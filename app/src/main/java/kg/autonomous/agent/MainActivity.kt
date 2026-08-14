@@ -1,34 +1,43 @@
 package kg.autonomous.agent
 
-import android.Manifest
+import android.app.Activity
 import android.content.Intent
-import android.content.pm.PackageManager
 import android.os.Bundle
-import android.provider.Settings
 import android.speech.RecognizerIntent
-import android.speech.SpeechRecognizer
-import android.speech.RecognitionListener
 import android.speech.tts.TextToSpeech
 import android.widget.Button
 import android.widget.LinearLayout
 import android.widget.TextView
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AppCompatActivity
-import androidx.core.content.ContextCompat
 import java.util.Locale
 
 class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
 
     private lateinit var statusText: TextView
-    private lateinit var speechRecognizer: SpeechRecognizer
     private lateinit var tts: TextToSpeech
 
-    private val microphonePermission =
-        registerForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
-            if (granted) {
-                startListening()
+    private val voiceLauncher =
+        registerForActivityResult(ActivityResultContracts.StartActivityForResult()) { result ->
+
+            if (result.resultCode == Activity.RESULT_OK) {
+
+                val results =
+                    result.data?.getStringArrayListExtra(
+                        RecognizerIntent.EXTRA_RESULTS
+                    )
+
+                val command = results?.firstOrNull()
+
+                if (!command.isNullOrBlank()) {
+                    statusText.text = "Вы: $command"
+                    processCommand(command)
+                } else {
+                    statusText.text = "Команда не распознана"
+                }
+
             } else {
-                speak("Для голосового управления разрешите доступ к микрофону.")
+                statusText.text = "Голосовой ввод отменён"
             }
         }
 
@@ -38,29 +47,21 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
         tts = TextToSpeech(this, this)
 
         statusText = TextView(this).apply {
-            text = "AUTONOMOUS готов"
+            text = "AUTONOMOUS Voice Lite готов"
             textSize = 24f
             setPadding(32, 32, 32, 32)
         }
 
         val voiceButton = Button(this).apply {
             text = "🎤 Говорить"
-            setOnClickListener { checkMicrophoneAndListen() }
-        }
-
-        val accessibilityButton = Button(this).apply {
-            text = "Включить доступ к экрану Android"
             setOnClickListener {
-                startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS))
+                startSystemVoiceRecognition()
             }
         }
 
         val stopButton = Button(this).apply {
-            text = "STOP"
+            text = "⛔ STOP"
             setOnClickListener {
-                if (::speechRecognizer.isInitialized) {
-                    speechRecognizer.cancel()
-                }
                 tts.stop()
                 statusText.text = "Остановлено"
             }
@@ -69,90 +70,63 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
         val layout = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             setPadding(40, 60, 40, 40)
+
             addView(statusText)
             addView(voiceButton)
-            addView(accessibilityButton)
             addView(stopButton)
         }
 
         setContentView(layout)
-
-        setupSpeechRecognizer()
     }
 
-    private fun setupSpeechRecognizer() {
-        if (!SpeechRecognizer.isRecognitionAvailable(this)) {
-            statusText.text = "Распознавание речи недоступно"
-            return
-        }
+    private fun startSystemVoiceRecognition() {
 
-        speechRecognizer = SpeechRecognizer.createSpeechRecognizer(this)
+        val intent =
+            Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
 
-        speechRecognizer.setRecognitionListener(object : RecognitionListener {
+                putExtra(
+                    RecognizerIntent.EXTRA_LANGUAGE_MODEL,
+                    RecognizerIntent.LANGUAGE_MODEL_FREE_FORM
+                )
 
-            override fun onReadyForSpeech(params: Bundle?) {
-                statusText.text = "Слушаю..."
+                putExtra(
+                    RecognizerIntent.EXTRA_LANGUAGE,
+                    "ru-RU"
+                )
+
+                putExtra(
+                    RecognizerIntent.EXTRA_PROMPT,
+                    "Скажите команду для AUTONOMOUS"
+                )
             }
 
-            override fun onResults(results: Bundle?) {
-                val matches =
-                    results?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)
-
-                val command = matches?.firstOrNull()
-
-                if (!command.isNullOrBlank()) {
-                    statusText.text = "Вы: $command"
-                    processCommand(command)
-                }
-            }
-
-            override fun onError(error: Int) {
-                statusText.text = "Нажмите микрофон и повторите команду"
-            }
-
-            override fun onBeginningOfSpeech() {}
-            override fun onRmsChanged(rmsdB: Float) {}
-            override fun onBufferReceived(buffer: ByteArray?) {}
-            override fun onEndOfSpeech() {}
-            override fun onPartialResults(partialResults: Bundle?) {}
-            override fun onEvent(eventType: Int, params: Bundle?) {}
-        })
-    }
-
-    private fun checkMicrophoneAndListen() {
-        if (ContextCompat.checkSelfPermission(
-                this,
-                Manifest.permission.RECORD_AUDIO
-            ) == PackageManager.PERMISSION_GRANTED
-        ) {
-            startListening()
-        } else {
-            microphonePermission.launch(Manifest.permission.RECORD_AUDIO)
+        try {
+            voiceLauncher.launch(intent)
+        } catch (e: Exception) {
+            statusText.text =
+                "На устройстве не найден сервис распознавания речи"
         }
-    }
-
-    private fun startListening() {
-        if (!::speechRecognizer.isInitialized) return
-
-        val intent = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
-            putExtra(
-                RecognizerIntent.EXTRA_LANGUAGE_MODEL,
-                RecognizerIntent.LANGUAGE_MODEL_FREE_FORM
-            )
-            putExtra(RecognizerIntent.EXTRA_LANGUAGE, "ru-RU")
-            putExtra(RecognizerIntent.EXTRA_PARTIAL_RESULTS, true)
-        }
-
-        speechRecognizer.startListening(intent)
     }
 
     private fun processCommand(command: String) {
+
+        val normalized = command.lowercase(Locale.getDefault())
+
         val answer = when {
-            command.contains("привет", ignoreCase = true) ->
+
+            "привет" in normalized ->
                 "Здравствуйте. Я AUTONOMOUS. Слушаю вас."
 
-            command.contains("кто ты", ignoreCase = true) ->
+            "кто ты" in normalized ->
                 "Я ваш голосовой помощник AUTONOMOUS."
+
+            "как дела" in normalized ->
+                "Всё работает. Я готова выполнять ваши команды."
+
+            "стоп" in normalized -> {
+                tts.stop()
+                "Остановлено."
+            }
 
             else ->
                 "Я услышала: $command"
@@ -162,27 +136,41 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
     }
 
     private fun speak(text: String) {
+
         statusText.text = text
 
         if (::tts.isInitialized) {
-            tts.speak(text, TextToSpeech.QUEUE_FLUSH, null, "AUTONOMOUS")
+            tts.speak(
+                text,
+                TextToSpeech.QUEUE_FLUSH,
+                null,
+                "AUTONOMOUS"
+            )
         }
     }
 
     override fun onInit(status: Int) {
+
         if (status == TextToSpeech.SUCCESS) {
-            tts.language = Locale("ru", "RU")
 
-            // Предпочитаем подходящий русский женский голос,
-            // если установленный TTS-движок предоставляет его.
-            val russianVoices = tts.voices?.filter {
-                it.locale.language == "ru"
-            }
+            val russianLocale = Locale("ru", "RU")
+            tts.language = russianLocale
 
-            val preferredVoice = russianVoices?.firstOrNull {
-                val name = it.name.lowercase()
-                "female" in name || "woman" in name
-            }
+            val russianVoices =
+                tts.voices?.filter {
+                    it.locale.language == "ru"
+                }
+
+            val preferredVoice =
+                russianVoices?.firstOrNull {
+
+                    val name = it.name.lowercase()
+
+                    "female" in name ||
+                    "woman" in name ||
+                    "fem" in name
+                }
+                    ?: russianVoices?.firstOrNull()
 
             if (preferredVoice != null) {
                 tts.voice = preferredVoice
@@ -190,16 +178,17 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
 
             tts.setSpeechRate(0.95f)
             tts.setPitch(1.05f)
+
+            speak("AUTONOMOUS готова к работе.")
         }
     }
 
     override fun onDestroy() {
-        if (::speechRecognizer.isInitialized) {
-            speechRecognizer.destroy()
-        }
 
-        tts.stop()
-        tts.shutdown()
+        if (::tts.isInitialized) {
+            tts.stop()
+            tts.shutdown()
+        }
 
         super.onDestroy()
     }
