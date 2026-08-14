@@ -5,6 +5,7 @@ import android.content.Intent
 import android.os.Bundle
 import android.speech.RecognizerIntent
 import android.speech.tts.TextToSpeech
+import android.speech.tts.Voice
 import android.widget.Button
 import android.widget.LinearLayout
 import android.widget.TextView
@@ -17,8 +18,17 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
     private lateinit var statusText: TextView
     private lateinit var tts: TextToSpeech
 
+    private var russianVoices: List<Voice> = emptyList()
+    private var currentVoiceIndex = 0
+
+    private val preferences by lazy {
+        getSharedPreferences("autonomous_settings", MODE_PRIVATE)
+    }
+
     private val voiceLauncher =
-        registerForActivityResult(ActivityResultContracts.StartActivityForResult()) { result ->
+        registerForActivityResult(
+            ActivityResultContracts.StartActivityForResult()
+        ) { result ->
 
             if (result.resultCode == Activity.RESULT_OK) {
 
@@ -47,22 +57,46 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
         tts = TextToSpeech(this, this)
 
         statusText = TextView(this).apply {
-            text = "AUTONOMOUS Voice Lite готов"
+            text = "AUTONOMOUS запускается..."
             textSize = 24f
             setPadding(32, 32, 32, 32)
         }
 
         val voiceButton = Button(this).apply {
-            text = "🎤 Говорить"
+            text = "🎤 ГОВОРИТЬ"
+
             setOnClickListener {
                 startSystemVoiceRecognition()
             }
         }
 
+        val selectVoiceButton = Button(this).apply {
+            text = "👩 СЛЕДУЮЩИЙ ГОЛОС"
+
+            setOnClickListener {
+                selectNextRussianVoice()
+            }
+        }
+
+        val testVoiceButton = Button(this).apply {
+            text = "🔊 ПРОВЕРИТЬ ГОЛОС"
+
+            setOnClickListener {
+                speak(
+                    "Здравствуйте. Я AUTONOMOUS. " +
+                    "Это мой текущий голос."
+                )
+            }
+        }
+
         val stopButton = Button(this).apply {
             text = "⛔ STOP"
+
             setOnClickListener {
-                tts.stop()
+                if (::tts.isInitialized) {
+                    tts.stop()
+                }
+
                 statusText.text = "Остановлено"
             }
         }
@@ -73,6 +107,8 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
 
             addView(statusText)
             addView(voiceButton)
+            addView(selectVoiceButton)
+            addView(testVoiceButton)
             addView(stopButton)
         }
 
@@ -110,7 +146,8 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
 
     private fun processCommand(command: String) {
 
-        val normalized = command.lowercase(Locale.getDefault())
+        val normalized =
+            command.lowercase(Locale.getDefault())
 
         val answer = when {
 
@@ -135,11 +172,48 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
         speak(answer)
     }
 
+    private fun selectNextRussianVoice() {
+
+        if (russianVoices.isEmpty()) {
+            statusText.text =
+                "Русские голоса не найдены"
+            return
+        }
+
+        currentVoiceIndex++
+
+        if (currentVoiceIndex >= russianVoices.size) {
+            currentVoiceIndex = 0
+        }
+
+        val selectedVoice =
+            russianVoices[currentVoiceIndex]
+
+        tts.voice = selectedVoice
+
+        preferences.edit()
+            .putString(
+                "selected_voice",
+                selectedVoice.name
+            )
+            .apply()
+
+        statusText.text =
+            "Голос ${currentVoiceIndex + 1} из ${russianVoices.size}"
+
+        speak(
+            "Здравствуйте. Я AUTONOMOUS. " +
+            "Если вам нравится этот голос, " +
+            "просто оставьте его."
+        )
+    }
+
     private fun speak(text: String) {
 
         statusText.text = text
 
         if (::tts.isInitialized) {
+
             tts.speak(
                 text,
                 TextToSpeech.QUEUE_FLUSH,
@@ -151,36 +225,60 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
 
     override fun onInit(status: Int) {
 
-        if (status == TextToSpeech.SUCCESS) {
+        if (status != TextToSpeech.SUCCESS) {
+            statusText.text =
+                "Не удалось запустить голосовой движок"
+            return
+        }
 
-            val russianLocale = Locale("ru", "RU")
-            tts.language = russianLocale
+        val russianLocale =
+            Locale("ru", "RU")
 
-            val russianVoices =
-                tts.voices?.filter {
+        tts.language = russianLocale
+
+        russianVoices =
+            tts.voices
+                ?.filter {
                     it.locale.language == "ru"
                 }
-
-            val preferredVoice =
-                russianVoices?.firstOrNull {
-
-                    val name = it.name.lowercase()
-
-                    "female" in name ||
-                    "woman" in name ||
-                    "fem" in name
+                ?.sortedBy {
+                    it.name
                 }
-                    ?: russianVoices?.firstOrNull()
+                ?: emptyList()
 
-            if (preferredVoice != null) {
-                tts.voice = preferredVoice
-            }
+        val savedVoiceName =
+            preferences.getString(
+                "selected_voice",
+                null
+            )
 
-            tts.setSpeechRate(0.95f)
-            tts.setPitch(1.05f)
+        if (russianVoices.isNotEmpty()) {
 
-            speak("AUTONOMOUS готова к работе.")
+            val savedIndex =
+                russianVoices.indexOfFirst {
+                    it.name == savedVoiceName
+                }
+
+            currentVoiceIndex =
+                if (savedIndex >= 0) {
+                    savedIndex
+                } else {
+                    0
+                }
+
+            tts.voice =
+                russianVoices[currentVoiceIndex]
         }
+
+        tts.setSpeechRate(0.95f)
+        tts.setPitch(1.05f)
+
+        statusText.text =
+            "AUTONOMOUS готова к работе."
+
+        speak(
+            "AUTONOMOUS готова к работе."
+        )
     }
 
     override fun onDestroy() {
