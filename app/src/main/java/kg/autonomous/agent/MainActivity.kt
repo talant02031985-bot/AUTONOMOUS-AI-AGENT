@@ -148,33 +148,83 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
     }
 
     private fun processCommand(command: String) {
-
-        val normalized =
-            command.lowercase(Locale.getDefault())
-
-        val answer = when {
-
-            "привет" in normalized ->
-                "Здравствуйте. Я Аяна. Слушаю вас."
-
-            "кто ты" in normalized ->
-                "Я ваш голосовой помощник Аяна."
-
-            "как дела" in normalized ->
-                "Всё работает. Я готова выполнять ваши команды."
-
-            "стоп" in normalized -> {
-                tts.stop()
-                "Остановлено."
-            }
-
-            else ->
-                "Я услышала: $command"
+    statusText.text = "Аяна думает..."
+    askAyana(command)
         }
 
-        speak(answer)
-    }
+    private fun askAyana(message: String) {
+    Thread {
+        try {
+            val url = URL(
+                "https://ayana-ai.talant02031985.workers.dev/"
+            )
 
+            val connection =
+                url.openConnection() as HttpsURLConnection
+
+            connection.requestMethod = "POST"
+            connection.setRequestProperty(
+                "Content-Type",
+                "application/json"
+            )
+
+            connection.connectTimeout = 15000
+            connection.readTimeout = 30000
+            connection.doOutput = true
+
+            val requestJson = JSONObject().apply {
+                put("message", message)
+            }
+
+            connection.outputStream.use { output ->
+                output.write(
+                    requestJson.toString()
+                        .toByteArray(Charsets.UTF_8)
+                )
+            }
+
+            val responseCode = connection.responseCode
+
+            val stream =
+                if (responseCode in 200..299) {
+                    connection.inputStream
+                } else {
+                    connection.errorStream
+                }
+
+            val responseText =
+                stream.bufferedReader().use { it.readText() }
+
+            connection.disconnect()
+
+            val json = JSONObject(responseText)
+
+            val answer =
+                if (responseCode in 200..299) {
+                    json.optString(
+                        "reply",
+                        "Я не смогла сформировать ответ."
+                    )
+                } else {
+                    "Ошибка подключения к ИИ."
+                }
+
+            runOnUiThread {
+                statusText.text = answer
+                speak(answer)
+            }
+
+        } catch (e: Exception) {
+            runOnUiThread {
+                statusText.text = "Не удалось связаться с ИИ."
+                speak(
+                    "Не удалось связаться с сервером. Проверьте интернет."
+                )
+            }
+        }
+    }.start()
+    }
+    
     private fun selectNextRussianVoice() {
 
         if (russianVoices.isEmpty()) {
