@@ -57,7 +57,7 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
         tts = TextToSpeech(this, this)
 
         statusText = TextView(this).apply {
-            text = "AUTONOMOUS запускается..."
+            text = "Аяна запускается..."
             textSize = 24f
             setPadding(32, 32, 32, 32)
         }
@@ -83,7 +83,7 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
 
             setOnClickListener {
                 speak(
-                    "Здравствуйте. Я AUTONOMOUS. " +
+                    "Здравствуйте. Я Аяна. " +
                     "Это мой текущий голос."
                 )
             }
@@ -132,7 +132,7 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
 
                 putExtra(
                     RecognizerIntent.EXTRA_PROMPT,
-                    "Скажите команду для AUTONOMOUS"
+                    "Скажите команду для Аяна"
                 )
             }
 
@@ -152,10 +152,10 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
         val answer = when {
 
             "привет" in normalized ->
-                "Здравствуйте. Я AUTONOMOUS. Слушаю вас."
+                "Здравствуйте. Я Аяна. Слушаю вас."
 
             "кто ты" in normalized ->
-                "Я ваш голосовой помощник AUTONOMOUS."
+                "Я ваш голосовой помощник Аяна."
 
             "как дела" in normalized ->
                 "Всё работает. Я готова выполнять ваши команды."
@@ -202,7 +202,7 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
             "Голос ${currentVoiceIndex + 1} из ${russianVoices.size}"
 
         speak(
-            "Здравствуйте. Я AUTONOMOUS. " +
+            "Здравствуйте. Я Аяна. " +
             "Если вам нравится этот голос, " +
             "просто оставьте его."
         )
@@ -275,10 +275,10 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
         
 
         statusText.text =
-            "AUTONOMOUS готова к работе."
+            "Здравствуйте. Я Аяна. Готова к работе."
 
         speak(
-            "AUTONOMOUS готова к работе."
+            "Здравствуйте. Я Аяна. Готова к работе."
         )
     }
 
