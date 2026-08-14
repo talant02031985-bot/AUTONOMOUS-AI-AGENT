@@ -24,6 +24,8 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
     private var russianVoices: List<Voice> = emptyList()
     private var currentVoiceIndex = 0
 
+    private val conversationHistory = mutableListOf<Pair<String, String>>()
+
     private val preferences by lazy {
         getSharedPreferences("autonomous_settings", MODE_PRIVATE)
     }
@@ -172,9 +174,24 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
             connection.readTimeout = 30000
             connection.doOutput = true
 
-            val requestJson = JSONObject().apply {
-                put("message", message)
-            }
+            val conversationContext = buildString {
+    conversationHistory.takeLast(5).forEach { turn ->
+        append("Пользователь: ")
+        append(turn.first)
+        append("\n")
+
+        append("AYANA: ")
+        append(turn.second)
+        append("\n")
+    }
+
+    append("Пользователь: ")
+    append(message)
+}
+
+val requestJson = JSONObject().apply {
+    put("message", conversationContext)
+}
 
             connection.outputStream.use { output ->
                 output.write(
@@ -210,9 +227,15 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
                 }
 
             runOnUiThread {
-                statusText.text = answer
-                speak(answer)
-            }
+    conversationHistory.add(message to answer)
+
+    if (conversationHistory.size > 10) {
+        conversationHistory.removeAt(0)
+    }
+
+    statusText.text = answer
+    speak(answer)
+}
 
         } catch (e: Exception) {
             runOnUiThread {
