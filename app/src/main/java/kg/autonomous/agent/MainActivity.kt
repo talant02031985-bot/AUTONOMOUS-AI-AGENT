@@ -270,8 +270,9 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
                 russianVoices[currentVoiceIndex]
         }
 
-        tts.setSpeechRate(0.95f)
-        tts.setPitch(1.05f)
+        tts.setSpeechRate(1.02f)
+        tts.setPitch(1.14f)
+        
 
         statusText.text =
             "AUTONOMOUS готова к работе."
