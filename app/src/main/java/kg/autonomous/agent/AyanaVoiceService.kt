@@ -7,6 +7,7 @@ import android.app.NotificationManager
 import android.app.PendingIntent
 import android.app.Service
 import android.content.ActivityNotFoundException
+import android.content.ComponentName
 import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
@@ -1264,12 +1265,9 @@ class AyanaVoiceService : Service() {
                 return
             }
 
-            normalized ==
-                "громче" ||
-                normalized ==
-                "увеличь громкость" ||
-                normalized ==
-                "сделай громче" -> {
+            isVolumeUpCommand(
+                normalized
+            ) -> {
 
                 changeVolume(
                     AudioManager.ADJUST_RAISE
@@ -1283,12 +1281,9 @@ class AyanaVoiceService : Service() {
                 return
             }
 
-            normalized ==
-                "тише" ||
-                normalized ==
-                "уменьши громкость" ||
-                normalized ==
-                "сделай тише" -> {
+            isVolumeDownCommand(
+                normalized
+            ) -> {
 
                 changeVolume(
                     AudioManager.ADJUST_LOWER
@@ -1302,10 +1297,9 @@ class AyanaVoiceService : Service() {
                 return
             }
 
-            normalized ==
-                "выключи звук" ||
-                normalized ==
-                "без звука" -> {
+            isMuteCommand(
+                normalized
+            ) -> {
 
                 changeVolume(
                     AudioManager.ADJUST_MUTE
@@ -1319,10 +1313,9 @@ class AyanaVoiceService : Service() {
                 return
             }
 
-            normalized ==
-                "включи звук" ||
-                normalized ==
-                "верни звук" -> {
+            isUnmuteCommand(
+                normalized
+            ) -> {
 
                 changeVolume(
                     AudioManager.ADJUST_UNMUTE
@@ -1616,12 +1609,26 @@ class AyanaVoiceService : Service() {
                 )
 
             "галерея",
-            "фото" ->
+            "галерею",
+            "фото",
+            "фотографии" ->
                 openApp(
                     "галерею",
                     silent,
                     "com.sec.android.gallery3d",
                     "com.google.android.apps.photos"
+                )
+
+            "переводчик",
+            "переводчика",
+            "google переводчик",
+            "гугл переводчик",
+            "translate",
+            "google translate" ->
+                openApp(
+                    "переводчик",
+                    silent,
+                    "com.google.android.apps.translate"
                 )
 
             "google фото",
@@ -1809,12 +1816,536 @@ class AyanaVoiceService : Service() {
                     silent
                 )
 
-            else ->
-                askAyana(
-                    originalCommand,
-                    silent
-                )
+            else -> {
+
+                if (
+                    isAppLaunchCommand(
+                        normalized
+                    )
+                ) {
+
+                    openInstalledAppByName(
+                        target,
+                        silent
+                    )
+
+                } else {
+
+                    askAyana(
+                        originalCommand,
+                        silent
+                    )
+                }
+            }
         }
+    }
+
+    private fun isAppLaunchCommand(
+        command: String
+    ): Boolean {
+
+        return APP_LAUNCH_PREFIXES
+            .any {
+                command.startsWith(it)
+            }
+    }
+
+    private fun isVolumeUpCommand(
+        command: String
+    ): Boolean {
+
+        return command == "громче" ||
+            command.contains("погромч") ||
+            (
+                command.contains("увелич") &&
+                    (
+                        command.contains("громк") ||
+                            command.contains("звук")
+                        )
+                ) ||
+            (
+                command.contains("сделай") &&
+                    command.contains("громч")
+                )
+    }
+
+    private fun isVolumeDownCommand(
+        command: String
+    ): Boolean {
+
+        return command == "тише" ||
+            command.contains("потише") ||
+            (
+                command.contains("уменьш") &&
+                    (
+                        command.contains("громк") ||
+                            command.contains("звук")
+                        )
+                ) ||
+            (
+                command.contains("сделай") &&
+                    command.contains("тиш")
+                )
+    }
+
+    private fun isMuteCommand(
+        command: String
+    ): Boolean {
+
+        return command == "без звука" ||
+            (
+                command.contains("выключ") &&
+                    command.contains("звук")
+                ) ||
+            command.contains("убери звук")
+    }
+
+    private fun isUnmuteCommand(
+        command: String
+    ): Boolean {
+
+        return (
+            command.contains("включ") &&
+                command.contains("звук")
+            ) ||
+            command.contains("верни звук")
+    }
+
+    private fun openInstalledAppByName(
+        requestedName: String,
+        silent: Boolean
+    ) {
+
+        val query =
+            normalizeAppName(
+                requestedName
+            )
+
+        if (query.isBlank()) {
+
+            respondAndResume(
+                "Не поняла, какое приложение открыть.",
+                silent
+            )
+
+            return
+        }
+
+        val known =
+            knownAppForQuery(
+                query
+            )
+
+        if (known != null) {
+
+            openApp(
+                known.first,
+                silent,
+                *known.second.toTypedArray()
+            )
+
+            return
+        }
+
+        val launcherIntent =
+            Intent(
+                Intent.ACTION_MAIN
+            ).apply {
+                addCategory(
+                    Intent.CATEGORY_LAUNCHER
+                )
+            }
+
+        val activities =
+            try {
+                @Suppress("DEPRECATION")
+                packageManager
+                    .queryIntentActivities(
+                        launcherIntent,
+                        0
+                    )
+            } catch (_: Exception) {
+                emptyList()
+            }
+
+        val best =
+            activities
+                .map { info ->
+
+                    val label =
+                        try {
+                            info
+                                .loadLabel(
+                                    packageManager
+                                )
+                                ?.toString()
+                                .orEmpty()
+                        } catch (_: Exception) {
+                            ""
+                        }
+
+                    Triple(
+                        info,
+                        label,
+                        appNameScore(
+                            query,
+                            label
+                        )
+                    )
+                }
+                .filter {
+                    it.third > 0
+                }
+                .maxByOrNull {
+                    it.third
+                }
+
+        if (
+            best == null ||
+            best.third < 70
+        ) {
+
+            respondAndResume(
+                "Не нашла приложение $requestedName.",
+                silent
+            )
+
+            return
+        }
+
+        val info =
+            best.first
+
+        val label =
+            best.second
+                .ifBlank {
+                    requestedName
+                }
+
+        val activityInfo =
+            info.activityInfo
+
+        try {
+
+            val intent =
+                Intent(
+                    Intent.ACTION_MAIN
+                ).apply {
+
+                    addCategory(
+                        Intent.CATEGORY_LAUNCHER
+                    )
+
+                    component =
+                        ComponentName(
+                            activityInfo.packageName,
+                            activityInfo.name
+                        )
+
+                    addFlags(
+                        Intent.FLAG_ACTIVITY_NEW_TASK or
+                            Intent.FLAG_ACTIVITY_RESET_TASK_IF_NEEDED
+                    )
+                }
+
+            startActivity(
+                intent
+            )
+
+            finishLocalCommand(
+                "Открываю $label",
+                silent
+            )
+
+        } catch (_: Exception) {
+
+            respondAndResume(
+                "Не удалось открыть приложение $label.",
+                silent
+            )
+        }
+    }
+
+    private fun knownAppForQuery(
+        query: String
+    ): Pair<String, List<String>>? {
+
+        return when {
+
+            query in setOf(
+                "youtube",
+                "ютуб"
+            ) ->
+                "YouTube" to
+                    listOf(
+                        "com.google.android.youtube"
+                    )
+
+            query in setOf(
+                "переводчик",
+                "переводчика",
+                "гугл переводчик",
+                "google переводчик",
+                "google translate",
+                "translate"
+            ) ->
+                "переводчик" to
+                    listOf(
+                        "com.google.android.apps.translate"
+                    )
+
+            query in setOf(
+                "галерея",
+                "галерею",
+                "фото",
+                "фотографии"
+            ) ->
+                "галерею" to
+                    listOf(
+                        "com.sec.android.gallery3d",
+                        "com.google.android.apps.photos"
+                    )
+
+            query in setOf(
+                "камера",
+                "камеру"
+            ) ->
+                "камеру" to
+                    listOf(
+                        "com.sec.android.app.camera"
+                    )
+
+            query in setOf(
+                "калькулятор",
+                "калькулятора"
+            ) ->
+                "калькулятор" to
+                    listOf(
+                        "com.sec.android.app.popupcalculator"
+                    )
+
+            query in setOf(
+                "файлы",
+                "мои файлы"
+            ) ->
+                "Мои файлы" to
+                    listOf(
+                        "com.sec.android.app.myfiles"
+                    )
+
+            query in setOf(
+                "telegram",
+                "телеграм",
+                "телеграмм"
+            ) ->
+                "Telegram" to
+                    listOf(
+                        "org.telegram.messenger"
+                    )
+
+            query in setOf(
+                "whatsapp",
+                "ватсап",
+                "вотсап"
+            ) ->
+                "WhatsApp" to
+                    listOf(
+                        "com.whatsapp"
+                    )
+
+            else ->
+                null
+        }
+    }
+
+    private fun normalizeAppName(
+        value: String
+    ): String {
+
+        return normalizeRecognitionText(
+            value
+        )
+            .removePrefix(
+                "приложение "
+            )
+            .removePrefix(
+                "программу "
+            )
+            .removePrefix(
+                "программа "
+            )
+            .trim()
+    }
+
+    private fun appNameScore(
+        query: String,
+        label: String
+    ): Int {
+
+        val q =
+            normalizeAppName(
+                query
+            )
+
+        val l =
+            normalizeAppName(
+                label
+            )
+
+        if (
+            q.isBlank() ||
+            l.isBlank()
+        ) {
+            return 0
+        }
+
+        if (q == l) {
+            return 100
+        }
+
+        if (
+            l.contains(q) ||
+            q.contains(l)
+        ) {
+            return 92
+        }
+
+        val qTokens =
+            q.split(" ")
+                .filter {
+                    it.isNotBlank()
+                }
+
+        val lTokens =
+            l.split(" ")
+                .filter {
+                    it.isNotBlank()
+                }
+
+        if (
+            qTokens.isEmpty() ||
+            lTokens.isEmpty()
+        ) {
+            return 0
+        }
+
+        val qStems =
+            qTokens.map {
+                appStem(it)
+            }
+
+        val lStems =
+            lTokens.map {
+                appStem(it)
+            }
+
+        val matched =
+            qStems.count { qStem ->
+
+                lStems.any { lStem ->
+
+                    qStem.length >= 3 &&
+                        lStem.length >= 3 &&
+                        (
+                            qStem == lStem ||
+                                qStem.startsWith(
+                                    lStem
+                                ) ||
+                                lStem.startsWith(
+                                    qStem
+                                )
+                            )
+                }
+            }
+
+        if (matched == 0) {
+            return 0
+        }
+
+        return 70 +
+            (
+                25 *
+                    matched /
+                    qStems.size
+                )
+    }
+
+    private fun appStem(
+        value: String
+    ): String {
+
+        var result =
+            value
+                .lowercase(
+                    Locale.getDefault()
+                )
+                .replace('ё', 'е')
+                .replace(
+                    Regex("[^a-zа-я0-9]"),
+                    ""
+                )
+
+        if (result.length <= 4) {
+            return result
+        }
+
+        val endings =
+            listOf(
+                "иями",
+                "ями",
+                "ами",
+                "ого",
+                "его",
+                "ому",
+                "ему",
+                "ыми",
+                "ими",
+                "ую",
+                "юю",
+                "ая",
+                "яя",
+                "ое",
+                "ее",
+                "ой",
+                "ей",
+                "ом",
+                "ем",
+                "ах",
+                "ях",
+                "ам",
+                "ям",
+                "ов",
+                "ев",
+                "ы",
+                "и",
+                "а",
+                "я",
+                "у",
+                "ю",
+                "е",
+                "о"
+            )
+
+        for (ending in endings) {
+
+            if (
+                result.endsWith(
+                    ending
+                ) &&
+                result.length -
+                    ending.length >= 3
+            ) {
+
+                result =
+                    result.dropLast(
+                        ending.length
+                    )
+
+                break
+            }
+        }
+
+        return result
     }
 
     private fun extractYouTubeQuery(
@@ -3031,6 +3562,16 @@ class AyanaVoiceService : Service() {
 
         private const val WORKER_URL =
             "https://ayana-ai.talant02031985.workers.dev"
+
+        private val APP_LAUNCH_PREFIXES =
+            listOf(
+                "открой ",
+                "запусти ",
+                "включи ",
+                "включи приложение ",
+                "открой приложение ",
+                "запусти приложение "
+            )
 
         private val WAKE_VARIANTS =
             listOf(
