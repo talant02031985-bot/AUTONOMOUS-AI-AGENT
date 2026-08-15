@@ -69,7 +69,7 @@ export default {
 
               input: speechText,
 
-              speed: 1.1,
+              speed: speechText === "Да?" ? 1.35 : 1.1,
 
               response_format: "mp3",
 
