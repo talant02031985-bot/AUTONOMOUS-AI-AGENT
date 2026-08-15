@@ -9,13 +9,18 @@
 
     <queries>
 
-        <intent>
-            <action android:name="android.speech.RecognitionService" />
-        </intent>
+    <intent>
+        <action android:name="android.speech.RecognitionService" />
+    </intent>
 
-        <package android:name="com.google.android.youtube" />
+    <intent>
+        <action android:name="android.intent.action.MAIN" />
+        <category android:name="android.intent.category.LAUNCHER" />
+    </intent>
 
-    </queries>
+    <package android:name="com.google.android.youtube" />
+
+</queries>
 
     <application
         android:allowBackup="true"
