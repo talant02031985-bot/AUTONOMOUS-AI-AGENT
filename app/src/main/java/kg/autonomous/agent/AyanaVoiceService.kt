@@ -29,6 +29,7 @@ import com.k2fsa.sherpa.onnx.OnlineModelConfig
 import com.k2fsa.sherpa.onnx.OnlineRecognizer
 import com.k2fsa.sherpa.onnx.OnlineRecognizerConfig
 import com.k2fsa.sherpa.onnx.OnlineTransducerModelConfig
+import org.json.JSONArray
 import org.json.JSONObject
 import java.io.File
 import java.net.URL
@@ -80,6 +81,10 @@ class AyanaVoiceService : Service() {
 
     private val conversationHistory =
         mutableListOf<Pair<String, String>>()
+
+    @Volatile
+    private var agentPreviousResponseId:
+        String? = null
 
     private val readyFile by lazy {
         File(
@@ -1257,6 +1262,9 @@ class AyanaVoiceService : Service() {
                 conversationHistory
                     .clear()
 
+                agentPreviousResponseId =
+                    null
+
                 respondAndResume(
                     "Хорошо. История разговора очищена.",
                     silent
@@ -1819,6 +1827,17 @@ class AyanaVoiceService : Service() {
             else -> {
 
                 if (
+                    isMultiStepAgentCommand(
+                        normalized
+                    )
+                ) {
+
+                    askAyana(
+                        originalCommand,
+                        silent
+                    )
+
+                } else if (
                     isAppLaunchCommand(
                         normalized
                     )
@@ -1838,6 +1857,46 @@ class AyanaVoiceService : Service() {
                 }
             }
         }
+    }
+
+    private fun isMultiStepAgentCommand(
+        command: String
+    ): Boolean {
+
+        val connectors =
+            listOf(
+                " и ",
+                " потом ",
+                " затем ",
+                " после этого ",
+                " а потом "
+            )
+
+        if (
+            connectors.any {
+                command.contains(it)
+            }
+        ) {
+            return true
+        }
+
+        val actionWords =
+            listOf(
+                "открой",
+                "запусти",
+                "включи",
+                "найди",
+                "поищи",
+                "нажми",
+                "выбери"
+            )
+
+        val actionCount =
+            actionWords.count {
+                command.contains(it)
+            }
+
+        return actionCount >= 2
     }
 
     private fun isAppLaunchCommand(
@@ -2828,145 +2887,204 @@ class AyanaVoiceService : Service() {
         )
 
         updateNotification(
-            "AYANA думает…"
+            "AYANA Agent Core думает…"
         )
 
         thread(
             start = true,
-            name = "AyanaAI"
+            name = "AyanaAgentCore"
         ) {
-
-            var connection:
-                HttpsURLConnection? = null
 
             try {
 
-                val url =
-                    URL(
-                        "$WORKER_URL/"
-                    )
+                var nextMessage:
+                    String? = message
 
-                connection =
-                    url.openConnection()
-                        as HttpsURLConnection
+                var previousResponseId:
+                    String? =
+                    agentPreviousResponseId
 
-                connection.requestMethod =
-                    "POST"
+                var toolResults:
+                    JSONArray? = null
 
-                connection.setRequestProperty(
-                    "Content-Type",
-                    "application/json"
-                )
+                var finalAnswer:
+                    String? = null
 
-                connection.connectTimeout =
-                    15000
+                var step = 0
 
-                connection.readTimeout =
-                    35000
-
-                connection.doOutput =
-                    true
-
-                val contextText =
-                    buildString {
-
-                        conversationHistory
-                            .takeLast(5)
-                            .forEach {
-
-                                append(
-                                    "Пользователь: "
-                                )
-
-                                append(
-                                    it.first
-                                )
-
-                                append("\n")
-
-                                append(
-                                    "AYANA: "
-                                )
-
-                                append(
-                                    it.second
-                                )
-
-                                append("\n")
-                            }
-
-                        append(
-                            "Пользователь: "
-                        )
-
-                        append(
-                            message
-                        )
-                    }
-
-                val requestJson =
-                    JSONObject().apply {
-
-                        put(
-                            "message",
-                            contextText
-                        )
-                    }
-
-                connection.outputStream
-                    .use { output ->
-
-                        output.write(
-                            requestJson
-                                .toString()
-                                .toByteArray(
-                                    Charsets.UTF_8
-                                )
-                        )
-                    }
-
-                val responseCode =
-                    connection.responseCode
-
-                val stream =
-                    if (
-                        responseCode in
-                        200..299
-                    ) {
-
-                        connection.inputStream
-
-                    } else {
-
-                        connection.errorStream
-                    }
-
-                val responseText =
-                    stream
-                        .bufferedReader()
-                        .use {
-                            it.readText()
-                        }
-
-                if (
-                    responseCode !in
-                    200..299
+                while (
+                    step <
+                    MAX_AGENT_STEPS &&
+                    !shuttingDown
                 ) {
 
-                    throw IllegalStateException(
-                        "AI HTTP $responseCode"
-                    )
+                    step++
+
+                    val response =
+                        callAgentCore(
+                            message =
+                                nextMessage,
+                            previousResponseId =
+                                previousResponseId,
+                            toolResults =
+                                toolResults
+                        )
+
+                    val type =
+                        response
+                            .optString(
+                                "type"
+                            )
+
+                    val responseId =
+                        response
+                            .optString(
+                                "response_id"
+                            )
+                            .trim()
+
+                    if (
+                        responseId
+                            .isNotBlank()
+                    ) {
+
+                        previousResponseId =
+                            responseId
+
+                        agentPreviousResponseId =
+                            responseId
+                    }
+
+                    when (type) {
+
+                        "final" -> {
+
+                            finalAnswer =
+                                response
+                                    .optString(
+                                        "reply",
+                                        "Готово."
+                                    )
+                                    .trim()
+                                    .ifBlank {
+                                        "Готово."
+                                    }
+
+                            break
+                        }
+
+                        "tool_calls" -> {
+
+                            val calls =
+                                response
+                                    .optJSONArray(
+                                        "calls"
+                                    )
+                                    ?: JSONArray()
+
+                            if (
+                                calls.length() ==
+                                0
+                            ) {
+
+                                finalAnswer =
+                                    "Я не получила действие для выполнения."
+
+                                break
+                            }
+
+                            val outputs =
+                                JSONArray()
+
+                            for (
+                                i in
+                                0 until
+                                calls.length()
+                            ) {
+
+                                val call =
+                                    calls
+                                        .optJSONObject(
+                                            i
+                                        )
+                                        ?: continue
+
+                                val callId =
+                                    call
+                                        .optString(
+                                            "call_id"
+                                        )
+
+                                val toolName =
+                                    call
+                                        .optString(
+                                            "name"
+                                        )
+
+                                val arguments =
+                                    call
+                                        .optJSONObject(
+                                            "arguments"
+                                        )
+                                        ?: JSONObject()
+
+                                broadcastStatus(
+                                    agentToolStatus(
+                                        toolName,
+                                        arguments
+                                    ),
+                                    STATE_THINKING
+                                )
+
+                                val result =
+                                    executeAgentTool(
+                                        toolName,
+                                        arguments
+                                    )
+
+                                outputs.put(
+                                    JSONObject()
+                                        .put(
+                                            "call_id",
+                                            callId
+                                        )
+                                        .put(
+                                            "output",
+                                            result
+                                                .toString()
+                                        )
+                                )
+                            }
+
+                            nextMessage =
+                                null
+
+                            toolResults =
+                                outputs
+                        }
+
+                        else -> {
+
+                            finalAnswer =
+                                "Не удалось продолжить выполнение задачи."
+
+                            break
+                        }
+                    }
+                }
+
+                if (
+                    finalAnswer ==
+                    null
+                ) {
+
+                    finalAnswer =
+                        "Я остановила задачу: слишком много последовательных действий."
                 }
 
                 val answer =
-                    JSONObject(
-                        responseText
-                    )
-                        .optString(
-                            "reply",
-                            "Я пока не смогла сформировать ответ."
-                        )
-                        .trim()
+                    finalAnswer
+                        ?: "Готово."
 
                 synchronized(
                     conversationHistory
@@ -2999,16 +3117,883 @@ class AyanaVoiceService : Service() {
                 mainHandler.post {
 
                     respondAndResume(
-                        "Не удалось связаться с сервером. Проверьте интернет.",
+                        "Не удалось связаться с Agent Core. Проверьте интернет.",
                         silent
                     )
                 }
-
-            } finally {
-
-                connection
-                    ?.disconnect()
             }
+        }
+    }
+
+    private fun callAgentCore(
+        message: String?,
+        previousResponseId: String?,
+        toolResults: JSONArray?
+    ): JSONObject {
+
+        var connection:
+            HttpsURLConnection? = null
+
+        try {
+
+            val url =
+                URL(
+                    "$WORKER_URL/agent"
+                )
+
+            connection =
+                url.openConnection()
+                    as HttpsURLConnection
+
+            connection.requestMethod =
+                "POST"
+
+            connection.setRequestProperty(
+                "Content-Type",
+                "application/json"
+            )
+
+            connection.connectTimeout =
+                15000
+
+            connection.readTimeout =
+                45000
+
+            connection.doOutput =
+                true
+
+            val requestJson =
+                JSONObject()
+
+            if (
+                !message.isNullOrBlank()
+            ) {
+
+                requestJson.put(
+                    "message",
+                    message
+                )
+            }
+
+            if (
+                !previousResponseId
+                    .isNullOrBlank()
+            ) {
+
+                requestJson.put(
+                    "previous_response_id",
+                    previousResponseId
+                )
+            }
+
+            if (
+                toolResults != null &&
+                toolResults.length() > 0
+            ) {
+
+                requestJson.put(
+                    "tool_results",
+                    toolResults
+                )
+            }
+
+            connection
+                .outputStream
+                .use { output ->
+
+                    output.write(
+                        requestJson
+                            .toString()
+                            .toByteArray(
+                                Charsets.UTF_8
+                            )
+                    )
+                }
+
+            val responseCode =
+                connection
+                    .responseCode
+
+            val stream =
+                if (
+                    responseCode in
+                    200..299
+                ) {
+
+                    connection
+                        .inputStream
+
+                } else {
+
+                    connection
+                        .errorStream
+                }
+
+            val responseText =
+                stream
+                    .bufferedReader()
+                    .use {
+                        it.readText()
+                    }
+
+            if (
+                responseCode !in
+                200..299
+            ) {
+
+                throw IllegalStateException(
+                    "Agent HTTP " +
+                        responseCode +
+                        ": " +
+                        responseText
+                )
+            }
+
+            return JSONObject(
+                responseText
+            )
+
+        } finally {
+
+            connection
+                ?.disconnect()
+        }
+    }
+
+    private fun agentToolStatus(
+        name: String,
+        arguments: JSONObject
+    ): String {
+
+        return when (name) {
+
+            "open_app" ->
+                "Открываю " +
+                    arguments
+                        .optString(
+                            "name"
+                        )
+
+            "open_settings" ->
+                "Открываю настройки…"
+
+            "press_back" ->
+                "Назад"
+
+            "press_home" ->
+                "На главный экран"
+
+            "change_volume" ->
+                "Меняю громкость…"
+
+            "click_text" ->
+                "Нажимаю " +
+                    arguments
+                        .optString(
+                            "text"
+                        )
+
+            "youtube_search" ->
+                "Ищу в YouTube…"
+
+            "google_search" ->
+                "Открываю поиск…"
+
+            "map_search" ->
+                "Ищу на карте…"
+
+            else ->
+                "Выполняю действие…"
+        }
+    }
+
+    private fun executeAgentTool(
+        name: String,
+        arguments: JSONObject
+    ): JSONObject {
+
+        return try {
+
+            when (name) {
+
+                "open_app" -> {
+
+                    agentOpenApp(
+                        arguments
+                            .optString(
+                                "name"
+                            )
+                    )
+                }
+
+                "open_settings" -> {
+
+                    agentOpenSettings(
+                        arguments
+                            .optString(
+                                "section"
+                            )
+                    )
+                }
+
+                "press_back" -> {
+
+                    val success =
+                        AgentAccessibilityService
+                            .instance
+                            ?.pressBack() ==
+                            true
+
+                    toolResult(
+                        success,
+                        if (success) {
+                            "Нажато Назад"
+                        } else {
+                            "Accessibility AYANA недоступен"
+                        }
+                    )
+                }
+
+                "press_home" -> {
+
+                    val success =
+                        AgentAccessibilityService
+                            .instance
+                            ?.pressHome() ==
+                            true
+
+                    toolResult(
+                        success,
+                        if (success) {
+                            "Открыт главный экран"
+                        } else {
+                            "Accessibility AYANA недоступен"
+                        }
+                    )
+                }
+
+                "change_volume" -> {
+
+                    agentChangeVolume(
+                        arguments
+                            .optString(
+                                "action"
+                            )
+                    )
+                }
+
+                "click_text" -> {
+
+                    val target =
+                        arguments
+                            .optString(
+                                "text"
+                            )
+                            .trim()
+
+                    val success =
+                        target.isNotBlank() &&
+                            AgentAccessibilityService
+                                .instance
+                                ?.clickByText(
+                                    target
+                                ) ==
+                            true
+
+                    toolResult(
+                        success,
+                        if (success) {
+                            "Нажат элемент: $target"
+                        } else {
+                            "Элемент не найден или Accessibility недоступен: $target"
+                        }
+                    )
+                }
+
+                "youtube_search" -> {
+
+                    agentYouTubeSearch(
+                        arguments
+                            .optString(
+                                "query"
+                            )
+                    )
+                }
+
+                "google_search" -> {
+
+                    agentGoogleSearch(
+                        arguments
+                            .optString(
+                                "query"
+                            )
+                    )
+                }
+
+                "map_search" -> {
+
+                    agentMapSearch(
+                        arguments
+                            .optString(
+                                "query"
+                            )
+                    )
+                }
+
+                else ->
+                    toolResult(
+                        false,
+                        "Неизвестный инструмент: $name"
+                    )
+            }
+
+        } catch (
+            error: Exception
+        ) {
+
+            toolResult(
+                false,
+                error.message
+                    ?: "Ошибка выполнения инструмента"
+            )
+        }
+    }
+
+    private fun toolResult(
+        success: Boolean,
+        message: String
+    ): JSONObject {
+
+        return JSONObject()
+            .put(
+                "success",
+                success
+            )
+            .put(
+                "message",
+                message
+            )
+    }
+
+    private fun agentOpenApp(
+        requestedName: String
+    ): JSONObject {
+
+        val query =
+            normalizeAppName(
+                requestedName
+            )
+
+        if (query.isBlank()) {
+
+            return toolResult(
+                false,
+                "Название приложения пустое"
+            )
+        }
+
+        val known =
+            knownAppForQuery(
+                query
+            )
+
+        if (known != null) {
+
+            for (
+                packageName in
+                known.second
+            ) {
+
+                try {
+
+                    val intent =
+                        Intent(
+                            Intent.ACTION_MAIN
+                        ).apply {
+
+                            addCategory(
+                                Intent.CATEGORY_LAUNCHER
+                            )
+
+                            setPackage(
+                                packageName
+                            )
+
+                            addFlags(
+                                Intent.FLAG_ACTIVITY_NEW_TASK or
+                                    Intent.FLAG_ACTIVITY_RESET_TASK_IF_NEEDED
+                            )
+                        }
+
+                    startActivity(
+                        intent
+                    )
+
+                    return toolResult(
+                        true,
+                        "Открыто приложение ${known.first}"
+                    )
+
+                } catch (_: Exception) {
+                }
+            }
+        }
+
+        val launcherIntent =
+            Intent(
+                Intent.ACTION_MAIN
+            ).apply {
+
+                addCategory(
+                    Intent.CATEGORY_LAUNCHER
+                )
+            }
+
+        val activities =
+            try {
+
+                @Suppress("DEPRECATION")
+                packageManager
+                    .queryIntentActivities(
+                        launcherIntent,
+                        0
+                    )
+
+            } catch (_: Exception) {
+
+                emptyList()
+            }
+
+        val best =
+            activities
+                .map { info ->
+
+                    val label =
+                        try {
+
+                            info
+                                .loadLabel(
+                                    packageManager
+                                )
+                                ?.toString()
+                                .orEmpty()
+
+                        } catch (_: Exception) {
+
+                            ""
+                        }
+
+                    Triple(
+                        info,
+                        label,
+                        appNameScore(
+                            query,
+                            label
+                        )
+                    )
+                }
+                .filter {
+                    it.third > 0
+                }
+                .maxByOrNull {
+                    it.third
+                }
+
+        if (
+            best == null ||
+            best.third < 70
+        ) {
+
+            return toolResult(
+                false,
+                "Приложение не найдено: $requestedName"
+            )
+        }
+
+        return try {
+
+            val activityInfo =
+                best.first
+                    .activityInfo
+
+            val label =
+                best.second
+                    .ifBlank {
+                        requestedName
+                    }
+
+            val intent =
+                Intent(
+                    Intent.ACTION_MAIN
+                ).apply {
+
+                    addCategory(
+                        Intent.CATEGORY_LAUNCHER
+                    )
+
+                    component =
+                        ComponentName(
+                            activityInfo
+                                .packageName,
+                            activityInfo
+                                .name
+                        )
+
+                    addFlags(
+                        Intent.FLAG_ACTIVITY_NEW_TASK or
+                            Intent.FLAG_ACTIVITY_RESET_TASK_IF_NEEDED
+                    )
+                }
+
+            startActivity(
+                intent
+            )
+
+            toolResult(
+                true,
+                "Открыто приложение $label"
+            )
+
+        } catch (
+            error: Exception
+        ) {
+
+            toolResult(
+                false,
+                "Не удалось открыть $requestedName: " +
+                    (
+                        error.message
+                            ?: "неизвестная ошибка"
+                        )
+            )
+        }
+    }
+
+    private fun agentOpenSettings(
+        section: String
+    ): JSONObject {
+
+        val action =
+            when (section) {
+
+                "wifi" ->
+                    Settings
+                        .ACTION_WIFI_SETTINGS
+
+                "bluetooth" ->
+                    Settings
+                        .ACTION_BLUETOOTH_SETTINGS
+
+                "sound" ->
+                    Settings
+                        .ACTION_SOUND_SETTINGS
+
+                "display" ->
+                    Settings
+                        .ACTION_DISPLAY_SETTINGS
+
+                "accessibility" ->
+                    Settings
+                        .ACTION_ACCESSIBILITY_SETTINGS
+
+                "location" ->
+                    Settings
+                        .ACTION_LOCATION_SOURCE_SETTINGS
+
+                "security" ->
+                    Settings
+                        .ACTION_SECURITY_SETTINGS
+
+                "date_time" ->
+                    Settings
+                        .ACTION_DATE_SETTINGS
+
+                else ->
+                    Settings
+                        .ACTION_SETTINGS
+            }
+
+        return try {
+
+            startActivity(
+                Intent(
+                    action
+                ).apply {
+
+                    addFlags(
+                        Intent.FLAG_ACTIVITY_NEW_TASK
+                    )
+                }
+            )
+
+            toolResult(
+                true,
+                "Открыт раздел настроек: $section"
+            )
+
+        } catch (
+            error: Exception
+        ) {
+
+            toolResult(
+                false,
+                "Не удалось открыть настройки: " +
+                    (
+                        error.message
+                            ?: "неизвестная ошибка"
+                        )
+            )
+        }
+    }
+
+    private fun agentChangeVolume(
+        action: String
+    ): JSONObject {
+
+        val audioManager =
+            getSystemService(
+                Context.AUDIO_SERVICE
+            ) as AudioManager
+
+        val direction =
+            when (action) {
+
+                "up" ->
+                    AudioManager
+                        .ADJUST_RAISE
+
+                "down" ->
+                    AudioManager
+                        .ADJUST_LOWER
+
+                "mute" ->
+                    AudioManager
+                        .ADJUST_MUTE
+
+                "unmute" ->
+                    AudioManager
+                        .ADJUST_UNMUTE
+
+                else ->
+                    return toolResult(
+                        false,
+                        "Неизвестная команда громкости: $action"
+                    )
+            }
+
+        audioManager
+            .adjustStreamVolume(
+                AudioManager.STREAM_MUSIC,
+                direction,
+                AudioManager.FLAG_SHOW_UI
+            )
+
+        return toolResult(
+            true,
+            "Громкость изменена: $action"
+        )
+    }
+
+    private fun agentYouTubeSearch(
+        query: String
+    ): JSONObject {
+
+        if (query.isBlank()) {
+
+            return toolResult(
+                false,
+                "Пустой запрос YouTube"
+            )
+        }
+
+        val uri =
+            Uri.parse(
+                "https://www.youtube.com/results" +
+                    "?search_query=" +
+                    Uri.encode(query)
+            )
+
+        return try {
+
+            try {
+
+                startActivity(
+                    Intent(
+                        Intent.ACTION_VIEW,
+                        uri
+                    ).apply {
+
+                        setPackage(
+                            "com.google.android.youtube"
+                        )
+
+                        addFlags(
+                            Intent.FLAG_ACTIVITY_NEW_TASK
+                        )
+                    }
+                )
+
+            } catch (
+                _: ActivityNotFoundException
+            ) {
+
+                startActivity(
+                    Intent(
+                        Intent.ACTION_VIEW,
+                        uri
+                    ).apply {
+
+                        addFlags(
+                            Intent.FLAG_ACTIVITY_NEW_TASK
+                        )
+                    }
+                )
+            }
+
+            toolResult(
+                true,
+                "Открыт поиск YouTube: $query"
+            )
+
+        } catch (
+            error: Exception
+        ) {
+
+            toolResult(
+                false,
+                "Не удалось открыть поиск YouTube: " +
+                    (
+                        error.message
+                            ?: "неизвестная ошибка"
+                        )
+            )
+        }
+    }
+
+    private fun agentGoogleSearch(
+        query: String
+    ): JSONObject {
+
+        if (query.isBlank()) {
+
+            return toolResult(
+                false,
+                "Пустой поисковый запрос"
+            )
+        }
+
+        val uri =
+            Uri.parse(
+                "https://www.google.com/search?q=" +
+                    Uri.encode(query)
+            )
+
+        return try {
+
+            startActivity(
+                Intent(
+                    Intent.ACTION_VIEW,
+                    uri
+                ).apply {
+
+                    addFlags(
+                        Intent.FLAG_ACTIVITY_NEW_TASK
+                    )
+                }
+            )
+
+            toolResult(
+                true,
+                "Открыт Google-поиск: $query"
+            )
+
+        } catch (
+            error: Exception
+        ) {
+
+            toolResult(
+                false,
+                "Не удалось открыть Google-поиск: " +
+                    (
+                        error.message
+                            ?: "неизвестная ошибка"
+                        )
+            )
+        }
+    }
+
+    private fun agentMapSearch(
+        query: String
+    ): JSONObject {
+
+        if (query.isBlank()) {
+
+            return toolResult(
+                false,
+                "Пустой запрос для карты"
+            )
+        }
+
+        val uri =
+            Uri.parse(
+                "geo:0,0?q=" +
+                    Uri.encode(query)
+            )
+
+        return try {
+
+            try {
+
+                startActivity(
+                    Intent(
+                        Intent.ACTION_VIEW,
+                        uri
+                    ).apply {
+
+                        setPackage(
+                            "com.google.android.apps.maps"
+                        )
+
+                        addFlags(
+                            Intent.FLAG_ACTIVITY_NEW_TASK
+                        )
+                    }
+                )
+
+            } catch (
+                _: ActivityNotFoundException
+            ) {
+
+                startActivity(
+                    Intent(
+                        Intent.ACTION_VIEW,
+                        uri
+                    ).apply {
+
+                        addFlags(
+                            Intent.FLAG_ACTIVITY_NEW_TASK
+                        )
+                    }
+                )
+            }
+
+            toolResult(
+                true,
+                "Открыт поиск на карте: $query"
+            )
+
+        } catch (
+            error: Exception
+        ) {
+
+            toolResult(
+                false,
+                "Не удалось открыть карты: " +
+                    (
+                        error.message
+                            ?: "неизвестная ошибка"
+                        )
+            )
         }
     }
 
@@ -3553,6 +4538,9 @@ class AyanaVoiceService : Service() {
 
         const val EXTRA_STATUS_STATE =
             "status_state"
+
+        private const val MAX_AGENT_STEPS =
+            8
 
         private const val CHANNEL_ID =
             "ayana_voice_service"
