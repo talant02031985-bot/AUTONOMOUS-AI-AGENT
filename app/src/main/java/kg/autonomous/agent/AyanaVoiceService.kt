@@ -1,5 +1,6 @@
 package kg.autonomous.agent
 
+import android.Manifest
 import android.app.Notification
 import android.app.NotificationChannel
 import android.app.NotificationManager
@@ -8,9 +9,13 @@ import android.app.Service
 import android.content.ActivityNotFoundException
 import android.content.Context
 import android.content.Intent
+import android.content.pm.PackageManager
 import android.content.pm.ServiceInfo
+import android.media.AudioFormat
+import android.media.AudioRecord
 import android.media.AudioManager
 import android.media.MediaPlayer
+import android.media.MediaRecorder
 import android.media.ToneGenerator
 import android.net.Uri
 import android.os.Build
@@ -18,18 +23,19 @@ import android.os.Handler
 import android.os.IBinder
 import android.os.Looper
 import android.provider.Settings
-import android.speech.RecognitionListener
-import android.speech.RecognizerIntent
-import android.speech.SpeechRecognizer
+import com.k2fsa.sherpa.onnx.FeatureConfig
+import com.k2fsa.sherpa.onnx.OnlineModelConfig
+import com.k2fsa.sherpa.onnx.OnlineRecognizer
+import com.k2fsa.sherpa.onnx.OnlineRecognizerConfig
+import com.k2fsa.sherpa.onnx.OnlineTransducerModelConfig
 import org.json.JSONObject
 import java.io.File
 import java.net.URL
 import java.util.Locale
 import javax.net.ssl.HttpsURLConnection
+import kotlin.concurrent.thread
 
-class AyanaVoiceService :
-    Service(),
-    RecognitionListener {
+class AyanaVoiceService : Service() {
 
     private enum class ListenMode {
         WAKE,
@@ -40,20 +46,30 @@ class AyanaVoiceService :
     private val mainHandler =
         Handler(Looper.getMainLooper())
 
-    private var speechRecognizer:
-        SpeechRecognizer? = null
-
-    private var recognitionIntent:
-        Intent? = null
-
+    @Volatile
     private var listenMode =
         ListenMode.WAKE
 
-    private var listeningNow =
+    @Volatile
+    private var isRecording =
         false
 
+    @Volatile
     private var shuttingDown =
         false
+
+    @Volatile
+    private var modelReady =
+        false
+
+    private var recognizer:
+        OnlineRecognizer? = null
+
+    private var audioRecord:
+        AudioRecord? = null
+
+    private var recordingThread:
+        Thread? = null
 
     private var mediaPlayer:
         MediaPlayer? = null
@@ -71,6 +87,15 @@ class AyanaVoiceService :
         )
     }
 
+    private val sampleRateInHz =
+        16000
+
+    private val channelConfig =
+        AudioFormat.CHANNEL_IN_MONO
+
+    private val audioFormat =
+        AudioFormat.ENCODING_PCM_16BIT
+
     override fun onCreate() {
         super.onCreate()
 
@@ -78,19 +103,50 @@ class AyanaVoiceService :
         shuttingDown = false
 
         createNotificationChannel()
+
         promoteToForeground(
-            "AYANA активна • жду «Аяна»"
+            "AYANA запускает локальное распознавание"
         )
 
-        setupSpeechRecognizer()
+        broadcastStatus(
+            "Загружаю русскую модель…",
+            STATE_THINKING
+        )
+
         prefetchReadyVoice()
 
-        mainHandler.postDelayed(
-            {
-                startWakeListening()
-            },
-            500L
-        )
+        thread(
+            start = true,
+            name = "AyanaModelInit"
+        ) {
+            try {
+
+                initSherpaModel()
+
+                modelReady = true
+
+                mainHandler.post {
+                    if (!shuttingDown) {
+                        startWakeListening()
+                    }
+                }
+
+            } catch (_: Exception) {
+
+                modelReady = false
+
+                mainHandler.post {
+                    broadcastStatus(
+                        "Не удалось загрузить локальную модель",
+                        STATE_ERROR
+                    )
+
+                    updateNotification(
+                        "Ошибка локального распознавания"
+                    )
+                }
+            }
+        }
     }
 
     override fun onStartCommand(
@@ -109,11 +165,38 @@ class AyanaVoiceService :
             ACTION_START -> {
                 if (
                     !shuttingDown &&
-                    speechRecognizer != null &&
-                    !listeningNow &&
+                    modelReady &&
+                    !isRecording &&
                     listenMode != ListenMode.BUSY
                 ) {
                     startWakeListening()
+                }
+            }
+
+            ACTION_TEXT_COMMAND -> {
+
+                val command =
+                    intent.getStringExtra(
+                        EXTRA_TEXT_COMMAND
+                    )
+                        ?.trim()
+                        .orEmpty()
+
+                if (command.isNotBlank()) {
+
+                    stopSherpaListening()
+
+                    mainHandler.postDelayed(
+                        {
+                            if (!shuttingDown) {
+                                executeCommand(
+                                    command,
+                                    silent = true
+                                )
+                            }
+                        },
+                        180L
+                    )
                 }
             }
         }
@@ -126,7 +209,7 @@ class AyanaVoiceService :
     ): IBinder? = null
 
     // =========================================================
-    // FOREGROUND SERVICE / NOTIFICATION
+    // FOREGROUND SERVICE
     // =========================================================
 
     private fun createNotificationChannel() {
@@ -139,8 +222,10 @@ class AyanaVoiceService :
                     "AYANA Voice",
                     NotificationManager.IMPORTANCE_LOW
                 ).apply {
+
                     description =
                         "Фоновая работа голосового помощника AYANA"
+
                     setShowBadge(false)
                 }
 
@@ -193,11 +278,14 @@ class AyanaVoiceService :
 
         val builder =
             if (Build.VERSION.SDK_INT >= 26) {
+
                 Notification.Builder(
                     this,
                     CHANNEL_ID
                 )
+
             } else {
+
                 @Suppress("DEPRECATION")
                 Notification.Builder(this)
             }
@@ -209,7 +297,7 @@ class AyanaVoiceService :
             .setContentTitle("AYANA AI")
             .setContentText(text)
             .setSubText(
-                "Голос синтезирован искусственным интеллектом"
+                "Голос AYANA синтезирован искусственным интеллектом"
             )
             .setOngoing(true)
             .setOnlyAlertOnce(true)
@@ -230,13 +318,16 @@ class AyanaVoiceService :
             buildNotification(text)
 
         if (Build.VERSION.SDK_INT >= 29) {
+
             startForeground(
                 NOTIFICATION_ID,
                 notification,
                 ServiceInfo
                     .FOREGROUND_SERVICE_TYPE_MICROPHONE
             )
+
         } else {
+
             startForeground(
                 NOTIFICATION_ID,
                 notification
@@ -260,95 +351,62 @@ class AyanaVoiceService :
     }
 
     // =========================================================
-    // SPEECH RECOGNITION
+    // SHERPA-ONNX
     // =========================================================
 
-    private fun setupSpeechRecognizer() {
+    private fun initSherpaModel() {
 
-        if (
-            !SpeechRecognizer
-                .isRecognitionAvailable(this)
-        ) {
-            broadcastStatus(
-                "Распознавание речи недоступно",
-                STATE_ERROR
+        val modelDir =
+            "sherpa_ru"
+
+        val modelConfig =
+            OnlineModelConfig(
+                transducer =
+                    OnlineTransducerModelConfig(
+                        encoder =
+                            "$modelDir/encoder.int8.onnx",
+                        decoder =
+                            "$modelDir/decoder.onnx",
+                        joiner =
+                            "$modelDir/joiner.int8.onnx"
+                    ),
+                tokens =
+                    "$modelDir/tokens.txt",
+                numThreads = 2,
+                debug = false,
+                provider = "cpu",
+                modelType = "zipformer2"
             )
-            return
-        }
 
-        speechRecognizer =
-            try {
-                if (
-                    Build.VERSION.SDK_INT >= 31 &&
-                    SpeechRecognizer
-                        .isOnDeviceRecognitionAvailable(
-                            this
-                        )
-                ) {
-                    SpeechRecognizer
-                        .createOnDeviceSpeechRecognizer(
-                            this
-                        )
-                } else {
-                    SpeechRecognizer
-                        .createSpeechRecognizer(
-                            this
-                        )
-                }
-            } catch (_: Exception) {
-                SpeechRecognizer
-                    .createSpeechRecognizer(this)
-            }
+        val config =
+            OnlineRecognizerConfig(
+                featConfig =
+                    FeatureConfig(
+                        sampleRate =
+                            sampleRateInHz,
+                        featureDim = 80,
+                        dither = 0.0f
+                    ),
+                modelConfig =
+                    modelConfig,
+                enableEndpoint =
+                    true,
+                decodingMethod =
+                    "greedy_search"
+            )
 
-        speechRecognizer
-            ?.setRecognitionListener(this)
-
-        recognitionIntent =
-            Intent(
-                RecognizerIntent.ACTION_RECOGNIZE_SPEECH
-            ).apply {
-
-                putExtra(
-                    RecognizerIntent.EXTRA_LANGUAGE_MODEL,
-                    RecognizerIntent
-                        .LANGUAGE_MODEL_FREE_FORM
-                )
-
-                putExtra(
-                    RecognizerIntent.EXTRA_LANGUAGE,
-                    "ru-RU"
-                )
-
-                putExtra(
-                    RecognizerIntent.EXTRA_PARTIAL_RESULTS,
-                    true
-                )
-
-                putExtra(
-                    RecognizerIntent
-                        .EXTRA_MAX_RESULTS,
-                    5
-                )
-
-                putExtra(
-                    RecognizerIntent
-                        .EXTRA_SPEECH_INPUT_COMPLETE_SILENCE_LENGTH_MILLIS,
-                    900L
-                )
-
-                putExtra(
-                    RecognizerIntent
-                        .EXTRA_SPEECH_INPUT_POSSIBLY_COMPLETE_SILENCE_LENGTH_MILLIS,
-                    650L
-                )
-            }
+        recognizer =
+            OnlineRecognizer(
+                assetManager = assets,
+                config = config
+            )
     }
 
     private fun startWakeListening() {
 
         if (
             shuttingDown ||
-            listenMode == ListenMode.BUSY
+            !modelReady
         ) {
             return
         }
@@ -365,12 +423,15 @@ class AyanaVoiceService :
             "Жду голосовую команду «Аяна»"
         )
 
-        startListeningInternal()
+        startSherpaListening()
     }
 
     private fun startCommandListening() {
 
-        if (shuttingDown) {
+        if (
+            shuttingDown ||
+            !modelReady
+        ) {
             return
         }
 
@@ -386,134 +447,25 @@ class AyanaVoiceService :
             "Слушаю вашу команду"
         )
 
-        startListeningInternal()
+        startSherpaListening()
     }
 
-    private fun startListeningInternal() {
+    private fun startSherpaListening() {
 
         if (
             shuttingDown ||
-            speechRecognizer == null ||
-            recognitionIntent == null
+            !modelReady
         ) {
-            return
-        }
-
-        try {
-            speechRecognizer?.cancel()
-
-            mainHandler.postDelayed(
-                {
-                    if (
-                        shuttingDown ||
-                        listenMode == ListenMode.BUSY
-                    ) {
-                        return@postDelayed
-                    }
-
-                    try {
-                        listeningNow = true
-
-                        speechRecognizer
-                            ?.startListening(
-                                recognitionIntent
-                            )
-                    } catch (_: Exception) {
-                        listeningNow = false
-                        scheduleRecognitionRestart(
-                            900L
-                        )
-                    }
-                },
-                150L
-            )
-
-        } catch (_: Exception) {
-            listeningNow = false
-
-            scheduleRecognitionRestart(
-                900L
-            )
-        }
-    }
-
-    private fun pauseRecognition() {
-
-        listeningNow = false
-
-        try {
-            speechRecognizer?.cancel()
-        } catch (_: Exception) {
-        }
-    }
-
-    private fun scheduleRecognitionRestart(
-        delay: Long
-    ) {
-
-        if (shuttingDown) {
-            return
-        }
-
-        mainHandler.postDelayed(
-            {
-                if (
-                    !shuttingDown &&
-                    listenMode != ListenMode.BUSY
-                ) {
-                    when (listenMode) {
-                        ListenMode.WAKE ->
-                            startWakeListening()
-
-                        ListenMode.COMMAND ->
-                            startCommandListening()
-
-                        ListenMode.BUSY -> Unit
-                    }
-                }
-            },
-            delay
-        )
-    }
-
-    override fun onReadyForSpeech(
-        params: android.os.Bundle?
-    ) {
-        listeningNow = true
-    }
-
-    override fun onBeginningOfSpeech() {
-    }
-
-    override fun onRmsChanged(
-        rmsdB: Float
-    ) {
-    }
-
-    override fun onBufferReceived(
-        buffer: ByteArray?
-    ) {
-    }
-
-    override fun onEndOfSpeech() {
-        listeningNow = false
-    }
-
-    override fun onError(
-        error: Int
-    ) {
-
-        listeningNow = false
-
-        if (shuttingDown) {
             return
         }
 
         if (
-            error ==
-            SpeechRecognizer
-                .ERROR_INSUFFICIENT_PERMISSIONS
+            checkSelfPermission(
+                Manifest.permission.RECORD_AUDIO
+            ) !=
+            PackageManager.PERMISSION_GRANTED
         ) {
+
             broadcastStatus(
                 "Нет доступа к микрофону",
                 STATE_ERROR
@@ -526,162 +478,551 @@ class AyanaVoiceService :
             return
         }
 
-        val delay =
-            when (error) {
+        if (
+            recordingThread?.isAlive == true ||
+            isRecording
+        ) {
 
-                SpeechRecognizer
-                    .ERROR_RECOGNIZER_BUSY ->
-                    1200L
+            mainHandler.postDelayed(
+                {
+                    if (
+                        !shuttingDown &&
+                        !isRecording
+                    ) {
+                        startSherpaListening()
+                    }
+                },
+                160L
+            )
 
-                SpeechRecognizer
-                    .ERROR_CLIENT ->
-                    800L
+            return
+        }
 
-                SpeechRecognizer
-                    .ERROR_NETWORK,
-                SpeechRecognizer
-                    .ERROR_NETWORK_TIMEOUT ->
-                    1500L
+        val minBufferBytes =
+            AudioRecord.getMinBufferSize(
+                sampleRateInHz,
+                channelConfig,
+                audioFormat
+            )
 
-                else ->
-                    450L
+        if (minBufferBytes <= 0) {
+
+            broadcastStatus(
+                "Не удалось открыть микрофон",
+                STATE_ERROR
+            )
+
+            return
+        }
+
+        val recorder =
+            try {
+
+                AudioRecord(
+                    MediaRecorder.AudioSource.MIC,
+                    sampleRateInHz,
+                    channelConfig,
+                    audioFormat,
+                    minBufferBytes * 2
+                )
+
+            } catch (_: Exception) {
+
+                null
             }
 
-        scheduleRecognitionRestart(delay)
+        if (
+            recorder == null ||
+            recorder.state !=
+            AudioRecord.STATE_INITIALIZED
+        ) {
+
+            try {
+                recorder?.release()
+            } catch (_: Exception) {
+            }
+
+            broadcastStatus(
+                "Микрофон недоступен",
+                STATE_ERROR
+            )
+
+            return
+        }
+
+        audioRecord =
+            recorder
+
+        try {
+
+            recorder.startRecording()
+
+            isRecording =
+                true
+
+        } catch (_: Exception) {
+
+            try {
+                recorder.release()
+            } catch (_: Exception) {
+            }
+
+            audioRecord =
+                null
+
+            isRecording =
+                false
+
+            broadcastStatus(
+                "Не удалось начать прослушивание",
+                STATE_ERROR
+            )
+
+            return
+        }
+
+        recordingThread =
+            thread(
+                start = true,
+                name = "AyanaSherpaAudio"
+            ) {
+
+                processSherpaAudio(
+                    recorder
+                )
+            }
     }
 
-    override fun onResults(
-        results: android.os.Bundle?
+    private fun processSherpaAudio(
+        recorder: AudioRecord
     ) {
 
-        listeningNow = false
+        val localRecognizer =
+            recognizer
+                ?: return
 
-        val phrases =
-            results
-                ?.getStringArrayList(
-                    SpeechRecognizer
-                        .RESULTS_RECOGNITION
+        val stream =
+            try {
+                localRecognizer
+                    .createStream()
+            } catch (_: Exception) {
+                cleanupRecorder(
+                    recorder
                 )
-                ?.filter {
-                    it.isNotBlank()
-                }
-                ?: emptyList()
+                return
+            }
 
-        if (phrases.isEmpty()) {
-            scheduleRecognitionRestart(
-                350L
+        val intervalSeconds =
+            0.10
+
+        val sampleCount =
+            (
+                intervalSeconds *
+                    sampleRateInHz
+                ).toInt()
+
+        val buffer =
+            ShortArray(
+                sampleCount
             )
+
+        var wakeSeen =
+            false
+
+        var pendingAction:
+            (() -> Unit)? = null
+
+        try {
+
+            while (
+                isRecording &&
+                !shuttingDown
+            ) {
+
+                val count =
+                    try {
+                        recorder.read(
+                            buffer,
+                            0,
+                            buffer.size
+                        )
+                    } catch (_: Exception) {
+                        -1
+                    }
+
+                if (count <= 0) {
+                    continue
+                }
+
+                val samples =
+                    FloatArray(count) {
+                        buffer[it] /
+                            32768.0f
+                    }
+
+                stream.acceptWaveform(
+                    samples,
+                    sampleRate =
+                        sampleRateInHz
+                )
+
+                while (
+                    localRecognizer
+                        .isReady(stream)
+                ) {
+
+                    localRecognizer
+                        .decode(stream)
+                }
+
+                val text =
+                    normalizeRecognitionText(
+                        localRecognizer
+                            .getResult(stream)
+                            .text
+                    )
+
+                val isEndpoint =
+                    localRecognizer
+                        .isEndpoint(stream)
+
+                when (listenMode) {
+
+                    ListenMode.WAKE -> {
+
+                        if (
+                            text.isNotBlank() &&
+                            containsWakeWord(text)
+                        ) {
+
+                            wakeSeen = true
+
+                            broadcastStatus(
+                                "Слышу «Аяна»…",
+                                STATE_COMMAND
+                            )
+                        }
+
+                        if (isEndpoint) {
+
+                            val finalText =
+                                text
+
+                            localRecognizer
+                                .reset(stream)
+
+                            val detected =
+                                wakeSeen ||
+                                    containsWakeWord(
+                                        finalText
+                                    )
+
+                            wakeSeen =
+                                false
+
+                            if (detected) {
+
+                                val command =
+                                    extractWakeCommand(
+                                        finalText
+                                    )
+
+                                isRecording =
+                                    false
+
+                                pendingAction =
+                                    if (
+                                        command.isBlank()
+                                    ) {
+
+                                        {
+                                            acknowledgeWakeAndListen()
+                                        }
+
+                                    } else {
+
+                                        {
+                                            executeCommand(
+                                                command,
+                                                silent = false
+                                            )
+                                        }
+                                    }
+
+                                break
+                            }
+                        }
+                    }
+
+                    ListenMode.COMMAND -> {
+
+                        if (isEndpoint) {
+
+                            val finalText =
+                                text
+
+                            localRecognizer
+                                .reset(stream)
+
+                            if (
+                                finalText.isNotBlank()
+                            ) {
+
+                                isRecording =
+                                    false
+
+                                pendingAction =
+                                    {
+                                        executeCommand(
+                                            finalText,
+                                            silent = false
+                                        )
+                                    }
+
+                                break
+                            }
+                        }
+                    }
+
+                    ListenMode.BUSY -> {
+
+                        isRecording =
+                            false
+
+                        break
+                    }
+                }
+            }
+
+        } catch (_: Exception) {
+
+            if (
+                !shuttingDown &&
+                listenMode !=
+                ListenMode.BUSY
+            ) {
+
+                pendingAction =
+                    {
+                        broadcastStatus(
+                            "Перезапускаю микрофон…",
+                            STATE_THINKING
+                        )
+
+                        mainHandler.postDelayed(
+                            {
+                                resumeCurrentListeningMode()
+                            },
+                            700L
+                        )
+                    }
+            }
+
+        } finally {
+
+            try {
+                stream.release()
+            } catch (_: Exception) {
+            }
+
+            cleanupRecorder(
+                recorder
+            )
+
+            val action =
+                pendingAction
+
+            if (
+                action != null &&
+                !shuttingDown
+            ) {
+
+                mainHandler.post(
+                    action
+                )
+            }
+        }
+    }
+
+    private fun cleanupRecorder(
+        recorder: AudioRecord
+    ) {
+
+        try {
+
+            if (
+                recorder.recordingState ==
+                AudioRecord.RECORDSTATE_RECORDING
+            ) {
+                recorder.stop()
+            }
+
+        } catch (_: Exception) {
+        }
+
+        try {
+            recorder.release()
+        } catch (_: Exception) {
+        }
+
+        if (
+            audioRecord === recorder
+        ) {
+            audioRecord =
+                null
+        }
+
+        isRecording =
+            false
+
+        if (
+            Thread.currentThread() ===
+            recordingThread
+        ) {
+            recordingThread =
+                null
+        }
+    }
+
+    private fun stopSherpaListening() {
+
+        isRecording =
+            false
+
+        val recorder =
+            audioRecord
+
+        if (recorder != null) {
+
+            try {
+
+                if (
+                    recorder.recordingState ==
+                    AudioRecord.RECORDSTATE_RECORDING
+                ) {
+                    recorder.stop()
+                }
+
+            } catch (_: Exception) {
+            }
+        }
+    }
+
+    private fun resumeCurrentListeningMode() {
+
+        if (
+            shuttingDown ||
+            !modelReady
+        ) {
             return
         }
 
         when (listenMode) {
 
-            ListenMode.WAKE -> {
+            ListenMode.WAKE ->
+                startWakeListening()
 
-                val match =
-                    phrases
-                        .mapNotNull {
-                            extractWakeCommand(it)
-                        }
-                        .firstOrNull()
+            ListenMode.COMMAND ->
+                startCommandListening()
 
-                if (match == null) {
-                    scheduleRecognitionRestart(
-                        250L
-                    )
-                    return
-                }
-
-                pauseRecognition()
-
-                if (match.isBlank()) {
-                    acknowledgeWakeAndListen()
-                } else {
-                    executeCommand(match)
-                }
-            }
-
-            ListenMode.COMMAND -> {
-
-                val command =
-                    phrases.firstOrNull()
-                        ?.trim()
-                        .orEmpty()
-
-                if (command.isBlank()) {
-                    startWakeListening()
-                } else {
-                    pauseRecognition()
-                    executeCommand(command)
-                }
-            }
-
-            ListenMode.BUSY -> Unit
+            ListenMode.BUSY ->
+                Unit
         }
     }
 
-    override fun onPartialResults(
-        partialResults:
-            android.os.Bundle?
-    ) {
-        // Намеренно не запускаем команду по partial result:
-        // ждём полный результат, чтобы не отрезать фразу
-        // после слова «Аяна».
+    private fun normalizeRecognitionText(
+        text: String
+    ): String {
+
+        return text
+            .lowercase(
+                Locale.getDefault()
+            )
+            .replace('ё', 'е')
+            .replace(
+                Regex("[,!?;:.]"),
+                " "
+            )
+            .replace(
+                Regex("\\s+"),
+                " "
+            )
+            .trim()
     }
 
-    override fun onEvent(
-        eventType: Int,
-        params: android.os.Bundle?
-    ) {
+    private fun containsWakeWord(
+        text: String
+    ): Boolean {
+
+        val normalized =
+            normalizeRecognitionText(
+                text
+            )
+
+        return WAKE_VARIANTS
+            .any {
+                normalized.contains(it)
+            }
     }
 
     private fun extractWakeCommand(
         phrase: String
-    ): String? {
+    ): String {
 
-        val normalized =
-            phrase
-                .lowercase(Locale.getDefault())
-                .replace('ё', 'е')
-                .trim()
-
-        val wakeWords =
-            listOf(
-                "аяна",
-                "айана",
-                "ayana"
+        var normalized =
+            normalizeRecognitionText(
+                phrase
             )
 
-        for (wake in wakeWords) {
+        var found =
+            false
 
-            val index =
-                normalized.indexOf(wake)
+        do {
 
-            if (index >= 0) {
+            found =
+                false
 
-                val after =
+            for (
+                wake in
+                WAKE_VARIANTS
+            ) {
+
+                val index =
                     normalized
-                        .substring(
-                            index + wake.length
-                        )
-                        .trim()
-                        .trimStart(
-                            ',',
-                            '.',
-                            '!',
-                            '?',
-                            ':',
-                            ';',
-                            '-',
-                            '—'
-                        )
-                        .trim()
+                        .indexOf(wake)
 
-                return after
+                if (index >= 0) {
+
+                    normalized =
+                        normalized
+                            .substring(
+                                index +
+                                    wake.length
+                            )
+                            .trim()
+                            .trimStart(
+                                '-',
+                                '—'
+                            )
+                            .trim()
+
+                    found =
+                        true
+
+                    break
+                }
             }
-        }
 
-        return null
+        } while (
+            found &&
+            WAKE_VARIANTS.any {
+                normalized
+                    .startsWith(it)
+            }
+        )
+
+        return normalized
+            .trim()
     }
 
     // =========================================================
@@ -697,18 +1038,25 @@ class AyanaVoiceService :
             return
         }
 
-        Thread {
+        thread(
+            start = true,
+            name = "AyanaReadyVoice"
+        ) {
             try {
+
                 downloadTtsToFile(
                     "Слушаю.",
                     readyFile
                 )
+
             } catch (_: Exception) {
             }
-        }.start()
+        }
     }
 
     private fun acknowledgeWakeAndListen() {
+
+        stopSherpaListening()
 
         listenMode =
             ListenMode.BUSY
@@ -733,6 +1081,7 @@ class AyanaVoiceService :
         } else {
 
             try {
+
                 val tone =
                     ToneGenerator(
                         AudioManager.STREAM_MUSIC,
@@ -767,26 +1116,26 @@ class AyanaVoiceService :
     }
 
     // =========================================================
-    // COMMAND PROCESSING
+    // COMMANDS
     // =========================================================
 
     private fun executeCommand(
-        originalCommand: String
+        originalCommand: String,
+        silent: Boolean
     ) {
+
+        stopSherpaListening()
 
         listenMode =
             ListenMode.BUSY
 
         val normalized =
-            originalCommand
-                .lowercase(
-                    Locale.getDefault()
-                )
-                .replace('ё', 'е')
-                .replace("пожалуйста", "")
+            normalizeRecognitionText(
+                originalCommand
+            )
                 .replace(
-                    Regex("[,!?;:]"),
-                    " "
+                    "пожалуйста",
+                    ""
                 )
                 .replace(
                     Regex("\\s+"),
@@ -795,18 +1144,31 @@ class AyanaVoiceService :
                 .trim()
 
         if (normalized.isBlank()) {
-            startWakeListening()
+
+            if (silent) {
+                showTextAndResume(
+                    "Команда пустая."
+                )
+            } else {
+                startWakeListening()
+            }
+
             return
         }
 
         broadcastStatus(
-            "Выполняю: $originalCommand",
+            if (silent) {
+                "Текст: $originalCommand"
+            } else {
+                "Выполняю: $originalCommand"
+            },
             STATE_THINKING
         )
 
         when {
 
-            normalized == "назад" ||
+            normalized ==
+                "назад" ||
                 normalized ==
                 "вернись назад" -> {
 
@@ -817,19 +1179,21 @@ class AyanaVoiceService :
 
                 if (ok) {
                     finishLocalCommand(
-                        "Назад"
+                        "Назад",
+                        silent
                     )
                 } else {
-                    speakAndResume(
-                        "Включите мой доступ " +
-                            "в специальных возможностях."
+                    respondAndResume(
+                        "Включите мой доступ в специальных возможностях.",
+                        silent
                     )
                 }
 
                 return
             }
 
-            normalized == "домой" ||
+            normalized ==
+                "домой" ||
                 normalized ==
                 "на главный экран" ||
                 normalized ==
@@ -842,24 +1206,16 @@ class AyanaVoiceService :
 
                 if (ok) {
                     finishLocalCommand(
-                        "Главный экран"
+                        "Главный экран",
+                        silent
                     )
                 } else {
-                    speakAndResume(
-                        "Включите мой доступ " +
-                            "в специальных возможностях."
+                    respondAndResume(
+                        "Включите мой доступ в специальных возможностях.",
+                        silent
                     )
                 }
 
-                return
-            }
-
-            normalized == "замолчи" ||
-                normalized ==
-                "прекрати говорить" -> {
-
-                stopCurrentAudio()
-                startWakeListening()
                 return
             }
 
@@ -873,13 +1229,17 @@ class AyanaVoiceService :
                         .lastOrNull()
                         ?.second
 
-                if (lastAnswer != null) {
-                    speakAndResume(
-                        lastAnswer
+                if (
+                    lastAnswer != null
+                ) {
+                    respondAndResume(
+                        lastAnswer,
+                        silent
                     )
                 } else {
-                    speakAndResume(
-                        "Мне пока нечего повторять."
+                    respondAndResume(
+                        "Мне пока нечего повторять.",
+                        silent
                     )
                 }
 
@@ -893,10 +1253,12 @@ class AyanaVoiceService :
                 normalized ==
                 "очисти историю" -> {
 
-                conversationHistory.clear()
+                conversationHistory
+                    .clear()
 
-                speakAndResume(
-                    "Хорошо. История разговора очищена."
+                respondAndResume(
+                    "Хорошо. История разговора очищена.",
+                    silent
                 )
 
                 return
@@ -914,7 +1276,8 @@ class AyanaVoiceService :
                 )
 
                 finishLocalCommand(
-                    "Громкость увеличена"
+                    "Громкость увеличена",
+                    silent
                 )
 
                 return
@@ -932,7 +1295,8 @@ class AyanaVoiceService :
                 )
 
                 finishLocalCommand(
-                    "Громкость уменьшена"
+                    "Громкость уменьшена",
+                    silent
                 )
 
                 return
@@ -948,7 +1312,8 @@ class AyanaVoiceService :
                 )
 
                 finishLocalCommand(
-                    "Звук выключен"
+                    "Звук выключен",
+                    silent
                 )
 
                 return
@@ -964,14 +1329,17 @@ class AyanaVoiceService :
                 )
 
                 finishLocalCommand(
-                    "Звук включён"
+                    "Звук включён",
+                    silent
                 )
 
                 return
             }
 
             normalized
-                .startsWith("нажми ") -> {
+                .startsWith(
+                    "нажми "
+                ) -> {
 
                 val target =
                     normalized
@@ -980,12 +1348,18 @@ class AyanaVoiceService :
                         )
                         .trim()
 
-                clickByText(target)
+                clickByText(
+                    target,
+                    silent
+                )
+
                 return
             }
 
             normalized
-                .startsWith("выбери ") -> {
+                .startsWith(
+                    "выбери "
+                ) -> {
 
                 val target =
                     normalized
@@ -994,61 +1368,58 @@ class AyanaVoiceService :
                         )
                         .trim()
 
-                clickByText(target)
+                clickByText(
+                    target,
+                    silent
+                )
+
                 return
             }
 
             (
-                normalized.contains("ютуб") &&
+                normalized.contains(
+                    "ютуб"
+                ) ||
+                    normalized.contains(
+                        "youtube"
+                    )
+                ) &&
                 (
-                    normalized.contains("найди ") ||
-                    normalized.contains("ищи ") ||
-                    normalized.contains("поищи ") ||
-                    normalized.contains("поиск ")
-                )
-            ) -> {
+                    normalized.contains(
+                        "найди "
+                    ) ||
+                        normalized.contains(
+                            "ищи "
+                        ) ||
+                        normalized.contains(
+                            "поищи "
+                        ) ||
+                        normalized.contains(
+                            "поиск "
+                        )
+                    ) -> {
 
                 val query =
                     extractYouTubeQuery(
                         normalized
                     )
 
-                if (query.isNotBlank()) {
-                    openYouTubeSearch(query)
+                if (
+                    query.isNotBlank()
+                ) {
+
+                    openYouTubeSearch(
+                        query,
+                        silent
+                    )
+
                 } else {
+
                     openApp(
                         "YouTube",
+                        silent,
                         "com.google.android.youtube"
                     )
-                }
-
-                return
-            }
-
-            normalized
-                .startsWith(
-                    "найди в ютубе "
-                ) ||
-                normalized
-                    .startsWith(
-                        "найди на ютубе "
-                    ) ||
-                normalized
-                    .startsWith(
-                        "поиск в ютубе "
-                    ) -> {
-
-                val query =
-                    normalized
-                        .substringAfter(
-                            "ютубе"
-                        )
-                        .trim()
-
-                if (query.isNotBlank()) {
-                    openYouTubeSearch(query)
-                } else {
-                    startWakeListening()
                 }
 
                 return
@@ -1073,15 +1444,19 @@ class AyanaVoiceService :
 
                 val query =
                     if (
-                        normalized
-                            .contains("google")
+                        normalized.contains(
+                            "google"
+                        )
                     ) {
+
                         normalized
                             .substringAfter(
                                 "google"
                             )
                             .trim()
+
                     } else {
+
                         normalized
                             .substringAfter(
                                 "гугле"
@@ -1089,8 +1464,13 @@ class AyanaVoiceService :
                             .trim()
                     }
 
-                if (query.isNotBlank()) {
-                    openGoogleSearch(query)
+                if (
+                    query.isNotBlank()
+                ) {
+                    openGoogleSearch(
+                        query,
+                        silent
+                    )
                 } else {
                     startWakeListening()
                 }
@@ -1140,8 +1520,13 @@ class AyanaVoiceService :
                                 .trim()
                     }
 
-                if (query.isNotBlank()) {
-                    openMapSearch(query)
+                if (
+                    query.isNotBlank()
+                ) {
+                    openMapSearch(
+                        query,
+                        silent
+                    )
                 } else {
                     startWakeListening()
                 }
@@ -1152,9 +1537,15 @@ class AyanaVoiceService :
 
         val target =
             normalized
-                .removePrefix("открой ")
-                .removePrefix("запусти ")
-                .removePrefix("включи ")
+                .removePrefix(
+                    "открой "
+                )
+                .removePrefix(
+                    "запусти "
+                )
+                .removePrefix(
+                    "включи "
+                )
                 .trim()
 
         when (target) {
@@ -1163,6 +1554,7 @@ class AyanaVoiceService :
             "ютуб" ->
                 openApp(
                     "YouTube",
+                    silent,
                     "com.google.android.youtube"
                 )
 
@@ -1171,6 +1563,7 @@ class AyanaVoiceService :
             "гугл хром" ->
                 openApp(
                     "Chrome",
+                    silent,
                     "com.android.chrome"
                 )
 
@@ -1179,6 +1572,7 @@ class AyanaVoiceService :
             "самсунг интернет" ->
                 openApp(
                     "браузер",
+                    silent,
                     "com.sec.android.app.sbrowser",
                     "com.android.chrome"
                 )
@@ -1189,6 +1583,7 @@ class AyanaVoiceService :
             "электронная почта" ->
                 openApp(
                     "почту",
+                    silent,
                     "com.google.android.gm",
                     "com.samsung.android.email.provider"
                 )
@@ -1198,6 +1593,7 @@ class AyanaVoiceService :
             "гугл карты" ->
                 openApp(
                     "Google Maps",
+                    silent,
                     "com.google.android.apps.maps"
                 )
 
@@ -1207,6 +1603,7 @@ class AyanaVoiceService :
             "гугл плей" ->
                 openApp(
                     "Google Play",
+                    silent,
                     "com.android.vending"
                 )
 
@@ -1214,6 +1611,7 @@ class AyanaVoiceService :
             "камеру" ->
                 openApp(
                     "камеру",
+                    silent,
                     "com.sec.android.app.camera"
                 )
 
@@ -1221,6 +1619,7 @@ class AyanaVoiceService :
             "фото" ->
                 openApp(
                     "галерею",
+                    silent,
                     "com.sec.android.gallery3d",
                     "com.google.android.apps.photos"
                 )
@@ -1229,6 +1628,7 @@ class AyanaVoiceService :
             "гугл фото" ->
                 openApp(
                     "Google Фото",
+                    silent,
                     "com.google.android.apps.photos",
                     "com.sec.android.gallery3d"
                 )
@@ -1237,18 +1637,21 @@ class AyanaVoiceService :
             "мои файлы" ->
                 openApp(
                     "Мои файлы",
+                    silent,
                     "com.sec.android.app.myfiles"
                 )
 
             "калькулятор" ->
                 openApp(
                     "калькулятор",
+                    silent,
                     "com.sec.android.app.popupcalculator"
                 )
 
             "календарь" ->
                 openApp(
                     "календарь",
+                    silent,
                     "com.samsung.android.calendar",
                     "com.google.android.calendar"
                 )
@@ -1257,6 +1660,7 @@ class AyanaVoiceService :
             "будильник" ->
                 openApp(
                     "часы",
+                    silent,
                     "com.sec.android.app.clockpackage"
                 )
 
@@ -1264,6 +1668,7 @@ class AyanaVoiceService :
             "смс" ->
                 openApp(
                     "сообщения",
+                    silent,
                     "com.samsung.android.messaging",
                     "com.google.android.apps.messaging"
                 )
@@ -1271,6 +1676,7 @@ class AyanaVoiceService :
             "контакты" ->
                 openApp(
                     "контакты",
+                    silent,
                     "com.samsung.android.app.contacts",
                     "com.google.android.contacts"
                 )
@@ -1281,6 +1687,7 @@ class AyanaVoiceService :
             "чат джипити" ->
                 openApp(
                     "ChatGPT",
+                    silent,
                     "com.openai.chatgpt"
                 )
 
@@ -1288,6 +1695,7 @@ class AyanaVoiceService :
             "телеграм" ->
                 openApp(
                     "Telegram",
+                    silent,
                     "org.telegram.messenger"
                 )
 
@@ -1296,6 +1704,7 @@ class AyanaVoiceService :
             "вотсап" ->
                 openApp(
                     "WhatsApp",
+                    silent,
                     "com.whatsapp"
                 )
 
@@ -1303,6 +1712,7 @@ class AyanaVoiceService :
             "гугл" ->
                 openApp(
                     "Google",
+                    silent,
                     "com.google.android.googlequicksearchbox"
                 )
 
@@ -1311,6 +1721,7 @@ class AyanaVoiceService :
             "гугл диск" ->
                 openApp(
                     "Google Диск",
+                    silent,
                     "com.google.android.apps.docs"
                 )
 
@@ -1319,13 +1730,15 @@ class AyanaVoiceService :
             "самсунг ноутс" ->
                 openApp(
                     "Samsung Notes",
+                    silent,
                     "com.samsung.android.app.notes"
                 )
 
             "настройки" ->
                 openSystemScreen(
                     Settings.ACTION_SETTINGS,
-                    "настройки"
+                    "настройки",
+                    silent
                 )
 
             "wifi",
@@ -1334,21 +1747,24 @@ class AyanaVoiceService :
             "вайфай" ->
                 openSystemScreen(
                     Settings.ACTION_WIFI_SETTINGS,
-                    "настройки Wi-Fi"
+                    "настройки Wi-Fi",
+                    silent
                 )
 
             "bluetooth",
             "блютуз" ->
                 openSystemScreen(
                     Settings.ACTION_BLUETOOTH_SETTINGS,
-                    "настройки Bluetooth"
+                    "настройки Bluetooth",
+                    silent
                 )
 
             "звук",
             "настройки звука" ->
                 openSystemScreen(
                     Settings.ACTION_SOUND_SETTINGS,
-                    "настройки звука"
+                    "настройки звука",
+                    silent
                 )
 
             "экран",
@@ -1356,14 +1772,16 @@ class AyanaVoiceService :
             "дисплей" ->
                 openSystemScreen(
                     Settings.ACTION_DISPLAY_SETTINGS,
-                    "настройки экрана"
+                    "настройки экрана",
+                    silent
                 )
 
             "специальные возможности",
             "спец возможности" ->
                 openSystemScreen(
                     Settings.ACTION_ACCESSIBILITY_SETTINGS,
-                    "специальные возможности"
+                    "специальные возможности",
+                    silent
                 )
 
             "геолокация",
@@ -1371,26 +1789,30 @@ class AyanaVoiceService :
             "локация" ->
                 openSystemScreen(
                     Settings.ACTION_LOCATION_SOURCE_SETTINGS,
-                    "настройки местоположения"
+                    "настройки местоположения",
+                    silent
                 )
 
             "безопасность",
             "настройки безопасности" ->
                 openSystemScreen(
                     Settings.ACTION_SECURITY_SETTINGS,
-                    "настройки безопасности"
+                    "настройки безопасности",
+                    silent
                 )
 
             "дата и время",
             "время и дата" ->
                 openSystemScreen(
                     Settings.ACTION_DATE_SETTINGS,
-                    "настройки даты и времени"
+                    "настройки даты и времени",
+                    silent
                 )
 
             else ->
                 askAyana(
-                    originalCommand
+                    originalCommand,
+                    silent
                 )
         }
     }
@@ -1407,28 +1829,45 @@ class AyanaVoiceService :
                 "поиск "
             )
 
-        for (marker in markers) {
+        for (
+            marker in markers
+        ) {
 
             val index =
-                command.indexOf(marker)
+                command.indexOf(
+                    marker
+                )
 
             if (index >= 0) {
 
                 var query =
                     command
                         .substring(
-                            index + marker.length
+                            index +
+                                marker.length
                         )
                         .trim()
 
                 query =
                     query
-                        .removePrefix("в ютубе ")
-                        .removePrefix("на ютубе ")
-                        .removePrefix("youtube ")
-                        .removePrefix("ютуб ")
-                        .removePrefix("музыку ")
-                        .removePrefix("музыка ")
+                        .removePrefix(
+                            "в ютубе "
+                        )
+                        .removePrefix(
+                            "на ютубе "
+                        )
+                        .removePrefix(
+                            "youtube "
+                        )
+                        .removePrefix(
+                            "ютуб "
+                        )
+                        .removePrefix(
+                            "музыку "
+                        )
+                        .removePrefix(
+                            "музыка "
+                        )
                         .trim()
 
                 return query
@@ -1439,37 +1878,51 @@ class AyanaVoiceService :
     }
 
     private fun clickByText(
-        target: String
+        target: String,
+        silent: Boolean
     ) {
 
         if (target.isBlank()) {
-            speakAndResume(
-                "Скажите, что именно нажать."
+
+            respondAndResume(
+                "Скажите, что именно нажать.",
+                silent
             )
+
             return
         }
 
         val service =
-            AgentAccessibilityService.instance
+            AgentAccessibilityService
+                .instance
 
         if (service == null) {
-            speakAndResume(
-                "Включите мой доступ " +
-                    "в специальных возможностях."
+
+            respondAndResume(
+                "Включите мой доступ в специальных возможностях.",
+                silent
             )
+
             return
         }
 
         val success =
-            service.clickByText(target)
+            service.clickByText(
+                target
+            )
 
         if (success) {
+
             finishLocalCommand(
-                "Нажимаю: $target"
+                "Нажимаю: $target",
+                silent
             )
+
         } else {
-            speakAndResume(
-                "Я не нашла на экране элемент $target."
+
+            respondAndResume(
+                "Я не нашла на экране элемент $target.",
+                silent
             )
         }
     }
@@ -1492,10 +1945,13 @@ class AyanaVoiceService :
 
     private fun openApp(
         displayName: String,
+        silent: Boolean,
         vararg packages: String
     ) {
 
-        for (packageName in packages) {
+        for (
+            packageName in packages
+        ) {
 
             try {
 
@@ -1520,7 +1976,8 @@ class AyanaVoiceService :
                 startActivity(intent)
 
                 finishLocalCommand(
-                    "Открываю $displayName"
+                    "Открываю $displayName",
+                    silent
                 )
 
                 return
@@ -1534,20 +1991,23 @@ class AyanaVoiceService :
             }
         }
 
-        speakAndResume(
-            "Приложение $displayName не найдено."
+        respondAndResume(
+            "Приложение $displayName не найдено.",
+            silent
         )
     }
 
     private fun openSystemScreen(
         action: String,
-        displayName: String
+        displayName: String,
+        silent: Boolean
     ) {
 
         try {
 
             startActivity(
                 Intent(action).apply {
+
                     addFlags(
                         Intent.FLAG_ACTIVITY_NEW_TASK
                     )
@@ -1555,21 +2015,24 @@ class AyanaVoiceService :
             )
 
             finishLocalCommand(
-                "Открываю $displayName"
+                "Открываю $displayName",
+                silent
             )
 
         } catch (
             _: ActivityNotFoundException
         ) {
 
-            speakAndResume(
-                "Не удалось открыть $displayName."
+            respondAndResume(
+                "Не удалось открыть $displayName.",
+                silent
             )
         }
     }
 
     private fun openYouTubeSearch(
-        query: String
+        query: String,
+        silent: Boolean
     ) {
 
         val uri =
@@ -1586,6 +2049,7 @@ class AyanaVoiceService :
                     Intent.ACTION_VIEW,
                     uri
                 ).apply {
+
                     setPackage(
                         "com.google.android.youtube"
                     )
@@ -1597,7 +2061,8 @@ class AyanaVoiceService :
             )
 
             finishLocalCommand(
-                "Ищу в YouTube: $query"
+                "Ищу в YouTube: $query",
+                silent
             )
 
         } catch (
@@ -1611,6 +2076,7 @@ class AyanaVoiceService :
                         Intent.ACTION_VIEW,
                         uri
                     ).apply {
+
                         addFlags(
                             Intent.FLAG_ACTIVITY_NEW_TASK
                         )
@@ -1618,22 +2084,25 @@ class AyanaVoiceService :
                 )
 
                 finishLocalCommand(
-                    "Ищу в YouTube: $query"
+                    "Ищу в YouTube: $query",
+                    silent
                 )
 
             } catch (
                 _: ActivityNotFoundException
             ) {
 
-                speakAndResume(
-                    "Не удалось открыть YouTube."
+                respondAndResume(
+                    "Не удалось открыть YouTube.",
+                    silent
                 )
             }
         }
     }
 
     private fun openGoogleSearch(
-        query: String
+        query: String,
+        silent: Boolean
     ) {
 
         val uri =
@@ -1649,6 +2118,7 @@ class AyanaVoiceService :
                     Intent.ACTION_VIEW,
                     uri
                 ).apply {
+
                     addFlags(
                         Intent.FLAG_ACTIVITY_NEW_TASK
                     )
@@ -1656,21 +2126,24 @@ class AyanaVoiceService :
             )
 
             finishLocalCommand(
-                "Ищу в Google: $query"
+                "Ищу в Google: $query",
+                silent
             )
 
         } catch (
             _: ActivityNotFoundException
         ) {
 
-            speakAndResume(
-                "Не удалось открыть поиск."
+            respondAndResume(
+                "Не удалось открыть поиск.",
+                silent
             )
         }
     }
 
     private fun openMapSearch(
-        query: String
+        query: String,
+        silent: Boolean
     ) {
 
         val uri =
@@ -1698,7 +2171,8 @@ class AyanaVoiceService :
             )
 
             finishLocalCommand(
-                "Ищу на карте: $query"
+                "Ищу на карте: $query",
+                silent
             )
 
         } catch (
@@ -1712,6 +2186,7 @@ class AyanaVoiceService :
                         Intent.ACTION_VIEW,
                         uri
                     ).apply {
+
                         addFlags(
                             Intent.FLAG_ACTIVITY_NEW_TASK
                         )
@@ -1719,22 +2194,25 @@ class AyanaVoiceService :
                 )
 
                 finishLocalCommand(
-                    "Ищу на карте: $query"
+                    "Ищу на карте: $query",
+                    silent
                 )
 
             } catch (
                 _: ActivityNotFoundException
             ) {
 
-                speakAndResume(
-                    "Не удалось открыть карты."
+                respondAndResume(
+                    "Не удалось открыть карты.",
+                    silent
                 )
             }
         }
     }
 
     private fun finishLocalCommand(
-        text: String
+        text: String,
+        silent: Boolean
     ) {
 
         broadcastStatus(
@@ -1742,13 +2220,60 @@ class AyanaVoiceService :
             STATE_THINKING
         )
 
-        updateNotification(text)
+        updateNotification(
+            text
+        )
+
+        if (silent) {
+
+            mainHandler.postDelayed(
+                {
+                    startWakeListening()
+                },
+                300L
+            )
+
+        } else {
+
+            mainHandler.postDelayed(
+                {
+                    startWakeListening()
+                },
+                650L
+            )
+        }
+    }
+
+    private fun respondAndResume(
+        text: String,
+        silent: Boolean
+    ) {
+
+        if (silent) {
+            showTextAndResume(text)
+        } else {
+            speakAndResume(text)
+        }
+    }
+
+    private fun showTextAndResume(
+        text: String
+    ) {
+
+        broadcastStatus(
+            text,
+            STATE_TEXT
+        )
+
+        updateNotification(
+            "Текстовый ответ готов"
+        )
 
         mainHandler.postDelayed(
             {
                 startWakeListening()
             },
-            650L
+            450L
         )
     }
 
@@ -1757,10 +2282,12 @@ class AyanaVoiceService :
     // =========================================================
 
     private fun askAyana(
-        message: String
+        message: String,
+        silent: Boolean
     ) {
 
-        pauseRecognition()
+        stopSherpaListening()
+
         listenMode =
             ListenMode.BUSY
 
@@ -1773,7 +2300,10 @@ class AyanaVoiceService :
             "AYANA думает…"
         )
 
-        Thread {
+        thread(
+            start = true,
+            name = "AyanaAI"
+        ) {
 
             var connection:
                 HttpsURLConnection? = null
@@ -1812,25 +2342,40 @@ class AyanaVoiceService :
                         conversationHistory
                             .takeLast(5)
                             .forEach {
+
                                 append(
                                     "Пользователь: "
                                 )
-                                append(it.first)
+
+                                append(
+                                    it.first
+                                )
+
                                 append("\n")
 
-                                append("AYANA: ")
-                                append(it.second)
+                                append(
+                                    "AYANA: "
+                                )
+
+                                append(
+                                    it.second
+                                )
+
                                 append("\n")
                             }
 
                         append(
                             "Пользователь: "
                         )
-                        append(message)
+
+                        append(
+                            message
+                        )
                     }
 
                 val requestJson =
                     JSONObject().apply {
+
                         put(
                             "message",
                             contextText
@@ -1854,10 +2399,14 @@ class AyanaVoiceService :
 
                 val stream =
                     if (
-                        responseCode in 200..299
+                        responseCode in
+                        200..299
                     ) {
+
                         connection.inputStream
+
                     } else {
+
                         connection.errorStream
                     }
 
@@ -1869,8 +2418,10 @@ class AyanaVoiceService :
                         }
 
                 if (
-                    responseCode !in 200..299
+                    responseCode !in
+                    200..299
                 ) {
+
                     throw IllegalStateException(
                         "AI HTTP $responseCode"
                     )
@@ -1886,35 +2437,48 @@ class AyanaVoiceService :
                         )
                         .trim()
 
-                if (
-                    conversationHistory.size >= 10
-                ) {
+                synchronized(
                     conversationHistory
-                        .removeAt(0)
+                ) {
+
+                    if (
+                        conversationHistory
+                            .size >= 10
+                    ) {
+
+                        conversationHistory
+                            .removeAt(0)
+                    }
+
+                    conversationHistory.add(
+                        message to answer
+                    )
                 }
 
-                conversationHistory.add(
-                    message to answer
-                )
-
                 mainHandler.post {
-                    speakAndResume(answer)
+
+                    respondAndResume(
+                        answer,
+                        silent
+                    )
                 }
 
             } catch (_: Exception) {
 
                 mainHandler.post {
-                    speakAndResume(
-                        "Не удалось связаться с сервером. " +
-                            "Проверьте интернет."
+
+                    respondAndResume(
+                        "Не удалось связаться с сервером. Проверьте интернет.",
+                        silent
                     )
                 }
 
             } finally {
-                connection?.disconnect()
-            }
 
-        }.start()
+                connection
+                    ?.disconnect()
+            }
+        }
     }
 
     // =========================================================
@@ -1926,11 +2490,13 @@ class AyanaVoiceService :
     ) {
 
         if (text.isBlank()) {
+
             startWakeListening()
+
             return
         }
 
-        pauseRecognition()
+        stopSherpaListening()
 
         listenMode =
             ListenMode.BUSY
@@ -1951,7 +2517,10 @@ class AyanaVoiceService :
             keepToken = true
         )
 
-        Thread {
+        thread(
+            start = true,
+            name = "AyanaTTS"
+        ) {
 
             var file:
                 File? = null
@@ -1971,11 +2540,14 @@ class AyanaVoiceService :
                 )
 
                 if (
-                    token != audioToken ||
+                    token !=
+                    audioToken ||
                     shuttingDown
                 ) {
+
                     file.delete()
-                    return@Thread
+
+                    return@thread
                 }
 
                 val readyAudio =
@@ -1984,7 +2556,8 @@ class AyanaVoiceService :
                 mainHandler.post {
 
                     if (
-                        token == audioToken &&
+                        token ==
+                        audioToken &&
                         !shuttingDown
                     ) {
 
@@ -1996,13 +2569,16 @@ class AyanaVoiceService :
                         }
 
                     } else {
-                        readyAudio.delete()
+
+                        readyAudio
+                            .delete()
                     }
                 }
 
             } catch (_: Exception) {
 
-                file?.delete()
+                file
+                    ?.delete()
 
                 mainHandler.post {
 
@@ -2019,7 +2595,7 @@ class AyanaVoiceService :
                     )
                 }
             }
-        }.start()
+        }
     }
 
     private fun downloadTtsToFile(
@@ -2060,7 +2636,11 @@ class AyanaVoiceService :
 
             val requestJson =
                 JSONObject().apply {
-                    put("text", text)
+
+                    put(
+                        "text",
+                        text
+                    )
                 }
 
             connection.outputStream
@@ -2076,11 +2656,14 @@ class AyanaVoiceService :
                 }
 
             val responseCode =
-                connection.responseCode
+                connection
+                    .responseCode
 
             if (
-                responseCode !in 200..299
+                responseCode !in
+                200..299
             ) {
+
                 throw IllegalStateException(
                     "TTS HTTP $responseCode"
                 )
@@ -2092,12 +2675,16 @@ class AyanaVoiceService :
                     target.outputStream()
                         .use { output ->
 
-                            input.copyTo(output)
+                            input.copyTo(
+                                output
+                            )
                         }
                 }
 
         } finally {
-            connection?.disconnect()
+
+            connection
+                ?.disconnect()
         }
     }
 
@@ -2124,22 +2711,26 @@ class AyanaVoiceService :
             )
 
             player.setOnPreparedListener {
-                prepared ->
+                    prepared ->
 
                 try {
+
                     prepared.start()
+
                 } catch (_: Exception) {
+
                     releasePlayer(
                         prepared,
                         file,
                         deleteAfter
                     )
+
                     onFinished()
                 }
             }
 
             player.setOnCompletionListener {
-                completed ->
+                    completed ->
 
                 releasePlayer(
                     completed,
@@ -2151,9 +2742,9 @@ class AyanaVoiceService :
             }
 
             player.setOnErrorListener {
-                failed,
-                _,
-                _ ->
+                    failed,
+                    _,
+                    _ ->
 
                 releasePlayer(
                     failed,
@@ -2189,7 +2780,9 @@ class AyanaVoiceService :
         if (
             mediaPlayer === player
         ) {
-            mediaPlayer = null
+
+            mediaPlayer =
+                null
         }
 
         try {
@@ -2198,29 +2791,38 @@ class AyanaVoiceService :
         }
 
         if (deleteAfter) {
+
             file.delete()
         }
     }
 
     private fun stopCurrentAudio(
-        keepToken: Boolean = false
+        keepToken: Boolean =
+            false
     ) {
 
         if (!keepToken) {
+
             audioToken++
         }
 
         val player =
             mediaPlayer
 
-        mediaPlayer = null
+        mediaPlayer =
+            null
 
         if (player != null) {
 
             try {
-                if (player.isPlaying) {
+
+                if (
+                    player.isPlaying
+                ) {
+
                     player.stop()
                 }
+
             } catch (_: Exception) {
             }
 
@@ -2240,15 +2842,20 @@ class AyanaVoiceService :
         state: String
     ) {
 
-        currentStatusText = text
-        currentStatusState = state
+        currentStatusText =
+            text
+
+        currentStatusState =
+            state
 
         sendBroadcast(
             Intent(
                 ACTION_STATUS
             ).apply {
 
-                setPackage(packageName)
+                setPackage(
+                    packageName
+                )
 
                 putExtra(
                     EXTRA_STATUS_TEXT,
@@ -2264,7 +2871,7 @@ class AyanaVoiceService :
     }
 
     // =========================================================
-    // STOP
+    // STOP / DESTROY
     // =========================================================
 
     private fun shutdownAyana() {
@@ -2273,33 +2880,68 @@ class AyanaVoiceService :
             return
         }
 
-        shuttingDown = true
-        isRunning = false
+        shuttingDown =
+            true
+
+        isRunning =
+            false
+
+        listenMode =
+            ListenMode.BUSY
 
         broadcastStatus(
             "AYANA остановлена",
             STATE_STOPPED
         )
 
-        pauseRecognition()
+        stopSherpaListening()
         stopCurrentAudio()
 
+        mainHandler
+            .removeCallbacksAndMessages(
+                null
+            )
+
+        val thread =
+            recordingThread
+
+        if (
+            thread != null &&
+            thread !==
+            Thread.currentThread()
+        ) {
+
+            try {
+                thread.join(
+                    500L
+                )
+            } catch (_: Exception) {
+            }
+        }
+
         try {
-            speechRecognizer?.destroy()
+            recognizer
+                ?.release()
         } catch (_: Exception) {
         }
 
-        speechRecognizer = null
-
-        mainHandler.removeCallbacksAndMessages(
+        recognizer =
             null
-        )
 
-        if (Build.VERSION.SDK_INT >= 24) {
+        modelReady =
+            false
+
+        if (
+            Build.VERSION.SDK_INT >=
+            24
+        ) {
+
             stopForeground(
                 STOP_FOREGROUND_REMOVE
             )
+
         } else {
+
             @Suppress("DEPRECATION")
             stopForeground(true)
         }
@@ -2309,22 +2951,51 @@ class AyanaVoiceService :
 
     override fun onDestroy() {
 
-        shuttingDown = true
-        isRunning = false
+        shuttingDown =
+            true
 
-        pauseRecognition()
+        isRunning =
+            false
+
+        listenMode =
+            ListenMode.BUSY
+
+        stopSherpaListening()
         stopCurrentAudio()
 
+        mainHandler
+            .removeCallbacksAndMessages(
+                null
+            )
+
+        val thread =
+            recordingThread
+
+        if (
+            thread != null &&
+            thread !==
+            Thread.currentThread()
+        ) {
+
+            try {
+                thread.join(
+                    500L
+                )
+            } catch (_: Exception) {
+            }
+        }
+
         try {
-            speechRecognizer?.destroy()
+            recognizer
+                ?.release()
         } catch (_: Exception) {
         }
 
-        speechRecognizer = null
-
-        mainHandler.removeCallbacksAndMessages(
+        recognizer =
             null
-        )
+
+        modelReady =
+            false
 
         super.onDestroy()
     }
@@ -2337,8 +3008,14 @@ class AyanaVoiceService :
         const val ACTION_STOP =
             "kg.autonomous.agent.action.STOP_AYANA"
 
+        const val ACTION_TEXT_COMMAND =
+            "kg.autonomous.agent.action.TEXT_COMMAND"
+
         const val ACTION_STATUS =
             "kg.autonomous.agent.action.AYANA_STATUS"
+
+        const val EXTRA_TEXT_COMMAND =
+            "text_command"
 
         const val EXTRA_STATUS_TEXT =
             "status_text"
@@ -2355,6 +3032,15 @@ class AyanaVoiceService :
         private const val WORKER_URL =
             "https://ayana-ai.talant02031985.workers.dev"
 
+        private val WAKE_VARIANTS =
+            listOf(
+                "аяна",
+                "айана",
+                "а яна",
+                "а я на",
+                "ayana"
+            )
+
         const val STATE_LISTENING =
             "listening"
 
@@ -2366,6 +3052,9 @@ class AyanaVoiceService :
 
         const val STATE_SPEAKING =
             "speaking"
+
+        const val STATE_TEXT =
+            "text"
 
         const val STATE_ERROR =
             "error"
