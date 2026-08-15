@@ -1,15 +1,15 @@
 package kg.autonomous.agent
 
 import android.accessibilityservice.AccessibilityService
-import android.accessibilityservice.GestureDescription
-import android.graphics.Path
 import android.view.accessibility.AccessibilityEvent
 import android.view.accessibility.AccessibilityNodeInfo
 
-class AgentAccessibilityService : AccessibilityService() {
+class AgentAccessibilityService :
+    AccessibilityService() {
 
     companion object {
-        var instance: AgentAccessibilityService? = null
+        var instance:
+            AgentAccessibilityService? = null
             private set
     }
 
@@ -18,64 +18,102 @@ class AgentAccessibilityService : AccessibilityService() {
         instance = this
     }
 
-    override fun onAccessibilityEvent(event: AccessibilityEvent?) {
-        // Позже здесь подключим Observe → Verify.
+    override fun onAccessibilityEvent(
+        event: AccessibilityEvent?
+    ) {
     }
 
     override fun onInterrupt() {
+    }
+
+    override fun onUnbind(
+        intent: android.content.Intent?
+    ): Boolean {
+        if (instance === this) {
+            instance = null
+        }
+
+        return super.onUnbind(intent)
     }
 
     override fun onDestroy() {
         if (instance === this) {
             instance = null
         }
+
         super.onDestroy()
     }
 
-    fun clickByText(text: String): Boolean {
-        val root = rootInActiveWindow ?: return false
+    fun pressBack(): Boolean {
+        return performGlobalAction(
+            GLOBAL_ACTION_BACK
+        )
+    }
 
-        val nodes = root.findAccessibilityNodeInfosByText(text)
+    fun pressHome(): Boolean {
+        return performGlobalAction(
+            GLOBAL_ACTION_HOME
+        )
+    }
 
-        for (node in nodes) {
-            var current: AccessibilityNodeInfo? = node
+    fun clickByText(
+        target: String
+    ): Boolean {
 
-            while (current != null) {
-                if (current.isClickable) {
-                    return current.performAction(
-                        AccessibilityNodeInfo.ACTION_CLICK
-                    )
-                }
-                current = current.parent
+        val root =
+            rootInActiveWindow
+                ?: return false
+
+        val candidates =
+            root.findAccessibilityNodeInfosByText(
+                target
+            )
+
+        for (node in candidates) {
+
+            val clickable =
+                findClickableParent(node)
+
+            if (
+                clickable != null &&
+                clickable.performAction(
+                    AccessibilityNodeInfo
+                        .ACTION_CLICK
+                )
+            ) {
+                return true
             }
         }
 
         return false
     }
 
-    fun pressBack(): Boolean {
-        return performGlobalAction(GLOBAL_ACTION_BACK)
-    }
+    private fun findClickableParent(
+        start:
+            AccessibilityNodeInfo?
+    ): AccessibilityNodeInfo? {
 
-    fun pressHome(): Boolean {
-        return performGlobalAction(GLOBAL_ACTION_HOME)
-    }
+        var node = start
 
-    fun tap(x: Float, y: Float): Boolean {
-        val path = Path().apply {
-            moveTo(x, y)
+        var depth = 0
+
+        while (
+            node != null &&
+            depth < 8
+        ) {
+
+            if (
+                node.isVisibleToUser &&
+                node.isClickable &&
+                node.isEnabled
+            ) {
+                return node
+            }
+
+            node = node.parent
+            depth++
         }
 
-        val gesture = GestureDescription.Builder()
-            .addStroke(
-                GestureDescription.StrokeDescription(
-                    path,
-                    0,
-                    100
-                )
-            )
-            .build()
-
-        return dispatchGesture(gesture, null, null)
+        return null
     }
 }
