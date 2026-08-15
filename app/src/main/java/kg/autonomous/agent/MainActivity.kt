@@ -5,39 +5,33 @@ import android.content.ActivityNotFoundException
 import android.content.Context
 import android.content.Intent
 import android.media.AudioManager
+import android.media.MediaPlayer
 import android.net.Uri
 import android.os.Bundle
 import android.provider.Settings
 import android.speech.RecognizerIntent
-import android.speech.tts.TextToSpeech
-import android.speech.tts.Voice
 import android.widget.Button
 import android.widget.LinearLayout
 import android.widget.TextView
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AppCompatActivity
 import org.json.JSONObject
+import java.io.File
 import java.net.URL
 import java.util.Locale
 import javax.net.ssl.HttpsURLConnection
 
-class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
+class MainActivity : AppCompatActivity() {
 
     private lateinit var statusText: TextView
-    private lateinit var tts: TextToSpeech
 
-    private var russianVoices: List<Voice> = emptyList()
-    private var currentVoiceIndex = 0
+    private var mediaPlayer: MediaPlayer? = null
+
+    @Volatile
+    private var speechToken: Long = 0L
 
     private val conversationHistory =
         mutableListOf<Pair<String, String>>()
-
-    private val preferences by lazy {
-        getSharedPreferences(
-            "autonomous_settings",
-            MODE_PRIVATE
-        )
-    }
 
     private val voiceLauncher =
         registerForActivityResult(
@@ -68,10 +62,8 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
 
-        tts = TextToSpeech(this, this)
-
         statusText = TextView(this).apply {
-            text = "Аяна запускается..."
+            text = "AYANA AI готова к работе"
             textSize = 24f
             setPadding(32, 32, 32, 32)
         }
@@ -84,21 +76,25 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
             }
         }
 
-        val selectVoiceButton = Button(this).apply {
-            text = "👩 СЛЕДУЮЩИЙ ГОЛОС"
-
-            setOnClickListener {
-                selectNextRussianVoice()
-            }
-        }
-
         val testVoiceButton = Button(this).apply {
-            text = "🔊 ПРОВЕРИТЬ ГОЛОС"
+            text = "🔊 ПРОВЕРИТЬ ГОЛОС AYANA"
 
             setOnClickListener {
                 speak(
-                    "Здравствуйте. Я Аяна. " +
-                        "Это мой текущий голос."
+                    "Ну привет! Я Аяна. " +
+                        "Рада тебя слышать. " +
+                        "Что будем делать?"
+                )
+            }
+        }
+
+        val accessibilityButton = Button(this).apply {
+            text = "⚙ ДОСТУП К УПРАВЛЕНИЮ"
+
+            setOnClickListener {
+                openSystemScreen(
+                    Settings.ACTION_ACCESSIBILITY_SETTINGS,
+                    "специальные возможности"
                 )
             }
         }
@@ -107,12 +103,15 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
             text = "⛔ STOP"
 
             setOnClickListener {
-                if (::tts.isInitialized) {
-                    tts.stop()
-                }
-
+                stopSpeech()
                 statusText.text = "Остановлено"
             }
+        }
+
+        val disclosureText = TextView(this).apply {
+            text = "Голос AYANA синтезирован искусственным интеллектом."
+            textSize = 13f
+            setPadding(10, 24, 10, 10)
         }
 
         val layout = LinearLayout(this).apply {
@@ -121,12 +120,16 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
 
             addView(statusText)
             addView(voiceButton)
-            addView(selectVoiceButton)
             addView(testVoiceButton)
+            addView(accessibilityButton)
             addView(stopButton)
+            addView(disclosureText)
         }
 
         setContentView(layout)
+
+        // Короткое приветствие нейронным голосом AYANA.
+        speak("Здравствуйте. Я Аяна. Готова к работе.")
     }
 
     private fun startSystemVoiceRecognition() {
@@ -148,13 +151,13 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
 
                 putExtra(
                     RecognizerIntent.EXTRA_PROMPT,
-                    "Скажите команду для Аяна"
+                    "Скажите команду для Аяны"
                 )
             }
 
         try {
             voiceLauncher.launch(intent)
-        } catch (e: Exception) {
+        } catch (_: Exception) {
             statusText.text =
                 "На устройстве не найден сервис распознавания речи"
         }
@@ -172,9 +175,9 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
             .replace(Regex("\\s+"), " ")
             .trim()
 
-        // ==============================
+        // =====================================
         // СИСТЕМНЫЕ КОМАНДЫ
-        // ==============================
+        // =====================================
 
         when {
 
@@ -217,17 +220,32 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
                 normalized == "замолчи" ||
                 normalized == "остановись" -> {
 
-                if (::tts.isInitialized) {
-                    tts.stop()
-                }
-
+                stopSpeech()
                 statusText.text = "Остановлено"
                 return
             }
 
-            // ==============================
-            // ПАМЯТЬ
-            // ==============================
+            normalized.startsWith("нажми ") -> {
+
+                val target =
+                    normalized.removePrefix("нажми ").trim()
+
+                clickByVoice(target)
+                return
+            }
+
+            normalized.startsWith("выбери ") -> {
+
+                val target =
+                    normalized.removePrefix("выбери ").trim()
+
+                clickByVoice(target)
+                return
+            }
+
+            // =====================================
+            // ПАМЯТЬ ДИАЛОГА
+            // =====================================
 
             normalized == "повтори" ||
                 normalized == "повтори ответ" -> {
@@ -259,9 +277,9 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
                 return
             }
 
-            // ==============================
+            // =====================================
             // ГРОМКОСТЬ
-            // ==============================
+            // =====================================
 
             normalized == "громче" ||
                 normalized == "увеличь громкость" ||
@@ -317,9 +335,9 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
                 return
             }
 
-            // ==============================
+            // =====================================
             // ПОИСК В YOUTUBE
-            // ==============================
+            // =====================================
 
             normalized.startsWith(
                 "найди в ютубе "
@@ -343,9 +361,9 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
                 return
             }
 
-            // ==============================
+            // =====================================
             // ПОИСК GOOGLE
-            // ==============================
+            // =====================================
 
             normalized.startsWith(
                 "найди в google "
@@ -380,9 +398,9 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
                 return
             }
 
-            // ==============================
+            // =====================================
             // ПОИСК НА КАРТЕ
-            // ==============================
+            // =====================================
 
             normalized.startsWith(
                 "найди на карте "
@@ -430,17 +448,16 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
             }
         }
 
-        // Убираем слова "открой", "запусти", "включи"
-
+        // Убираем вводные слова у команд запуска.
         val target = normalized
             .removePrefix("открой ")
             .removePrefix("запусти ")
             .removePrefix("включи ")
             .trim()
 
-        // ==============================
-        // ПРИЛОЖЕНИЯ
-        // ==============================
+        // =====================================
+        // ПРИЛОЖЕНИЯ И НАСТРОЙКИ
+        // =====================================
 
         when (target) {
 
@@ -607,10 +624,6 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
                     "com.samsung.android.app.notes"
                 )
 
-            // ==============================
-            // НАСТРОЙКИ ПЛАНШЕТА
-            // ==============================
-
             "настройки" ->
                 openSystemScreen(
                     Settings.ACTION_SETTINGS,
@@ -677,9 +690,6 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
                     "настройки даты и времени"
                 )
 
-            // Если это не команда планшету —
-            // отправляем вопрос в ИИ
-
             else -> {
                 statusText.text =
                     "Аяна думает..."
@@ -688,10 +698,6 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
             }
         }
     }
-
-    // ==============================
-    // ACCESSIBILITY
-    // ==============================
 
     private fun accessibilityWarning() {
 
@@ -706,9 +712,36 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
         )
     }
 
-    // ==============================
-    // ГРОМКОСТЬ
-    // ==============================
+    private fun clickByVoice(target: String) {
+
+        if (target.isBlank()) {
+            speak("Скажите, что именно нажать.")
+            return
+        }
+
+        val service =
+            AgentAccessibilityService.instance
+
+        if (service == null) {
+            accessibilityWarning()
+            return
+        }
+
+        val success =
+            service.clickByText(target)
+
+        if (success) {
+            statusText.text =
+                "Нажимаю: $target"
+        } else {
+            statusText.text =
+                "Не нашла на экране: $target"
+
+            speak(
+                "Я не нашла на экране элемент $target."
+            )
+        }
+    }
 
     private fun changeVolume(
         direction: Int
@@ -725,10 +758,6 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
             AudioManager.FLAG_SHOW_UI
         )
     }
-
-    // ==============================
-    // ОТКРЫТИЕ ПРИЛОЖЕНИЙ
-    // ==============================
 
     private fun openApp(
         displayName: String,
@@ -761,11 +790,11 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
             } catch (
                 _: ActivityNotFoundException
             ) {
-                // Пробуем следующий пакет
+                // Пробуем следующий пакет.
             } catch (
                 _: SecurityException
             ) {
-                // Пробуем следующий пакет
+                // Пробуем следующий пакет.
             }
         }
 
@@ -776,10 +805,6 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
             "Приложение $displayName не найдено."
         )
     }
-
-    // ==============================
-    // СИСТЕМНЫЕ НАСТРОЙКИ
-    // ==============================
 
     private fun openSystemScreen(
         action: String,
@@ -807,10 +832,6 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
             )
         }
     }
-
-    // ==============================
-    // ПОИСК YOUTUBE
-    // ==============================
 
     private fun openYouTubeSearch(
         query: String
@@ -868,10 +889,6 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
         }
     }
 
-    // ==============================
-    // ПОИСК GOOGLE
-    // ==============================
-
     private fun openGoogleSearch(
         query: String
     ) {
@@ -903,10 +920,6 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
             )
         }
     }
-
-    // ==============================
-    // ПОИСК НА КАРТЕ
-    // ==============================
 
     private fun openMapSearch(
         query: String
@@ -960,9 +973,9 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
         }
     }
 
-    // ==============================
-    // AYANA AI / CLOUDFLARE / OPENAI
-    // ==============================
+    // =====================================
+    // ТЕКСТОВЫЙ ИИ AYANA
+    // =====================================
 
     private fun askAyana(
         message: String
@@ -1111,7 +1124,7 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
                 }
 
             } catch (
-                e: Exception
+                _: Exception
             ) {
 
                 runOnUiThread {
@@ -1130,181 +1143,334 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
         }.start()
     }
 
-    // ==============================
-    // ВЫБОР ГОЛОСА
-    // ==============================
-
-    private fun selectNextRussianVoice() {
-
-        if (
-            russianVoices.isEmpty()
-        ) {
-
-            statusText.text =
-                "Русские голоса не найдены"
-
-            return
-        }
-
-        currentVoiceIndex++
-
-        if (
-            currentVoiceIndex >=
-            russianVoices.size
-        ) {
-
-            currentVoiceIndex = 0
-        }
-
-        val selectedVoice =
-            russianVoices[
-                currentVoiceIndex
-            ]
-
-        tts.voice =
-            selectedVoice
-
-        preferences.edit()
-            .putString(
-                "selected_voice",
-                selectedVoice.name
-            )
-            .apply()
-
-        statusText.text =
-            "Голос ${currentVoiceIndex + 1} " +
-                "из ${russianVoices.size}"
-
-        speak(
-            "Здравствуйте. Я Аяна. " +
-                "Если вам нравится этот голос, " +
-                "просто оставьте его."
-        )
-    }
-
-    // ==============================
-    // ПРОИЗНЕСЕНИЕ ОТВЕТА
-    // ==============================
+    // =====================================
+    // НЕЙРОННЫЙ ГОЛОС AYANA / MARIN
+    // =====================================
 
     private fun speak(
         text: String
     ) {
 
-        statusText.text =
-            text
+        statusText.text = text
 
-        if (
-            ::tts.isInitialized
-        ) {
-
-            tts.speak(
-                text,
-                TextToSpeech.QUEUE_FLUSH,
-                null,
-                "AUTONOMOUS"
-            )
-        }
-    }
-
-    // ==============================
-    // ИНИЦИАЛИЗАЦИЯ ГОЛОСА
-    // ==============================
-
-    override fun onInit(
-        status: Int
-    ) {
-
-        if (
-            status !=
-            TextToSpeech.SUCCESS
-        ) {
-
-            statusText.text =
-                "Не удалось запустить голосовой движок"
-
+        if (text.isBlank()) {
             return
         }
 
-        val russianLocale =
-            Locale(
-                "ru",
-                "RU"
-            )
+        val token =
+            speechToken + 1L
 
-        tts.language =
-            russianLocale
+        speechToken = token
 
-        russianVoices =
-            tts.voices
-                ?.filter {
-                    it.locale.language ==
-                        "ru"
-                }
-                ?.sortedBy {
-                    it.name
-                }
-                ?: emptyList()
+        releaseMediaPlayer()
 
-        val savedVoiceName =
-            preferences.getString(
-                "selected_voice",
-                null
-            )
+        Thread {
 
-        if (
-            russianVoices.isNotEmpty()
-        ) {
+            var connection:
+                HttpsURLConnection? = null
 
-            val savedIndex =
-                russianVoices
-                    .indexOfFirst {
-                        it.name ==
-                            savedVoiceName
+            var tempFile:
+                File? = null
+
+            try {
+
+                val url =
+                    URL(
+                        "https://ayana-ai.talant02031985.workers.dev/tts"
+                    )
+
+                connection =
+                    url.openConnection()
+                        as HttpsURLConnection
+
+                connection.requestMethod =
+                    "POST"
+
+                connection.setRequestProperty(
+                    "Content-Type",
+                    "application/json"
+                )
+
+                connection.connectTimeout =
+                    15000
+
+                connection.readTimeout =
+                    45000
+
+                connection.doOutput =
+                    true
+
+                val requestJson =
+                    JSONObject().apply {
+                        put("text", text)
                     }
 
-            currentVoiceIndex =
+                connection.outputStream
+                    .use { output ->
+
+                        output.write(
+                            requestJson
+                                .toString()
+                                .toByteArray(
+                                    Charsets.UTF_8
+                                )
+                        )
+                    }
+
+                val responseCode =
+                    connection.responseCode
+
                 if (
-                    savedIndex >= 0
+                    responseCode !in 200..299
                 ) {
 
-                    savedIndex
+                    val errorMessage =
+                        connection.errorStream
+                            ?.bufferedReader()
+                            ?.use {
+                                it.readText()
+                            }
+                            ?: "Unknown TTS error"
+
+                    throw IllegalStateException(
+                        "TTS HTTP $responseCode: $errorMessage"
+                    )
+                }
+
+                tempFile =
+                    File.createTempFile(
+                        "ayana_voice_",
+                        ".mp3",
+                        cacheDir
+                    )
+
+                connection.inputStream
+                    .use { input ->
+
+                        tempFile.outputStream()
+                            .use { output ->
+
+                                input.copyTo(output)
+                            }
+                    }
+
+                if (
+                    token != speechToken
+                ) {
+
+                    tempFile.delete()
+                    return@Thread
+                }
+
+                val audioFile =
+                    tempFile
+
+                runOnUiThread {
+
+                    if (
+                        token ==
+                        speechToken
+                    ) {
+
+                        playAudioFile(
+                            audioFile,
+                            token
+                        )
+
+                    } else {
+
+                        audioFile.delete()
+                    }
+                }
+
+            } catch (
+                _: Exception
+            ) {
+
+                tempFile?.delete()
+
+                if (
+                    token ==
+                    speechToken
+                ) {
+
+                    runOnUiThread {
+
+                        statusText.text =
+                            "$text\n\nГолос временно недоступен."
+                    }
+                }
+
+            } finally {
+
+                connection?.disconnect()
+            }
+
+        }.start()
+    }
+
+    private fun playAudioFile(
+        file: File,
+        token: Long
+    ) {
+
+        releaseMediaPlayer()
+
+        val player =
+            MediaPlayer()
+
+        mediaPlayer =
+            player
+
+        try {
+
+            player.setDataSource(
+                file.absolutePath
+            )
+
+            player.setOnPreparedListener {
+                mediaPlayerPrepared ->
+
+                if (
+                    token ==
+                    speechToken
+                ) {
+
+                    mediaPlayerPrepared.start()
 
                 } else {
 
-                    0
+                    try {
+                        mediaPlayerPrepared.release()
+                    } catch (_: Exception) {
+                    }
+
+                    if (
+                        mediaPlayer ===
+                        mediaPlayerPrepared
+                    ) {
+
+                        mediaPlayer =
+                            null
+                    }
+
+                    file.delete()
+                }
+            }
+
+            player.setOnCompletionListener {
+                completedPlayer ->
+
+                if (
+                    mediaPlayer ===
+                    completedPlayer
+                ) {
+
+                    mediaPlayer =
+                        null
                 }
 
-            tts.voice =
-                russianVoices[
-                    currentVoiceIndex
-                ]
+                try {
+                    completedPlayer.release()
+                } catch (_: Exception) {
+                }
+
+                file.delete()
+            }
+
+            player.setOnErrorListener {
+                errorPlayer,
+                _,
+                _ ->
+
+                if (
+                    mediaPlayer ===
+                    errorPlayer
+                ) {
+
+                    mediaPlayer =
+                        null
+                }
+
+                try {
+                    errorPlayer.release()
+                } catch (_: Exception) {
+                }
+
+                file.delete()
+
+                true
+            }
+
+            player.prepareAsync()
+
+        } catch (
+            _: Exception
+        ) {
+
+            if (
+                mediaPlayer ===
+                player
+            ) {
+
+                mediaPlayer =
+                    null
+            }
+
+            try {
+                player.release()
+            } catch (_: Exception) {
+            }
+
+            file.delete()
+
+            statusText.text =
+                "Не удалось воспроизвести голос AYANA."
         }
+    }
 
-        tts.setSpeechRate(
-            1.02f
-        )
+    private fun stopSpeech() {
 
-        tts.setPitch(
-            1.14f
-        )
+        speechToken =
+            speechToken + 1L
 
-        statusText.text =
-            "Здравствуйте. Я Аяна. Готова к работе."
+        releaseMediaPlayer()
+    }
 
-        speak(
-            "Здравствуйте. Я Аяна. Готова к работе."
-        )
+    private fun releaseMediaPlayer() {
+
+        val player =
+            mediaPlayer
+
+        mediaPlayer =
+            null
+
+        if (
+            player != null
+        ) {
+
+            try {
+
+                if (
+                    player.isPlaying
+                ) {
+
+                    player.stop()
+                }
+
+            } catch (_: Exception) {
+            }
+
+            try {
+                player.release()
+            } catch (_: Exception) {
+            }
+        }
     }
 
     override fun onDestroy() {
 
-        if (
-            ::tts.isInitialized
-        ) {
-
-            tts.stop()
-            tts.shutdown()
-        }
+        stopSpeech()
 
         super.onDestroy()
     }
