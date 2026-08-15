@@ -190,12 +190,29 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
             }
         }
 
+        normalized == "открой youtube" ||
+        normalized == "открой ютуб" ||
+        normalized == "ютуб" -> {
+
+            val intent = packageManager
+                .getLaunchIntentForPackage("com.google.android.youtube")
+
+            if (intent != null) {
+                startActivity(intent)
+                statusText.text = "Открываю YouTube"
+            } else {
+                statusText.text = "YouTube не найден"
+                speak("Приложение YouTube не найдено.")
+            }
+        }
+
         else -> {
             statusText.text = "Аяна думает..."
             askAyana(command)
         }
     }
-}
+
+    }
 
     private fun askAyana(message: String) {
     Thread {
