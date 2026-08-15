@@ -83,7 +83,7 @@ class AyanaVoiceService : Service() {
     private val readyFile by lazy {
         File(
             filesDir,
-            "ayana_ready_marin.mp3"
+            "ayana_ready_da_marin.mp3"
         )
     }
 
@@ -1045,7 +1045,7 @@ class AyanaVoiceService : Service() {
             try {
 
                 downloadTtsToFile(
-                    "Слушаю.",
+                    "Да?",
                     readyFile
                 )
 
