@@ -150,9 +150,52 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
     }
 
     private fun processCommand(command: String) {
-    statusText.text = "Аяна думает..."
-    askAyana(command)
+    val normalized = command
+        .lowercase()
+        .replace("аяна", "")
+        .trim()
+
+    when {
+        normalized == "назад" ||
+        normalized == "вернись назад" -> {
+
+            val success =
+                AgentAccessibilityService.instance?.pressBack() == true
+
+            if (success) {
+                statusText.text = "Назад"
+            } else {
+                statusText.text =
+                    "Включите доступ AYANA в специальных возможностях."
+                speak(
+                    "Для управления экраном включите мой доступ в специальных возможностях."
+                )
+            }
         }
+
+        normalized == "домой" ||
+        normalized == "на главный экран" -> {
+
+            val success =
+                AgentAccessibilityService.instance?.pressHome() == true
+
+            if (success) {
+                statusText.text = "Главный экран"
+            } else {
+                statusText.text =
+                    "Включите доступ AYANA в специальных возможностях."
+                speak(
+                    "Для управления экраном включите мой доступ в специальных возможностях."
+                )
+            }
+        }
+
+        else -> {
+            statusText.text = "Аяна думает..."
+            askAyana(command)
+        }
+    }
+}
 
     private fun askAyana(message: String) {
     Thread {
