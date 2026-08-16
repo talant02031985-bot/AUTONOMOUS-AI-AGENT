@@ -6,21 +6,22 @@
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MICROPHONE" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+    <uses-permission android:name="android.permission.SCHEDULE_EXACT_ALARM" />
 
     <queries>
 
-    <intent>
-        <action android:name="android.speech.RecognitionService" />
-    </intent>
+        <intent>
+            <action android:name="android.speech.RecognitionService" />
+        </intent>
 
-    <intent>
-        <action android:name="android.intent.action.MAIN" />
-        <category android:name="android.intent.category.LAUNCHER" />
-    </intent>
+        <intent>
+            <action android:name="android.intent.action.MAIN" />
+            <category android:name="android.intent.category.LAUNCHER" />
+        </intent>
 
-    <package android:name="com.google.android.youtube" />
+        <package android:name="com.google.android.youtube" />
 
-</queries>
+    </queries>
 
     <application
         android:allowBackup="true"
@@ -61,6 +62,11 @@
                 android:resource="@xml/accessibility_service_config" />
 
         </service>
+
+        <receiver
+            android:name=".AyanaReminderReceiver"
+            android:enabled="true"
+            android:exported="false" />
 
     </application>
 
