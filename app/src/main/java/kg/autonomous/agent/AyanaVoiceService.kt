@@ -82,6 +82,12 @@ class AyanaVoiceService : Service() {
     private val conversationHistory =
         mutableListOf<Pair<String, String>>()
 
+    private val memoryStore by lazy {
+        AyanaMemoryStore(
+            applicationContext
+        )
+    }
+
     @Volatile
     private var agentPreviousResponseId:
         String? = null
@@ -1255,8 +1261,6 @@ class AyanaVoiceService : Service() {
             normalized ==
                 "забудь разговор" ||
                 normalized ==
-                "очисти память" ||
-                normalized ==
                 "очисти историю" -> {
 
                 conversationHistory
@@ -1266,7 +1270,34 @@ class AyanaVoiceService : Service() {
                     null
 
                 respondAndResume(
-                    "Хорошо. История разговора очищена.",
+                    "Хорошо. История текущего разговора очищена.",
+                    silent
+                )
+
+                return
+            }
+
+            normalized ==
+                "очисти память" ||
+                normalized ==
+                "забудь все что помнишь" ||
+                normalized ==
+                "забудь всё что помнишь" ||
+                normalized ==
+                "очисти долговременную память" -> {
+
+                val removed =
+                    memoryStore.clear()
+
+                agentPreviousResponseId =
+                    null
+
+                respondAndResume(
+                    if (removed > 0) {
+                        "Хорошо. Долговременная память очищена."
+                    } else {
+                        "Долговременная память уже пуста."
+                    },
                     silent
                 )
 
@@ -2900,6 +2931,12 @@ class AyanaVoiceService : Service() {
                 var nextMessage:
                     String? = message
 
+                val memoryContext =
+                    memoryStore
+                        .buildContextForAgent(
+                            message
+                        )
+
                 var previousResponseId:
                     String? =
                     agentPreviousResponseId
@@ -2927,7 +2964,13 @@ class AyanaVoiceService : Service() {
                             previousResponseId =
                                 previousResponseId,
                             toolResults =
-                                toolResults
+                                toolResults,
+                            memoryContext =
+                                if (step == 1) {
+                                    memoryContext
+                                } else {
+                                    null
+                                }
                         )
 
                     val type =
@@ -3128,7 +3171,8 @@ class AyanaVoiceService : Service() {
     private fun callAgentCore(
         message: String?,
         previousResponseId: String?,
-        toolResults: JSONArray?
+        toolResults: JSONArray?,
+        memoryContext: String?
     ): JSONObject {
 
         var connection:
@@ -3172,6 +3216,16 @@ class AyanaVoiceService : Service() {
                 requestJson.put(
                     "message",
                     message
+                )
+            }
+
+            if (
+                !memoryContext.isNullOrBlank()
+            ) {
+
+                requestJson.put(
+                    "memory_context",
+                    memoryContext
                 )
             }
 
@@ -3301,6 +3355,15 @@ class AyanaVoiceService : Service() {
 
             "map_search" ->
                 "Ищу на карте…"
+
+            "remember_memory" ->
+                "Запоминаю…"
+
+            "forget_memory" ->
+                "Забываю…"
+
+            "recall_memory" ->
+                "Вспоминаю…"
 
             else ->
                 "Выполняю действие…"
@@ -3440,6 +3503,43 @@ class AyanaVoiceService : Service() {
                     )
                 }
 
+                "remember_memory" -> {
+
+                    agentRememberMemory(
+                        text =
+                            arguments
+                                .optString(
+                                    "text"
+                                ),
+                        category =
+                            arguments
+                                .optString(
+                                    "category",
+                                    "general"
+                                )
+                    )
+                }
+
+                "forget_memory" -> {
+
+                    agentForgetMemory(
+                        arguments
+                            .optString(
+                                "query"
+                            )
+                    )
+                }
+
+                "recall_memory" -> {
+
+                    agentRecallMemory(
+                        arguments
+                            .optString(
+                                "query"
+                            )
+                    )
+                }
+
                 else ->
                     toolResult(
                         false,
@@ -3457,6 +3557,170 @@ class AyanaVoiceService : Service() {
                     ?: "Ошибка выполнения инструмента"
             )
         }
+    }
+
+    private fun agentRememberMemory(
+        text: String,
+        category: String
+    ): JSONObject {
+
+        val item =
+            memoryStore.remember(
+                text = text,
+                category = category
+            )
+
+        return if (item != null) {
+
+            JSONObject()
+                .put(
+                    "success",
+                    true
+                )
+                .put(
+                    "message",
+                    "Сохранено в долговременную память"
+                )
+                .put(
+                    "memory",
+                    JSONObject()
+                        .put(
+                            "id",
+                            item.id
+                        )
+                        .put(
+                            "text",
+                            item.text
+                        )
+                        .put(
+                            "category",
+                            item.category
+                        )
+                )
+
+        } else {
+
+            toolResult(
+                false,
+                "Пустую запись сохранить нельзя"
+            )
+        }
+    }
+
+    private fun agentForgetMemory(
+        query: String
+    ): JSONObject {
+
+        val normalized =
+            query
+                .lowercase(
+                    Locale.getDefault()
+                )
+                .replace('ё', 'е')
+                .trim()
+
+        val clearAll =
+            normalized in
+                setOf(
+                    "все",
+                    "всё",
+                    "всю память",
+                    "все воспоминания",
+                    "all",
+                    "everything",
+                    "all memories"
+                )
+
+        val removed =
+            if (clearAll) {
+                memoryStore.clear()
+            } else {
+                memoryStore.forget(
+                    query
+                )
+            }
+
+        return JSONObject()
+            .put(
+                "success",
+                true
+            )
+            .put(
+                "removed",
+                removed
+            )
+            .put(
+                "message",
+                if (removed > 0) {
+                    "Удалено записей из памяти: $removed"
+                } else {
+                    "Подходящих записей в памяти не найдено"
+                }
+            )
+    }
+
+    private fun agentRecallMemory(
+        query: String
+    ): JSONObject {
+
+        val memories =
+            if (query.isBlank()) {
+
+                memoryStore.getAll(
+                    20
+                )
+
+            } else {
+
+                memoryStore.search(
+                    query = query,
+                    limit = 20
+                )
+            }
+
+        val array =
+            JSONArray()
+
+        memories.forEach { item ->
+
+            array.put(
+                JSONObject()
+                    .put(
+                        "id",
+                        item.id
+                    )
+                    .put(
+                        "text",
+                        item.text
+                    )
+                    .put(
+                        "category",
+                        item.category
+                    )
+            )
+        }
+
+        return JSONObject()
+            .put(
+                "success",
+                true
+            )
+            .put(
+                "count",
+                memories.size
+            )
+            .put(
+                "memories",
+                array
+            )
+            .put(
+                "message",
+                if (memories.isEmpty()) {
+                    "Подходящих записей в памяти нет"
+                } else {
+                    "Найдено записей: ${memories.size}"
+                }
+            )
     }
 
     private fun toolResult(
