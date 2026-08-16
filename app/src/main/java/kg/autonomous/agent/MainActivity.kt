@@ -566,7 +566,7 @@ class MainActivity : AppCompatActivity() {
         textInput =
             EditText(this).apply {
 
-                hint =
+                this.hint =
                     "Введите команду…"
 
                 textSize = 15f
