@@ -3361,8 +3361,15 @@ class AyanaVoiceService : Service() {
                         )
                     }
 
+                    val spokenTechnical =
+                        if (technicalMessage.isNotBlank()) {
+                            technicalMessage.take(180)
+                        } else {
+                            "неизвестная ошибка"
+                        }
+
                     respondAndResume(
-                        "Не удалось продолжить задачу через Agent Core.",
+                        "Ошибка Agent Core: $spokenTechnical",
                         silent
                     )
                 }
