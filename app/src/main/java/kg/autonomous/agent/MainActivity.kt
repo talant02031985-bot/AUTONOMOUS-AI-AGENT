@@ -1762,7 +1762,7 @@ class MainActivity : AppCompatActivity() {
                     )
                 )
 
-                singleLine =
+                isSingleLine =
                     true
 
                 imeOptions =
