@@ -2,6 +2,7 @@ name: Build Android APK
 
 on:
   workflow_dispatch:
+
   push:
     branches:
       - main
@@ -30,6 +31,26 @@ jobs:
 
 
       # ==========================================
+      # PERMANENT AYANA SIGNING KEY
+      # ==========================================
+
+      - name: Restore AYANA signing key
+        shell: bash
+        env:
+          AYANA_KEYSTORE_BASE64: ${{ secrets.AYANA_KEYSTORE_BASE64 }}
+        run: |
+          set -euo pipefail
+
+          echo "$AYANA_KEYSTORE_BASE64" \
+            | base64 --decode \
+            > app/ayana-release.jks
+
+          echo "AYANA signing key restored"
+
+          ls -lh app/ayana-release.jks
+
+
+      # ==========================================
       # SHERPA-ONNX ANDROID LIBRARY
       # ==========================================
 
@@ -55,7 +76,7 @@ jobs:
 
 
       # ==========================================
-      # RUSSIAN LOCAL SPEECH MODEL FOR AYANA
+      # RUSSIAN LOCAL SPEECH MODEL
       # ==========================================
 
       - name: Download AYANA Russian speech model
@@ -114,19 +135,33 @@ jobs:
             -o "$MODEL_DIR/bpe.model"
 
 
-          echo "========================================"
           echo "AYANA Russian speech model downloaded"
-          echo "========================================"
 
           ls -lh "$MODEL_DIR"
 
 
       # ==========================================
-      # BUILD APK
+      # BUILD SIGNED APK
       # ==========================================
 
-      - name: Build debug APK
-        run: gradle :app:assembleDebug --stacktrace
+      - name: Build signed debug APK
+        env:
+          AYANA_KEYSTORE_PASSWORD: ${{ secrets.AYANA_KEYSTORE_PASSWORD }}
+          AYANA_KEY_ALIAS: ${{ secrets.AYANA_KEY_ALIAS }}
+          AYANA_KEY_PASSWORD: ${{ secrets.AYANA_KEY_PASSWORD }}
+        run: |
+          gradle :app:assembleDebug --stacktrace
+
+
+      # ==========================================
+      # REMOVE PRIVATE KEY FROM RUNNER
+      # ==========================================
+
+      - name: Remove signing key
+        if: always()
+        shell: bash
+        run: |
+          rm -f app/ayana-release.jks
 
 
       # ==========================================
@@ -136,6 +171,6 @@ jobs:
       - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
-          name: AUTONOMOUS-AI-AGENT-debug
+          name: AYANA-AI-signed-debug
           path: app/build/outputs/apk/debug/app-debug.apk
           if-no-files-found: error
