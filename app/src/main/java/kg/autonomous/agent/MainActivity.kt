@@ -84,6 +84,12 @@ class MainActivity : AppCompatActivity() {
         )
     }
 
+    private val ayanaPreferences by lazy {
+        AyanaPreferences(
+            applicationContext
+        )
+    }
+
     private val permissionLauncher =
         registerForActivityResult(
             ActivityResultContracts.RequestMultiplePermissions()
@@ -235,6 +241,13 @@ class MainActivity : AppCompatActivity() {
 
     override fun onResume() {
         super.onResume()
+
+        if (
+            ayanaPreferences.miniOrbEnabled &&
+            overlayPermissionGranted()
+        ) {
+            refreshMiniOrb()
+        }
 
         renderCurrentPage()
     }
@@ -1170,7 +1183,7 @@ class MainActivity : AppCompatActivity() {
                 "Сервисы",
                 diagnosticsPassed()
                     .toString(),
-                "из 6 работают"
+                "из 7 работают"
             ),
             equalCardParams(
                 left =
@@ -1510,6 +1523,18 @@ class MainActivity : AppCompatActivity() {
                     "Wake-word и фоновые команды"
                 ),
                 Triple(
+                    "Mini-Orb",
+                    !ayanaPreferences.miniOrbEnabled ||
+                        overlayPermissionGranted(),
+                    if (
+                        ayanaPreferences.miniOrbEnabled
+                    ) {
+                        "Плавающий интерфейс поверх приложений"
+                    } else {
+                        "Отключён пользователем"
+                    }
+                ),
+                Triple(
                     "Точные напоминания",
                     taskScheduler
                         .canScheduleExact(),
@@ -1605,6 +1630,27 @@ class MainActivity : AppCompatActivity() {
             pageTitle(
                 "Настройки",
                 "Разрешения и управление AYANA"
+            )
+        )
+
+        contentContainer.addView(
+            settingsAction(
+                "Плавающий Orb",
+                when {
+                    !overlayPermissionGranted() ->
+                        "Нужен системный доступ «Поверх других приложений»"
+                    ayanaPreferences.miniOrbEnabled ->
+                        "Включён • нажмите, чтобы отключить"
+                    else ->
+                        "Выключен • нажмите, чтобы включить"
+                }
+            ) {
+
+                configureMiniOrb()
+            },
+            sectionParams(
+                top =
+                    8
             )
         )
 
@@ -3408,6 +3454,8 @@ class MainActivity : AppCompatActivity() {
             ),
             isAccessibilityEnabled(),
             AyanaVoiceService.isRunning,
+            !ayanaPreferences.miniOrbEnabled ||
+                overlayPermissionGranted(),
             taskScheduler
                 .canScheduleExact(),
             notificationsEnabled(),
@@ -3462,6 +3510,102 @@ class MainActivity : AppCompatActivity() {
         } catch (_: Exception) {
 
             true
+        }
+    }
+
+    private fun overlayPermissionGranted():
+        Boolean {
+
+        return if (
+            Build.VERSION.SDK_INT >= 23
+        ) {
+
+            Settings
+                .canDrawOverlays(
+                    this
+                )
+
+        } else {
+
+            true
+        }
+    }
+
+    private fun configureMiniOrb() {
+
+        if (
+            overlayPermissionGranted()
+        ) {
+
+            ayanaPreferences
+                .miniOrbEnabled =
+                !ayanaPreferences
+                    .miniOrbEnabled
+
+            refreshMiniOrb()
+
+            renderSettings()
+
+            return
+        }
+
+        ayanaPreferences
+            .miniOrbEnabled =
+            true
+
+        try {
+
+            startActivity(
+                Intent(
+                    Settings
+                        .ACTION_MANAGE_OVERLAY_PERMISSION,
+                    android.net.Uri.parse(
+                        "package:$packageName"
+                    )
+                )
+            )
+
+        } catch (_: Exception) {
+
+            startActivity(
+                Intent(
+                    Settings
+                        .ACTION_APPLICATION_DETAILS_SETTINGS,
+                    android.net.Uri.parse(
+                        "package:$packageName"
+                    )
+                )
+            )
+        }
+    }
+
+    private fun refreshMiniOrb() {
+
+        if (
+            !AyanaVoiceService
+                .isRunning
+        ) {
+            return
+        }
+
+        val intent =
+            Intent(
+                this,
+                AyanaVoiceService::class.java
+            ).apply {
+
+                action =
+                    AyanaVoiceService
+                        .ACTION_REFRESH_OVERLAY
+            }
+
+        try {
+
+            startService(
+                intent
+            )
+
+        } catch (_: Exception) {
         }
     }
 
