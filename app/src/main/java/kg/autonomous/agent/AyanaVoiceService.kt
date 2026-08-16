@@ -116,6 +116,12 @@ class AyanaVoiceService : Service() {
         )
     }
 
+    private val screenIntelligence by lazy {
+        AyanaScreenIntelligence(
+            applicationContext
+        )
+    }
+
     @Volatile
     private var agentPreviousResponseId:
         String? = null
@@ -3444,6 +3450,21 @@ class AyanaVoiceService : Service() {
             "delete_reminder" ->
                 "Удаляю напоминание…"
 
+            "get_screen_state" ->
+                "Смотрю, что на экране…"
+
+            "click_screen_element" ->
+                "Нажимаю элемент…"
+
+            "input_screen_text" ->
+                "Ввожу текст…"
+
+            "scroll_screen" ->
+                "Прокручиваю экран…"
+
+            "tap_screen_coordinates" ->
+                "Выполняю точное касание…"
+
             else ->
                 "Выполняю действие…"
         }
@@ -3660,6 +3681,91 @@ class AyanaVoiceService : Service() {
                                 "query"
                             )
                     )
+                }
+
+                "get_screen_state" -> {
+
+                    screenIntelligence
+                        .getScreenState()
+                }
+
+                "click_screen_element" -> {
+
+                    screenIntelligence
+                        .click(
+                            target =
+                                arguments
+                                    .optString(
+                                        "target"
+                                    ),
+                            confirmed =
+                                arguments
+                                    .optBoolean(
+                                        "confirmed",
+                                        false
+                                    )
+                        )
+                }
+
+                "input_screen_text" -> {
+
+                    val target =
+                        arguments
+                            .optString(
+                                "target"
+                            )
+                            .trim()
+                            .ifBlank {
+                                null
+                            }
+
+                    screenIntelligence
+                        .inputText(
+                            target =
+                                target,
+                            text =
+                                arguments
+                                    .optString(
+                                        "text"
+                                    )
+                        )
+                }
+
+                "scroll_screen" -> {
+
+                    screenIntelligence
+                        .scroll(
+                            arguments
+                                .optString(
+                                    "direction",
+                                    "down"
+                                )
+                        )
+                }
+
+                "tap_screen_coordinates" -> {
+
+                    screenIntelligence
+                        .tap(
+                            x =
+                                arguments
+                                    .optInt(
+                                        "x",
+                                        -1
+                                    ),
+                            y =
+                                arguments
+                                    .optInt(
+                                        "y",
+                                        -1
+                                    ),
+                            confirmed =
+                                arguments
+                                    .optBoolean(
+                                        "confirmed",
+                                        false
+                                    )
+                        )
                 }
 
                 else ->
