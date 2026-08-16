@@ -3697,6 +3697,9 @@ class AyanaVoiceService : Service() {
             "open_settings" ->
                 "Открываю настройки…"
 
+            "open_app_info" ->
+                "Открываю информацию о приложении…"
+
             "press_back" ->
                 "Назад"
 
@@ -3785,6 +3788,16 @@ class AyanaVoiceService : Service() {
                         arguments
                             .optString(
                                 "section"
+                            )
+                    )
+                }
+
+                "open_app_info" -> {
+
+                    agentOpenAppInfo(
+                        arguments
+                            .optString(
+                                "name"
                             )
                     )
                 }
@@ -4793,6 +4806,196 @@ class AyanaVoiceService : Service() {
         }
     }
 
+    private fun agentOpenAppInfo(
+        requestedName: String
+    ): JSONObject {
+
+        val query =
+            normalizeAppName(
+                requestedName
+            )
+
+        if (query.isBlank()) {
+
+            return toolResult(
+                false,
+                "Название приложения пустое"
+            )
+        }
+
+        var resolvedPackage:
+            String? = null
+
+        var resolvedLabel =
+            requestedName
+
+        val known =
+            knownAppForQuery(
+                query
+            )
+
+        if (known != null) {
+
+            for (
+                candidate in
+                known.second
+            ) {
+
+                try {
+
+                    @Suppress("DEPRECATION")
+                    val appInfo =
+                        packageManager
+                            .getApplicationInfo(
+                                candidate,
+                                0
+                            )
+
+                    resolvedPackage =
+                        candidate
+
+                    resolvedLabel =
+                        try {
+                            appInfo
+                                .loadLabel(
+                                    packageManager
+                                )
+                                ?.toString()
+                                .orEmpty()
+                                .ifBlank {
+                                    known.first
+                                }
+                        } catch (_: Exception) {
+                            known.first
+                        }
+
+                    break
+
+                } catch (_: Exception) {
+                }
+            }
+        }
+
+        if (resolvedPackage == null) {
+
+            val launcherIntent =
+                Intent(
+                    Intent.ACTION_MAIN
+                ).apply {
+
+                    addCategory(
+                        Intent.CATEGORY_LAUNCHER
+                    )
+                }
+
+            val activities =
+                try {
+
+                    @Suppress("DEPRECATION")
+                    packageManager
+                        .queryIntentActivities(
+                            launcherIntent,
+                            0
+                        )
+
+                } catch (_: Exception) {
+
+                    emptyList()
+                }
+
+            val best =
+                activities
+                    .map { info ->
+
+                        val label =
+                            try {
+                                info
+                                    .loadLabel(
+                                        packageManager
+                                    )
+                                    ?.toString()
+                                    .orEmpty()
+                            } catch (_: Exception) {
+                                ""
+                            }
+
+                        Triple(
+                            info,
+                            label,
+                            appNameScore(
+                                query,
+                                label
+                            )
+                        )
+                    }
+                    .filter {
+                        it.third > 0
+                    }
+                    .maxByOrNull {
+                        it.third
+                    }
+
+            if (
+                best != null &&
+                best.third >= 70
+            ) {
+
+                resolvedPackage =
+                    best.first
+                        .activityInfo
+                        .packageName
+
+                resolvedLabel =
+                    best.second
+                        .ifBlank {
+                            requestedName
+                        }
+            }
+        }
+
+        val packageName =
+            resolvedPackage
+                ?: return toolResult(
+                    false,
+                    "Приложение не найдено: $requestedName"
+                )
+
+        return try {
+
+            startActivity(
+                Intent(
+                    Settings.ACTION_APPLICATION_DETAILS_SETTINGS,
+                    Uri.parse(
+                        "package:$packageName"
+                    )
+                ).apply {
+
+                    addFlags(
+                        Intent.FLAG_ACTIVITY_NEW_TASK
+                    )
+                }
+            )
+
+            toolResult(
+                true,
+                "Открыта информация о приложении $resolvedLabel"
+            )
+
+        } catch (
+            error: Exception
+        ) {
+
+            toolResult(
+                false,
+                "Не удалось открыть информацию о приложении $resolvedLabel: " +
+                    (
+                        error.message
+                            ?: "неизвестная ошибка"
+                        )
+            )
+        }
+    }
+
     private fun agentOpenSettings(
         section: String
     ): JSONObject {
@@ -4815,6 +5018,10 @@ class AyanaVoiceService : Service() {
                 "display" ->
                     Settings
                         .ACTION_DISPLAY_SETTINGS
+
+                "apps" ->
+                    Settings
+                        .ACTION_MANAGE_APPLICATIONS_SETTINGS
 
                 "accessibility" ->
                     Settings
