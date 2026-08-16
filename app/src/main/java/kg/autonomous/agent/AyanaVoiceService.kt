@@ -33,6 +33,10 @@ import org.json.JSONArray
 import org.json.JSONObject
 import java.io.File
 import java.net.URL
+import java.time.Instant
+import java.time.LocalDateTime
+import java.time.ZoneId
+import java.time.format.DateTimeFormatter
 import java.util.Locale
 import javax.net.ssl.HttpsURLConnection
 import kotlin.concurrent.thread
@@ -84,6 +88,18 @@ class AyanaVoiceService : Service() {
 
     private val memoryStore by lazy {
         AyanaMemoryStore(
+            applicationContext
+        )
+    }
+
+    private val taskStore by lazy {
+        AyanaTaskStore(
+            applicationContext
+        )
+    }
+
+    private val taskScheduler by lazy {
+        AyanaTaskScheduler(
             applicationContext
         )
     }
@@ -3217,6 +3233,29 @@ class AyanaVoiceService : Service() {
                     "message",
                     message
                 )
+
+                val zoneId =
+                    ZoneId.systemDefault()
+
+                val localDateTime =
+                    LocalDateTime
+                        .now(zoneId)
+                        .format(
+                            DateTimeFormatter
+                                .ofPattern(
+                                    "yyyy-MM-dd'T'HH:mm:ss"
+                                )
+                        )
+
+                requestJson.put(
+                    "device_local_datetime",
+                    localDateTime
+                )
+
+                requestJson.put(
+                    "device_timezone",
+                    zoneId.id
+                )
             }
 
             if (
@@ -3364,6 +3403,15 @@ class AyanaVoiceService : Service() {
 
             "recall_memory" ->
                 "Вспоминаю…"
+
+            "create_reminder" ->
+                "Создаю напоминание…"
+
+            "list_reminders" ->
+                "Проверяю напоминания…"
+
+            "delete_reminder" ->
+                "Удаляю напоминание…"
 
             else ->
                 "Выполняю действие…"
@@ -3533,6 +3581,49 @@ class AyanaVoiceService : Service() {
                 "recall_memory" -> {
 
                     agentRecallMemory(
+                        arguments
+                            .optString(
+                                "query"
+                            )
+                    )
+                }
+
+                "create_reminder" -> {
+
+                    agentCreateReminder(
+                        title =
+                            arguments
+                                .optString(
+                                    "title"
+                                ),
+                        message =
+                            arguments
+                                .optString(
+                                    "message"
+                                ),
+                        triggerAtLocal =
+                            arguments
+                                .optString(
+                                    "trigger_at_local"
+                                ),
+                        recurrence =
+                            arguments
+                                .optString(
+                                    "recurrence",
+                                    AyanaTaskStore
+                                        .RECURRENCE_NONE
+                                )
+                    )
+                }
+
+                "list_reminders" -> {
+
+                    agentListReminders()
+                }
+
+                "delete_reminder" -> {
+
+                    agentDeleteReminder(
                         arguments
                             .optString(
                                 "query"
@@ -3719,6 +3810,348 @@ class AyanaVoiceService : Service() {
                     "Подходящих записей в памяти нет"
                 } else {
                     "Найдено записей: ${memories.size}"
+                }
+            )
+    }
+
+    private fun agentCreateReminder(
+        title: String,
+        message: String,
+        triggerAtLocal: String,
+        recurrence: String
+    ): JSONObject {
+
+        val cleanTitle =
+            title
+                .trim()
+                .ifBlank {
+                    "Напоминание AYANA"
+                }
+
+        val cleanMessage =
+            message
+                .trim()
+                .ifBlank {
+                    cleanTitle
+                }
+
+        val cleanTrigger =
+            triggerAtLocal
+                .trim()
+
+        if (cleanTrigger.isBlank()) {
+
+            return toolResult(
+                false,
+                "Не указано время напоминания"
+            )
+        }
+
+        val formatter =
+            DateTimeFormatter
+                .ofPattern(
+                    "yyyy-MM-dd'T'HH:mm:ss"
+                )
+
+        val localDateTime =
+            try {
+
+                LocalDateTime.parse(
+                    cleanTrigger,
+                    formatter
+                )
+
+            } catch (_: Exception) {
+
+                return toolResult(
+                    false,
+                    "Неверный формат времени. Нужен YYYY-MM-DDTHH:mm:ss"
+                )
+            }
+
+        val zoneId =
+            ZoneId.systemDefault()
+
+        val triggerMillis =
+            try {
+
+                localDateTime
+                    .atZone(
+                        zoneId
+                    )
+                    .toInstant()
+                    .toEpochMilli()
+
+            } catch (_: Exception) {
+
+                return toolResult(
+                    false,
+                    "Не удалось определить локальное время напоминания"
+                )
+            }
+
+        if (
+            triggerMillis <=
+            System.currentTimeMillis()
+        ) {
+
+            return toolResult(
+                false,
+                "Время напоминания уже прошло"
+            )
+        }
+
+        val task =
+            taskStore.addTask(
+                title =
+                    cleanTitle,
+                message =
+                    cleanMessage,
+                triggerAtMillis =
+                    triggerMillis,
+                recurrence =
+                    recurrence
+            )
+                ?: return toolResult(
+                    false,
+                    "Не удалось сохранить напоминание"
+                )
+
+        val scheduleResult =
+            taskScheduler.schedule(
+                task
+            )
+
+        if (!scheduleResult.success) {
+
+            taskStore.deleteTask(
+                task.id
+            )
+
+            return toolResult(
+                false,
+                scheduleResult.message
+            )
+        }
+
+        if (
+            !scheduleResult.exact
+        ) {
+
+            taskScheduler
+                .openExactAlarmPermissionScreen()
+        }
+
+        return JSONObject()
+            .put(
+                "success",
+                true
+            )
+            .put(
+                "task_id",
+                task.id
+            )
+            .put(
+                "title",
+                task.title
+            )
+            .put(
+                "message",
+                task.message
+            )
+            .put(
+                "trigger_at_local",
+                cleanTrigger
+            )
+            .put(
+                "timezone",
+                zoneId.id
+            )
+            .put(
+                "recurrence",
+                task.recurrence
+            )
+            .put(
+                "exact",
+                scheduleResult.exact
+            )
+            .put(
+                "requires_exact_alarm_permission",
+                !scheduleResult.exact
+            )
+            .put(
+                "message_to_user",
+                if (
+                    scheduleResult.exact
+                ) {
+                    "Напоминание установлено точно на $cleanTrigger"
+                } else {
+                    "Напоминание сохранено, но Android требует разрешение на точные будильники. Открыт системный экран разрешения."
+                }
+            )
+    }
+
+    private fun agentListReminders():
+        JSONObject {
+
+        val tasks =
+            taskStore
+                .getFutureTasks()
+
+        val array =
+            JSONArray()
+
+        val zoneId =
+            ZoneId.systemDefault()
+
+        val formatter =
+            DateTimeFormatter
+                .ofPattern(
+                    "yyyy-MM-dd'T'HH:mm:ss"
+                )
+
+        tasks.forEach { task ->
+
+            val localDateTime =
+                Instant
+                    .ofEpochMilli(
+                        task.triggerAtMillis
+                    )
+                    .atZone(
+                        zoneId
+                    )
+                    .toLocalDateTime()
+                    .format(
+                        formatter
+                    )
+
+            array.put(
+                JSONObject()
+                    .put(
+                        "id",
+                        task.id
+                    )
+                    .put(
+                        "title",
+                        task.title
+                    )
+                    .put(
+                        "message",
+                        task.message
+                    )
+                    .put(
+                        "trigger_at_local",
+                        localDateTime
+                    )
+                    .put(
+                        "timezone",
+                        zoneId.id
+                    )
+                    .put(
+                        "recurrence",
+                        task.recurrence
+                    )
+                    .put(
+                        "enabled",
+                        task.enabled
+                    )
+            )
+        }
+
+        return JSONObject()
+            .put(
+                "success",
+                true
+            )
+            .put(
+                "count",
+                tasks.size
+            )
+            .put(
+                "tasks",
+                array
+            )
+            .put(
+                "message",
+                if (
+                    tasks.isEmpty()
+                ) {
+                    "Активных будущих напоминаний нет"
+                } else {
+                    "Активных напоминаний: ${tasks.size}"
+                }
+            )
+    }
+
+    private fun agentDeleteReminder(
+        query: String
+    ): JSONObject {
+
+        val cleanQuery =
+            query
+                .trim()
+
+        if (cleanQuery.isBlank()) {
+
+            return toolResult(
+                false,
+                "Не указано, какое напоминание удалить"
+            )
+        }
+
+        val removed =
+            taskStore
+                .deleteByQuery(
+                    cleanQuery
+                )
+
+        removed.forEach { task ->
+
+            taskScheduler
+                .cancel(
+                    task
+                )
+        }
+
+        val removedArray =
+            JSONArray()
+
+        removed.forEach { task ->
+
+            removedArray.put(
+                JSONObject()
+                    .put(
+                        "id",
+                        task.id
+                    )
+                    .put(
+                        "title",
+                        task.title
+                    )
+            )
+        }
+
+        return JSONObject()
+            .put(
+                "success",
+                removed.isNotEmpty()
+            )
+            .put(
+                "removed",
+                removed.size
+            )
+            .put(
+                "tasks",
+                removedArray
+            )
+            .put(
+                "message",
+                if (
+                    removed.isEmpty()
+                ) {
+                    "Подходящих напоминаний не найдено"
+                } else {
+                    "Удалено напоминаний: ${removed.size}"
                 }
             )
     }
