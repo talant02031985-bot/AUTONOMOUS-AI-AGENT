@@ -1,12 +1,14 @@
 package kg.autonomous.agent
 
 import android.Manifest
+import android.app.NotificationManager
 import android.content.BroadcastReceiver
+import android.content.ComponentName
 import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
-import android.content.pm.PackageManager
 import android.graphics.Color
+import android.graphics.Typeface
 import android.graphics.drawable.GradientDrawable
 import android.os.Build
 import android.os.Bundle
@@ -19,16 +21,31 @@ import android.view.inputmethod.EditorInfo
 import android.view.inputmethod.InputMethodManager
 import android.widget.Button
 import android.widget.EditText
+import android.widget.HorizontalScrollView
 import android.widget.LinearLayout
+import android.widget.ScrollView
+import android.widget.Space
 import android.widget.TextView
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AppCompatActivity
-import kotlin.math.min
+import java.text.SimpleDateFormat
+import java.util.Date
+import java.util.Locale
 
 class MainActivity : AppCompatActivity() {
 
+    private enum class Page {
+        HOME,
+        TASKS,
+        MEMORY,
+        DIAGNOSTICS,
+        SETTINGS
+    }
+
+    private lateinit var contentContainer: LinearLayout
     private lateinit var statusText: TextView
     private lateinit var statusDot: View
+    private lateinit var orbText: TextView
     private lateinit var stopButton: Button
 
     private lateinit var textModeButton: TextView
@@ -37,8 +54,35 @@ class MainActivity : AppCompatActivity() {
     private lateinit var textAnswer: TextView
     private lateinit var answerCard: LinearLayout
 
-    private var receiverRegistered = false
-    private var textModeVisible = false
+    private val navButtons =
+        mutableMapOf<Page, TextView>()
+
+    private var currentPage =
+        Page.HOME
+
+    private var receiverRegistered =
+        false
+
+    private var textModeVisible =
+        false
+
+    private val memoryStore by lazy {
+        AyanaMemoryStore(
+            applicationContext
+        )
+    }
+
+    private val taskStore by lazy {
+        AyanaTaskStore(
+            applicationContext
+        )
+    }
+
+    private val taskScheduler by lazy {
+        AyanaTaskScheduler(
+            applicationContext
+        )
+    }
 
     private val permissionLauncher =
         registerForActivityResult(
@@ -46,7 +90,9 @@ class MainActivity : AppCompatActivity() {
         ) { permissions ->
 
             val microphoneGranted =
-                permissions[Manifest.permission.RECORD_AUDIO] == true ||
+                permissions[
+                    Manifest.permission.RECORD_AUDIO
+                ] == true ||
                     checkSelfPermissionCompat(
                         Manifest.permission.RECORD_AUDIO
                     )
@@ -59,6 +105,8 @@ class MainActivity : AppCompatActivity() {
                     AyanaVoiceService.STATE_ERROR
                 )
             }
+
+            renderCurrentPage()
         }
 
     private val statusReceiver =
@@ -70,54 +118,64 @@ class MainActivity : AppCompatActivity() {
             ) {
 
                 val text =
-                    intent?.getStringExtra(
-                        AyanaVoiceService.EXTRA_STATUS_TEXT
-                    ) ?: return
+                    intent
+                        ?.getStringExtra(
+                            AyanaVoiceService.EXTRA_STATUS_TEXT
+                        )
+                        ?: return
 
                 val state =
                     intent.getStringExtra(
                         AyanaVoiceService.EXTRA_STATUS_STATE
-                    ) ?: AyanaVoiceService.STATE_LISTENING
+                    )
+                        ?: AyanaVoiceService.STATE_LISTENING
 
                 if (
                     state ==
                     AyanaVoiceService.STATE_TEXT
                 ) {
-                    showTextAnswer(text)
+                    showTextAnswer(
+                        text
+                    )
                 }
 
                 setStatus(
                     text,
                     state
                 )
+
+                if (
+                    currentPage ==
+                    Page.HOME
+                ) {
+                    renderHome()
+                }
             }
         }
 
     override fun onCreate(
         savedInstanceState: Bundle?
     ) {
-        super.onCreate(savedInstanceState)
-
-        setFinishOnTouchOutside(false)
-
-        window.setBackgroundDrawableResource(
-            android.R.color.transparent
+        super.onCreate(
+            savedInstanceState
         )
 
-        window.addFlags(
-            WindowManager.LayoutParams.FLAG_DIM_BEHIND
-        )
+        window.statusBarColor =
+            Color.parseColor(
+                "#060910"
+            )
 
-        window.attributes =
-            window.attributes.apply {
-                dimAmount = 0.28f
-            }
+        window.navigationBarColor =
+            Color.parseColor(
+                "#060910"
+            )
 
         window.setSoftInputMode(
-            WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE
+            WindowManager.LayoutParams
+                .SOFT_INPUT_ADJUST_RESIZE
         )
 
-        buildCompactInterface()
+        buildAyanaInterface()
 
         requestNeededPermissionsAndStart()
     }
@@ -132,7 +190,9 @@ class MainActivity : AppCompatActivity() {
                     AyanaVoiceService.ACTION_STATUS
                 )
 
-            if (Build.VERSION.SDK_INT >= 33) {
+            if (
+                Build.VERSION.SDK_INT >= 33
+            ) {
 
                 registerReceiver(
                     statusReceiver,
@@ -149,63 +209,59 @@ class MainActivity : AppCompatActivity() {
                 )
             }
 
-            receiverRegistered = true
+            receiverRegistered =
+                true
         }
 
-        if (AyanaVoiceService.isRunning) {
+        if (
+            AyanaVoiceService.isRunning
+        ) {
 
             setStatus(
                 AyanaVoiceService.currentStatusText,
                 AyanaVoiceService.currentStatusState
             )
-        }
-    }
 
-    override fun onStop() {
+        } else {
 
-        if (receiverRegistered) {
-
-            try {
-                unregisterReceiver(
-                    statusReceiver
-                )
-            } catch (_: Exception) {
-            }
-
-            receiverRegistered = false
+            setStatus(
+                "AYANA остановлена",
+                AyanaVoiceService.STATE_STOPPED
+            )
         }
 
-        super.onStop()
+        renderCurrentPage()
     }
 
     override fun onResume() {
         super.onResume()
 
-        resizeWindow()
+        renderCurrentPage()
     }
 
-    private fun resizeWindow() {
+    override fun onStop() {
 
-        val width =
-            min(
-                dp(430),
-                resources
-                    .displayMetrics
-                    .widthPixels -
-                    dp(28)
-            )
+        if (
+            receiverRegistered
+        ) {
 
-        window.setLayout(
-            width,
-            ViewGroup.LayoutParams.WRAP_CONTENT
-        )
+            try {
 
-        window.setGravity(
-            Gravity.CENTER
-        )
+                unregisterReceiver(
+                    statusReceiver
+                )
+
+            } catch (_: Exception) {
+            }
+
+            receiverRegistered =
+                false
+        }
+
+        super.onStop()
     }
 
-    private fun buildCompactInterface() {
+    private fun buildAyanaInterface() {
 
         val root =
             LinearLayout(this).apply {
@@ -213,40 +269,131 @@ class MainActivity : AppCompatActivity() {
                 orientation =
                     LinearLayout.VERTICAL
 
-                gravity =
-                    Gravity.CENTER_HORIZONTAL
-
-                setPadding(
-                    dp(22),
-                    dp(20),
-                    dp(22),
-                    dp(20)
+                setBackgroundColor(
+                    Color.parseColor(
+                        "#060910"
+                    )
                 )
 
-                background =
-                    GradientDrawable(
-                        GradientDrawable.Orientation.TL_BR,
-                        intArrayOf(
-                            Color.parseColor("#0E1626"),
-                            Color.parseColor("#17243B")
-                        )
+                setPadding(
+                    dp(18),
+                    dp(14),
+                    dp(18),
+                    dp(14)
+                )
+            }
+
+        root.addView(
+            buildTopBar()
+        )
+
+        val body =
+            LinearLayout(this).apply {
+
+                orientation =
+                    LinearLayout.HORIZONTAL
+
+                gravity =
+                    Gravity.TOP
+
+                layoutParams =
+                    LinearLayout.LayoutParams(
+                        ViewGroup.LayoutParams.MATCH_PARENT,
+                        0,
+                        1f
                     ).apply {
 
-                        cornerRadius =
-                            dp(28).toFloat()
-
-                        setStroke(
-                            dp(1),
-                            Color.parseColor("#2C3C5A")
-                        )
+                        topMargin =
+                            dp(12)
                     }
             }
 
-        // =====================================================
-        // TOP BAR
-        // =====================================================
+        body.addView(
+            buildSidebar()
+        )
 
-        val topRow =
+        val rightColumn =
+            LinearLayout(this).apply {
+
+                orientation =
+                    LinearLayout.VERTICAL
+
+                layoutParams =
+                    LinearLayout.LayoutParams(
+                        0,
+                        ViewGroup.LayoutParams.MATCH_PARENT,
+                        1f
+                    ).apply {
+
+                        marginStart =
+                            dp(12)
+                    }
+            }
+
+        val scroll =
+            ScrollView(this).apply {
+
+                isFillViewport =
+                    true
+
+                overScrollMode =
+                    View.OVER_SCROLL_NEVER
+
+                layoutParams =
+                    LinearLayout.LayoutParams(
+                        ViewGroup.LayoutParams.MATCH_PARENT,
+                        0,
+                        1f
+                    )
+            }
+
+        contentContainer =
+            LinearLayout(this).apply {
+
+                orientation =
+                    LinearLayout.VERTICAL
+
+                setPadding(
+                    0,
+                    0,
+                    dp(2),
+                    dp(14)
+                )
+            }
+
+        scroll.addView(
+            contentContainer
+        )
+
+        rightColumn.addView(
+            scroll
+        )
+
+        buildTextPanel()
+
+        rightColumn.addView(
+            textPanel
+        )
+
+        body.addView(
+            rightColumn
+        )
+
+        root.addView(
+            body
+        )
+
+        setContentView(
+            root
+        )
+
+        renderCurrentPage()
+    }
+
+    private fun buildTopBar():
+        View {
+
+        val bar =
             LinearLayout(this).apply {
 
                 orientation =
@@ -255,14 +402,23 @@ class MainActivity : AppCompatActivity() {
                 gravity =
                     Gravity.CENTER_VERTICAL
 
-                layoutParams =
-                    LinearLayout.LayoutParams(
-                        ViewGroup.LayoutParams.MATCH_PARENT,
-                        ViewGroup.LayoutParams.WRAP_CONTENT
+                setPadding(
+                    dp(16),
+                    dp(10),
+                    dp(12),
+                    dp(10)
+                )
+
+                background =
+                    panelDrawable(
+                        corner =
+                            20,
+                        stroke =
+                            "#1E2B41"
                     )
             }
 
-        val titleBlock =
+        val brand =
             LinearLayout(this).apply {
 
                 orientation =
@@ -276,239 +432,1281 @@ class MainActivity : AppCompatActivity() {
                     )
             }
 
-        val title =
-            TextView(this).apply {
-
-                text = "AYANA AI"
-                textSize = 23f
-
-                setTextColor(
-                    Color.WHITE
-                )
-
-                typeface =
-                    android.graphics.Typeface.DEFAULT_BOLD
-            }
-
-        val subtitle =
+        brand.addView(
             TextView(this).apply {
 
                 text =
-                    "Персональный AI-агент"
+                    "AYANA AI 1.0"
 
-                textSize = 12.5f
-
-                setTextColor(
-                    Color.parseColor("#93A4BD")
-                )
-
-                setPadding(
-                    0,
-                    dp(3),
-                    0,
-                    0
-                )
-            }
-
-        titleBlock.addView(title)
-        titleBlock.addView(subtitle)
-
-        textModeButton =
-            makeRoundTopButton(
-                symbol = "⌨"
-            ).apply {
-
-                contentDescription =
-                    "Текстовая команда"
-
-                setOnClickListener {
-                    toggleTextMode()
-                }
-            }
-
-        val settingsButton =
-            makeRoundTopButton(
-                symbol = "⚙"
-            ).apply {
-
-                contentDescription =
-                    "Настройки AYANA"
-
-                setOnClickListener {
-
-                    try {
-
-                        startActivity(
-                            Intent(
-                                Settings.ACTION_ACCESSIBILITY_SETTINGS
-                            )
-                        )
-
-                    } catch (_: Exception) {
-
-                        startActivity(
-                            Intent(
-                                Settings.ACTION_SETTINGS
-                            )
-                        )
-                    }
-                }
-            }
-
-        topRow.addView(titleBlock)
-        topRow.addView(textModeButton)
-        topRow.addView(
-            settingsButton,
-            LinearLayout.LayoutParams(
-                dp(46),
-                dp(46)
-            ).apply {
-                marginStart = dp(9)
-            }
-        )
-
-        // =====================================================
-        // AYANA ORB
-        // =====================================================
-
-        val orb =
-            TextView(this).apply {
-
-                text = "A"
-                textSize = 43f
-
-                gravity =
-                    Gravity.CENTER
+                textSize =
+                    23f
 
                 setTextColor(
                     Color.WHITE
                 )
 
-                typeface =
-                    android.graphics.Typeface.DEFAULT_BOLD
-
-                layoutParams =
-                    LinearLayout.LayoutParams(
-                        dp(108),
-                        dp(108)
-                    ).apply {
-
-                        topMargin =
-                            dp(18)
-
-                        bottomMargin =
-                            dp(12)
-                    }
-
-                background =
-                    GradientDrawable(
-                        GradientDrawable.Orientation.TL_BR,
-                        intArrayOf(
-                            Color.parseColor("#7759FF"),
-                            Color.parseColor("#2CC7EE")
-                        )
-                    ).apply {
-
-                        shape =
-                            GradientDrawable.OVAL
-
-                        setStroke(
-                            dp(5),
-                            Color.parseColor("#243554")
-                        )
-                    }
+                setTypeface(
+                    Typeface.DEFAULT,
+                    Typeface.BOLD
+                )
             }
+        )
 
-        // =====================================================
-        // STATUS
-        // =====================================================
+        brand.addView(
+            TextView(this).apply {
 
-        val statusRow =
+                text =
+                    "Ваш персональный AI-агент"
+
+                textSize =
+                    12f
+
+                setTextColor(
+                    Color.parseColor(
+                        "#8292AA"
+                    )
+                )
+            }
+        )
+
+        bar.addView(
+            brand
+        )
+
+        val online =
             LinearLayout(this).apply {
 
                 orientation =
                     LinearLayout.HORIZONTAL
 
                 gravity =
-                    Gravity.CENTER
+                    Gravity.CENTER_VERTICAL
+
+                setPadding(
+                    dp(12),
+                    dp(8),
+                    dp(12),
+                    dp(8)
+                )
+
+                background =
+                    softDrawable(
+                        "#0B1716",
+                        "#174438",
+                        16
+                    )
+            }
+
+        online.addView(
+            View(this).apply {
+
+                background =
+                    circleDrawable(
+                        Color.parseColor(
+                            "#22C55E"
+                        )
+                    )
+
+                layoutParams =
+                    LinearLayout.LayoutParams(
+                        dp(8),
+                        dp(8)
+                    ).apply {
+
+                        marginEnd =
+                            dp(7)
+                    }
+            }
+        )
+
+        online.addView(
+            TextView(this).apply {
+
+                text =
+                    "Онлайн"
+
+                textSize =
+                    12f
+
+                setTextColor(
+                    Color.parseColor(
+                        "#A7F3D0"
+                    )
+                )
+            }
+        )
+
+        bar.addView(
+            online
+        )
+
+        textModeButton =
+            topIconButton(
+                "⌨"
+            ).apply {
+
+                contentDescription =
+                    "Текстовый режим"
+
+                setOnClickListener {
+                    toggleTextMode()
+                }
+            }
+
+        bar.addView(
+            textModeButton,
+            LinearLayout.LayoutParams(
+                dp(44),
+                dp(44)
+            ).apply {
+
+                marginStart =
+                    dp(9)
+            }
+        )
+
+        val settingsButton =
+            topIconButton(
+                "⚙"
+            ).apply {
+
+                contentDescription =
+                    "Настройки"
+
+                setOnClickListener {
+                    switchPage(
+                        Page.SETTINGS
+                    )
+                }
+            }
+
+        bar.addView(
+            settingsButton,
+            LinearLayout.LayoutParams(
+                dp(44),
+                dp(44)
+            ).apply {
+
+                marginStart =
+                    dp(7)
+            }
+        )
+
+        return bar
+    }
+
+    private fun buildSidebar():
+        View {
+
+        val side =
+            LinearLayout(this).apply {
+
+                orientation =
+                    LinearLayout.VERTICAL
 
                 setPadding(
                     dp(10),
-                    dp(5),
+                    dp(12),
                     dp(10),
-                    dp(5)
+                    dp(12)
+                )
+
+                background =
+                    panelDrawable(
+                        corner =
+                            22,
+                        stroke =
+                            "#1B2638"
+                    )
+
+                layoutParams =
+                    LinearLayout.LayoutParams(
+                        dp(178),
+                        ViewGroup.LayoutParams.MATCH_PARENT
+                    )
+            }
+
+        side.addView(
+            smallSectionTitle(
+                "AYANA"
+            )
+        )
+
+        side.addView(
+            navButton(
+                Page.HOME,
+                "⌂  Главная"
+            )
+        )
+
+        side.addView(
+            navButton(
+                Page.TASKS,
+                "◷  Задачи"
+            )
+        )
+
+        side.addView(
+            navButton(
+                Page.MEMORY,
+                "◇  Память"
+            )
+        )
+
+        side.addView(
+            navButton(
+                Page.DIAGNOSTICS,
+                "⌁  Диагностика"
+            )
+        )
+
+        side.addView(
+            navButton(
+                Page.SETTINGS,
+                "⚙  Настройки"
+            )
+        )
+
+        side.addView(
+            Space(this),
+            LinearLayout.LayoutParams(
+                1,
+                0,
+                1f
+            )
+        )
+
+        val serviceCaption =
+            TextView(this).apply {
+
+                text =
+                    "ГОЛОСОВОЙ СЕРВИС"
+
+                textSize =
+                    10f
+
+                setTextColor(
+                    Color.parseColor(
+                        "#64748B"
+                    )
+                )
+
+                setPadding(
+                    dp(8),
+                    dp(8),
+                    dp(8),
+                    dp(6)
+                )
+            }
+
+        side.addView(
+            serviceCaption
+        )
+
+        stopButton =
+            Button(this).apply {
+
+                text =
+                    "■  ОСТАНОВИТЬ"
+
+                textSize =
+                    11f
+
+                isAllCaps =
+                    false
+
+                setTextColor(
+                    Color.parseColor(
+                        "#FCA5A5"
+                    )
+                )
+
+                background =
+                    softDrawable(
+                        "#241012",
+                        "#5C242A",
+                        16
+                    )
+
+                setOnClickListener {
+                    stopAyanaService()
+                }
+            }
+
+        side.addView(
+            stopButton,
+            LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                dp(48)
+            )
+        )
+
+        return side
+    }
+
+    private fun navButton(
+        page: Page,
+        label: String
+    ): TextView {
+
+        return TextView(this).apply {
+
+            text =
+                label
+
+            textSize =
+                13f
+
+            gravity =
+                Gravity.CENTER_VERTICAL
+
+            setTextColor(
+                Color.parseColor(
+                    "#B6C2D4"
+                )
+            )
+
+            setPadding(
+                dp(12),
+                0,
+                dp(10),
+                0
+            )
+
+            layoutParams =
+                LinearLayout.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT,
+                    dp(50)
+                ).apply {
+
+                    bottomMargin =
+                        dp(6)
+                }
+
+            setOnClickListener {
+                switchPage(
+                    page
+                )
+            }
+
+            navButtons[
+                page
+            ] =
+                this
+        }
+    }
+
+    private fun switchPage(
+        page: Page
+    ) {
+
+        currentPage =
+            page
+
+        renderCurrentPage()
+    }
+
+    private fun renderCurrentPage() {
+
+        if (
+            !::contentContainer.isInitialized
+        ) {
+            return
+        }
+
+        updateNavigation()
+
+        when (
+            currentPage
+        ) {
+
+            Page.HOME ->
+                renderHome()
+
+            Page.TASKS ->
+                renderTasks()
+
+            Page.MEMORY ->
+                renderMemory()
+
+            Page.DIAGNOSTICS ->
+                renderDiagnostics()
+
+            Page.SETTINGS ->
+                renderSettings()
+        }
+    }
+
+    private fun updateNavigation() {
+
+        navButtons
+            .forEach {
+                entry ->
+
+                val selected =
+                    entry.key ==
+                        currentPage
+
+                entry.value.background =
+                    if (
+                        selected
+                    ) {
+                        GradientDrawable(
+                            GradientDrawable
+                                .Orientation
+                                .LEFT_RIGHT,
+                            intArrayOf(
+                                Color.parseColor(
+                                    "#3B237B"
+                                ),
+                                Color.parseColor(
+                                    "#273A7A"
+                                )
+                            )
+                        ).apply {
+
+                            cornerRadius =
+                                dp(14)
+                                    .toFloat()
+
+                            setStroke(
+                                dp(1),
+                                Color.parseColor(
+                                    "#745CFF"
+                                )
+                            )
+                        }
+                    } else {
+                        ColorDrawableCompat(
+                            Color.TRANSPARENT
+                        )
+                    }
+
+                entry.value
+                    .setTextColor(
+                        Color.parseColor(
+                            if (
+                                selected
+                            ) {
+                                "#FFFFFF"
+                            } else {
+                                "#9CAAC0"
+                            }
+                        )
+                    )
+            }
+    }
+
+    private fun renderHome() {
+
+        contentContainer
+            .removeAllViews()
+
+        contentContainer.addView(
+            pageTitle(
+                "Главная",
+                "AYANA готова к работе"
+            )
+        )
+
+        val hero =
+            LinearLayout(this).apply {
+
+                orientation =
+                    LinearLayout.HORIZONTAL
+
+                gravity =
+                    Gravity.CENTER_VERTICAL
+
+                setPadding(
+                    dp(22),
+                    dp(20),
+                    dp(22),
+                    dp(20)
+                )
+
+                background =
+                    GradientDrawable(
+                        GradientDrawable
+                            .Orientation
+                            .TL_BR,
+                        intArrayOf(
+                            Color.parseColor(
+                                "#101827"
+                            ),
+                            Color.parseColor(
+                                "#121B31"
+                            ),
+                            Color.parseColor(
+                                "#17132D"
+                            )
+                        )
+                    ).apply {
+
+                        cornerRadius =
+                            dp(24)
+                                .toFloat()
+
+                        setStroke(
+                            dp(1),
+                            Color.parseColor(
+                                "#2E3755"
+                            )
+                        )
+                    }
+            }
+
+        orbText =
+            TextView(this).apply {
+
+                text =
+                    "A"
+
+                textSize =
+                    52f
+
+                gravity =
+                    Gravity.CENTER
+
+                setTextColor(
+                    Color.WHITE
+                )
+
+                setTypeface(
+                    Typeface.DEFAULT,
+                    Typeface.BOLD
+                )
+
+                background =
+                    orbDrawable(
+                        AyanaVoiceService
+                            .currentStatusState
+                    )
+            }
+
+        hero.addView(
+            orbText,
+            LinearLayout.LayoutParams(
+                dp(132),
+                dp(132)
+            )
+        )
+
+        val stateColumn =
+            LinearLayout(this).apply {
+
+                orientation =
+                    LinearLayout.VERTICAL
+
+                layoutParams =
+                    LinearLayout.LayoutParams(
+                        0,
+                        ViewGroup.LayoutParams.WRAP_CONTENT,
+                        1f
+                    ).apply {
+
+                        marginStart =
+                            dp(24)
+                    }
+            }
+
+        stateColumn.addView(
+            TextView(this).apply {
+
+                text =
+                    stateTitle(
+                        AyanaVoiceService
+                            .currentStatusState
+                    )
+
+                textSize =
+                    22f
+
+                setTextColor(
+                    Color.WHITE
+                )
+
+                setTypeface(
+                    Typeface.DEFAULT,
+                    Typeface.BOLD
+                )
+            }
+        )
+
+        val statusLine =
+            LinearLayout(this).apply {
+
+                orientation =
+                    LinearLayout.HORIZONTAL
+
+                gravity =
+                    Gravity.CENTER_VERTICAL
+
+                setPadding(
+                    0,
+                    dp(12),
+                    0,
+                    0
                 )
             }
 
         statusDot =
             View(this).apply {
 
-                layoutParams =
-                    LinearLayout.LayoutParams(
-                        dp(10),
-                        dp(10)
-                    ).apply {
-
-                        marginEnd =
-                            dp(10)
-                    }
-
                 background =
                     circleDrawable(
-                        Color.parseColor("#4ADE80")
+                        stateColor(
+                            AyanaVoiceService
+                                .currentStatusState
+                        )
                     )
             }
+
+        statusLine.addView(
+            statusDot,
+            LinearLayout.LayoutParams(
+                dp(10),
+                dp(10)
+            ).apply {
+
+                marginEnd =
+                    dp(9)
+            }
+        )
 
         statusText =
             TextView(this).apply {
 
                 text =
-                    "Запускаю AYANA…"
+                    AyanaVoiceService
+                        .currentStatusText
 
-                textSize = 15.5f
-
-                gravity =
-                    Gravity.CENTER_VERTICAL
+                textSize =
+                    14f
 
                 setTextColor(
-                    Color.parseColor("#E7EEF9")
+                    Color.parseColor(
+                        "#C9D4E5"
+                    )
                 )
             }
 
-        statusRow.addView(
-            statusDot
-        )
-
-        statusRow.addView(
+        statusLine.addView(
             statusText
         )
 
-        val hint =
+        stateColumn.addView(
+            statusLine
+        )
+
+        stateColumn.addView(
             TextView(this).apply {
 
                 text =
-                    "Скажите «Аяна…» или нажмите ⌨"
+                    "Скажите «Аяна» или используйте текстовую команду."
 
-                textSize = 12.5f
-
-                gravity =
-                    Gravity.CENTER
+                textSize =
+                    12.5f
 
                 setTextColor(
-                    Color.parseColor("#8FA0B8")
+                    Color.parseColor(
+                        "#75859D"
+                    )
                 )
 
                 setPadding(
                     0,
-                    dp(2),
+                    dp(10),
                     0,
-                    dp(12)
+                    0
                 )
             }
+        )
 
-        // =====================================================
-        // TEXT MODE
-        // =====================================================
+        hero.addView(
+            stateColumn
+        )
+
+        contentContainer.addView(
+            hero,
+            sectionParams()
+        )
+
+        val metrics =
+            LinearLayout(this).apply {
+
+                orientation =
+                    LinearLayout.HORIZONTAL
+            }
+
+        metrics.addView(
+            metricCard(
+                "Задачи",
+                taskStore
+                    .getFutureTasks()
+                    .size
+                    .toString(),
+                "активных"
+            ),
+            equalCardParams()
+        )
+
+        metrics.addView(
+            metricCard(
+                "Память",
+                memoryStore
+                    .count()
+                    .toString(),
+                "фактов"
+            ),
+            equalCardParams(
+                left =
+                    10
+            )
+        )
+
+        metrics.addView(
+            metricCard(
+                "Сервисы",
+                diagnosticsPassed()
+                    .toString(),
+                "из 6 работают"
+            ),
+            equalCardParams(
+                left =
+                    10
+            )
+        )
+
+        contentContainer.addView(
+            metrics,
+            sectionParams()
+        )
+
+        val lower =
+            LinearLayout(this).apply {
+
+                orientation =
+                    LinearLayout.HORIZONTAL
+            }
+
+        lower.addView(
+            nextReminderCard(),
+            LinearLayout.LayoutParams(
+                0,
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+                1f
+            )
+        )
+
+        lower.addView(
+            quickActionsCard(),
+            LinearLayout.LayoutParams(
+                0,
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+                1f
+            ).apply {
+
+                marginStart =
+                    dp(10)
+            }
+        )
+
+        contentContainer.addView(
+            lower,
+            sectionParams()
+        )
+
+        contentContainer.addView(
+            modeStrip(),
+            sectionParams()
+        )
+    }
+
+    private fun renderTasks() {
+
+        contentContainer
+            .removeAllViews()
+
+        contentContainer.addView(
+            pageTitle(
+                "Задачи",
+                "Напоминания и повторяющиеся задачи"
+            )
+        )
+
+        val tasks =
+            taskStore
+                .getFutureTasks()
+
+        if (
+            tasks.isEmpty()
+        ) {
+
+            contentContainer.addView(
+                emptyCard(
+                    "Активных напоминаний нет",
+                    "Скажите: «Аяна, завтра в 9 напомни позвонить»."
+                ),
+                sectionParams()
+            )
+
+            return
+        }
+
+        tasks.forEach {
+            task ->
+
+            val card =
+                panel(
+                    20
+                )
+
+            val recurrence =
+                when (
+                    task.recurrence
+                ) {
+
+                    AyanaTaskStore
+                        .RECURRENCE_DAILY ->
+                        "Каждый день"
+
+                    AyanaTaskStore
+                        .RECURRENCE_WEEKLY ->
+                        "Каждую неделю"
+
+                    AyanaTaskStore
+                        .RECURRENCE_MONTHLY ->
+                        "Каждый месяц"
+
+                    else ->
+                        "Однократно"
+                }
+
+            card.addView(
+                TextView(this).apply {
+
+                    text =
+                        task.title
+
+                    textSize =
+                        16f
+
+                    setTypeface(
+                        Typeface.DEFAULT,
+                        Typeface.BOLD
+                    )
+
+                    setTextColor(
+                        Color.WHITE
+                    )
+                }
+            )
+
+            card.addView(
+                TextView(this).apply {
+
+                    text =
+                        formatTaskTime(
+                            task.triggerAtMillis
+                        ) +
+                            "  •  " +
+                            recurrence
+
+                    textSize =
+                        12.5f
+
+                    setTextColor(
+                        Color.parseColor(
+                            "#A78BFA"
+                        )
+                    )
+
+                    setPadding(
+                        0,
+                        dp(7),
+                        0,
+                        0
+                    )
+                }
+            )
+
+            card.addView(
+                TextView(this).apply {
+
+                    text =
+                        task.message
+
+                    textSize =
+                        13f
+
+                    setTextColor(
+                        Color.parseColor(
+                            "#A8B5C7"
+                        )
+                    )
+
+                    setPadding(
+                        0,
+                        dp(7),
+                        0,
+                        0
+                    )
+                }
+            )
+
+            contentContainer.addView(
+                card,
+                sectionParams(
+                    top =
+                        8
+                )
+            )
+        }
+    }
+
+    private fun renderMemory() {
+
+        contentContainer
+            .removeAllViews()
+
+        contentContainer.addView(
+            pageTitle(
+                "Память",
+                "Что AYANA хранит для будущих разговоров"
+            )
+        )
+
+        val memories =
+            memoryStore
+                .getAll(
+                    100
+                )
+
+        if (
+            memories.isEmpty()
+        ) {
+
+            contentContainer.addView(
+                emptyCard(
+                    "Память пока пуста",
+                    "Скажите: «Аяна, запомни…»"
+                ),
+                sectionParams()
+            )
+
+            return
+        }
+
+        val grouped =
+            memories
+                .groupBy {
+                    it.category
+                }
+
+        val order =
+            listOf(
+                "preference",
+                "person",
+                "project",
+                "task",
+                "place",
+                "general"
+            )
+
+        order.forEach {
+            category ->
+
+            val items =
+                grouped[
+                    category
+                ]
+                    ?: return@forEach
+
+            contentContainer.addView(
+                smallSectionTitle(
+                    memoryCategoryTitle(
+                        category
+                    )
+                ),
+                LinearLayout.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT,
+                    ViewGroup.LayoutParams.WRAP_CONTENT
+                ).apply {
+
+                    topMargin =
+                        dp(12)
+
+                    bottomMargin =
+                        dp(5)
+                }
+            )
+
+            items.forEach {
+                memory ->
+
+                val card =
+                    panel(
+                        18
+                    )
+
+                card.addView(
+                    TextView(this).apply {
+
+                        text =
+                            memory.text
+
+                        textSize =
+                            13.5f
+
+                        setTextColor(
+                            Color.parseColor(
+                                "#D7E0ED"
+                            )
+                        )
+                    }
+                )
+
+                contentContainer.addView(
+                    card,
+                    sectionParams(
+                        top =
+                            6
+                    )
+                )
+            }
+        }
+    }
+
+    private fun renderDiagnostics() {
+
+        contentContainer
+            .removeAllViews()
+
+        contentContainer.addView(
+            pageTitle(
+                "Диагностика",
+                "Состояние ключевых систем AYANA"
+            )
+        )
+
+        val checks =
+            listOf(
+                Triple(
+                    "Микрофон",
+                    checkSelfPermissionCompat(
+                        Manifest.permission.RECORD_AUDIO
+                    ),
+                    "Доступ к голосовым командам"
+                ),
+                Triple(
+                    "Accessibility",
+                    isAccessibilityEnabled(),
+                    "Управление интерфейсом Android"
+                ),
+                Triple(
+                    "Голосовой сервис",
+                    AyanaVoiceService.isRunning,
+                    "Wake-word и фоновые команды"
+                ),
+                Triple(
+                    "Точные напоминания",
+                    taskScheduler
+                        .canScheduleExact(),
+                    "Точное системное расписание"
+                ),
+                Triple(
+                    "Уведомления",
+                    notificationsEnabled(),
+                    "Системные уведомления AYANA"
+                ),
+                Triple(
+                    "Память и задачи",
+                    true,
+                    "${memoryStore.count()} фактов • ${taskStore.count()} задач"
+                )
+            )
+
+        checks.forEach {
+            check ->
+
+            contentContainer.addView(
+                diagnosticRow(
+                    check.first,
+                    check.second,
+                    check.third
+                ),
+                sectionParams(
+                    top =
+                        7
+                )
+            )
+        }
+
+        val allGood =
+            checks.all {
+                it.second
+            }
+
+        val summary =
+            panel(
+                20
+            )
+
+        summary.addView(
+            TextView(this).apply {
+
+                text =
+                    if (
+                        allGood
+                    ) {
+                        "✓ Все основные системы работают"
+                    } else {
+                        "Некоторые разрешения требуют внимания"
+                    }
+
+                textSize =
+                    14f
+
+                setTypeface(
+                    Typeface.DEFAULT,
+                    Typeface.BOLD
+                )
+
+                setTextColor(
+                    Color.parseColor(
+                        if (
+                            allGood
+                        ) {
+                            "#86EFAC"
+                        } else {
+                            "#FBBF24"
+                        }
+                    )
+                )
+            }
+        )
+
+        contentContainer.addView(
+            summary,
+            sectionParams(
+                top =
+                    14
+            )
+        )
+    }
+
+    private fun renderSettings() {
+
+        contentContainer
+            .removeAllViews()
+
+        contentContainer.addView(
+            pageTitle(
+                "Настройки",
+                "Разрешения и управление AYANA"
+            )
+        )
+
+        contentContainer.addView(
+            settingsAction(
+                "Accessibility",
+                "Управление приложениями и интерфейсом Android"
+            ) {
+
+                try {
+
+                    startActivity(
+                        Intent(
+                            Settings.ACTION_ACCESSIBILITY_SETTINGS
+                        )
+                    )
+
+                } catch (_: Exception) {
+
+                    startActivity(
+                        Intent(
+                            Settings.ACTION_SETTINGS
+                        )
+                    )
+                }
+            },
+            sectionParams(
+                top =
+                    8
+            )
+        )
+
+        contentContainer.addView(
+            settingsAction(
+                "Точные напоминания",
+                if (
+                    taskScheduler
+                        .canScheduleExact()
+                ) {
+                    "Разрешение уже выдано"
+                } else {
+                    "Открыть системный экран разрешения"
+                }
+            ) {
+
+                taskScheduler
+                    .openExactAlarmPermissionScreen()
+            },
+            sectionParams(
+                top =
+                    8
+            )
+        )
+
+        contentContainer.addView(
+            settingsAction(
+                "Уведомления AYANA",
+                "Открыть системные настройки уведомлений"
+            ) {
+
+                openNotificationSettings()
+            },
+            sectionParams(
+                top =
+                    8
+            )
+        )
+
+        contentContainer.addView(
+            settingsAction(
+                "Текстовый режим",
+                "Открыть тихий ввод без голосового ответа"
+            ) {
+
+                toggleTextMode()
+            },
+            sectionParams(
+                top =
+                    8
+            )
+        )
+
+        contentContainer.addView(
+            settingsAction(
+                "Системные настройки Android",
+                "Открыть настройки планшета"
+            ) {
+
+                startActivity(
+                    Intent(
+                        Settings.ACTION_SETTINGS
+                    )
+                )
+            },
+            sectionParams(
+                top =
+                    8
+            )
+        )
+    }
+
+    private fun buildTextPanel() {
 
         textPanel =
             LinearLayout(this).apply {
@@ -519,15 +1717,20 @@ class MainActivity : AppCompatActivity() {
                 visibility =
                     View.GONE
 
-                layoutParams =
-                    LinearLayout.LayoutParams(
-                        ViewGroup.LayoutParams.MATCH_PARENT,
-                        ViewGroup.LayoutParams.WRAP_CONTENT
-                    ).apply {
+                setPadding(
+                    dp(14),
+                    dp(12),
+                    dp(14),
+                    dp(12)
+                )
 
-                        bottomMargin =
-                            dp(12)
-                    }
+                background =
+                    panelDrawable(
+                        corner =
+                            20,
+                        stroke =
+                            "#283650"
+                    )
             }
 
         val inputRow =
@@ -538,29 +1741,6 @@ class MainActivity : AppCompatActivity() {
 
                 gravity =
                     Gravity.CENTER_VERTICAL
-
-                background =
-                    GradientDrawable().apply {
-
-                        cornerRadius =
-                            dp(16).toFloat()
-
-                        setColor(
-                            Color.parseColor("#111C2F")
-                        )
-
-                        setStroke(
-                            dp(1),
-                            Color.parseColor("#334768")
-                        )
-                    }
-
-                setPadding(
-                    dp(6),
-                    dp(4),
-                    dp(5),
-                    dp(4)
-                )
             }
 
         textInput =
@@ -569,42 +1749,43 @@ class MainActivity : AppCompatActivity() {
                 this.hint =
                     "Введите команду…"
 
-                textSize = 15f
-
-                setSingleLine(true)
-
-                imeOptions =
-                    EditorInfo.IME_ACTION_SEND
+                textSize =
+                    14f
 
                 setTextColor(
                     Color.WHITE
                 )
 
                 setHintTextColor(
-                    Color.parseColor("#7F91AA")
+                    Color.parseColor(
+                        "#66758B"
+                    )
                 )
+
+                singleLine =
+                    true
+
+                imeOptions =
+                    EditorInfo.IME_ACTION_SEND
 
                 background =
-                    null
-
-                setPadding(
-                    dp(12),
-                    dp(8),
-                    dp(8),
-                    dp(8)
-                )
-
-                layoutParams =
-                    LinearLayout.LayoutParams(
-                        0,
-                        dp(48),
-                        1f
+                    softDrawable(
+                        "#0A101B",
+                        "#26344C",
+                        16
                     )
 
+                setPadding(
+                    dp(14),
+                    0,
+                    dp(14),
+                    0
+                )
+
                 setOnEditorActionListener {
-                        _,
-                        actionId,
-                        _ ->
+                    _,
+                    actionId,
+                    _ ->
 
                     if (
                         actionId ==
@@ -621,11 +1802,23 @@ class MainActivity : AppCompatActivity() {
                 }
             }
 
-        val sendButton =
+        inputRow.addView(
+            textInput,
+            LinearLayout.LayoutParams(
+                0,
+                dp(48),
+                1f
+            )
+        )
+
+        val send =
             TextView(this).apply {
 
-                text = "➤"
-                textSize = 23f
+                text =
+                    "➤"
+
+                textSize =
+                    22f
 
                 gravity =
                     Gravity.CENTER
@@ -634,21 +1827,24 @@ class MainActivity : AppCompatActivity() {
                     Color.WHITE
                 )
 
-                layoutParams =
-                    LinearLayout.LayoutParams(
-                        dp(46),
-                        dp(46)
-                    )
-
                 background =
-                    GradientDrawable().apply {
-
-                        shape =
-                            GradientDrawable.OVAL
-
-                        setColor(
-                            Color.parseColor("#4C6FFF")
+                    GradientDrawable(
+                        GradientDrawable
+                            .Orientation
+                            .TL_BR,
+                        intArrayOf(
+                            Color.parseColor(
+                                "#6655E8"
+                            ),
+                            Color.parseColor(
+                                "#3867DE"
+                            )
                         )
+                    ).apply {
+
+                        cornerRadius =
+                            dp(16)
+                                .toFloat()
                     }
 
                 setOnClickListener {
@@ -657,11 +1853,19 @@ class MainActivity : AppCompatActivity() {
             }
 
         inputRow.addView(
-            textInput
+            send,
+            LinearLayout.LayoutParams(
+                dp(50),
+                dp(48)
+            ).apply {
+
+                marginStart =
+                    dp(8)
+            }
         )
 
-        inputRow.addView(
-            sendButton
+        textPanel.addView(
+            inputRow
         )
 
         answerCard =
@@ -681,204 +1885,41 @@ class MainActivity : AppCompatActivity() {
                 )
 
                 background =
-                    GradientDrawable().apply {
-
-                        cornerRadius =
-                            dp(15).toFloat()
-
-                        setColor(
-                            Color.parseColor("#142137")
-                        )
-
-                        setStroke(
-                            dp(1),
-                            Color.parseColor("#304563")
-                        )
-                    }
-
-                layoutParams =
-                    LinearLayout.LayoutParams(
-                        ViewGroup.LayoutParams.MATCH_PARENT,
-                        ViewGroup.LayoutParams.WRAP_CONTENT
-                    ).apply {
-
-                        topMargin =
-                            dp(9)
-                    }
-            }
-
-        val answerLabel =
-            TextView(this).apply {
-
-                text = "AYANA"
-
-                textSize = 11.5f
-
-                setTextColor(
-                    Color.parseColor("#79D8F3")
-                )
-
-                typeface =
-                    android.graphics.Typeface.DEFAULT_BOLD
+                    softDrawable(
+                        "#101426",
+                        "#39345E",
+                        16
+                    )
             }
 
         textAnswer =
             TextView(this).apply {
 
-                text = ""
-
-                textSize = 14f
+                textSize =
+                    13.5f
 
                 setTextColor(
-                    Color.parseColor("#E6EDF8")
+                    Color.parseColor(
+                        "#DDE6F2"
+                    )
                 )
-
-                setPadding(
-                    0,
-                    dp(5),
-                    0,
-                    0
-                )
-
-                maxLines = 9
             }
-
-        answerCard.addView(
-            answerLabel
-        )
 
         answerCard.addView(
             textAnswer
         )
 
         textPanel.addView(
-            inputRow
-        )
+            answerCard,
+            LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT
+            ).apply {
 
-        textPanel.addView(
-            answerCard
-        )
-
-        // =====================================================
-        // STOP
-        // =====================================================
-
-        stopButton =
-            Button(this).apply {
-
-                text =
-                    "■  ОСТАНОВИТЬ AYANA"
-
-                textSize = 14f
-                isAllCaps = false
-
-                setTextColor(
-                    Color.WHITE
-                )
-
-                layoutParams =
-                    LinearLayout.LayoutParams(
-                        ViewGroup.LayoutParams.MATCH_PARENT,
-                        dp(52)
-                    )
-
-                background =
-                    GradientDrawable(
-                        GradientDrawable.Orientation.LEFT_RIGHT,
-                        intArrayOf(
-                            Color.parseColor("#AD233E"),
-                            Color.parseColor("#D23B55")
-                        )
-                    ).apply {
-
-                        cornerRadius =
-                            dp(16).toFloat()
-                    }
-
-                setOnClickListener {
-
-                    stopAyanaService()
-
-                    setStatus(
-                        "AYANA остановлена",
-                        AyanaVoiceService.STATE_STOPPED
-                    )
-
-                    isEnabled =
-                        false
-
-                    alpha =
-                        0.55f
-                }
+                topMargin =
+                    dp(9)
             }
-
-        root.addView(
-            topRow
         )
-
-        root.addView(
-            orb
-        )
-
-        root.addView(
-            statusRow
-        )
-
-        root.addView(
-            hint
-        )
-
-        root.addView(
-            textPanel
-        )
-
-        root.addView(
-            stopButton
-        )
-
-        setContentView(
-            root
-        )
-    }
-
-    private fun makeRoundTopButton(
-        symbol: String
-    ): TextView {
-
-        return TextView(this).apply {
-
-            text = symbol
-            textSize = 23f
-
-            gravity =
-                Gravity.CENTER
-
-            setTextColor(
-                Color.parseColor("#DDE8FF")
-            )
-
-            layoutParams =
-                LinearLayout.LayoutParams(
-                    dp(46),
-                    dp(46)
-                )
-
-            background =
-                GradientDrawable().apply {
-
-                    shape =
-                        GradientDrawable.OVAL
-
-                    setColor(
-                        Color.parseColor("#1B2941")
-                    )
-
-                    setStroke(
-                        dp(1),
-                        Color.parseColor("#354A6C")
-                    )
-                }
-        }
     }
 
     private fun toggleTextMode() {
@@ -886,46 +1927,44 @@ class MainActivity : AppCompatActivity() {
         textModeVisible =
             !textModeVisible
 
-        if (textModeVisible) {
-
-            textPanel.visibility =
+        textPanel.visibility =
+            if (
+                textModeVisible
+            ) {
                 View.VISIBLE
+            } else {
+                View.GONE
+            }
 
-            textModeButton.setTextColor(
-                Color.parseColor("#77D9F3")
-            )
+        if (
+            textModeVisible
+        ) {
 
-            textInput.requestFocus()
+            textInput
+                .requestFocus()
 
-            textInput.postDelayed(
-                {
+            textInput
+                .postDelayed(
+                    {
 
-                    val keyboard =
-                        getSystemService(
-                            Context.INPUT_METHOD_SERVICE
-                        ) as InputMethodManager
+                        val keyboard =
+                            getSystemService(
+                                Context.INPUT_METHOD_SERVICE
+                            ) as InputMethodManager
 
-                    keyboard.showSoftInput(
-                        textInput,
-                        InputMethodManager.SHOW_IMPLICIT
-                    )
-                },
-                120L
-            )
+                        keyboard.showSoftInput(
+                            textInput,
+                            InputMethodManager.SHOW_IMPLICIT
+                        )
+
+                    },
+                    150
+                )
 
         } else {
 
-            textPanel.visibility =
-                View.GONE
-
-            textModeButton.setTextColor(
-                Color.parseColor("#DDE8FF")
-            )
-
             hideKeyboard()
         }
-
-        resizeWindow()
     }
 
     private fun sendTextCommand() {
@@ -936,19 +1975,17 @@ class MainActivity : AppCompatActivity() {
                 .toString()
                 .trim()
 
-        if (command.isBlank()) {
+        if (
+            command.isBlank()
+        ) {
             return
         }
 
-        textInput.setText("")
-
-        answerCard.visibility =
-            View.GONE
-
-        setStatus(
-            "Думаю…",
-            AyanaVoiceService.STATE_THINKING
-        )
+        if (
+            !AyanaVoiceService.isRunning
+        ) {
+            startAyanaService()
+        }
 
         val intent =
             Intent(
@@ -968,66 +2005,70 @@ class MainActivity : AppCompatActivity() {
         try {
 
             if (
-                AyanaVoiceService.isRunning
+                Build.VERSION.SDK_INT >= 26
             ) {
 
-                startService(
+                startForegroundService(
                     intent
                 )
 
             } else {
 
-                startAyanaService()
-
-                textInput.postDelayed(
-                    {
-                        try {
-                            startService(
-                                intent
-                            )
-                        } catch (_: Exception) {
-                        }
-                    },
-                    500L
+                startService(
+                    intent
                 )
             }
 
+            textInput
+                .setText(
+                    ""
+                )
+
+            answerCard.visibility =
+                View.VISIBLE
+
+            textAnswer.text =
+                "AYANA думает…"
+
+            hideKeyboard()
+
         } catch (_: Exception) {
 
-            setStatus(
-                "Не удалось отправить команду",
-                AyanaVoiceService.STATE_ERROR
+            showTextAnswer(
+                "Не удалось отправить команду."
             )
         }
     }
 
     private fun showTextAnswer(
-        answer: String
+        text: String
     ) {
 
-        if (!textModeVisible) {
+        if (
+            !textModeVisible
+        ) {
 
             textModeVisible =
                 true
 
             textPanel.visibility =
                 View.VISIBLE
-
-            textModeButton.setTextColor(
-                Color.parseColor("#77D9F3")
-            )
         }
-
-        textAnswer.text =
-            answer
 
         answerCard.visibility =
             View.VISIBLE
 
-        resizeWindow()
+        textAnswer.text =
+            text
     }
 
     private fun hideKeyboard() {
+
+        if (
+            !::textInput.isInitialized
+        ) {
+            return
+        }
 
         val keyboard =
             getSystemService(
@@ -1160,6 +2201,11 @@ class MainActivity : AppCompatActivity() {
                 )
             )
         }
+
+        setStatus(
+            "AYANA остановлена",
+            AyanaVoiceService.STATE_STOPPED
+        )
     }
 
     private fun setStatus(
@@ -1167,43 +2213,1104 @@ class MainActivity : AppCompatActivity() {
         state: String
     ) {
 
-        statusText.text =
-            text
+        if (
+            ::statusText.isInitialized
+        ) {
 
-        val color =
-            when (state) {
+            statusText.text =
+                text
+        }
+
+        if (
+            ::statusDot.isInitialized
+        ) {
+
+            statusDot.background =
+                circleDrawable(
+                    stateColor(
+                        state
+                    )
+                )
+        }
+
+        if (
+            ::orbText.isInitialized
+        ) {
+
+            orbText.background =
+                orbDrawable(
+                    state
+                )
+        }
+    }
+
+    private fun stateTitle(
+        state: String
+    ): String {
+
+        return when (
+            state
+        ) {
+
+            AyanaVoiceService.STATE_LISTENING ->
+                "Слушаю"
+
+            AyanaVoiceService.STATE_COMMAND ->
+                "Распознаю команду"
+
+            AyanaVoiceService.STATE_THINKING ->
+                "Думаю"
+
+            AyanaVoiceService.STATE_SPEAKING ->
+                "Говорю"
+
+            AyanaVoiceService.STATE_TEXT ->
+                "Текстовый ответ"
+
+            AyanaVoiceService.STATE_ERROR ->
+                "Нужна помощь"
+
+            AyanaVoiceService.STATE_STOPPED ->
+                "Остановлена"
+
+            else ->
+                "AYANA"
+        }
+    }
+
+    private fun stateColor(
+        state: String
+    ): Int {
+
+        return Color.parseColor(
+            when (
+                state
+            ) {
 
                 AyanaVoiceService.STATE_LISTENING ->
-                    "#4ADE80"
-
-                AyanaVoiceService.STATE_COMMAND ->
                     "#38BDF8"
 
+                AyanaVoiceService.STATE_COMMAND ->
+                    "#22D3EE"
+
                 AyanaVoiceService.STATE_THINKING ->
-                    "#A78BFA"
+                    "#8B5CF6"
 
                 AyanaVoiceService.STATE_SPEAKING ->
-                    "#F59E0B"
+                    "#6366F1"
 
                 AyanaVoiceService.STATE_TEXT ->
                     "#67E8F9"
 
                 AyanaVoiceService.STATE_ERROR ->
-                    "#FB7185"
+                    "#EF4444"
 
                 AyanaVoiceService.STATE_STOPPED ->
-                    "#94A3B8"
+                    "#64748B"
 
                 else ->
-                    "#CBD5E1"
+                    "#7C3AED"
+            }
+        )
+    }
+
+    private fun orbDrawable(
+        state: String
+    ): GradientDrawable {
+
+        val colors =
+            when (
+                state
+            ) {
+
+                AyanaVoiceService.STATE_LISTENING ->
+                    intArrayOf(
+                        Color.parseColor(
+                            "#1D4ED8"
+                        ),
+                        Color.parseColor(
+                            "#06B6D4"
+                        )
+                    )
+
+                AyanaVoiceService.STATE_THINKING ->
+                    intArrayOf(
+                        Color.parseColor(
+                            "#4C1D95"
+                        ),
+                        Color.parseColor(
+                            "#7C3AED"
+                        )
+                    )
+
+                AyanaVoiceService.STATE_ERROR ->
+                    intArrayOf(
+                        Color.parseColor(
+                            "#7F1D1D"
+                        ),
+                        Color.parseColor(
+                            "#DC2626"
+                        )
+                    )
+
+                AyanaVoiceService.STATE_STOPPED ->
+                    intArrayOf(
+                        Color.parseColor(
+                            "#1F2937"
+                        ),
+                        Color.parseColor(
+                            "#334155"
+                        )
+                    )
+
+                else ->
+                    intArrayOf(
+                        Color.parseColor(
+                            "#4338CA"
+                        ),
+                        Color.parseColor(
+                            "#7C3AED"
+                        ),
+                        Color.parseColor(
+                            "#2563EB"
+                        )
+                    )
             }
 
-        statusDot.background =
-            circleDrawable(
-                Color.parseColor(
-                    color
+        return GradientDrawable(
+            GradientDrawable
+                .Orientation
+                .TL_BR,
+            colors
+        ).apply {
+
+            shape =
+                GradientDrawable.OVAL
+
+            setStroke(
+                dp(4),
+                stateColor(
+                    state
                 )
             )
+        }
+    }
+
+    private fun nextReminderCard():
+        View {
+
+        val card =
+            panel(
+                20
+            )
+
+        card.addView(
+            smallSectionTitle(
+                "СЛЕДУЮЩЕЕ НАПОМИНАНИЕ"
+            )
+        )
+
+        val next =
+            taskStore
+                .getFutureTasks()
+                .firstOrNull()
+
+        if (
+            next == null
+        ) {
+
+            card.addView(
+                TextView(this).apply {
+
+                    text =
+                        "Пока ничего не запланировано"
+
+                    textSize =
+                        14f
+
+                    setTextColor(
+                        Color.parseColor(
+                            "#95A3B6"
+                        )
+                    )
+
+                    setPadding(
+                        0,
+                        dp(12),
+                        0,
+                        dp(4)
+                    )
+                }
+            )
+
+        } else {
+
+            card.addView(
+                TextView(this).apply {
+
+                    text =
+                        formatTaskTime(
+                            next.triggerAtMillis
+                        )
+
+                    textSize =
+                        22f
+
+                    setTypeface(
+                        Typeface.DEFAULT,
+                        Typeface.BOLD
+                    )
+
+                    setTextColor(
+                        Color.WHITE
+                    )
+
+                    setPadding(
+                        0,
+                        dp(10),
+                        0,
+                        0
+                    )
+                }
+            )
+
+            card.addView(
+                TextView(this).apply {
+
+                    text =
+                        next.message
+
+                    textSize =
+                        13f
+
+                    setTextColor(
+                        Color.parseColor(
+                            "#A7B4C6"
+                        )
+                    )
+
+                    setPadding(
+                        0,
+                        dp(7),
+                        0,
+                        0
+                    )
+                }
+            )
+        }
+
+        return card
+    }
+
+    private fun quickActionsCard():
+        View {
+
+        val card =
+            panel(
+                20
+            )
+
+        card.addView(
+            smallSectionTitle(
+                "БЫСТРЫЕ ДЕЙСТВИЯ"
+            )
+        )
+
+        val row =
+            HorizontalScrollView(this).apply {
+
+                isHorizontalScrollBarEnabled =
+                    false
+            }
+
+        val chips =
+            LinearLayout(this).apply {
+
+                orientation =
+                    LinearLayout.HORIZONTAL
+
+                setPadding(
+                    0,
+                    dp(10),
+                    0,
+                    0
+                )
+            }
+
+        listOf(
+            "Задачи" to Page.TASKS,
+            "Память" to Page.MEMORY,
+            "Проверка" to Page.DIAGNOSTICS
+        ).forEach {
+            item ->
+
+            chips.addView(
+                smallAction(
+                    item.first
+                ) {
+
+                    switchPage(
+                        item.second
+                    )
+                },
+                LinearLayout.LayoutParams(
+                    ViewGroup.LayoutParams.WRAP_CONTENT,
+                    dp(42)
+                ).apply {
+
+                    marginEnd =
+                        dp(8)
+                }
+            )
+        }
+
+        row.addView(
+            chips
+        )
+
+        card.addView(
+            row
+        )
+
+        return card
+    }
+
+    private fun modeStrip():
+        View {
+
+        val card =
+            panel(
+                20
+            )
+
+        card.addView(
+            smallSectionTitle(
+                "СОСТОЯНИЯ AYANA"
+            )
+        )
+
+        val row =
+            LinearLayout(this).apply {
+
+                orientation =
+                    LinearLayout.HORIZONTAL
+
+                gravity =
+                    Gravity.CENTER
+
+                setPadding(
+                    0,
+                    dp(12),
+                    0,
+                    0
+                )
+            }
+
+        listOf(
+            "Слушаю" to "#38BDF8",
+            "Думаю" to "#8B5CF6",
+            "Выполняю" to "#6366F1",
+            "Говорю" to "#22D3EE",
+            "Ошибка" to "#EF4444"
+        ).forEach {
+            item ->
+
+            val state =
+                LinearLayout(this).apply {
+
+                    orientation =
+                        LinearLayout.VERTICAL
+
+                    gravity =
+                        Gravity.CENTER
+
+                    layoutParams =
+                        LinearLayout.LayoutParams(
+                            0,
+                            ViewGroup.LayoutParams.WRAP_CONTENT,
+                            1f
+                        )
+                }
+
+            state.addView(
+                View(this).apply {
+
+                    background =
+                        circleDrawable(
+                            Color.parseColor(
+                                item.second
+                            )
+                        )
+                },
+                LinearLayout.LayoutParams(
+                    dp(18),
+                    dp(18)
+                )
+            )
+
+            state.addView(
+                TextView(this).apply {
+
+                    text =
+                        item.first
+
+                    textSize =
+                        10.5f
+
+                    setTextColor(
+                        Color.parseColor(
+                            "#8FA0B7"
+                        )
+                    )
+
+                    setPadding(
+                        0,
+                        dp(5),
+                        0,
+                        0
+                    )
+                }
+            )
+
+            row.addView(
+                state
+            )
+        }
+
+        card.addView(
+            row
+        )
+
+        return card
+    }
+
+    private fun metricCard(
+        title: String,
+        number: String,
+        caption: String
+    ): View {
+
+        val card =
+            panel(
+                18
+            )
+
+        card.addView(
+            TextView(this).apply {
+
+                text =
+                    title.uppercase(
+                        Locale.getDefault()
+                    )
+
+                textSize =
+                    10.5f
+
+                setTextColor(
+                    Color.parseColor(
+                        "#73839A"
+                    )
+                )
+            }
+        )
+
+        card.addView(
+            TextView(this).apply {
+
+                text =
+                    number
+
+                textSize =
+                    27f
+
+                setTypeface(
+                    Typeface.DEFAULT,
+                    Typeface.BOLD
+                )
+
+                setTextColor(
+                    Color.WHITE
+                )
+
+                setPadding(
+                    0,
+                    dp(5),
+                    0,
+                    0
+                )
+            }
+        )
+
+        card.addView(
+            TextView(this).apply {
+
+                text =
+                    caption
+
+                textSize =
+                    11.5f
+
+                setTextColor(
+                    Color.parseColor(
+                        "#8A98AA"
+                    )
+                )
+            }
+        )
+
+        return card
+    }
+
+    private fun diagnosticRow(
+        name: String,
+        ok: Boolean,
+        description: String
+    ): View {
+
+        val row =
+            LinearLayout(this).apply {
+
+                orientation =
+                    LinearLayout.HORIZONTAL
+
+                gravity =
+                    Gravity.CENTER_VERTICAL
+
+                setPadding(
+                    dp(18),
+                    dp(15),
+                    dp(18),
+                    dp(15)
+                )
+
+                background =
+                    panelDrawable(
+                        corner =
+                            18,
+                        stroke =
+                            "#1B293C"
+                    )
+            }
+
+        val copy =
+            LinearLayout(this).apply {
+
+                orientation =
+                    LinearLayout.VERTICAL
+
+                layoutParams =
+                    LinearLayout.LayoutParams(
+                        0,
+                        ViewGroup.LayoutParams.WRAP_CONTENT,
+                        1f
+                    )
+            }
+
+        copy.addView(
+            TextView(this).apply {
+
+                text =
+                    name
+
+                textSize =
+                    14f
+
+                setTextColor(
+                    Color.WHITE
+                )
+            }
+        )
+
+        copy.addView(
+            TextView(this).apply {
+
+                text =
+                    description
+
+                textSize =
+                    11.5f
+
+                setTextColor(
+                    Color.parseColor(
+                        "#728196"
+                    )
+                )
+
+                setPadding(
+                    0,
+                    dp(4),
+                    0,
+                    0
+                )
+            }
+        )
+
+        row.addView(
+            copy
+        )
+
+        row.addView(
+            TextView(this).apply {
+
+                text =
+                    if (
+                        ok
+                    ) {
+                        "✓ Работает"
+                    } else {
+                        "● Требует внимания"
+                    }
+
+                textSize =
+                    12f
+
+                setTextColor(
+                    Color.parseColor(
+                        if (
+                            ok
+                        ) {
+                            "#4ADE80"
+                        } else {
+                            "#FBBF24"
+                        }
+                    )
+                )
+            }
+        )
+
+        return row
+    }
+
+    private fun settingsAction(
+        title: String,
+        description: String,
+        action: () -> Unit
+    ): View {
+
+        val row =
+            LinearLayout(this).apply {
+
+                orientation =
+                    LinearLayout.HORIZONTAL
+
+                gravity =
+                    Gravity.CENTER_VERTICAL
+
+                setPadding(
+                    dp(18),
+                    dp(16),
+                    dp(18),
+                    dp(16)
+                )
+
+                background =
+                    panelDrawable(
+                        corner =
+                            18,
+                        stroke =
+                            "#1B293C"
+                    )
+
+                setOnClickListener {
+                    action()
+                }
+            }
+
+        val copy =
+            LinearLayout(this).apply {
+
+                orientation =
+                    LinearLayout.VERTICAL
+
+                layoutParams =
+                    LinearLayout.LayoutParams(
+                        0,
+                        ViewGroup.LayoutParams.WRAP_CONTENT,
+                        1f
+                    )
+            }
+
+        copy.addView(
+            TextView(this).apply {
+
+                text =
+                    title
+
+                textSize =
+                    14f
+
+                setTextColor(
+                    Color.WHITE
+                )
+            }
+        )
+
+        copy.addView(
+            TextView(this).apply {
+
+                text =
+                    description
+
+                textSize =
+                    11.5f
+
+                setTextColor(
+                    Color.parseColor(
+                        "#728196"
+                    )
+                )
+
+                setPadding(
+                    0,
+                    dp(4),
+                    0,
+                    0
+                )
+            }
+        )
+
+        row.addView(
+            copy
+        )
+
+        row.addView(
+            TextView(this).apply {
+
+                text =
+                    "›"
+
+                textSize =
+                    26f
+
+                setTextColor(
+                    Color.parseColor(
+                        "#8B5CF6"
+                    )
+                )
+            }
+        )
+
+        return row
+    }
+
+    private fun pageTitle(
+        title: String,
+        subtitle: String
+    ): View {
+
+        return LinearLayout(this).apply {
+
+            orientation =
+                LinearLayout.VERTICAL
+
+            setPadding(
+                dp(2),
+                dp(5),
+                dp(2),
+                dp(12)
+            )
+
+            addView(
+                TextView(this@MainActivity).apply {
+
+                    text =
+                        title
+
+                    textSize =
+                        25f
+
+                    setTypeface(
+                        Typeface.DEFAULT,
+                        Typeface.BOLD
+                    )
+
+                    setTextColor(
+                        Color.WHITE
+                    )
+                }
+            )
+
+            addView(
+                TextView(this@MainActivity).apply {
+
+                    text =
+                        subtitle
+
+                    textSize =
+                        12.5f
+
+                    setTextColor(
+                        Color.parseColor(
+                            "#718197"
+                        )
+                    )
+
+                    setPadding(
+                        0,
+                        dp(3),
+                        0,
+                        0
+                    )
+                }
+            )
+        }
+    }
+
+    private fun emptyCard(
+        title: String,
+        subtitle: String
+    ): View {
+
+        val card =
+            panel(
+                20
+            )
+
+        card.gravity =
+            Gravity.CENTER_HORIZONTAL
+
+        card.setPadding(
+            dp(20),
+            dp(28),
+            dp(20),
+            dp(28)
+        )
+
+        card.addView(
+            TextView(this).apply {
+
+                text =
+                    title
+
+                textSize =
+                    16f
+
+                setTypeface(
+                    Typeface.DEFAULT,
+                    Typeface.BOLD
+                )
+
+                setTextColor(
+                    Color.parseColor(
+                        "#DDE6F2"
+                    )
+                )
+            }
+        )
+
+        card.addView(
+            TextView(this).apply {
+
+                text =
+                    subtitle
+
+                textSize =
+                    12.5f
+
+                gravity =
+                    Gravity.CENTER
+
+                setTextColor(
+                    Color.parseColor(
+                        "#7A899D"
+                    )
+                )
+
+                setPadding(
+                    0,
+                    dp(8),
+                    0,
+                    0
+                )
+            }
+        )
+
+        return card
+    }
+
+    private fun panel(
+        corner: Int
+    ): LinearLayout {
+
+        return LinearLayout(this).apply {
+
+            orientation =
+                LinearLayout.VERTICAL
+
+            setPadding(
+                dp(18),
+                dp(16),
+                dp(18),
+                dp(16)
+            )
+
+            background =
+                panelDrawable(
+                    corner =
+                        corner,
+                    stroke =
+                        "#1A283B"
+                )
+        }
+    }
+
+    private fun smallSectionTitle(
+        textValue: String
+    ): TextView {
+
+        return TextView(this).apply {
+
+            text =
+                textValue
+
+            textSize =
+                10.5f
+
+            setTypeface(
+                Typeface.DEFAULT,
+                Typeface.BOLD
+            )
+
+            setTextColor(
+                Color.parseColor(
+                    "#8B79E8"
+                )
+            )
+
+            letterSpacing =
+                0.04f
+        }
+    }
+
+    private fun topIconButton(
+        symbol: String
+    ): TextView {
+
+        return TextView(this).apply {
+
+            text =
+                symbol
+
+            textSize =
+                20f
+
+            gravity =
+                Gravity.CENTER
+
+            setTextColor(
+                Color.parseColor(
+                    "#D9E3F1"
+                )
+            )
+
+            background =
+                softDrawable(
+                    "#0D1420",
+                    "#24334B",
+                    14
+                )
+        }
+    }
+
+    private fun smallAction(
+        label: String,
+        action: () -> Unit
+    ): TextView {
+
+        return TextView(this).apply {
+
+            text =
+                label
+
+            textSize =
+                11.5f
+
+            gravity =
+                Gravity.CENTER
+
+            setPadding(
+                dp(14),
+                0,
+                dp(14),
+                0
+            )
+
+            setTextColor(
+                Color.parseColor(
+                    "#D9E3F1"
+                )
+            )
+
+            background =
+                softDrawable(
+                    "#111A2A",
+                    "#31405A",
+                    14
+                )
+
+            setOnClickListener {
+                action()
+            }
+        }
+    }
+
+    private fun panelDrawable(
+        corner: Int,
+        stroke: String
+    ): GradientDrawable {
+
+        return GradientDrawable(
+            GradientDrawable
+                .Orientation
+                .TL_BR,
+            intArrayOf(
+                Color.parseColor(
+                    "#0D131F"
+                ),
+                Color.parseColor(
+                    "#101826"
+                )
+            )
+        ).apply {
+
+            cornerRadius =
+                dp(corner)
+                    .toFloat()
+
+            setStroke(
+                dp(1),
+                Color.parseColor(
+                    stroke
+                )
+            )
+        }
+    }
+
+    private fun softDrawable(
+        fill: String,
+        stroke: String,
+        corner: Int
+    ): GradientDrawable {
+
+        return GradientDrawable().apply {
+
+            setColor(
+                Color.parseColor(
+                    fill
+                )
+            )
+
+            cornerRadius =
+                dp(corner)
+                    .toFloat()
+
+            setStroke(
+                dp(1),
+                Color.parseColor(
+                    stroke
+                )
+            )
+        }
     }
 
     private fun circleDrawable(
@@ -1221,15 +3328,194 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
+    private fun equalCardParams(
+        left: Int = 0
+    ): LinearLayout.LayoutParams {
+
+        return LinearLayout.LayoutParams(
+            0,
+            ViewGroup.LayoutParams.WRAP_CONTENT,
+            1f
+        ).apply {
+
+            marginStart =
+                dp(left)
+        }
+    }
+
+    private fun sectionParams(
+        top: Int = 10
+    ): LinearLayout.LayoutParams {
+
+        return LinearLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT,
+            ViewGroup.LayoutParams.WRAP_CONTENT
+        ).apply {
+
+            topMargin =
+                dp(top)
+        }
+    }
+
+    private fun formatTaskTime(
+        millis: Long
+    ): String {
+
+        return SimpleDateFormat(
+            "dd MMM, HH:mm",
+            Locale.getDefault()
+        ).format(
+            Date(
+                millis
+            )
+        )
+    }
+
+    private fun memoryCategoryTitle(
+        category: String
+    ): String {
+
+        return when (
+            category
+        ) {
+
+            "preference" ->
+                "ПРЕДПОЧТЕНИЯ"
+
+            "person" ->
+                "ЛЮДИ"
+
+            "project" ->
+                "ПРОЕКТЫ"
+
+            "task" ->
+                "ЗАДАЧИ"
+
+            "place" ->
+                "МЕСТА"
+
+            else ->
+                "ВАЖНОЕ"
+        }
+    }
+
+    private fun diagnosticsPassed():
+        Int {
+
+        return listOf(
+            checkSelfPermissionCompat(
+                Manifest.permission.RECORD_AUDIO
+            ),
+            isAccessibilityEnabled(),
+            AyanaVoiceService.isRunning,
+            taskScheduler
+                .canScheduleExact(),
+            notificationsEnabled(),
+            true
+        ).count {
+            it
+        }
+    }
+
+    private fun isAccessibilityEnabled():
+        Boolean {
+
+        val expected =
+            ComponentName(
+                this,
+                AgentAccessibilityService::class.java
+            )
+                .flattenToString()
+
+        val enabled =
+            Settings.Secure
+                .getString(
+                    contentResolver,
+                    Settings.Secure
+                        .ENABLED_ACCESSIBILITY_SERVICES
+                )
+                ?: return false
+
+        return enabled
+            .split(":")
+            .any {
+                service ->
+
+                service.equals(
+                    expected,
+                    ignoreCase =
+                        true
+                )
+            }
+    }
+
+    private fun notificationsEnabled():
+        Boolean {
+
+        return try {
+
+            getSystemService(
+                NotificationManager::class.java
+            )
+                .areNotificationsEnabled()
+
+        } catch (_: Exception) {
+
+            true
+        }
+    }
+
+    private fun openNotificationSettings() {
+
+        val intent =
+            Intent(
+                Settings.ACTION_APP_NOTIFICATION_SETTINGS
+            ).apply {
+
+                putExtra(
+                    Settings.EXTRA_APP_PACKAGE,
+                    packageName
+                )
+            }
+
+        try {
+
+            startActivity(
+                intent
+            )
+
+        } catch (_: Exception) {
+
+            startActivity(
+                Intent(
+                    Settings.ACTION_APPLICATION_DETAILS_SETTINGS,
+                    android.net.Uri.parse(
+                        "package:$packageName"
+                    )
+                )
+            )
+        }
+    }
+
     private fun checkSelfPermissionCompat(
         permission: String
     ): Boolean {
 
-        return Build.VERSION.SDK_INT < 23 ||
+        return if (
+            Build.VERSION.SDK_INT >= 23
+        ) {
+
             checkSelfPermission(
                 permission
             ) ==
-            PackageManager.PERMISSION_GRANTED
+                android.content.pm
+                    .PackageManager
+                    .PERMISSION_GRANTED
+
+        } else {
+
+            true
+        }
     }
 
     private fun dp(
@@ -1241,6 +3527,15 @@ class MainActivity : AppCompatActivity() {
                 resources
                     .displayMetrics
                     .density
-            ).toInt()
+            )
+            .toInt()
     }
+
+    private class ColorDrawableCompat(
+        color: Int
+    ) :
+        android.graphics.drawable
+            .ColorDrawable(
+                color
+            )
 }
