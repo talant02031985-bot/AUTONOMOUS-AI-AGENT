@@ -773,19 +773,16 @@ class AyanaVoiceService : Service() {
                             val finalText =
                                 text
 
-                            localRecognizer
-                                .reset(stream)
-
                             val detected =
                                 wakeSeen ||
                                     containsWakeWord(
                                         finalText
                                     )
 
-                            wakeSeen =
-                                false
-
                             if (detected) {
+
+                                wakeSeen =
+                                    false
 
                                 val command =
                                     extractWakeCommand(
@@ -815,6 +812,14 @@ class AyanaVoiceService : Service() {
                                     }
 
                                 break
+
+                            } else {
+
+                                wakeSeen =
+                                    false
+
+                                localRecognizer
+                                    .reset(stream)
                             }
                         }
                     }
@@ -825,9 +830,6 @@ class AyanaVoiceService : Service() {
 
                             val finalText =
                                 text
-
-                            localRecognizer
-                                .reset(stream)
 
                             if (
                                 finalText.isNotBlank()
@@ -845,6 +847,11 @@ class AyanaVoiceService : Service() {
                                     }
 
                                 break
+
+                            } else {
+
+                                localRecognizer
+                                    .reset(stream)
                             }
                         }
                     }
@@ -861,25 +868,56 @@ class AyanaVoiceService : Service() {
 
         } catch (_: Exception) {
 
-            if (
-                !shuttingDown &&
-                listenMode !=
-                ListenMode.BUSY
-            ) {
+            if (!shuttingDown) {
 
                 pendingAction =
-                    {
-                        broadcastStatus(
-                            "Перезапускаю микрофон…",
-                            STATE_THINKING
-                        )
+                    when (listenMode) {
 
-                        mainHandler.postDelayed(
+                        ListenMode.WAKE -> {
+
+                            if (wakeSeen) {
+
+                                {
+                                    acknowledgeWakeAndListen()
+                                }
+
+                            } else {
+
+                                {
+                                    broadcastStatus(
+                                        "Перезапускаю микрофон…",
+                                        STATE_THINKING
+                                    )
+
+                                    mainHandler.postDelayed(
+                                        {
+                                            startWakeListening()
+                                        },
+                                        900L
+                                    )
+                                }
+                            }
+                        }
+
+                        ListenMode.COMMAND -> {
+
                             {
-                                resumeCurrentListeningMode()
-                            },
-                            700L
-                        )
+                                broadcastStatus(
+                                    "Перезапускаю микрофон…",
+                                    STATE_THINKING
+                                )
+
+                                mainHandler.postDelayed(
+                                    {
+                                        startCommandListening()
+                                    },
+                                    900L
+                                )
+                            }
+                        }
+
+                        ListenMode.BUSY ->
+                            null
                     }
             }
 
