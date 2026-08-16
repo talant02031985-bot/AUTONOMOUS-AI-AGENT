@@ -5354,13 +5354,38 @@ class AyanaVoiceService : Service() {
         currentStatusState =
             state
 
-        miniOrbController.refresh(
-            enabled =
-                ayanaPreferences
-                    .miniOrbEnabled,
-            state =
-                state
-        )
+        // Mini orb owns Android Views/WindowManager and must only be
+        // touched from the main UI thread. Agent Core runs on its own
+        // worker thread, so marshal overlay updates to main.
+        if (
+            Looper.myLooper() ==
+            Looper.getMainLooper()
+        ) {
+
+            miniOrbController.refresh(
+                enabled =
+                    ayanaPreferences
+                        .miniOrbEnabled,
+                state =
+                    state
+            )
+
+        } else {
+
+            mainHandler.post {
+
+                if (!shuttingDown) {
+
+                    miniOrbController.refresh(
+                        enabled =
+                            ayanaPreferences
+                                .miniOrbEnabled,
+                        state =
+                            state
+                    )
+                }
+            }
+        }
 
         sendBroadcast(
             Intent(
