@@ -1,650 +1,439 @@
 package kg.autonomous.agent
 
+import android.app.AlarmManager
+import android.app.Notification
+import android.app.NotificationChannel
+import android.app.NotificationManager
+import android.app.PendingIntent
+import android.content.BroadcastReceiver
 import android.content.Context
-import org.json.JSONArray
-import org.json.JSONObject
-import java.io.File
-import java.util.UUID
+import android.content.Intent
+import android.os.Build
+import java.util.Calendar
 
-class AyanaTaskStore(
-    context: Context
-) {
+class AyanaReminderReceiver :
+    BroadcastReceiver() {
 
-    data class TaskItem(
-        val id: String,
-        val title: String,
-        val message: String,
-        val triggerAtMillis: Long,
-        val recurrence: String,
-        val enabled: Boolean,
-        val createdAt: Long,
-        val updatedAt: Long
-    )
+    override fun onReceive(
+        context: Context,
+        intent: Intent
+    ) {
 
-    private val taskFile =
-        File(
-            context.filesDir,
-            FILE_NAME
+        val taskId =
+            intent.getStringExtra(
+                EXTRA_TASK_ID
+            )
+                ?.trim()
+                .orEmpty()
+
+        if (taskId.isBlank()) {
+            return
+        }
+
+        val store =
+            AyanaTaskStore(
+                context.applicationContext
+            )
+
+        val task =
+            store.getTask(
+                taskId
+            )
+                ?: return
+
+        if (!task.enabled) {
+            return
+        }
+
+        showReminderNotification(
+            context,
+            task
         )
 
-    private val lock =
-        Any()
+        scheduleNextIfRecurring(
+            context,
+            store,
+            task
+        )
+    }
 
-    fun addTask(
-        title: String,
-        message: String,
-        triggerAtMillis: Long,
-        recurrence: String = RECURRENCE_NONE
-    ): TaskItem? {
+    private fun showReminderNotification(
+        context: Context,
+        task: AyanaTaskStore.TaskItem
+    ) {
 
-        val cleanTitle =
-            title
-                .trim()
-                .replace(
-                    Regex("\\s+"),
-                    " "
+        createNotificationChannel(
+            context
+        )
+
+        val openIntent =
+            Intent(
+                context,
+                MainActivity::class.java
+            ).apply {
+
+                addFlags(
+                    Intent.FLAG_ACTIVITY_NEW_TASK or
+                        Intent.FLAG_ACTIVITY_CLEAR_TOP
+                )
+            }
+
+        val openPendingIntent =
+            PendingIntent.getActivity(
+                context,
+                task.id.hashCode(),
+                openIntent,
+                PendingIntent.FLAG_UPDATE_CURRENT or
+                    PendingIntent.FLAG_IMMUTABLE
+            )
+
+        val builder =
+            if (
+                Build.VERSION.SDK_INT >= 26
+            ) {
+
+                Notification.Builder(
+                    context,
+                    CHANNEL_ID
                 )
 
-        val cleanMessage =
-            message
-                .trim()
-                .replace(
-                    Regex("\\s+"),
-                    " "
+            } else {
+
+                @Suppress("DEPRECATION")
+                Notification.Builder(
+                    context
                 )
+            }
+
+        val notification =
+            builder
+                .setSmallIcon(
+                    android.R.drawable.ic_popup_reminder
+                )
+                .setContentTitle(
+                    task.title
+                )
+                .setContentText(
+                    task.message
+                )
+                .setStyle(
+                    Notification.BigTextStyle()
+                        .bigText(
+                            task.message
+                        )
+                )
+                .setAutoCancel(
+                    true
+                )
+                .setContentIntent(
+                    openPendingIntent
+                )
+                .setCategory(
+                    Notification.CATEGORY_REMINDER
+                )
+                .setOnlyAlertOnce(
+                    false
+                )
+                .build()
+
+        val manager =
+            context.getSystemService(
+                NotificationManager::class.java
+            )
+
+        manager.notify(
+            notificationId(
+                task.id
+            ),
+            notification
+        )
+    }
+
+    private fun createNotificationChannel(
+        context: Context
+    ) {
 
         if (
-            cleanTitle.isBlank() ||
-            triggerAtMillis <= 0L
+            Build.VERSION.SDK_INT < 26
         ) {
-            return null
+            return
+        }
+
+        val manager =
+            context.getSystemService(
+                NotificationManager::class.java
+            )
+
+        if (
+            manager.getNotificationChannel(
+                CHANNEL_ID
+            ) != null
+        ) {
+            return
+        }
+
+        val channel =
+            NotificationChannel(
+                CHANNEL_ID,
+                "Напоминания AYANA",
+                NotificationManager.IMPORTANCE_HIGH
+            ).apply {
+
+                description =
+                    "Напоминания и задачи AYANA AI"
+
+                enableVibration(
+                    true
+                )
+            }
+
+        manager.createNotificationChannel(
+            channel
+        )
+    }
+
+    private fun scheduleNextIfRecurring(
+        context: Context,
+        store: AyanaTaskStore,
+        task: AyanaTaskStore.TaskItem
+    ) {
+
+        val nextTrigger =
+            calculateNextTrigger(
+                task.triggerAtMillis,
+                task.recurrence
+            )
+
+        if (nextTrigger == null) {
+
+            store.updateTask(
+                id =
+                    task.id,
+                enabled =
+                    false
+            )
+
+            return
+        }
+
+        val updated =
+            store.updateTask(
+                id =
+                    task.id,
+                triggerAtMillis =
+                    nextTrigger,
+                enabled =
+                    true
+            )
+                ?: return
+
+        scheduleAlarm(
+            context,
+            updated
+        )
+    }
+
+    private fun calculateNextTrigger(
+        previousTrigger: Long,
+        recurrence: String
+    ): Long? {
+
+        val calendar =
+            Calendar.getInstance().apply {
+                timeInMillis =
+                    previousTrigger
+            }
+
+        when (recurrence) {
+
+            AyanaTaskStore
+                .RECURRENCE_DAILY -> {
+
+                calendar.add(
+                    Calendar.DAY_OF_YEAR,
+                    1
+                )
+            }
+
+            AyanaTaskStore
+                .RECURRENCE_WEEKLY -> {
+
+                calendar.add(
+                    Calendar.WEEK_OF_YEAR,
+                    1
+                )
+            }
+
+            AyanaTaskStore
+                .RECURRENCE_MONTHLY -> {
+
+                calendar.add(
+                    Calendar.MONTH,
+                    1
+                )
+            }
+
+            else ->
+                return null
         }
 
         val now =
             System.currentTimeMillis()
 
-        val item =
-            TaskItem(
-                id =
-                    UUID
-                        .randomUUID()
-                        .toString(),
-                title =
-                    cleanTitle,
-                message =
-                    cleanMessage
-                        .ifBlank {
-                            cleanTitle
-                        },
-                triggerAtMillis =
-                    triggerAtMillis,
-                recurrence =
-                    normalizeRecurrence(
-                        recurrence
-                    ),
-                enabled =
-                    true,
-                createdAt =
-                    now,
-                updatedAt =
-                    now
-            )
-
-        synchronized(lock) {
-
-            val items =
-                readItemsMutable()
-
-            items.add(
-                item
-            )
-
-            writeItems(
-                items
-                    .sortedByDescending {
-                        it.updatedAt
-                    }
-                    .take(
-                        MAX_TASKS
-                    )
-                    .toMutableList()
-            )
-        }
-
-        return item
-    }
-
-    fun updateTask(
-        id: String,
-        title: String? = null,
-        message: String? = null,
-        triggerAtMillis: Long? = null,
-        recurrence: String? = null,
-        enabled: Boolean? = null
-    ): TaskItem? {
-
-        synchronized(lock) {
-
-            val items =
-                readItemsMutable()
-
-            val index =
-                items.indexOfFirst {
-                    it.id == id
-                }
-
-            if (index < 0) {
-                return null
-            }
-
-            val old =
-                items[index]
-
-            val updated =
-                old.copy(
-                    title =
-                        title
-                            ?.trim()
-                            ?.replace(
-                                Regex("\\s+"),
-                                " "
-                            )
-                            ?.ifBlank {
-                                old.title
-                            }
-                            ?: old.title,
-                    message =
-                        message
-                            ?.trim()
-                            ?.replace(
-                                Regex("\\s+"),
-                                " "
-                            )
-                            ?.ifBlank {
-                                old.message
-                            }
-                            ?: old.message,
-                    triggerAtMillis =
-                        triggerAtMillis
-                            ?.takeIf {
-                                it > 0L
-                            }
-                            ?: old.triggerAtMillis,
-                    recurrence =
-                        recurrence
-                            ?.let {
-                                normalizeRecurrence(
-                                    it
-                                )
-                            }
-                            ?: old.recurrence,
-                    enabled =
-                        enabled
-                            ?: old.enabled,
-                    updatedAt =
-                        System
-                            .currentTimeMillis()
-                )
-
-            items[index] =
-                updated
-
-            writeItems(
-                items
-            )
-
-            return updated
-        }
-    }
-
-    fun deleteTask(
-        id: String
-    ): Boolean {
-
-        synchronized(lock) {
-
-            val items =
-                readItemsMutable()
-
-            val removed =
-                items.removeAll {
-                    it.id == id
-                }
-
-            if (removed) {
-                writeItems(
-                    items
-                )
-            }
-
-            return removed
-        }
-    }
-
-    fun deleteByQuery(
-        query: String
-    ): List<TaskItem> {
-
-        val cleanQuery =
-            normalize(
-                query
-            )
-
-        if (cleanQuery.isBlank()) {
-            return emptyList()
-        }
-
-        synchronized(lock) {
-
-            val items =
-                readItemsMutable()
-
-            val removed =
-                items.filter {
-
-                    val haystack =
-                        normalize(
-                            it.title +
-                                " " +
-                                it.message
-                        )
-
-                    haystack.contains(
-                        cleanQuery
-                    ) ||
-                        cleanQuery.contains(
-                            normalize(
-                                it.title
-                            )
-                        )
-                }
-
-            if (removed.isEmpty()) {
-                return emptyList()
-            }
-
-            val removedIds =
-                removed
-                    .map {
-                        it.id
-                    }
-                    .toSet()
-
-            val remaining =
-                items
-                    .filterNot {
-                        it.id in removedIds
-                    }
-                    .toMutableList()
-
-            writeItems(
-                remaining
-            )
-
-            return removed
-        }
-    }
-
-    fun getTask(
-        id: String
-    ): TaskItem? {
-
-        synchronized(lock) {
-
-            return readItemsMutable()
-                .firstOrNull {
-                    it.id == id
-                }
-        }
-    }
-
-    fun getAll(
-        includeDisabled: Boolean = false
-    ): List<TaskItem> {
-
-        synchronized(lock) {
-
-            return readItemsMutable()
-                .filter {
-                    includeDisabled ||
-                        it.enabled
-                }
-                .sortedBy {
-                    it.triggerAtMillis
-                }
-        }
-    }
-
-    fun getFutureTasks(
-        nowMillis: Long =
-            System.currentTimeMillis()
-    ): List<TaskItem> {
-
-        return getAll(
-            includeDisabled = false
-        )
-            .filter {
-                it.triggerAtMillis >=
-                    nowMillis
-            }
-            .sortedBy {
-                it.triggerAtMillis
-            }
-    }
-
-    fun getDueTasks(
-        nowMillis: Long =
-            System.currentTimeMillis()
-    ): List<TaskItem> {
-
-        return getAll(
-            includeDisabled = false
-        )
-            .filter {
-                it.triggerAtMillis <=
-                    nowMillis
-            }
-            .sortedBy {
-                it.triggerAtMillis
-            }
-    }
-
-    fun count(): Int {
-
-        synchronized(lock) {
-
-            return readItemsMutable()
-                .size
-        }
-    }
-
-    private fun readItemsMutable():
-        MutableList<TaskItem> {
-
-        if (
-            !taskFile.exists() ||
-            taskFile.length() == 0L
+        while (
+            calendar.timeInMillis <= now
         ) {
-            return mutableListOf()
-        }
 
-        return try {
+            when (recurrence) {
 
-            val root =
-                JSONObject(
-                    taskFile.readText(
-                        Charsets.UTF_8
+                AyanaTaskStore
+                    .RECURRENCE_DAILY -> {
+
+                    calendar.add(
+                        Calendar.DAY_OF_YEAR,
+                        1
                     )
-                )
-
-            val array =
-                root.optJSONArray(
-                    "tasks"
-                ) ?: JSONArray()
-
-            val result =
-                mutableListOf<TaskItem>()
-
-            for (
-                i in
-                0 until
-                array.length()
-            ) {
-
-                val obj =
-                    array
-                        .optJSONObject(i)
-                        ?: continue
-
-                val id =
-                    obj
-                        .optString(
-                            "id"
-                        )
-                        .trim()
-
-                val title =
-                    obj
-                        .optString(
-                            "title"
-                        )
-                        .trim()
-
-                val triggerAt =
-                    obj
-                        .optLong(
-                            "trigger_at_millis",
-                            0L
-                        )
-
-                if (
-                    id.isBlank() ||
-                    title.isBlank() ||
-                    triggerAt <= 0L
-                ) {
-                    continue
                 }
 
-                result.add(
-                    TaskItem(
-                        id =
-                            id,
-                        title =
-                            title,
-                        message =
-                            obj
-                                .optString(
-                                    "message",
-                                    title
-                                )
-                                .trim()
-                                .ifBlank {
-                                    title
-                                },
-                        triggerAtMillis =
-                            triggerAt,
-                        recurrence =
-                            normalizeRecurrence(
-                                obj.optString(
-                                    "recurrence",
-                                    RECURRENCE_NONE
-                                )
-                            ),
-                        enabled =
-                            obj.optBoolean(
-                                "enabled",
-                                true
-                            ),
-                        createdAt =
-                            obj.optLong(
-                                "created_at",
-                                System
-                                    .currentTimeMillis()
-                            ),
-                        updatedAt =
-                            obj.optLong(
-                                "updated_at",
-                                System
-                                    .currentTimeMillis()
-                            )
+                AyanaTaskStore
+                    .RECURRENCE_WEEKLY -> {
+
+                    calendar.add(
+                        Calendar.WEEK_OF_YEAR,
+                        1
                     )
-                )
+                }
+
+                AyanaTaskStore
+                    .RECURRENCE_MONTHLY -> {
+
+                    calendar.add(
+                        Calendar.MONTH,
+                        1
+                    )
+                }
+
+                else ->
+                    return null
             }
-
-            result
-
-        } catch (_: Exception) {
-
-            mutableListOf()
         }
+
+        return calendar
+            .timeInMillis
     }
 
-    private fun writeItems(
-        items: MutableList<TaskItem>
+    private fun scheduleAlarm(
+        context: Context,
+        task: AyanaTaskStore.TaskItem
     ) {
 
-        val array =
-            JSONArray()
-
-        items
-            .sortedBy {
-                it.createdAt
-            }
-            .forEach { item ->
-
-                array.put(
-                    JSONObject()
-                        .put(
-                            "id",
-                            item.id
-                        )
-                        .put(
-                            "title",
-                            item.title
-                        )
-                        .put(
-                            "message",
-                            item.message
-                        )
-                        .put(
-                            "trigger_at_millis",
-                            item.triggerAtMillis
-                        )
-                        .put(
-                            "recurrence",
-                            item.recurrence
-                        )
-                        .put(
-                            "enabled",
-                            item.enabled
-                        )
-                        .put(
-                            "created_at",
-                            item.createdAt
-                        )
-                        .put(
-                            "updated_at",
-                            item.updatedAt
-                        )
-                )
-            }
-
-        val root =
-            JSONObject()
-                .put(
-                    "version",
-                    1
-                )
-                .put(
-                    "tasks",
-                    array
-                )
-
-        val tempFile =
-            File(
-                taskFile.parentFile,
-                taskFile.name +
-                    ".tmp"
+        val alarmManager =
+            context.getSystemService(
+                AlarmManager::class.java
             )
 
-        tempFile.writeText(
-            root.toString(),
-            Charsets.UTF_8
-        )
+        val pendingIntent =
+            createReminderPendingIntent(
+                context,
+                task
+            )
 
-        if (taskFile.exists()) {
-            taskFile.delete()
+        val triggerAt =
+            task.triggerAtMillis
+
+        if (
+            Build.VERSION.SDK_INT >= 31 &&
+            alarmManager
+                .canScheduleExactAlarms()
+        ) {
+
+            try {
+
+                alarmManager
+                    .setExactAndAllowWhileIdle(
+                        AlarmManager.RTC_WAKEUP,
+                        triggerAt,
+                        pendingIntent
+                    )
+
+                return
+
+            } catch (_: SecurityException) {
+            }
         }
 
         if (
-            !tempFile.renameTo(
-                taskFile
-            )
+            Build.VERSION.SDK_INT < 31
         ) {
 
-            taskFile.writeText(
-                root.toString(),
-                Charsets.UTF_8
-            )
+            try {
 
-            tempFile.delete()
+                alarmManager
+                    .setExactAndAllowWhileIdle(
+                        AlarmManager.RTC_WAKEUP,
+                        triggerAt,
+                        pendingIntent
+                    )
+
+                return
+
+            } catch (_: SecurityException) {
+            }
         }
+
+        alarmManager
+            .setAndAllowWhileIdle(
+                AlarmManager.RTC_WAKEUP,
+                triggerAt,
+                pendingIntent
+            )
     }
 
-    private fun normalizeRecurrence(
-        value: String
-    ): String {
+    private fun createReminderPendingIntent(
+        context: Context,
+        task: AyanaTaskStore.TaskItem
+    ): PendingIntent {
 
-        return when (
-            normalize(
-                value
-            )
-        ) {
+        val intent =
+            Intent(
+                context,
+                AyanaReminderReceiver::class.java
+            ).apply {
 
-            "daily",
-            "every day",
-            "ежедневно",
-            "каждый день" ->
-                RECURRENCE_DAILY
+                putExtra(
+                    EXTRA_TASK_ID,
+                    task.id
+                )
+            }
 
-            "weekly",
-            "every week",
-            "еженедельно",
-            "каждую неделю" ->
-                RECURRENCE_WEEKLY
-
-            "monthly",
-            "every month",
-            "ежемесячно",
-            "каждый месяц" ->
-                RECURRENCE_MONTHLY
-
-            else ->
-                RECURRENCE_NONE
-        }
+        return PendingIntent.getBroadcast(
+            context,
+            task.id.hashCode(),
+            intent,
+            PendingIntent.FLAG_UPDATE_CURRENT or
+                PendingIntent.FLAG_IMMUTABLE
+        )
     }
 
-    private fun normalize(
-        value: String
-    ): String {
+    private fun notificationId(
+        taskId: String
+    ): Int {
 
-        return value
-            .lowercase()
-            .replace(
-                'ё',
-                'е'
+        return (
+            taskId.hashCode() and
+                0x7fffffff
             )
-            .replace(
-                Regex(
-                    "[^\\p{L}\\p{N}\\s]"
-                ),
-                " "
+            .coerceAtLeast(
+                1000
             )
-            .replace(
-                Regex("\\s+"),
-                " "
-            )
-            .trim()
     }
 
     companion object {
 
-        private const val FILE_NAME =
-            "ayana_tasks.json"
+        const val EXTRA_TASK_ID =
+            "ayana_task_id"
 
-        private const val MAX_TASKS =
-            200
-
-        const val RECURRENCE_NONE =
-            "none"
-
-        const val RECURRENCE_DAILY =
-            "daily"
-
-        const val RECURRENCE_WEEKLY =
-            "weekly"
-
-        const val RECURRENCE_MONTHLY =
-            "monthly"
+        private const val CHANNEL_ID =
+            "ayana_reminders"
     }
 }
