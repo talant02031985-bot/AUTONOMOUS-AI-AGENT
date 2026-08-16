@@ -104,6 +104,18 @@ class AyanaVoiceService : Service() {
         )
     }
 
+    private val ayanaPreferences by lazy {
+        AyanaPreferences(
+            applicationContext
+        )
+    }
+
+    private val miniOrbController by lazy {
+        AyanaMiniOrbController(
+            applicationContext
+        )
+    }
+
     @Volatile
     private var agentPreviousResponseId:
         String? = null
@@ -134,6 +146,14 @@ class AyanaVoiceService : Service() {
 
         promoteToForeground(
             "AYANA запускает локальное распознавание"
+        )
+
+        miniOrbController.refresh(
+            enabled =
+                ayanaPreferences
+                    .miniOrbEnabled,
+            state =
+                currentStatusState
         )
 
         broadcastStatus(
@@ -199,6 +219,17 @@ class AyanaVoiceService : Service() {
                 ) {
                     startWakeListening()
                 }
+            }
+
+            ACTION_REFRESH_OVERLAY -> {
+
+                miniOrbController.refresh(
+                    enabled =
+                        ayanaPreferences
+                            .miniOrbEnabled,
+                    state =
+                        currentStatusState
+                )
             }
 
             ACTION_TEXT_COMMAND -> {
@@ -5061,6 +5092,14 @@ class AyanaVoiceService : Service() {
         currentStatusState =
             state
 
+        miniOrbController.refresh(
+            enabled =
+                ayanaPreferences
+                    .miniOrbEnabled,
+            state =
+                state
+        )
+
         sendBroadcast(
             Intent(
                 ACTION_STATUS
@@ -5210,6 +5249,9 @@ class AyanaVoiceService : Service() {
         modelReady =
             false
 
+        miniOrbController
+            .hide()
+
         super.onDestroy()
     }
 
@@ -5223,6 +5265,9 @@ class AyanaVoiceService : Service() {
 
         const val ACTION_TEXT_COMMAND =
             "kg.autonomous.agent.action.TEXT_COMMAND"
+
+        const val ACTION_REFRESH_OVERLAY =
+            "kg.autonomous.agent.action.REFRESH_OVERLAY"
 
         const val ACTION_STATUS =
             "kg.autonomous.agent.action.AYANA_STATUS"
