@@ -292,7 +292,7 @@ class MainActivity : AppCompatActivity() {
                     dp(18),
                     dp(14),
                     dp(18),
-                    dp(14)
+                    dp(22)
                 )
             }
 
@@ -378,14 +378,21 @@ class MainActivity : AppCompatActivity() {
             contentContainer
         )
 
-        rightColumn.addView(
-            scroll
-        )
-
         buildTextPanel()
 
         rightColumn.addView(
-            textPanel
+            textPanel,
+            LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT
+            ).apply {
+                bottomMargin =
+                    dp(10)
+            }
+        )
+
+        rightColumn.addView(
+            scroll
         )
 
         body.addView(
@@ -918,11 +925,111 @@ class MainActivity : AppCompatActivity() {
         contentContainer.addView(
             pageTitle(
                 "Главная",
-                "AYANA готова к работе"
+                "AYANA Control Center • голос, экран и автономные действия"
             )
         )
 
-        val hero =
+        val topRow =
+            LinearLayout(this).apply {
+
+                orientation =
+                    LinearLayout.HORIZONTAL
+
+                gravity =
+                    Gravity.TOP
+            }
+
+        topRow.addView(
+            controlHeroCard(),
+            LinearLayout.LayoutParams(
+                0,
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+                1.55f
+            )
+        )
+
+        val rightStack =
+            LinearLayout(this).apply {
+
+                orientation =
+                    LinearLayout.VERTICAL
+            }
+
+        rightStack.addView(
+            executionCard()
+        )
+
+        rightStack.addView(
+            servicesCompactCard(),
+            LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT
+            ).apply {
+                topMargin =
+                    dp(10)
+            }
+        )
+
+        topRow.addView(
+            rightStack,
+            LinearLayout.LayoutParams(
+                0,
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+                1f
+            ).apply {
+                marginStart =
+                    dp(10)
+            }
+        )
+
+        contentContainer.addView(
+            topRow,
+            sectionParams()
+        )
+
+        val infoRow =
+            LinearLayout(this).apply {
+
+                orientation =
+                    LinearLayout.HORIZONTAL
+            }
+
+        infoRow.addView(
+            nextReminderCard(),
+            LinearLayout.LayoutParams(
+                0,
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+                1.12f
+            )
+        )
+
+        infoRow.addView(
+            activityOverviewCard(),
+            LinearLayout.LayoutParams(
+                0,
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+                1f
+            ).apply {
+                marginStart =
+                    dp(10)
+            }
+        )
+
+        contentContainer.addView(
+            infoRow,
+            sectionParams()
+        )
+
+        contentContainer.addView(
+            controlFooterStrip(),
+            sectionParams()
+        )
+    }
+
+    private fun controlHeroCard():
+        View {
+
+        val card =
             LinearLayout(this).apply {
 
                 orientation =
@@ -932,10 +1039,10 @@ class MainActivity : AppCompatActivity() {
                     Gravity.CENTER_VERTICAL
 
                 setPadding(
+                    dp(24),
                     dp(22),
-                    dp(20),
-                    dp(22),
-                    dp(20)
+                    dp(24),
+                    dp(22)
                 )
 
                 background =
@@ -944,27 +1051,74 @@ class MainActivity : AppCompatActivity() {
                             .Orientation
                             .TL_BR,
                         intArrayOf(
-                            Color.parseColor(
-                                "#101827"
-                            ),
-                            Color.parseColor(
-                                "#121B31"
-                            ),
-                            Color.parseColor(
-                                "#17132D"
-                            )
+                            Color.parseColor("#0B1423"),
+                            Color.parseColor("#111A34"),
+                            Color.parseColor("#1A1231")
                         )
                     ).apply {
 
                         cornerRadius =
-                            dp(24)
+                            dp(26)
                                 .toFloat()
 
                         setStroke(
                             dp(1),
-                            Color.parseColor(
-                                "#2E3755"
-                            )
+                            Color.parseColor("#303B63")
+                        )
+                    }
+            }
+
+        val orbFrame =
+            LinearLayout(this).apply {
+
+                gravity =
+                    Gravity.CENTER
+
+                background =
+                    GradientDrawable(
+                        GradientDrawable
+                            .Orientation
+                            .TL_BR,
+                        intArrayOf(
+                            Color.parseColor("#1F2B54"),
+                            Color.parseColor("#5637B7"),
+                            Color.parseColor("#142E59")
+                        )
+                    ).apply {
+
+                        shape =
+                            GradientDrawable.OVAL
+
+                        setStroke(
+                            dp(2),
+                            Color.parseColor("#795CFF")
+                        )
+                    }
+            }
+
+        val orbInner =
+            LinearLayout(this).apply {
+
+                gravity =
+                    Gravity.CENTER
+
+                background =
+                    GradientDrawable(
+                        GradientDrawable
+                            .Orientation
+                            .TL_BR,
+                        intArrayOf(
+                            Color.parseColor("#0C162A"),
+                            Color.parseColor("#161334")
+                        )
+                    ).apply {
+
+                        shape =
+                            GradientDrawable.OVAL
+
+                        setStroke(
+                            dp(2),
+                            Color.parseColor("#43C8FF")
                         )
                     }
             }
@@ -976,7 +1130,7 @@ class MainActivity : AppCompatActivity() {
                     "A"
 
                 textSize =
-                    52f
+                    48f
 
                 gravity =
                     Gravity.CENTER
@@ -997,11 +1151,27 @@ class MainActivity : AppCompatActivity() {
                     )
             }
 
-        hero.addView(
+        orbInner.addView(
             orbText,
+            LinearLayout.LayoutParams(
+                dp(108),
+                dp(108)
+            )
+        )
+
+        orbFrame.addView(
+            orbInner,
             LinearLayout.LayoutParams(
                 dp(132),
                 dp(132)
+            )
+        )
+
+        card.addView(
+            orbFrame,
+            LinearLayout.LayoutParams(
+                dp(154),
+                dp(154)
             )
         )
 
@@ -1017,11 +1187,30 @@ class MainActivity : AppCompatActivity() {
                         ViewGroup.LayoutParams.WRAP_CONTENT,
                         1f
                     ).apply {
-
                         marginStart =
                             dp(24)
                     }
             }
+
+        stateColumn.addView(
+            TextView(this).apply {
+
+                text =
+                    "AYANA"
+
+                textSize =
+                    11f
+
+                setTextColor(
+                    Color.parseColor("#9A7BFF")
+                )
+
+                setTypeface(
+                    Typeface.DEFAULT,
+                    Typeface.BOLD
+                )
+            }
+        )
 
         stateColumn.addView(
             TextView(this).apply {
@@ -1033,7 +1222,7 @@ class MainActivity : AppCompatActivity() {
                     )
 
                 textSize =
-                    22f
+                    26f
 
                 setTextColor(
                     Color.WHITE
@@ -1042,6 +1231,13 @@ class MainActivity : AppCompatActivity() {
                 setTypeface(
                     Typeface.DEFAULT,
                     Typeface.BOLD
+                )
+
+                setPadding(
+                    0,
+                    dp(5),
+                    0,
+                    0
                 )
             }
         )
@@ -1057,7 +1253,7 @@ class MainActivity : AppCompatActivity() {
 
                 setPadding(
                     0,
-                    dp(12),
+                    dp(11),
                     0,
                     0
                 )
@@ -1081,7 +1277,6 @@ class MainActivity : AppCompatActivity() {
                 dp(10),
                 dp(10)
             ).apply {
-
                 marginEnd =
                     dp(9)
             }
@@ -1098,9 +1293,7 @@ class MainActivity : AppCompatActivity() {
                     14f
 
                 setTextColor(
-                    Color.parseColor(
-                        "#C9D4E5"
-                    )
+                    Color.parseColor("#D3DCEC")
                 )
             }
 
@@ -1116,15 +1309,13 @@ class MainActivity : AppCompatActivity() {
             TextView(this).apply {
 
                 text =
-                    "Скажите «Аяна» или используйте текстовую команду."
+                    "Скажите «Аяна» — агент услышит команду, посмотрит экран и выполнит доступные действия."
 
                 textSize =
                     12.5f
 
                 setTextColor(
-                    Color.parseColor(
-                        "#75859D"
-                    )
+                    Color.parseColor("#7D8DA7")
                 )
 
                 setPadding(
@@ -1136,75 +1327,674 @@ class MainActivity : AppCompatActivity() {
             }
         )
 
-        hero.addView(
-            stateColumn
-        )
-
-        contentContainer.addView(
-            hero,
-            sectionParams()
-        )
-
-        val metrics =
+        val chips =
             LinearLayout(this).apply {
 
                 orientation =
                     LinearLayout.HORIZONTAL
+
+                setPadding(
+                    0,
+                    dp(14),
+                    0,
+                    0
+                )
             }
 
-        metrics.addView(
-            metricCard(
-                "Задачи",
+        chips.addView(
+            statusChip(
+                "Голос"
+            )
+        )
+
+        chips.addView(
+            statusChip(
+                "Экран"
+            ),
+            LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+                dp(34)
+            ).apply {
+                marginStart =
+                    dp(7)
+            }
+        )
+
+        chips.addView(
+            statusChip(
+                "Agent Core"
+            ),
+            LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+                dp(34)
+            ).apply {
+                marginStart =
+                    dp(7)
+            }
+        )
+
+        stateColumn.addView(
+            chips
+        )
+
+        card.addView(
+            stateColumn
+        )
+
+        return card
+    }
+
+    private fun executionCard():
+        View {
+
+        val card =
+            panel(
+                20
+            )
+
+        card.addView(
+            smallSectionTitle(
+                "СЕЙЧАС AYANA"
+            )
+        )
+
+        card.addView(
+            TextView(this).apply {
+
+                text =
+                    AyanaVoiceService
+                        .currentStatusText
+
+                textSize =
+                    14f
+
+                setTextColor(
+                    Color.WHITE
+                )
+
+                setTypeface(
+                    Typeface.DEFAULT,
+                    Typeface.BOLD
+                )
+
+                setPadding(
+                    0,
+                    dp(10),
+                    0,
+                    dp(9)
+                )
+            }
+        )
+
+        val steps =
+            when (
+                AyanaVoiceService
+                    .currentStatusState
+            ) {
+
+                AyanaVoiceService.STATE_THINKING ->
+                    listOf(
+                        "1  Команда получена",
+                        "2  Планирую следующий шаг",
+                        "3  Проверяю результат"
+                    )
+
+                AyanaVoiceService.STATE_COMMAND ->
+                    listOf(
+                        "1  Слышу обращение",
+                        "2  Распознаю команду",
+                        "3  Готовлю действие"
+                    )
+
+                AyanaVoiceService.STATE_SPEAKING ->
+                    listOf(
+                        "1  Действие завершено",
+                        "2  Формирую ответ",
+                        "3  Возвращаюсь к ожиданию"
+                    )
+
+                else ->
+                    listOf(
+                        "1  Жду обращение «Аяна»",
+                        "2  Готова читать экран",
+                        "3  Готова выполнять действия"
+                    )
+            }
+
+        steps.forEachIndexed {
+            index,
+            text ->
+
+            card.addView(
+                agentStepRow(
+                    text,
+                    index == 0
+                )
+            )
+        }
+
+        return card
+    }
+
+    private fun servicesCompactCard():
+        View {
+
+        val card =
+            panel(
+                20
+            )
+
+        val titleRow =
+            LinearLayout(this).apply {
+
+                orientation =
+                    LinearLayout.HORIZONTAL
+
+                gravity =
+                    Gravity.CENTER_VERTICAL
+            }
+
+        titleRow.addView(
+            smallSectionTitle(
+                "СТАТУС СЕРВИСОВ"
+            ),
+            LinearLayout.LayoutParams(
+                0,
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+                1f
+            )
+        )
+
+        titleRow.addView(
+            TextView(this).apply {
+
+                text =
+                    "${diagnosticsPassed()}/7"
+
+                textSize =
+                    12f
+
+                setTextColor(
+                    Color.parseColor("#86EFAC")
+                )
+            }
+        )
+
+        card.addView(
+            titleRow
+        )
+
+        listOf(
+            Triple(
+                "Микрофон",
+                checkSelfPermissionCompat(
+                    Manifest.permission.RECORD_AUDIO
+                ),
+                "Голос"
+            ),
+            Triple(
+                "Accessibility",
+                isAccessibilityEnabled(),
+                "Экран"
+            ),
+            Triple(
+                "Agent Core",
+                AyanaVoiceService.isRunning,
+                "ИИ"
+            ),
+            Triple(
+                "Напоминания",
+                taskScheduler.canScheduleExact(),
+                "Задачи"
+            )
+        ).forEach {
+            item ->
+
+            card.addView(
+                compactServiceRow(
+                    item.first,
+                    item.second,
+                    item.third
+                )
+            )
+        }
+
+        return card
+    }
+
+    private fun activityOverviewCard():
+        View {
+
+        val card =
+            panel(
+                20
+            )
+
+        card.addView(
+            smallSectionTitle(
+                "АКТИВНОСТЬ"
+            )
+        )
+
+        val row =
+            LinearLayout(this).apply {
+
+                orientation =
+                    LinearLayout.HORIZONTAL
+
+                setPadding(
+                    0,
+                    dp(10),
+                    0,
+                    0
+                )
+            }
+
+        row.addView(
+            compactMetric(
                 taskStore
                     .getFutureTasks()
                     .size
                     .toString(),
-                "активных"
+                "задач"
             ),
             equalCardParams()
         )
 
-        metrics.addView(
-            metricCard(
-                "Память",
+        row.addView(
+            compactMetric(
                 memoryStore
                     .count()
                     .toString(),
-                "фактов"
+                "в памяти"
             ),
             equalCardParams(
                 left =
-                    10
+                    8
             )
         )
 
-        metrics.addView(
-            metricCard(
-                "Сервисы",
+        row.addView(
+            compactMetric(
                 diagnosticsPassed()
                     .toString(),
-                "из 7 работают"
+                "сервисов"
             ),
             equalCardParams(
                 left =
-                    10
+                    8
             )
         )
 
-        contentContainer.addView(
-            metrics,
-            sectionParams()
+        card.addView(
+            row
         )
 
-        val lower =
+        val actions =
             LinearLayout(this).apply {
 
                 orientation =
                     LinearLayout.HORIZONTAL
+
+                setPadding(
+                    0,
+                    dp(12),
+                    0,
+                    0
+                )
             }
 
-        lower.addView(
-            nextReminderCard(),
+        actions.addView(
+            smallAction(
+                "Задачи"
+            ) {
+                switchPage(
+                    Page.TASKS
+                )
+            }
+        )
+
+        actions.addView(
+            smallAction(
+                "Память"
+            ) {
+                switchPage(
+                    Page.MEMORY
+                )
+            },
+            LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+                dp(42)
+            ).apply {
+                marginStart =
+                    dp(8)
+            }
+        )
+
+        actions.addView(
+            smallAction(
+                "Проверка"
+            ) {
+                switchPage(
+                    Page.DIAGNOSTICS
+                )
+            },
+            LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+                dp(42)
+            ).apply {
+                marginStart =
+                    dp(8)
+            }
+        )
+
+        card.addView(
+            actions
+        )
+
+        return card
+    }
+
+    private fun controlFooterStrip():
+        View {
+
+        val card =
+            LinearLayout(this).apply {
+
+                orientation =
+                    LinearLayout.HORIZONTAL
+
+                gravity =
+                    Gravity.CENTER_VERTICAL
+
+                setPadding(
+                    dp(16),
+                    dp(12),
+                    dp(16),
+                    dp(12)
+                )
+
+                background =
+                    panelDrawable(
+                        corner =
+                            20,
+                        stroke =
+                            "#252F4C"
+                    )
+            }
+
+        card.addView(
+            TextView(this).apply {
+
+                text =
+                    "СОСТОЯНИЯ"
+
+                textSize =
+                    10.5f
+
+                setTextColor(
+                    Color.parseColor("#8B7DFF")
+                )
+
+                setTypeface(
+                    Typeface.DEFAULT,
+                    Typeface.BOLD
+                )
+            }
+        )
+
+        val states =
+            listOf(
+                "Слушаю" to "#38BDF8",
+                "Думаю" to "#8B5CF6",
+                "Выполняю" to "#6366F1",
+                "Говорю" to "#22D3EE",
+                "Ошибка" to "#EF4444"
+            )
+
+        states.forEach {
+            item ->
+
+            val chip =
+                LinearLayout(this).apply {
+
+                    orientation =
+                        LinearLayout.HORIZONTAL
+
+                    gravity =
+                        Gravity.CENTER_VERTICAL
+
+                    setPadding(
+                        dp(10),
+                        dp(6),
+                        dp(10),
+                        dp(6)
+                    )
+                }
+
+            chip.addView(
+                View(this).apply {
+
+                    background =
+                        circleDrawable(
+                            Color.parseColor(
+                                item.second
+                            )
+                        )
+                },
+                LinearLayout.LayoutParams(
+                    dp(9),
+                    dp(9)
+                ).apply {
+                    marginEnd =
+                        dp(6)
+                }
+            )
+
+            chip.addView(
+                TextView(this).apply {
+
+                    text =
+                        item.first
+
+                    textSize =
+                        10.5f
+
+                    setTextColor(
+                        Color.parseColor("#9BAAC0")
+                    )
+                }
+            )
+
+            card.addView(
+                chip,
+                LinearLayout.LayoutParams(
+                    ViewGroup.LayoutParams.WRAP_CONTENT,
+                    ViewGroup.LayoutParams.WRAP_CONTENT
+                ).apply {
+                    marginStart =
+                        dp(10)
+                }
+            )
+        }
+
+        card.addView(
+            Space(this),
+            LinearLayout.LayoutParams(
+                0,
+                1,
+                1f
+            )
+        )
+
+        card.addView(
+            TextView(this).apply {
+
+                text =
+                    "AYANA работает, чтобы вы жили проще"
+
+                textSize =
+                    10.5f
+
+                setTextColor(
+                    Color.parseColor("#65758F")
+                )
+            }
+        )
+
+        return card
+    }
+
+    private fun statusChip(
+        label: String
+    ): View {
+
+        return TextView(this).apply {
+
+            text =
+                "✓  $label"
+
+            textSize =
+                10.5f
+
+            gravity =
+                Gravity.CENTER
+
+            setTextColor(
+                Color.parseColor("#BEE9FF")
+            )
+
+            setPadding(
+                dp(10),
+                0,
+                dp(10),
+                0
+            )
+
+            background =
+                softDrawable(
+                    "#0C1A2A",
+                    "#244F76",
+                    14
+                )
+
+            layoutParams =
+                LinearLayout.LayoutParams(
+                    ViewGroup.LayoutParams.WRAP_CONTENT,
+                    dp(34)
+                )
+        }
+    }
+
+    private fun agentStepRow(
+        label: String,
+        active: Boolean
+    ): View {
+
+        val row =
+            LinearLayout(this).apply {
+
+                orientation =
+                    LinearLayout.HORIZONTAL
+
+                gravity =
+                    Gravity.CENTER_VERTICAL
+
+                setPadding(
+                    0,
+                    dp(5),
+                    0,
+                    dp(5)
+                )
+            }
+
+        row.addView(
+            View(this).apply {
+
+                background =
+                    circleDrawable(
+                        Color.parseColor(
+                            if (
+                                active
+                            ) {
+                                "#8B5CF6"
+                            } else {
+                                "#334155"
+                            }
+                        )
+                    )
+            },
+            LinearLayout.LayoutParams(
+                dp(8),
+                dp(8)
+            ).apply {
+                marginEnd =
+                    dp(8)
+            }
+        )
+
+        row.addView(
+            TextView(this).apply {
+
+                text =
+                    label
+
+                textSize =
+                    11.5f
+
+                setTextColor(
+                    Color.parseColor(
+                        if (
+                            active
+                        ) {
+                            "#E9E5FF"
+                        } else {
+                            "#8795AA"
+                        }
+                    )
+                )
+            }
+        )
+
+        return row
+    }
+
+    private fun compactServiceRow(
+        name: String,
+        ok: Boolean,
+        caption: String
+    ): View {
+
+        val row =
+            LinearLayout(this).apply {
+
+                orientation =
+                    LinearLayout.HORIZONTAL
+
+                gravity =
+                    Gravity.CENTER_VERTICAL
+
+                setPadding(
+                    0,
+                    dp(6),
+                    0,
+                    dp(6)
+                )
+            }
+
+        row.addView(
+            TextView(this).apply {
+
+                text =
+                    name
+
+                textSize =
+                    11.5f
+
+                setTextColor(
+                    Color.parseColor("#CED8E7")
+                )
+            },
             LinearLayout.LayoutParams(
                 0,
                 ViewGroup.LayoutParams.WRAP_CONTENT,
@@ -1212,28 +2002,114 @@ class MainActivity : AppCompatActivity() {
             )
         )
 
-        lower.addView(
-            quickActionsCard(),
-            LinearLayout.LayoutParams(
-                0,
-                ViewGroup.LayoutParams.WRAP_CONTENT,
-                1f
-            ).apply {
+        row.addView(
+            TextView(this).apply {
 
+                text =
+                    caption
+
+                textSize =
+                    9.5f
+
+                setTextColor(
+                    Color.parseColor("#66758B")
+                )
+            }
+        )
+
+        row.addView(
+            View(this).apply {
+
+                background =
+                    circleDrawable(
+                        Color.parseColor(
+                            if (
+                                ok
+                            ) {
+                                "#22C55E"
+                            } else {
+                                "#EF4444"
+                            }
+                        )
+                    )
+            },
+            LinearLayout.LayoutParams(
+                dp(9),
+                dp(9)
+            ).apply {
                 marginStart =
                     dp(10)
             }
         )
 
-        contentContainer.addView(
-            lower,
-            sectionParams()
+        return row
+    }
+
+    private fun compactMetric(
+        number: String,
+        caption: String
+    ): View {
+
+        val box =
+            LinearLayout(this).apply {
+
+                orientation =
+                    LinearLayout.VERTICAL
+
+                gravity =
+                    Gravity.CENTER
+
+                setPadding(
+                    dp(8),
+                    dp(8),
+                    dp(8),
+                    dp(8)
+                )
+
+                background =
+                    softDrawable(
+                        "#0B1220",
+                        "#26334A",
+                        14
+                    )
+            }
+
+        box.addView(
+            TextView(this).apply {
+
+                text =
+                    number
+
+                textSize =
+                    20f
+
+                setTypeface(
+                    Typeface.DEFAULT,
+                    Typeface.BOLD
+                )
+
+                setTextColor(
+                    Color.WHITE
+                )
+            }
         )
 
-        contentContainer.addView(
-            modeStrip(),
-            sectionParams()
+        box.addView(
+            TextView(this).apply {
+
+                text =
+                    caption
+
+                textSize =
+                    9.5f
+
+                setTextColor(
+                    Color.parseColor("#75859D")
+                )
+            }
         )
+
+        return box
     }
 
     private fun renderTasks() {
