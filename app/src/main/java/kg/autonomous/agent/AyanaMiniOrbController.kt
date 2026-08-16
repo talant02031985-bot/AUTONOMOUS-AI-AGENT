@@ -6,6 +6,8 @@ import android.graphics.Color
 import android.graphics.PixelFormat
 import android.graphics.drawable.GradientDrawable
 import android.os.Build
+import android.os.Handler
+import android.os.Looper
 import android.provider.Settings
 import android.view.Gravity
 import android.view.MotionEvent
@@ -26,39 +28,64 @@ class AyanaMiniOrbController(
             WindowManager::class.java
         )
 
-    private var orbView:
-        TextView? = null
+    private val mainHandler =
+        Handler(
+            Looper.getMainLooper()
+        )
 
-    private var layoutParams:
-        WindowManager.LayoutParams? = null
+    private val ayanaPreferences by lazy {
+        AyanaPreferences(
+            appContext
+        )
+    }
 
     fun refresh(
         enabled: Boolean,
         state: String
     ) {
 
-        if (
-            !enabled ||
-            !canDrawOverlays()
-        ) {
+        runOnMain {
 
-            hide()
-            return
-        }
+            if (
+                !enabled ||
+                !canDrawOverlays()
+            ) {
 
-        if (
-            orbView == null
-        ) {
+                hideInternal()
+                return@runOnMain
+            }
 
-            show(
-                state
-            )
+            synchronized(
+                overlayLock
+            ) {
 
-        } else {
+                val current =
+                    sharedOrbView
 
-            updateState(
-                state
-            )
+                if (
+                    current != null &&
+                    current.isAttachedToWindow
+                ) {
+
+                    current.background =
+                        orbDrawable(
+                            state
+                        )
+
+                    return@synchronized
+                }
+
+                // Any detached/stale reference must never create a second orb.
+                sharedOrbView =
+                    null
+
+                sharedLayoutParams =
+                    null
+
+                showInternal(
+                    state
+                )
+            }
         }
     }
 
@@ -66,37 +93,42 @@ class AyanaMiniOrbController(
         state: String
     ) {
 
-        val view =
-            orbView
-                ?: return
+        runOnMain {
 
-        view.background =
-            orbDrawable(
-                state
-            )
+            synchronized(
+                overlayLock
+            ) {
+
+                val view =
+                    sharedOrbView
+                        ?: return@synchronized
+
+                if (
+                    !view.isAttachedToWindow
+                ) {
+
+                    sharedOrbView =
+                        null
+
+                    sharedLayoutParams =
+                        null
+
+                    return@synchronized
+                }
+
+                view.background =
+                    orbDrawable(
+                        state
+                    )
+            }
+        }
     }
 
     fun hide() {
 
-        val view =
-            orbView
-                ?: return
-
-        try {
-
-            windowManager
-                .removeView(
-                    view
-                )
-
-        } catch (_: Exception) {
+        runOnMain {
+            hideInternal()
         }
-
-        orbView =
-            null
-
-        layoutParams =
-            null
     }
 
     fun canDrawOverlays():
@@ -117,13 +149,31 @@ class AyanaMiniOrbController(
         }
     }
 
-    private fun show(
+    private fun showInternal(
         state: String
     ) {
 
         if (
             !canDrawOverlays()
         ) {
+            return
+        }
+
+        // Double guard inside the same process. This also protects against
+        // several refresh() calls arriving almost simultaneously on startup.
+        val existing =
+            sharedOrbView
+
+        if (
+            existing != null &&
+            existing.isAttachedToWindow
+        ) {
+
+            existing.background =
+                orbDrawable(
+                    state
+                )
+
             return
         }
 
@@ -215,7 +265,7 @@ class AyanaMiniOrbController(
                     )
 
                 contentDescription =
-                    "AYANA mini orb"
+                    "AYANA mini orb. Нажмите, чтобы открыть AYANA. Удерживайте, чтобы скрыть."
             }
 
         attachTouchBehavior(
@@ -231,18 +281,55 @@ class AyanaMiniOrbController(
                     params
                 )
 
-            orbView =
+            sharedOrbView =
                 view
 
-            layoutParams =
+            sharedLayoutParams =
                 params
 
         } catch (_: Exception) {
 
-            orbView =
+            sharedOrbView =
                 null
 
-            layoutParams =
+            sharedLayoutParams =
+                null
+        }
+    }
+
+    private fun hideInternal() {
+
+        synchronized(
+            overlayLock
+        ) {
+
+            val view =
+                sharedOrbView
+
+            if (
+                view != null
+            ) {
+
+                try {
+
+                    if (
+                        view.isAttachedToWindow
+                    ) {
+
+                        windowManager
+                            .removeViewImmediate(
+                                view
+                            )
+                    }
+
+                } catch (_: Exception) {
+                }
+            }
+
+            sharedOrbView =
+                null
+
+            sharedLayoutParams =
                 null
         }
     }
@@ -267,6 +354,9 @@ class AyanaMiniOrbController(
         var moved =
             false
 
+        var downEventTime =
+            0L
+
         view.setOnTouchListener {
             _,
             event ->
@@ -288,6 +378,9 @@ class AyanaMiniOrbController(
 
                     startY =
                         params.y
+
+                    downEventTime =
+                        event.eventTime
 
                     moved =
                         false
@@ -338,11 +431,16 @@ class AyanaMiniOrbController(
 
                     try {
 
-                        windowManager
-                            .updateViewLayout(
-                                view,
-                                params
-                            )
+                        if (
+                            view.isAttachedToWindow
+                        ) {
+
+                            windowManager
+                                .updateViewLayout(
+                                    view,
+                                    params
+                                )
+                        }
 
                     } catch (_: Exception) {
                     }
@@ -356,11 +454,32 @@ class AyanaMiniOrbController(
                         !moved
                     ) {
 
-                        openAyana()
+                        val heldFor =
+                            event.eventTime -
+                                downEventTime
+
+                        if (
+                            heldFor >=
+                            700L
+                        ) {
+
+                            ayanaPreferences
+                                .miniOrbEnabled =
+                                false
+
+                            hideInternal()
+
+                        } else {
+
+                            openAyana()
+                        }
                     }
 
                     true
                 }
+
+                MotionEvent.ACTION_CANCEL ->
+                    true
 
                 else ->
                     false
@@ -511,6 +630,25 @@ class AyanaMiniOrbController(
         )
     }
 
+    private fun runOnMain(
+        action: () -> Unit
+    ) {
+
+        if (
+            Looper.myLooper() ==
+            Looper.getMainLooper()
+        ) {
+
+            action()
+
+        } else {
+
+            mainHandler.post {
+                action()
+            }
+        }
+    }
+
     private fun dp(
         value: Int
     ): Int {
@@ -523,5 +661,19 @@ class AyanaMiniOrbController(
                     .density
             )
             .toInt()
+    }
+
+    companion object {
+
+        private val overlayLock =
+            Any()
+
+        @Volatile
+        private var sharedOrbView:
+            TextView? = null
+
+        @Volatile
+        private var sharedLayoutParams:
+            WindowManager.LayoutParams? = null
     }
 }
