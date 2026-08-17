@@ -1834,6 +1834,15 @@ class AyanaVoiceService : Service() {
             STATE_THINKING
         )
 
+        // PLANNER HANDOFF v2.7.4.1
+        // Fast local routes are only allowed to finish SINGLE-STEP commands.
+        // Multi-step goals must reach Agent Core so the planner can continue
+        // after the first Android screen instead of returning early.
+        val multiStepRequest =
+            isMultiStepAgentCommand(
+                normalized
+            )
+
         // Direct local route for app-specific settings such as
         // «открой уведомления YouTube». This MUST run before the generic
         // «открой <app>» router, otherwise the whole phrase may be treated
@@ -1843,7 +1852,10 @@ class AyanaVoiceService : Service() {
                 normalized
             )
 
-        if (directAppSettingsTarget != null) {
+        if (
+            directAppSettingsTarget != null &&
+            !multiStepRequest
+        ) {
 
             val section =
                 directAppSettingsTarget.first
@@ -1904,7 +1916,8 @@ class AyanaVoiceService : Service() {
 
         if (
             !directAppInfoTarget
-                .isNullOrBlank()
+                .isNullOrBlank() &&
+            !multiStepRequest
         ) {
 
             val result =
@@ -1996,7 +2009,8 @@ class AyanaVoiceService : Service() {
 
         if (
             !directSystemSettingsSection
-                .isNullOrBlank()
+                .isNullOrBlank() &&
+            !multiStepRequest
         ) {
 
             val result =
@@ -4402,6 +4416,8 @@ class AyanaVoiceService : Service() {
                                     setOf(
                                         "open_app",
                                         "open_settings",
+                                        "open_app_info",
+                                        "open_app_settings",
                                         "press_back",
                                         "press_home",
                                         "click_text",
