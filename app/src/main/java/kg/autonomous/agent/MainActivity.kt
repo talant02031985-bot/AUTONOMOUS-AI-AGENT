@@ -3,6 +3,8 @@ package kg.autonomous.agent
 import android.Manifest
 import android.app.NotificationManager
 import android.content.BroadcastReceiver
+import android.content.ClipData
+import android.content.ClipboardManager
 import android.content.ComponentName
 import android.content.Context
 import android.content.Intent
@@ -10,11 +12,14 @@ import android.content.IntentFilter
 import android.graphics.Canvas
 import android.graphics.Color
 import android.graphics.Paint
+import android.graphics.RadialGradient
+import android.graphics.Shader
 import android.graphics.Path
 import android.graphics.Typeface
 import android.graphics.drawable.GradientDrawable
 import android.os.Build
 import android.os.Bundle
+import android.os.SystemClock
 import android.provider.Settings
 import android.view.Gravity
 import android.view.View
@@ -30,6 +35,7 @@ import android.widget.LinearLayout
 import android.widget.ScrollView
 import android.widget.Space
 import android.widget.TextView
+import android.widget.Toast
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.view.ViewCompat
@@ -44,6 +50,7 @@ class MainActivity : AppCompatActivity() {
         HOME,
         TASKS,
         MEMORY,
+        HISTORY,
         DIAGNOSTICS,
         SETTINGS
     }
@@ -52,7 +59,8 @@ class MainActivity : AppCompatActivity() {
     private lateinit var contentScroll: ScrollView
     private lateinit var statusText: TextView
     private lateinit var statusDot: View
-    private lateinit var orbText: TextView
+    private var homeStateTitle:
+        TextView? = null
     private lateinit var stopButton: Button
 
     private lateinit var textModeButton: TextView
@@ -93,6 +101,12 @@ class MainActivity : AppCompatActivity() {
 
     private val ayanaPreferences by lazy {
         AyanaPreferences(
+            applicationContext
+        )
+    }
+
+    private val commandHistoryStore by lazy {
+        AyanaCommandHistoryStore(
             applicationContext
         )
     }
@@ -159,9 +173,16 @@ class MainActivity : AppCompatActivity() {
 
                 if (
                     currentPage ==
-                    Page.HOME
+                    Page.HISTORY &&
+                    state in setOf(
+                        AyanaVoiceService.STATE_SUCCESS,
+                        AyanaVoiceService.STATE_ERROR,
+                        AyanaVoiceService.STATE_TEXT,
+                        AyanaVoiceService.STATE_SPEAKING,
+                        AyanaVoiceService.STATE_STOPPED
+                    )
                 ) {
-                    renderHome()
+                    renderHistory()
                 }
             }
         }
@@ -188,9 +209,10 @@ class MainActivity : AppCompatActivity() {
                 .SOFT_INPUT_ADJUST_RESIZE
         )
 
-        // UI v5.1 deliberately disables the floating Mini-Orb.
-        // The main AYANA interface is now the single visual surface.
-        ayanaPreferences.miniOrbEnabled = false
+        // UI v5.3: exactly ONE global floating Orb is enabled.
+        // It is owned by AyanaVoiceService/AyanaMiniOrbController, not by this Activity,
+        // so it remains visible above other apps and the launcher.
+        ayanaPreferences.miniOrbEnabled = true
 
         buildAyanaInterface()
 
@@ -253,7 +275,7 @@ class MainActivity : AppCompatActivity() {
     override fun onResume() {
         super.onResume()
 
-        ayanaPreferences.miniOrbEnabled = false
+        ayanaPreferences.miniOrbEnabled = true
 
         if (AyanaVoiceService.isRunning) {
             refreshMiniOrb()
@@ -588,6 +610,7 @@ class MainActivity : AppCompatActivity() {
         side.addView(navButton(Page.HOME, "⌂  Главная"))
         side.addView(navButton(Page.TASKS, "◷  Задачи"))
         side.addView(navButton(Page.MEMORY, "◇  Память"))
+        side.addView(navButton(Page.HISTORY, "≡  История"))
         side.addView(navButton(Page.DIAGNOSTICS, "⌁  Система"))
         side.addView(navButton(Page.SETTINGS, "⚙  Настройки"))
 
@@ -771,6 +794,7 @@ class MainActivity : AppCompatActivity() {
             Page.HOME -> renderHome()
             Page.TASKS -> renderTasks()
             Page.MEMORY -> renderMemory()
+            Page.HISTORY -> renderHistory()
             Page.DIAGNOSTICS -> renderDiagnostics()
             Page.SETTINGS -> renderSettings()
         }
@@ -990,7 +1014,7 @@ class MainActivity : AppCompatActivity() {
             }
         )
 
-        copy.addView(
+        val stateTitleView =
             TextView(this).apply {
                 text =
                     stateTitle(
@@ -1004,6 +1028,10 @@ class MainActivity : AppCompatActivity() {
                 )
                 setPadding(0, dp(8), 0, 0)
             }
+
+        homeStateTitle = stateTitleView
+        copy.addView(
+            stateTitleView
         )
 
         val stateRow =
@@ -3193,6 +3221,245 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
+    private fun renderHistory() {
+
+        contentContainer
+            .removeAllViews()
+
+        contentContainer.addView(
+            pageTitle(
+                "История команд",
+                "Что AYANA услышала → что решила → что выполнила → результат или ошибка"
+            )
+        )
+
+        val tools =
+            LinearLayout(this).apply {
+                orientation = LinearLayout.HORIZONTAL
+                gravity = Gravity.CENTER_VERTICAL
+            }
+
+        tools.addView(
+            TextView(this).apply {
+                text = "Копировать диагностику"
+                textSize = 14.5f
+                gravity = Gravity.CENTER
+                setTextColor(Color.parseColor("#E0E7FF"))
+                background = softDrawable("#11182A", "#38436D", 14)
+                setOnClickListener {
+                    val clipboard =
+                        getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+                    clipboard.setPrimaryClip(
+                        ClipData.newPlainText(
+                            "AYANA diagnostics",
+                            commandHistoryStore.exportRecent(30)
+                        )
+                    )
+                    Toast.makeText(
+                        this@MainActivity,
+                        "Диагностика AYANA скопирована",
+                        Toast.LENGTH_SHORT
+                    ).show()
+                }
+            },
+            LinearLayout.LayoutParams(
+                0,
+                dp(42),
+                1f
+            )
+        )
+
+        tools.addView(
+            TextView(this).apply {
+                text = "Очистить историю"
+                textSize = 14.5f
+                gravity = Gravity.CENTER
+                setTextColor(Color.parseColor("#FCA5A5"))
+                background = softDrawable("#1B1017", "#5B2838", 14)
+                setOnClickListener {
+                    commandHistoryStore.clear()
+                    renderHistory()
+                }
+            },
+            LinearLayout.LayoutParams(
+                0,
+                dp(42),
+                0.72f
+            ).apply {
+                marginStart = dp(10)
+            }
+        )
+
+        contentContainer.addView(
+            tools,
+            sectionParams(top = 8)
+        )
+
+        val records =
+            commandHistoryStore.recent(40)
+
+        if (records.isEmpty()) {
+            val empty = panel(20)
+            empty.addView(
+                TextView(this).apply {
+                    text = "История пока пуста. После следующей голосовой или текстовой команды здесь появится полный диагностический след."
+                    textSize = 16f
+                    setTextColor(Color.parseColor("#96A4B8"))
+                }
+            )
+            contentContainer.addView(
+                empty,
+                sectionParams(top = 12)
+            )
+            return
+        }
+
+        records.forEach { record ->
+            val success =
+                record.optBoolean(
+                    "success",
+                    false
+                )
+            val status =
+                record.optString(
+                    "status",
+                    "running"
+                )
+            val running = status == "running"
+            val duration =
+                record.optLong(
+                    "duration_ms",
+                    -1L
+                )
+            val started =
+                record.optLong(
+                    "started_at",
+                    0L
+                )
+            val timeText =
+                if (started > 0L) {
+                    SimpleDateFormat(
+                        "dd.MM  HH:mm:ss",
+                        Locale.getDefault()
+                    ).format(Date(started))
+                } else {
+                    ""
+                }
+
+            val card = panel(18)
+            card.setPadding(
+                dp(18),
+                dp(14),
+                dp(18),
+                dp(14)
+            )
+
+            val head =
+                LinearLayout(this).apply {
+                    orientation = LinearLayout.HORIZONTAL
+                    gravity = Gravity.CENTER_VERTICAL
+                }
+
+            head.addView(
+                TextView(this).apply {
+                    text =
+                        when {
+                            running -> "●  В РАБОТЕ"
+                            success -> "✓  ВЫПОЛНЕНО"
+                            else -> "!  ОШИБКА / НЕ ЗАВЕРШЕНО"
+                        }
+                    textSize = 12.5f
+                    setTypeface(Typeface.DEFAULT, Typeface.BOLD)
+                    setTextColor(
+                        Color.parseColor(
+                            when {
+                                running -> "#67E8F9"
+                                success -> "#86EFAC"
+                                else -> "#FCA5A5"
+                            }
+                        )
+                    )
+                },
+                LinearLayout.LayoutParams(
+                    0,
+                    ViewGroup.LayoutParams.WRAP_CONTENT,
+                    1f
+                )
+            )
+
+            head.addView(
+                TextView(this).apply {
+                    text = buildString {
+                        append(timeText)
+                        if (duration >= 0L) {
+                            append("  •  ")
+                            append(String.format(Locale.US, "%.1f c", duration / 1000.0))
+                        }
+                        val source = record.optString("source")
+                        if (source.isNotBlank()) {
+                            append("  •  ")
+                            append(if (source == "voice") "голос" else "текст")
+                        }
+                    }
+                    textSize = 12.5f
+                    setTextColor(Color.parseColor("#75869B"))
+                }
+            )
+
+            card.addView(head)
+
+            card.addView(
+                TextView(this).apply {
+                    text = record.optString("command")
+                    textSize = 17f
+                    setTypeface(Typeface.DEFAULT, Typeface.BOLD)
+                    setTextColor(Color.WHITE)
+                    setPadding(0, dp(8), 0, 0)
+                }
+            )
+
+            val result = record.optString("result")
+            if (result.isNotBlank()) {
+                card.addView(
+                    TextView(this).apply {
+                        text = "Результат: $result"
+                        textSize = 14.5f
+                        setTextColor(Color.parseColor("#C7D2E2"))
+                        setPadding(0, dp(7), 0, 0)
+                    }
+                )
+            }
+
+            val events = record.optJSONArray("events")
+            if (events != null && events.length() > 0) {
+                val startIndex = maxOf(0, events.length() - 6)
+                val trace = buildString {
+                    for (index in startIndex until events.length()) {
+                        val event = events.optJSONObject(index) ?: continue
+                        if (isNotEmpty()) append("\n")
+                        append("• ")
+                        append(event.optString("state"))
+                        append(" — ")
+                        append(event.optString("message").take(180))
+                    }
+                }
+                card.addView(
+                    TextView(this).apply {
+                        text = trace
+                        textSize = 12.5f
+                        setTextColor(Color.parseColor("#7F91A8"))
+                        setPadding(0, dp(8), 0, 0)
+                    }
+                )
+            }
+
+            contentContainer.addView(
+                card,
+                sectionParams(top = 9)
+            )
+        }
+    }
+
     private fun renderDiagnostics() {
 
         contentContainer
@@ -3225,16 +3492,9 @@ class MainActivity : AppCompatActivity() {
                     "Активация «Аяна» и фоновые команды"
                 ),
                 Triple(
-                    "Плавающая кнопка",
-                    !ayanaPreferences.miniOrbEnabled ||
-                        overlayPermissionGranted(),
-                    if (
-                        ayanaPreferences.miniOrbEnabled
-                    ) {
-                        "Плавающий интерфейс поверх приложений"
-                    } else {
-                        "Отключён пользователем"
-                    }
+                    "Orb AYANA",
+                    true,
+                    "Один встроенный Orb на главном экране • overlay-кнопки отключены"
                 ),
                 Triple(
                     "Точные напоминания",
@@ -3337,12 +3597,15 @@ class MainActivity : AppCompatActivity() {
 
         contentContainer.addView(
             settingsAction(
-                "Плавающая кнопка",
-                "Отключена — плавающие круги больше не используются"
+                "Orb AYANA",
+                if (overlayPermissionGranted()) {
+                    "Один плавающий Orb поверх всех приложений • можно перетаскивать"
+                } else {
+                    "Нужно разрешить показ поверх других приложений"
+                }
             ) {
 
-                ayanaPreferences.miniOrbEnabled = false
-                refreshMiniOrb()
+                configureMiniOrb()
             },
             sectionParams(
                 top =
@@ -3992,6 +4255,9 @@ class MainActivity : AppCompatActivity() {
                     stateColor(state)
                 )
         }
+
+        homeStateTitle?.text =
+            stateTitle(state)
     }
 
     private fun stateTitle(
@@ -4010,6 +4276,12 @@ class MainActivity : AppCompatActivity() {
 
             AyanaVoiceService.STATE_THINKING ->
                 "Думаю"
+
+            AyanaVoiceService.STATE_EXECUTING ->
+                "Выполняю"
+
+            AyanaVoiceService.STATE_SUCCESS ->
+                "Готово"
 
             AyanaVoiceService.STATE_SPEAKING ->
                 "Говорю"
@@ -4045,6 +4317,12 @@ class MainActivity : AppCompatActivity() {
 
                 AyanaVoiceService.STATE_THINKING ->
                     "#8B5CF6"
+
+                AyanaVoiceService.STATE_EXECUTING ->
+                    "#2DD4BF"
+
+                AyanaVoiceService.STATE_SUCCESS ->
+                    "#22C55E"
 
                 AyanaVoiceService.STATE_SPEAKING ->
                     "#6366F1"
@@ -4091,6 +4369,18 @@ class MainActivity : AppCompatActivity() {
                         Color.parseColor(
                             "#7C3AED"
                         )
+                    )
+
+                AyanaVoiceService.STATE_EXECUTING ->
+                    intArrayOf(
+                        Color.parseColor("#0F766E"),
+                        Color.parseColor("#2DD4BF")
+                    )
+
+                AyanaVoiceService.STATE_SUCCESS ->
+                    intArrayOf(
+                        Color.parseColor("#166534"),
+                        Color.parseColor("#22C55E")
                     )
 
                 AyanaVoiceService.STATE_ERROR ->
@@ -4143,6 +4433,27 @@ class MainActivity : AppCompatActivity() {
                     state
                 )
             )
+        }
+    }
+
+    private fun handleOrbClick() {
+
+        if (!AyanaVoiceService.isRunning) {
+            startAyanaService()
+            return
+        }
+
+        try {
+            startService(
+                Intent(
+                    this,
+                    AyanaVoiceService::class.java
+                ).apply {
+                    action =
+                        AyanaVoiceService.ACTION_START
+                }
+            )
+        } catch (_: Exception) {
         }
     }
 
@@ -5434,9 +5745,38 @@ class MainActivity : AppCompatActivity() {
 
     private fun configureMiniOrb() {
 
-        // Floating overlays are intentionally disabled in UI v5.1.
-        // This keeps AYANA visually clean and prevents stale duplicate orbs.
-        ayanaPreferences.miniOrbEnabled = false
+        ayanaPreferences.miniOrbEnabled = true
+
+        if (
+            Build.VERSION.SDK_INT >= 23 &&
+            !Settings.canDrawOverlays(this)
+        ) {
+
+            try {
+
+                startActivity(
+                    Intent(
+                        Settings.ACTION_MANAGE_OVERLAY_PERMISSION,
+                        android.net.Uri.parse(
+                            "package:$packageName"
+                        )
+                    )
+                )
+
+            } catch (_: Exception) {
+
+                Toast
+                    .makeText(
+                        this,
+                        "Разрешите AYANA показываться поверх других приложений",
+                        Toast.LENGTH_LONG
+                    )
+                    .show()
+            }
+
+            return
+        }
+
         refreshMiniOrb()
         renderSettings()
     }
@@ -5522,6 +5862,12 @@ class MainActivity : AppCompatActivity() {
 
             true
         }
+    }
+
+    private fun dp(
+        value: Float
+    ): Float {
+        return value * resources.displayMetrics.density
     }
 
     private fun dp(
