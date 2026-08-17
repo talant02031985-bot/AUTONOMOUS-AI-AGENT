@@ -3082,8 +3082,8 @@ class AyanaVoiceService : Service() {
                     emptyList()
             }
 
-        var lastResult =
-            JSONObject()
+        if (targets.isEmpty()) {
+            return JSONObject()
                 .put(
                     "success",
                     false
@@ -3092,13 +3092,59 @@ class AyanaVoiceService : Service() {
                     "message",
                     "Локальная цель подстраницы не определена"
                 )
+        }
 
-        // First try current App info screen. For lower cards (Battery/Storage),
-        // scroll down and retry. This is faster and more deterministic than
-        // asking Agent Core to rediscover the same path on every request.
-        repeat(3) { attempt ->
+        var lastResult =
+            JSONObject()
+                .put(
+                    "success",
+                    false
+                )
+                .put(
+                    "message",
+                    "Подстраница пока не найдена"
+                )
 
-            for (target in targets) {
+        // LOCAL GOAL STOP v2.7.4.3
+        // Do not blindly try every synonym: each Screen Intelligence click waits
+        // for Android, which added noticeable latency. First inspect the current
+        // App info snapshot and click only a label that is actually present.
+        //
+        // Some One UI Accessibility nodes can report ACTION_CLICK=false even
+        // though the parent row handled the click and the screen changed. Treat
+        // screen_changed as a successful navigation too. This prevents Planner
+        // from continuing after the requested Permissions/Battery page is already
+        // open and eventually hitting MAX_AGENT_STEPS.
+        repeat(4) { attempt ->
+
+            val screenBefore =
+                try {
+                    screenIntelligence
+                        .getScreenState()
+                } catch (_: Exception) {
+                    JSONObject()
+                }
+
+            val normalizedScreen =
+                screenBefore
+                    .toString()
+                    .lowercase(
+                        Locale.getDefault()
+                    )
+                    .replace('ё', 'е')
+
+            val visibleTargets =
+                targets.filter { target ->
+                    normalizedScreen.contains(
+                        target
+                            .lowercase(
+                                Locale.getDefault()
+                            )
+                            .replace('ё', 'е')
+                    )
+                }
+
+            for (target in visibleTargets) {
 
                 val clickResult =
                     screenIntelligence
@@ -3110,23 +3156,55 @@ class AyanaVoiceService : Service() {
                 lastResult =
                     clickResult
 
-                if (
+                val clickAccepted =
                     clickResult.optBoolean(
                         "success",
                         false
                     )
+
+                val screenChanged =
+                    clickResult.optBoolean(
+                        "screen_changed",
+                        false
+                    )
+
+                if (
+                    clickAccepted ||
+                    screenChanged
                 ) {
-                    return clickResult
+
+                    // Hard-stop the local goal here. The requested row was found
+                    // on App info and Android either accepted the click or moved
+                    // to a new screen. Do not hand this completed goal to Planner.
+                    return JSONObject(
+                        clickResult.toString()
+                    ).apply {
+                        put(
+                            "success",
+                            true
+                        )
+                        put(
+                            "local_goal_reached",
+                            true
+                        )
+                        put(
+                            "message",
+                            "Локальная подстраница открыта: $target"
+                        )
+                    }
                 }
             }
 
-            if (attempt < 2) {
+            if (attempt < 3) {
 
                 val scrollResult =
                     screenIntelligence
                         .scroll(
                             "down"
                         )
+
+                lastResult =
+                    scrollResult
 
                 if (
                     !scrollResult.optBoolean(
