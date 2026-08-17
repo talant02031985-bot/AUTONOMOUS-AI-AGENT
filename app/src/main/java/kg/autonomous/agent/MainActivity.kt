@@ -11,14 +11,12 @@ import android.graphics.Canvas
 import android.graphics.Color
 import android.graphics.Paint
 import android.graphics.Path
-import android.graphics.RectF
 import android.graphics.Typeface
 import android.graphics.drawable.GradientDrawable
 import android.os.Build
 import android.os.Bundle
 import android.provider.Settings
 import android.view.Gravity
-import android.view.MotionEvent
 import android.view.View
 import android.view.ViewGroup
 import android.view.WindowManager
@@ -51,7 +49,7 @@ class MainActivity : AppCompatActivity() {
     }
 
     private lateinit var contentContainer: LinearLayout
-    private lateinit var contentScroll: AyanaPageScrollView
+    private lateinit var contentScroll: ScrollView
     private lateinit var statusText: TextView
     private lateinit var statusDot: View
     private lateinit var orbText: TextView
@@ -190,7 +188,7 @@ class MainActivity : AppCompatActivity() {
                 .SOFT_INPUT_ADJUST_RESIZE
         )
 
-        // UI v5 deliberately disables the floating Mini-Orb.
+        // UI v5.1 deliberately disables the floating Mini-Orb.
         // The main AYANA interface is now the single visual surface.
         ayanaPreferences.miniOrbEnabled = false
 
@@ -360,7 +358,7 @@ class MainActivity : AppCompatActivity() {
         )
 
         contentScroll =
-            AyanaPageScrollView(this).apply {
+            ScrollView(this).apply {
                 isFillViewport = true
                 overScrollMode = View.OVER_SCROLL_NEVER
                 isVerticalScrollBarEnabled = false
@@ -377,11 +375,6 @@ class MainActivity : AppCompatActivity() {
             LinearLayout(this).apply {
                 orientation = LinearLayout.VERTICAL
                 setPadding(0, 0, dp(2), 0)
-                layoutParams =
-                    ScrollView.LayoutParams(
-                        ViewGroup.LayoutParams.MATCH_PARENT,
-                        ViewGroup.LayoutParams.MATCH_PARENT
-                    )
             }
 
         contentScroll.addView(contentContainer)
@@ -766,8 +759,6 @@ class MainActivity : AppCompatActivity() {
         updateNavigation()
 
         if (::contentScroll.isInitialized) {
-            contentScroll.scrollingEnabled =
-                currentPage != Page.HOME || textModeVisible
             contentScroll.isVerticalScrollBarEnabled =
                 currentPage != Page.HOME
 
@@ -1084,7 +1075,7 @@ class MainActivity : AppCompatActivity() {
         )
 
         val neural =
-            AyanaNeuralView(this).apply {
+            AyanaPulseView(this).apply {
                 background =
                     GradientDrawable(
                         GradientDrawable.Orientation.TL_BR,
@@ -3714,11 +3705,6 @@ class MainActivity : AppCompatActivity() {
                 View.GONE
             }
 
-        if (::contentScroll.isInitialized) {
-            contentScroll.scrollingEnabled =
-                currentPage != Page.HOME || textModeVisible
-        }
-
         if (
             textModeVisible
         ) {
@@ -5037,248 +5023,6 @@ class MainActivity : AppCompatActivity() {
                 dp(1),
                 Color.parseColor(stroke)
             )
-        }
-    }
-
-    private class AyanaPageScrollView(
-        context: Context
-    ) : ScrollView(context) {
-
-        var scrollingEnabled: Boolean = true
-
-        override fun onInterceptTouchEvent(
-            ev: MotionEvent
-        ): Boolean {
-            return scrollingEnabled &&
-                super.onInterceptTouchEvent(ev)
-        }
-
-        override fun onTouchEvent(
-            ev: MotionEvent
-        ): Boolean {
-            return scrollingEnabled &&
-                super.onTouchEvent(ev)
-        }
-    }
-
-    private inner class AyanaNeuralView(
-        context: Context
-    ) : View(context) {
-
-        private val linePaint =
-            Paint(Paint.ANTI_ALIAS_FLAG).apply {
-                style = Paint.Style.STROKE
-                strokeWidth = dp(1).toFloat()
-            }
-
-        private val arcPaint =
-            Paint(Paint.ANTI_ALIAS_FLAG).apply {
-                style = Paint.Style.STROKE
-                strokeCap = Paint.Cap.ROUND
-            }
-
-        private val nodePaint =
-            Paint(Paint.ANTI_ALIAS_FLAG).apply {
-                style = Paint.Style.FILL
-            }
-
-        private val arcRect = RectF()
-        private var attached = false
-
-        override fun onAttachedToWindow() {
-            super.onAttachedToWindow()
-            attached = true
-            postInvalidateOnAnimation()
-        }
-
-        override fun onDetachedFromWindow() {
-            attached = false
-            super.onDetachedFromWindow()
-        }
-
-        override fun onDraw(
-            canvas: Canvas
-        ) {
-            super.onDraw(canvas)
-
-            val w = width.toFloat()
-            val h = height.toFloat()
-            if (w <= 1f || h <= 1f) {
-                return
-            }
-
-            val state =
-                AyanaVoiceService.currentStatusState
-            val accent = stateColor(state)
-            val t =
-                (System.nanoTime() / 1_000_000_000.0)
-                    .toFloat()
-            val pulse =
-                (0.5f +
-                    0.5f *
-                    Math.sin(t * 2.4).toFloat())
-
-            val cx = w * 0.5f
-            val cy = h * 0.5f
-            val base = minOf(w, h) * 0.28f
-
-            for (ring in 1..3) {
-                val radius =
-                    base * (0.66f + ring * 0.28f)
-                arcRect.set(
-                    cx - radius,
-                    cy - radius,
-                    cx + radius,
-                    cy + radius
-                )
-
-                arcPaint.color =
-                    Color.argb(
-                        34 + ring * 9,
-                        Color.red(accent),
-                        Color.green(accent),
-                        Color.blue(accent)
-                    )
-                arcPaint.strokeWidth =
-                    dp(if (ring == 2) 2 else 1)
-                        .toFloat()
-
-                val start =
-                    (t * (8f + ring * 3f) +
-                        ring * 63f) % 360f
-                canvas.drawArc(
-                    arcRect,
-                    start,
-                    82f + ring * 19f,
-                    false,
-                    arcPaint
-                )
-                canvas.drawArc(
-                    arcRect,
-                    start + 176f,
-                    48f + ring * 13f,
-                    false,
-                    arcPaint
-                )
-            }
-
-            val count = 14
-            val points = FloatArray(count * 2)
-
-            for (i in 0 until count) {
-                val orbit =
-                    when (i % 3) {
-                        0 -> base * 0.62f
-                        1 -> base * 0.90f
-                        else -> base * 1.18f
-                    }
-                val direction =
-                    if (i % 2 == 0) 1f else -1f
-                val angle =
-                    (Math.PI * 2.0 * i / count) +
-                        t * 0.10f * direction +
-                        (i % 3) * 0.37
-
-                points[i * 2] =
-                    cx +
-                        Math.cos(angle)
-                            .toFloat() * orbit
-                points[i * 2 + 1] =
-                    cy +
-                        Math.sin(angle)
-                            .toFloat() * orbit * 0.74f
-            }
-
-            linePaint.color =
-                Color.argb(
-                    50,
-                    Color.red(accent),
-                    Color.green(accent),
-                    Color.blue(accent)
-                )
-            linePaint.strokeWidth = dp(1).toFloat()
-
-            for (i in 0 until count) {
-                val next = (i + 1) % count
-                canvas.drawLine(
-                    points[i * 2],
-                    points[i * 2 + 1],
-                    points[next * 2],
-                    points[next * 2 + 1],
-                    linePaint
-                )
-
-                if (i % 2 == 0) {
-                    val cross = (i + 5) % count
-                    canvas.drawLine(
-                        points[i * 2],
-                        points[i * 2 + 1],
-                        points[cross * 2],
-                        points[cross * 2 + 1],
-                        linePaint
-                    )
-                }
-            }
-
-            for (i in 0 until count) {
-                val activeNode =
-                    ((i + (t * 2f).toInt()) % 5) == 0
-                nodePaint.color =
-                    Color.argb(
-                        if (activeNode) 230 else 125,
-                        Color.red(accent),
-                        Color.green(accent),
-                        Color.blue(accent)
-                    )
-                canvas.drawCircle(
-                    points[i * 2],
-                    points[i * 2 + 1],
-                    dp(if (activeNode) 4 else 3)
-                        .toFloat(),
-                    nodePaint
-                )
-            }
-
-            nodePaint.color =
-                Color.argb(
-                    55,
-                    Color.red(accent),
-                    Color.green(accent),
-                    Color.blue(accent)
-                )
-            canvas.drawCircle(
-                cx,
-                cy,
-                dp(25).toFloat() + pulse * dp(5),
-                nodePaint
-            )
-
-            nodePaint.color = accent
-            canvas.drawCircle(
-                cx,
-                cy,
-                dp(6).toFloat() + pulse * dp(2),
-                nodePaint
-            )
-
-            arcPaint.color =
-                Color.argb(
-                    180,
-                    Color.red(accent),
-                    Color.green(accent),
-                    Color.blue(accent)
-                )
-            arcPaint.strokeWidth = dp(2).toFloat()
-            canvas.drawCircle(
-                cx,
-                cy,
-                dp(16).toFloat() + pulse * dp(3),
-                arcPaint
-            )
-
-            if (attached) {
-                postInvalidateOnAnimation()
-            }
         }
     }
 
