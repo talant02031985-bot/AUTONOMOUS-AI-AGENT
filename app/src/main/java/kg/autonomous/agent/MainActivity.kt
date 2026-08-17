@@ -11,12 +11,14 @@ import android.graphics.Canvas
 import android.graphics.Color
 import android.graphics.Paint
 import android.graphics.Path
+import android.graphics.RectF
 import android.graphics.Typeface
 import android.graphics.drawable.GradientDrawable
 import android.os.Build
 import android.os.Bundle
 import android.provider.Settings
 import android.view.Gravity
+import android.view.MotionEvent
 import android.view.View
 import android.view.ViewGroup
 import android.view.WindowManager
@@ -49,6 +51,7 @@ class MainActivity : AppCompatActivity() {
     }
 
     private lateinit var contentContainer: LinearLayout
+    private lateinit var contentScroll: AyanaPageScrollView
     private lateinit var statusText: TextView
     private lateinit var statusDot: View
     private lateinit var orbText: TextView
@@ -187,7 +190,7 @@ class MainActivity : AppCompatActivity() {
                 .SOFT_INPUT_ADJUST_RESIZE
         )
 
-        // UI v4.1 deliberately disables the floating Mini-Orb.
+        // UI v5 deliberately disables the floating Mini-Orb.
         // The main AYANA interface is now the single visual surface.
         ayanaPreferences.miniOrbEnabled = false
 
@@ -287,28 +290,15 @@ class MainActivity : AppCompatActivity() {
 
         val root =
             LinearLayout(this).apply {
-
-                orientation =
-                    LinearLayout.VERTICAL
-
-                setBackgroundColor(
-                    Color.parseColor(
-                        "#03050A"
-                    )
-                )
+                orientation = LinearLayout.VERTICAL
+                setBackgroundColor(Color.parseColor("#020409"))
             }
 
-        ViewCompat.setOnApplyWindowInsetsListener(
-            root
-        ) {
-            view,
-            insets ->
-
+        ViewCompat.setOnApplyWindowInsetsListener(root) { view, insets ->
             val bars =
                 insets.getInsets(
                     WindowInsetsCompat.Type.systemBars()
                 )
-
             val ime =
                 insets.getInsets(
                     WindowInsetsCompat.Type.ime()
@@ -316,61 +306,44 @@ class MainActivity : AppCompatActivity() {
 
             view.setPadding(
                 bars.left + dp(16),
-                bars.top + dp(12),
+                bars.top + dp(10),
                 bars.right + dp(16),
                 maxOf(
-                    bars.bottom + dp(16),
+                    bars.bottom + dp(12),
                     ime.bottom + dp(8)
                 )
             )
-
             insets
         }
 
-        root.addView(
-            buildTopBar()
-        )
+        root.addView(buildTopBar())
 
         val body =
             LinearLayout(this).apply {
-
-                orientation =
-                    LinearLayout.HORIZONTAL
-
-                gravity =
-                    Gravity.TOP
-
+                orientation = LinearLayout.HORIZONTAL
+                gravity = Gravity.TOP
                 layoutParams =
                     LinearLayout.LayoutParams(
                         ViewGroup.LayoutParams.MATCH_PARENT,
                         0,
                         1f
                     ).apply {
-
-                        topMargin =
-                            dp(10)
+                        topMargin = dp(10)
                     }
             }
 
-        body.addView(
-            buildSidebar()
-        )
+        body.addView(buildSidebar())
 
         val rightColumn =
             LinearLayout(this).apply {
-
-                orientation =
-                    LinearLayout.VERTICAL
-
+                orientation = LinearLayout.VERTICAL
                 layoutParams =
                     LinearLayout.LayoutParams(
                         0,
                         ViewGroup.LayoutParams.MATCH_PARENT,
                         1f
                     ).apply {
-
-                        marginStart =
-                            dp(10)
+                        marginStart = dp(12)
                     }
             }
 
@@ -382,23 +355,16 @@ class MainActivity : AppCompatActivity() {
                 ViewGroup.LayoutParams.MATCH_PARENT,
                 ViewGroup.LayoutParams.WRAP_CONTENT
             ).apply {
-                bottomMargin =
-                    dp(10)
+                bottomMargin = dp(10)
             }
         )
 
-        val scroll =
-            ScrollView(this).apply {
-
-                isFillViewport =
-                    true
-
-                overScrollMode =
-                    View.OVER_SCROLL_NEVER
-
-                clipToPadding =
-                    false
-
+        contentScroll =
+            AyanaPageScrollView(this).apply {
+                isFillViewport = true
+                overScrollMode = View.OVER_SCROLL_NEVER
+                isVerticalScrollBarEnabled = false
+                clipToPadding = false
                 layoutParams =
                     LinearLayout.LayoutParams(
                         ViewGroup.LayoutParams.MATCH_PARENT,
@@ -409,80 +375,59 @@ class MainActivity : AppCompatActivity() {
 
         contentContainer =
             LinearLayout(this).apply {
-
-                orientation =
-                    LinearLayout.VERTICAL
-
-                setPadding(
-                    0,
-                    0,
-                    dp(2),
-                    dp(18)
-                )
+                orientation = LinearLayout.VERTICAL
+                setPadding(0, 0, dp(2), 0)
+                layoutParams =
+                    ScrollView.LayoutParams(
+                        ViewGroup.LayoutParams.MATCH_PARENT,
+                        ViewGroup.LayoutParams.MATCH_PARENT
+                    )
             }
 
-        scroll.addView(
-            contentContainer
-        )
+        contentScroll.addView(contentContainer)
+        rightColumn.addView(contentScroll)
+        body.addView(rightColumn)
+        root.addView(body)
 
-        rightColumn.addView(
-            scroll
-        )
-
-        body.addView(
-            rightColumn
-        )
-
-        root.addView(
-            body
-        )
-
-        setContentView(
-            root
-        )
-
-        ViewCompat.requestApplyInsets(
-            root
-        )
-
+        setContentView(root)
+        ViewCompat.requestApplyInsets(root)
         renderCurrentPage()
     }
 
-    private fun buildTopBar():
-        View {
+
+    private fun buildTopBar(): View {
 
         val bar =
             LinearLayout(this).apply {
                 orientation = LinearLayout.HORIZONTAL
                 gravity = Gravity.CENTER_VERTICAL
                 setPadding(
-                    dp(18),
-                    dp(11),
-                    dp(12),
-                    dp(11)
+                    dp(16),
+                    dp(9),
+                    dp(10),
+                    dp(9)
                 )
                 background =
                     GradientDrawable(
                         GradientDrawable.Orientation.LEFT_RIGHT,
                         intArrayOf(
-                            Color.parseColor("#0A0F18"),
-                            Color.parseColor("#0B1220"),
-                            Color.parseColor("#10101D")
+                            Color.parseColor("#070C14"),
+                            Color.parseColor("#0A101B"),
+                            Color.parseColor("#0C0E18")
                         )
                     ).apply {
                         cornerRadius = dp(18).toFloat()
                         setStroke(
                             dp(1),
-                            Color.parseColor("#273149")
+                            Color.parseColor("#202A3C")
                         )
                     }
-                elevation = dp(2).toFloat()
             }
 
         val mark =
             TextView(this).apply {
                 text = "A"
-                textSize = 22f
+                textSize = 21f
                 gravity = Gravity.CENTER
                 setTextColor(Color.WHITE)
                 setTypeface(
@@ -493,15 +438,15 @@ class MainActivity : AppCompatActivity() {
                     GradientDrawable(
                         GradientDrawable.Orientation.TL_BR,
                         intArrayOf(
-                            Color.parseColor("#5B36D6"),
-                            Color.parseColor("#2563EB"),
-                            Color.parseColor("#0891B2")
+                            Color.parseColor("#4328A8"),
+                            Color.parseColor("#2458C7"),
+                            Color.parseColor("#087D9B")
                         )
                     ).apply {
-                        cornerRadius = dp(14).toFloat()
+                        cornerRadius = dp(13).toFloat()
                         setStroke(
                             dp(1),
-                            Color.parseColor("#7DD3FC")
+                            Color.parseColor("#5DB9E8")
                         )
                     }
             }
@@ -509,8 +454,8 @@ class MainActivity : AppCompatActivity() {
         bar.addView(
             mark,
             LinearLayout.LayoutParams(
-                dp(48),
-                dp(48)
+                dp(44),
+                dp(44)
             ).apply {
                 marginEnd = dp(13)
             }
@@ -529,62 +474,29 @@ class MainActivity : AppCompatActivity() {
 
         brand.addView(
             TextView(this).apply {
-                text = "AYANA  //  ЦЕНТР УПРАВЛЕНИЯ"
-                textSize = 22f
+                text = "AYANA AI"
+                textSize = 23f
                 setTextColor(Color.WHITE)
                 setTypeface(
                     Typeface.DEFAULT,
                     Typeface.BOLD
                 )
-                letterSpacing = 0.015f
+                letterSpacing = 0.01f
             }
         )
 
         brand.addView(
             TextView(this).apply {
-                text = "Голос • Анализ экрана • Agent Core"
-                textSize = 14f
+                text = "Персональный ИИ-агент  •  Agent Core"
+                textSize = 15f
                 setTextColor(
-                    Color.parseColor("#8291A8")
+                    Color.parseColor("#8290A5")
                 )
-                setPadding(
-                    0,
-                    dp(2),
-                    0,
-                    0
-                )
+                setPadding(0, dp(1), 0, 0)
             }
         )
 
         bar.addView(brand)
-
-        bar.addView(
-            headerBadge(
-                "●  АКТИВНА",
-                "#0A1B18",
-                "#1A5A49",
-                "#86EFAC"
-            )
-        )
-
-        bar.addView(
-            headerBadge(
-                if (AyanaVoiceService.isRunning) {
-                    "АГЕНТ  ВКЛ"
-                } else {
-                    "АГЕНТ  ВЫКЛ"
-                },
-                "#111526",
-                "#343B68",
-                "#C4B5FD"
-            ),
-            LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.WRAP_CONTENT,
-                dp(40)
-            ).apply {
-                marginStart = dp(8)
-            }
-        )
 
         textModeButton =
             topIconButton("⌨").apply {
@@ -600,7 +512,7 @@ class MainActivity : AppCompatActivity() {
                 dp(46),
                 dp(46)
             ).apply {
-                marginStart = dp(9)
+                marginStart = dp(8)
             }
         )
 
@@ -625,132 +537,66 @@ class MainActivity : AppCompatActivity() {
         return bar
     }
 
-    private fun buildSidebar():
-        View {
+
+    private fun buildSidebar(): View {
 
         val side =
             LinearLayout(this).apply {
-
-                orientation =
-                    LinearLayout.VERTICAL
-
+                orientation = LinearLayout.VERTICAL
                 setPadding(
                     dp(8),
-                    dp(10),
+                    dp(12),
                     dp(8),
                     dp(10)
                 )
-
                 background =
                     GradientDrawable(
                         GradientDrawable.Orientation.TL_BR,
                         intArrayOf(
-                            Color.parseColor("#0A0F19"),
-                            Color.parseColor("#0C1320"),
-                            Color.parseColor("#0D1020")
+                            Color.parseColor("#070C14"),
+                            Color.parseColor("#09111D"),
+                            Color.parseColor("#0A0D16")
                         )
                     ).apply {
-                        cornerRadius =
-                            dp(22).toFloat()
+                        cornerRadius = dp(20).toFloat()
                         setStroke(
                             dp(1),
-                            Color.parseColor("#222C42")
+                            Color.parseColor("#202A3B")
                         )
                     }
-
                 layoutParams =
                     LinearLayout.LayoutParams(
-                        dp(184),
+                        dp(172),
                         ViewGroup.LayoutParams.MATCH_PARENT
                     )
             }
 
-        val navHeader =
-            LinearLayout(this).apply {
-                orientation =
-                    LinearLayout.HORIZONTAL
-                gravity =
-                    Gravity.CENTER_VERTICAL
-                setPadding(
-                    dp(8),
-                    dp(4),
-                    dp(6),
-                    dp(10)
-                )
-            }
-
-        navHeader.addView(
-            View(this).apply {
-                background =
-                    circleDrawable(
-                        Color.parseColor("#8B5CF6")
-                    )
-            },
-            LinearLayout.LayoutParams(
-                dp(7),
-                dp(7)
-            ).apply {
-                marginEnd =
-                    dp(7)
-            }
-        )
-
-        navHeader.addView(
+        side.addView(
             TextView(this).apply {
-                text =
-                    "СИСТЕМА"
-                textSize =
-                    14f
+                text = "AYANA"
+                textSize = 14f
                 setTextColor(
-                    Color.parseColor("#8E9BB0")
+                    Color.parseColor("#6F7F95")
                 )
                 setTypeface(
                     Typeface.DEFAULT,
                     Typeface.BOLD
                 )
-                letterSpacing =
-                    0.08f
+                letterSpacing = 0.09f
+                setPadding(
+                    dp(10),
+                    dp(2),
+                    0,
+                    dp(10)
+                )
             }
         )
 
-        side.addView(
-            navHeader
-        )
-
-        side.addView(
-            navButton(
-                Page.HOME,
-                "◈  Центр"
-            )
-        )
-
-        side.addView(
-            navButton(
-                Page.TASKS,
-                "◷  Задачи"
-            )
-        )
-
-        side.addView(
-            navButton(
-                Page.MEMORY,
-                "◇  Память"
-            )
-        )
-
-        side.addView(
-            navButton(
-                Page.DIAGNOSTICS,
-                "⌁  Система"
-            )
-        )
-
-        side.addView(
-            navButton(
-                Page.SETTINGS,
-                "⚙  Настройки"
-            )
-        )
+        side.addView(navButton(Page.HOME, "⌂  Главная"))
+        side.addView(navButton(Page.TASKS, "◷  Задачи"))
+        side.addView(navButton(Page.MEMORY, "◇  Память"))
+        side.addView(navButton(Page.DIAGNOSTICS, "⌁  Система"))
+        side.addView(navButton(Page.SETTINGS, "⚙  Настройки"))
 
         side.addView(
             Space(this),
@@ -761,106 +607,77 @@ class MainActivity : AppCompatActivity() {
             )
         )
 
-        val stateBox =
+        val serviceLine =
             LinearLayout(this).apply {
-                orientation =
-                    LinearLayout.VERTICAL
+                orientation = LinearLayout.HORIZONTAL
+                gravity = Gravity.CENTER_VERTICAL
                 setPadding(
                     dp(10),
+                    dp(9),
                     dp(10),
-                    dp(10),
-                    dp(10)
+                    dp(9)
                 )
                 background =
                     softDrawable(
-                        "#0A1521",
-                        "#203C55",
-                        15
+                        "#09131C",
+                        "#1D384D",
+                        14
                     )
             }
 
-        stateBox.addView(
-            TextView(this).apply {
-                text =
-                    "ЯДРО AYANA"
-                textSize =
-                    13.5f
-                setTextColor(
-                    Color.parseColor("#667B95")
-                )
+        serviceLine.addView(
+            View(this).apply {
+                background =
+                    circleDrawable(
+                        if (AyanaVoiceService.isRunning) {
+                            Color.parseColor("#22C55E")
+                        } else {
+                            Color.parseColor("#64748B")
+                        }
+                    )
+            },
+            LinearLayout.LayoutParams(
+                dp(8),
+                dp(8)
+            ).apply {
+                marginEnd = dp(8)
             }
         )
 
-        stateBox.addView(
+        serviceLine.addView(
             TextView(this).apply {
-                text =
-                    if (
-                        AyanaVoiceService.isRunning
-                    ) {
-                        "●  АКТИВНО"
-                    } else {
-                        "●  ОТКЛЮЧЕНО"
-                    }
-                textSize =
-                    14.5f
+                text = "Голосовой сервис"
+                textSize = 14f
                 setTextColor(
-                    Color.parseColor(
-                        if (
-                            AyanaVoiceService.isRunning
-                        ) {
-                            "#67E8F9"
-                        } else {
-                            "#FCA5A5"
-                        }
-                    )
-                )
-                setTypeface(
-                    Typeface.DEFAULT,
-                    Typeface.BOLD
-                )
-                setPadding(
-                    0,
-                    dp(5),
-                    0,
-                    0
+                    Color.parseColor("#AAB7C8")
                 )
             }
         )
 
         side.addView(
-            stateBox,
+            serviceLine,
             LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT,
                 ViewGroup.LayoutParams.WRAP_CONTENT
             ).apply {
-                bottomMargin =
-                    dp(9)
+                bottomMargin = dp(9)
             }
         )
 
         stopButton =
             Button(this).apply {
-
-                text =
-                    "■  ОСТАНОВИТЬ"
-
-                textSize =
-                    14.5f
-
-                isAllCaps =
-                    false
-
+                text = "Остановить AYANA"
+                textSize = 14.5f
+                isAllCaps = false
                 setTextColor(
-                    Color.parseColor("#FCA5A5")
+                    Color.parseColor("#F2A7AE")
                 )
-
                 background =
                     softDrawable(
-                        "#211013",
-                        "#64303A",
-                        15
+                        "#1B0E12",
+                        "#56303A",
+                        14
                     )
-
                 setOnClickListener {
                     stopAyanaService()
                 }
@@ -870,12 +687,13 @@ class MainActivity : AppCompatActivity() {
             stopButton,
             LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT,
-                dp(50)
+                dp(48)
             )
         )
 
         return side
     }
+
 
     private fun navButton(
         page: Page,
@@ -888,7 +706,7 @@ class MainActivity : AppCompatActivity() {
                 label
 
             textSize =
-                    15.5f
+                    16.5f
 
             gravity =
                 Gravity.CENTER_VERTICAL
@@ -941,34 +759,32 @@ class MainActivity : AppCompatActivity() {
 
     private fun renderCurrentPage() {
 
-        if (
-            !::contentContainer.isInitialized
-        ) {
+        if (!::contentContainer.isInitialized) {
             return
         }
 
         updateNavigation()
 
-        when (
-            currentPage
-        ) {
+        if (::contentScroll.isInitialized) {
+            contentScroll.scrollingEnabled =
+                currentPage != Page.HOME || textModeVisible
+            contentScroll.isVerticalScrollBarEnabled =
+                currentPage != Page.HOME
 
-            Page.HOME ->
-                renderHome()
+            if (currentPage == Page.HOME) {
+                contentScroll.scrollTo(0, 0)
+            }
+        }
 
-            Page.TASKS ->
-                renderTasks()
-
-            Page.MEMORY ->
-                renderMemory()
-
-            Page.DIAGNOSTICS ->
-                renderDiagnostics()
-
-            Page.SETTINGS ->
-                renderSettings()
+        when (currentPage) {
+            Page.HOME -> renderHome()
+            Page.TASKS -> renderTasks()
+            Page.MEMORY -> renderMemory()
+            Page.DIAGNOSTICS -> renderDiagnostics()
+            Page.SETTINGS -> renderSettings()
         }
     }
+
 
     private fun updateNavigation() {
 
@@ -1033,28 +849,29 @@ class MainActivity : AppCompatActivity() {
     private fun renderHome() {
 
         contentContainer.removeAllViews()
+        contentContainer.setPadding(0, 0, dp(2), 0)
 
-        val titleRow =
+        val header =
             LinearLayout(this).apply {
                 orientation = LinearLayout.HORIZONTAL
                 gravity = Gravity.CENTER_VERTICAL
                 setPadding(
                     dp(2),
-                    dp(4),
+                    0,
                     dp(2),
-                    dp(8)
+                    dp(10)
                 )
             }
 
-        val titleBlock =
+        val title =
             LinearLayout(this).apply {
                 orientation = LinearLayout.VERTICAL
             }
 
-        titleBlock.addView(
+        title.addView(
             TextView(this).apply {
-                text = "Центр управления"
-                textSize = 30f
+                text = "Главная"
+                textSize = 28f
                 setTextColor(Color.WHITE)
                 setTypeface(
                     Typeface.DEFAULT,
@@ -1063,24 +880,19 @@ class MainActivity : AppCompatActivity() {
             }
         )
 
-        titleBlock.addView(
+        title.addView(
             TextView(this).apply {
-                text = "Живая сессия • управление устройством • контекст AYANA"
-                textSize = 15.5f
+                text = "Текущая сессия AYANA"
+                textSize = 16f
                 setTextColor(
-                    Color.parseColor("#8190A7")
+                    Color.parseColor("#77879D")
                 )
-                setPadding(
-                    0,
-                    dp(3),
-                    0,
-                    0
-                )
+                setPadding(0, dp(2), 0, 0)
             }
         )
 
-        titleRow.addView(
-            titleBlock,
+        header.addView(
+            title,
             LinearLayout.LayoutParams(
                 0,
                 ViewGroup.LayoutParams.WRAP_CONTENT,
@@ -1088,101 +900,509 @@ class MainActivity : AppCompatActivity() {
             )
         )
 
-        titleRow.addView(
-            headerBadge(
+        header.addView(
+            statusPill(
                 stateTitle(
                     AyanaVoiceService.currentStatusState
-                ).uppercase(Locale.getDefault()),
-                "#0C1422",
-                "#294766",
-                "#7DD3FC"
+                )
             )
         )
 
-        contentContainer.addView(titleRow)
+        contentContainer.addView(header)
 
-        val cockpit =
+        val primaryRow =
             LinearLayout(this).apply {
                 orientation = LinearLayout.HORIZONTAL
                 gravity = Gravity.TOP
             }
 
-        cockpit.addView(
-            controlHeroCard(),
+        primaryRow.addView(
+            aiPresenceCard(),
             LinearLayout.LayoutParams(
                 0,
-                ViewGroup.LayoutParams.WRAP_CONTENT,
-                1.52f
+                dp(310),
+                1.72f
             )
         )
 
-        cockpit.addView(
-            executionCard(),
+        primaryRow.addView(
+            aiSystemCard(),
             LinearLayout.LayoutParams(
                 0,
-                ViewGroup.LayoutParams.WRAP_CONTENT,
-                1.02f
+                dp(310),
+                0.88f
             ).apply {
                 marginStart = dp(12)
             }
         )
 
-        cockpit.addView(
-            servicesCompactCard(),
-            LinearLayout.LayoutParams(
-                0,
-                ViewGroup.LayoutParams.WRAP_CONTENT,
-                0.92f
-            ).apply {
-                marginStart = dp(12)
-            }
-        )
-
-        contentContainer.addView(cockpit)
-
-        val secondRow =
-            LinearLayout(this).apply {
-                orientation = LinearLayout.HORIZONTAL
-                gravity = Gravity.TOP
-            }
-
-        secondRow.addView(
-            commandConsoleCard(),
-            LinearLayout.LayoutParams(
-                0,
-                ViewGroup.LayoutParams.WRAP_CONTENT,
-                1.45f
-            )
-        )
-
-        secondRow.addView(
-            nextReminderCard(),
-            LinearLayout.LayoutParams(
-                0,
-                ViewGroup.LayoutParams.WRAP_CONTENT,
-                1.0f
-            ).apply {
-                marginStart = dp(12)
-            }
-        )
-
-        secondRow.addView(
-            activityOverviewCard(),
-            LinearLayout.LayoutParams(
-                0,
-                ViewGroup.LayoutParams.WRAP_CONTENT,
-                0.92f
-            ).apply {
-                marginStart = dp(12)
-            }
-        )
+        contentContainer.addView(primaryRow)
 
         contentContainer.addView(
-            secondRow,
-            sectionParams(12)
+            homeCommandBar(),
+            LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                dp(88)
+            ).apply {
+                topMargin = dp(12)
+            }
+        )
+    }
+
+    private fun aiPresenceCard(): View {
+
+        val card =
+            LinearLayout(this).apply {
+                orientation = LinearLayout.HORIZONTAL
+                gravity = Gravity.CENTER_VERTICAL
+                setPadding(
+                    dp(24),
+                    dp(22),
+                    dp(20),
+                    dp(22)
+                )
+                background =
+                    GradientDrawable(
+                        GradientDrawable.Orientation.TL_BR,
+                        intArrayOf(
+                            Color.parseColor("#080D15"),
+                            Color.parseColor("#0B1220"),
+                            Color.parseColor("#101023")
+                        )
+                    ).apply {
+                        cornerRadius = dp(24).toFloat()
+                        setStroke(
+                            dp(1),
+                            Color.parseColor("#2B3850")
+                        )
+                    }
+            }
+
+        val copy =
+            LinearLayout(this).apply {
+                orientation = LinearLayout.VERTICAL
+                gravity = Gravity.CENTER_VERTICAL
+            }
+
+        copy.addView(
+            TextView(this).apply {
+                text = "AGENT CORE"
+                textSize = 15f
+                setTextColor(
+                    Color.parseColor("#8A7CFF")
+                )
+                setTypeface(
+                    Typeface.DEFAULT,
+                    Typeface.BOLD
+                )
+                letterSpacing = 0.08f
+            }
         )
 
+        copy.addView(
+            TextView(this).apply {
+                text =
+                    stateTitle(
+                        AyanaVoiceService.currentStatusState
+                    )
+                textSize = 38f
+                setTextColor(Color.WHITE)
+                setTypeface(
+                    Typeface.DEFAULT,
+                    Typeface.BOLD
+                )
+                setPadding(0, dp(8), 0, 0)
+            }
+        )
+
+        val stateRow =
+            LinearLayout(this).apply {
+                orientation = LinearLayout.HORIZONTAL
+                gravity = Gravity.CENTER_VERTICAL
+                setPadding(0, dp(10), 0, 0)
+            }
+
+        statusDot =
+            View(this).apply {
+                background =
+                    circleDrawable(
+                        stateColor(
+                            AyanaVoiceService.currentStatusState
+                        )
+                    )
+            }
+
+        stateRow.addView(
+            statusDot,
+            LinearLayout.LayoutParams(
+                dp(10),
+                dp(10)
+            ).apply {
+                marginEnd = dp(9)
+            }
+        )
+
+        statusText =
+            TextView(this).apply {
+                text = AyanaVoiceService.currentStatusText
+                textSize = 17f
+                maxLines = 3
+                setTextColor(
+                    Color.parseColor("#D4DEEA")
+                )
+            }
+
+        stateRow.addView(
+            statusText,
+            LinearLayout.LayoutParams(
+                0,
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+                1f
+            )
+        )
+
+        copy.addView(stateRow)
+
+        copy.addView(
+            TextView(this).apply {
+                text = "Голос  •  Экран  •  Agent Core"
+                textSize = 15f
+                setTextColor(
+                    Color.parseColor("#718198")
+                )
+                setPadding(0, dp(16), 0, 0)
+            }
+        )
+
+        card.addView(
+            copy,
+            LinearLayout.LayoutParams(
+                0,
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                1.0f
+            )
+        )
+
+        val neural =
+            AyanaNeuralView(this).apply {
+                background =
+                    GradientDrawable(
+                        GradientDrawable.Orientation.TL_BR,
+                        intArrayOf(
+                            Color.parseColor("#060B12"),
+                            Color.parseColor("#09111D")
+                        )
+                    ).apply {
+                        cornerRadius = dp(20).toFloat()
+                        setStroke(
+                            dp(1),
+                            Color.parseColor("#1E3B54")
+                        )
+                    }
+            }
+
+        card.addView(
+            neural,
+            LinearLayout.LayoutParams(
+                0,
+                dp(248),
+                1.12f
+            ).apply {
+                marginStart = dp(22)
+            }
+        )
+
+        return card
     }
+
+    private fun aiSystemCard(): View {
+
+        val card = panel(22)
+        card.setPadding(
+            dp(20),
+            dp(20),
+            dp(20),
+            dp(18)
+        )
+
+        card.addView(
+            TextView(this).apply {
+                text = "Система"
+                textSize = 20f
+                setTextColor(Color.WHITE)
+                setTypeface(
+                    Typeface.DEFAULT,
+                    Typeface.BOLD
+                )
+            }
+        )
+
+        card.addView(
+            TextView(this).apply {
+                text = "Готовность основных модулей"
+                textSize = 15f
+                setTextColor(
+                    Color.parseColor("#77879D")
+                )
+                setPadding(0, dp(4), 0, dp(14))
+            }
+        )
+
+        card.addView(
+            primarySystemRow(
+                "Голос",
+                checkSelfPermissionCompat(
+                    Manifest.permission.RECORD_AUDIO
+                )
+            )
+        )
+
+        card.addView(
+            primarySystemRow(
+                "Экран",
+                isAccessibilityEnabled()
+            )
+        )
+
+        card.addView(
+            primarySystemRow(
+                "Agent Core",
+                AyanaVoiceService.isRunning
+            )
+        )
+
+        val spacer = Space(this)
+        card.addView(
+            spacer,
+            LinearLayout.LayoutParams(
+                1,
+                0,
+                1f
+            )
+        )
+
+        card.addView(
+            TextView(this).apply {
+                text = "Диагностика  ›"
+                textSize = 16f
+                gravity = Gravity.CENTER
+                setTextColor(
+                    Color.parseColor("#D4D8FF")
+                )
+                background =
+                    softDrawable(
+                        "#0D1424",
+                        "#313D62",
+                        14
+                    )
+                setOnClickListener {
+                    switchPage(Page.DIAGNOSTICS)
+                }
+            },
+            LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                dp(44)
+            )
+        )
+
+        return card
+    }
+
+    private fun primarySystemRow(
+        label: String,
+        ok: Boolean
+    ): View {
+
+        val row =
+            LinearLayout(this).apply {
+                orientation = LinearLayout.HORIZONTAL
+                gravity = Gravity.CENTER_VERTICAL
+                setPadding(
+                    dp(2),
+                    dp(9),
+                    dp(2),
+                    dp(9)
+                )
+            }
+
+        row.addView(
+            View(this).apply {
+                background =
+                    circleDrawable(
+                        Color.parseColor(
+                            if (ok) {
+                                "#22C55E"
+                            } else {
+                                "#EF4444"
+                            }
+                        )
+                    )
+            },
+            LinearLayout.LayoutParams(
+                dp(9),
+                dp(9)
+            ).apply {
+                marginEnd = dp(10)
+            }
+        )
+
+        row.addView(
+            TextView(this).apply {
+                text = label
+                textSize = 17f
+                setTextColor(
+                    Color.parseColor("#D5DEEA")
+                )
+            },
+            LinearLayout.LayoutParams(
+                0,
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+                1f
+            )
+        )
+
+        row.addView(
+            TextView(this).apply {
+                text =
+                    if (ok) {
+                        "Готово"
+                    } else {
+                        "Внимание"
+                    }
+                textSize = 15f
+                setTextColor(
+                    Color.parseColor(
+                        if (ok) {
+                            "#86EFAC"
+                        } else {
+                            "#FCA5A5"
+                        }
+                    )
+                )
+                setTypeface(
+                    Typeface.DEFAULT,
+                    Typeface.BOLD
+                )
+            }
+        )
+
+        return row
+    }
+
+    private fun homeCommandBar(): View {
+
+        val bar =
+            LinearLayout(this).apply {
+                orientation = LinearLayout.HORIZONTAL
+                gravity = Gravity.CENTER_VERTICAL
+                setPadding(
+                    dp(20),
+                    dp(14),
+                    dp(14),
+                    dp(14)
+                )
+                background =
+                    GradientDrawable(
+                        GradientDrawable.Orientation.LEFT_RIGHT,
+                        intArrayOf(
+                            Color.parseColor("#080D15"),
+                            Color.parseColor("#0A1220"),
+                            Color.parseColor("#0D0F1B")
+                        )
+                    ).apply {
+                        cornerRadius = dp(20).toFloat()
+                        setStroke(
+                            dp(1),
+                            Color.parseColor("#27344B")
+                        )
+                    }
+            }
+
+        bar.addView(
+            View(this).apply {
+                background =
+                    circleDrawable(
+                        stateColor(
+                            AyanaVoiceService.currentStatusState
+                        )
+                    )
+            },
+            LinearLayout.LayoutParams(
+                dp(11),
+                dp(11)
+            ).apply {
+                marginEnd = dp(12)
+            }
+        )
+
+        val textBlock =
+            LinearLayout(this).apply {
+                orientation = LinearLayout.VERTICAL
+            }
+
+        textBlock.addView(
+            TextView(this).apply {
+                text = "Команда"
+                textSize = 16f
+                setTextColor(
+                    Color.parseColor("#8C9BB0")
+                )
+                setTypeface(
+                    Typeface.DEFAULT,
+                    Typeface.BOLD
+                )
+            }
+        )
+
+        textBlock.addView(
+            TextView(this).apply {
+                text = "Скажите: «Аяна, открой YouTube»"
+                textSize = 18f
+                setTextColor(Color.WHITE)
+                setPadding(0, dp(2), 0, 0)
+            }
+        )
+
+        bar.addView(
+            textBlock,
+            LinearLayout.LayoutParams(
+                0,
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+                1f
+            )
+        )
+
+        bar.addView(
+            TextView(this).apply {
+                text = "⌨  Текст"
+                textSize = 16f
+                gravity = Gravity.CENTER
+                setTextColor(
+                    Color.parseColor("#D9D5FF")
+                )
+                setTypeface(
+                    Typeface.DEFAULT,
+                    Typeface.BOLD
+                )
+                background =
+                    softDrawable(
+                        "#121426",
+                        "#3B3B68",
+                        14
+                    )
+                setOnClickListener {
+                    toggleTextMode()
+                }
+            },
+            LinearLayout.LayoutParams(
+                dp(128),
+                dp(48)
+            )
+        )
+
+        return bar
+    }
+
 
     private fun controlHeroCard():
         View {
@@ -1222,7 +1442,7 @@ class MainActivity : AppCompatActivity() {
             }
 
         top.addView(
-            smallSectionTitle("ЯДРО AYANA  /  АКТИВНО"),
+            smallSectionTitle("AGENT CORE"),
             LinearLayout.LayoutParams(
                 0,
                 ViewGroup.LayoutParams.WRAP_CONTENT,
@@ -1333,7 +1553,7 @@ class MainActivity : AppCompatActivity() {
 
         stateColumn.addView(
             TextView(this).apply {
-                text = "Голос • Экран • Ядро"
+                text = "Голос • Экран • Agent Core"
                 textSize = 14f
                 setTextColor(
                     Color.parseColor("#75869F")
@@ -1395,7 +1615,7 @@ class MainActivity : AppCompatActivity() {
         listOf(
             "ГОЛОС",
             "ЭКРАН",
-            "ЯДРО"
+            "AGENT CORE"
         ).forEachIndexed {
             index,
             label ->
@@ -1579,7 +1799,7 @@ class MainActivity : AppCompatActivity() {
         )
 
         titleRow.addView(
-            statusPill("ЯДРО ГОТОВО")
+            statusPill("Agent Core")
         )
 
         card.addView(titleRow)
@@ -1836,7 +2056,7 @@ class MainActivity : AppCompatActivity() {
 
         card.addView(
             TextView(this).apply {
-                text = "ГОЛОС  •  ЭКРАН  •  ЯДРО  •  ЗАДАЧИ"
+                text = "ГОЛОС  •  ЭКРАН  •  AGENT CORE"
                 textSize = 13.5f
                 setTextColor(
                     Color.parseColor("#788AA3")
@@ -3494,6 +3714,11 @@ class MainActivity : AppCompatActivity() {
                 View.GONE
             }
 
+        if (::contentScroll.isInitialized) {
+            contentScroll.scrollingEnabled =
+                currentPage != Page.HOME || textModeVisible
+        }
+
         if (
             textModeVisible
         ) {
@@ -4815,6 +5040,248 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
+    private class AyanaPageScrollView(
+        context: Context
+    ) : ScrollView(context) {
+
+        var scrollingEnabled: Boolean = true
+
+        override fun onInterceptTouchEvent(
+            ev: MotionEvent
+        ): Boolean {
+            return scrollingEnabled &&
+                super.onInterceptTouchEvent(ev)
+        }
+
+        override fun onTouchEvent(
+            ev: MotionEvent
+        ): Boolean {
+            return scrollingEnabled &&
+                super.onTouchEvent(ev)
+        }
+    }
+
+    private inner class AyanaNeuralView(
+        context: Context
+    ) : View(context) {
+
+        private val linePaint =
+            Paint(Paint.ANTI_ALIAS_FLAG).apply {
+                style = Paint.Style.STROKE
+                strokeWidth = dp(1).toFloat()
+            }
+
+        private val arcPaint =
+            Paint(Paint.ANTI_ALIAS_FLAG).apply {
+                style = Paint.Style.STROKE
+                strokeCap = Paint.Cap.ROUND
+            }
+
+        private val nodePaint =
+            Paint(Paint.ANTI_ALIAS_FLAG).apply {
+                style = Paint.Style.FILL
+            }
+
+        private val arcRect = RectF()
+        private var attached = false
+
+        override fun onAttachedToWindow() {
+            super.onAttachedToWindow()
+            attached = true
+            postInvalidateOnAnimation()
+        }
+
+        override fun onDetachedFromWindow() {
+            attached = false
+            super.onDetachedFromWindow()
+        }
+
+        override fun onDraw(
+            canvas: Canvas
+        ) {
+            super.onDraw(canvas)
+
+            val w = width.toFloat()
+            val h = height.toFloat()
+            if (w <= 1f || h <= 1f) {
+                return
+            }
+
+            val state =
+                AyanaVoiceService.currentStatusState
+            val accent = stateColor(state)
+            val t =
+                (System.nanoTime() / 1_000_000_000.0)
+                    .toFloat()
+            val pulse =
+                (0.5f +
+                    0.5f *
+                    Math.sin(t * 2.4).toFloat())
+
+            val cx = w * 0.5f
+            val cy = h * 0.5f
+            val base = minOf(w, h) * 0.28f
+
+            for (ring in 1..3) {
+                val radius =
+                    base * (0.66f + ring * 0.28f)
+                arcRect.set(
+                    cx - radius,
+                    cy - radius,
+                    cx + radius,
+                    cy + radius
+                )
+
+                arcPaint.color =
+                    Color.argb(
+                        34 + ring * 9,
+                        Color.red(accent),
+                        Color.green(accent),
+                        Color.blue(accent)
+                    )
+                arcPaint.strokeWidth =
+                    dp(if (ring == 2) 2 else 1)
+                        .toFloat()
+
+                val start =
+                    (t * (8f + ring * 3f) +
+                        ring * 63f) % 360f
+                canvas.drawArc(
+                    arcRect,
+                    start,
+                    82f + ring * 19f,
+                    false,
+                    arcPaint
+                )
+                canvas.drawArc(
+                    arcRect,
+                    start + 176f,
+                    48f + ring * 13f,
+                    false,
+                    arcPaint
+                )
+            }
+
+            val count = 14
+            val points = FloatArray(count * 2)
+
+            for (i in 0 until count) {
+                val orbit =
+                    when (i % 3) {
+                        0 -> base * 0.62f
+                        1 -> base * 0.90f
+                        else -> base * 1.18f
+                    }
+                val direction =
+                    if (i % 2 == 0) 1f else -1f
+                val angle =
+                    (Math.PI * 2.0 * i / count) +
+                        t * 0.10f * direction +
+                        (i % 3) * 0.37
+
+                points[i * 2] =
+                    cx +
+                        Math.cos(angle)
+                            .toFloat() * orbit
+                points[i * 2 + 1] =
+                    cy +
+                        Math.sin(angle)
+                            .toFloat() * orbit * 0.74f
+            }
+
+            linePaint.color =
+                Color.argb(
+                    50,
+                    Color.red(accent),
+                    Color.green(accent),
+                    Color.blue(accent)
+                )
+            linePaint.strokeWidth = dp(1).toFloat()
+
+            for (i in 0 until count) {
+                val next = (i + 1) % count
+                canvas.drawLine(
+                    points[i * 2],
+                    points[i * 2 + 1],
+                    points[next * 2],
+                    points[next * 2 + 1],
+                    linePaint
+                )
+
+                if (i % 2 == 0) {
+                    val cross = (i + 5) % count
+                    canvas.drawLine(
+                        points[i * 2],
+                        points[i * 2 + 1],
+                        points[cross * 2],
+                        points[cross * 2 + 1],
+                        linePaint
+                    )
+                }
+            }
+
+            for (i in 0 until count) {
+                val activeNode =
+                    ((i + (t * 2f).toInt()) % 5) == 0
+                nodePaint.color =
+                    Color.argb(
+                        if (activeNode) 230 else 125,
+                        Color.red(accent),
+                        Color.green(accent),
+                        Color.blue(accent)
+                    )
+                canvas.drawCircle(
+                    points[i * 2],
+                    points[i * 2 + 1],
+                    dp(if (activeNode) 4 else 3)
+                        .toFloat(),
+                    nodePaint
+                )
+            }
+
+            nodePaint.color =
+                Color.argb(
+                    55,
+                    Color.red(accent),
+                    Color.green(accent),
+                    Color.blue(accent)
+                )
+            canvas.drawCircle(
+                cx,
+                cy,
+                dp(25).toFloat() + pulse * dp(5),
+                nodePaint
+            )
+
+            nodePaint.color = accent
+            canvas.drawCircle(
+                cx,
+                cy,
+                dp(6).toFloat() + pulse * dp(2),
+                nodePaint
+            )
+
+            arcPaint.color =
+                Color.argb(
+                    180,
+                    Color.red(accent),
+                    Color.green(accent),
+                    Color.blue(accent)
+                )
+            arcPaint.strokeWidth = dp(2).toFloat()
+            canvas.drawCircle(
+                cx,
+                cy,
+                dp(16).toFloat() + pulse * dp(3),
+                arcPaint
+            )
+
+            if (attached) {
+                postInvalidateOnAnimation()
+            }
+        }
+    }
+
     private inner class AyanaPulseView(
         context: Context
     ) : View(context) {
@@ -5223,7 +5690,7 @@ class MainActivity : AppCompatActivity() {
 
     private fun configureMiniOrb() {
 
-        // Floating overlays are intentionally disabled in UI v4.1.
+        // Floating overlays are intentionally disabled in UI v5.1.
         // This keeps AYANA visually clean and prevents stale duplicate orbs.
         ayanaPreferences.miniOrbEnabled = false
         refreshMiniOrb()
