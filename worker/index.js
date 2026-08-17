@@ -598,6 +598,7 @@ ${memoryContext}
 
   const payload = {
     model: "gpt-5.6",
+    reasoning: { effort: "low" },
     instructions: AGENT_INSTRUCTIONS,
     input,
     tools: [
