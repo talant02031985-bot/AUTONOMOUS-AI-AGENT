@@ -23,6 +23,7 @@ import android.os.Build
 import android.os.Handler
 import android.os.IBinder
 import android.os.Looper
+import android.os.SystemClock
 import android.provider.Settings
 import com.k2fsa.sherpa.onnx.FeatureConfig
 import com.k2fsa.sherpa.onnx.OnlineModelConfig
@@ -40,12 +41,15 @@ import java.time.format.DateTimeFormatter
 import java.util.Locale
 import javax.net.ssl.HttpsURLConnection
 import kotlin.concurrent.thread
+import kotlin.math.abs
 
 class AyanaVoiceService : Service() {
 
     private enum class ListenMode {
         WAKE,
+        QUICK_COMMAND,
         COMMAND,
+        FOLLOW_UP,
         BUSY
     }
 
@@ -491,6 +495,70 @@ class AyanaVoiceService : Service() {
         startSherpaListening()
     }
 
+    private fun startQuickCommandListening() {
+
+        if (
+            shuttingDown ||
+            !modelReady
+        ) {
+            return
+        }
+
+        listenMode =
+            ListenMode.QUICK_COMMAND
+
+        broadcastStatus(
+            "Слушаю…",
+            STATE_COMMAND
+        )
+
+        updateNotification(
+            "Слушаю продолжение команды"
+        )
+
+        startSherpaListening()
+    }
+
+    private fun startFollowUpOrWake() {
+
+        val audioManager =
+            getSystemService(
+                Context.AUDIO_SERVICE
+            ) as? AudioManager
+
+        if (
+            audioManager?.isMusicActive == true
+        ) {
+            startWakeListening()
+        } else {
+            startFollowUpListening()
+        }
+    }
+
+    private fun startFollowUpListening() {
+
+        if (
+            shuttingDown ||
+            !modelReady
+        ) {
+            return
+        }
+
+        listenMode =
+            ListenMode.FOLLOW_UP
+
+        broadcastStatus(
+            "Можно продолжить без «Аяна»",
+            STATE_COMMAND
+        )
+
+        updateNotification(
+            "Слушаю продолжение"
+        )
+
+        startSherpaListening()
+    }
+
     private fun startCommandListening() {
 
         if (
@@ -580,21 +648,44 @@ class AyanaVoiceService : Service() {
             return
         }
 
-        val recorder =
-            try {
+        var recorder: AudioRecord? =
+            null
 
-                AudioRecord(
-                    MediaRecorder.AudioSource.MIC,
-                    sampleRateInHz,
-                    channelConfig,
-                    audioFormat,
-                    minBufferBytes * 2
-                )
+        val audioSources =
+            intArrayOf(
+                MediaRecorder.AudioSource.VOICE_RECOGNITION,
+                MediaRecorder.AudioSource.MIC
+            )
 
-            } catch (_: Exception) {
+        for (source in audioSources) {
 
-                null
+            val candidate =
+                try {
+                    AudioRecord(
+                        source,
+                        sampleRateInHz,
+                        channelConfig,
+                        audioFormat,
+                        minBufferBytes * 2
+                    )
+                } catch (_: Exception) {
+                    null
+                }
+
+            if (
+                candidate != null &&
+                candidate.state ==
+                AudioRecord.STATE_INITIALIZED
+            ) {
+                recorder = candidate
+                break
             }
+
+            try {
+                candidate?.release()
+            } catch (_: Exception) {
+            }
+        }
 
         if (
             recorder == null ||
@@ -615,12 +706,16 @@ class AyanaVoiceService : Service() {
             return
         }
 
-        audioRecord =
+        val activeRecorder =
             recorder
+                ?: return
+
+        audioRecord =
+            activeRecorder
 
         try {
 
-            recorder.startRecording()
+            activeRecorder.startRecording()
 
             isRecording =
                 true
@@ -628,7 +723,7 @@ class AyanaVoiceService : Service() {
         } catch (_: Exception) {
 
             try {
-                recorder.release()
+                activeRecorder.release()
             } catch (_: Exception) {
             }
 
@@ -653,7 +748,7 @@ class AyanaVoiceService : Service() {
             ) {
 
                 processSherpaAudio(
-                    recorder
+                    activeRecorder
                 )
             }
     }
@@ -694,6 +789,12 @@ class AyanaVoiceService : Service() {
         var wakeSeen =
             false
 
+        val modeStartedAt =
+            SystemClock.elapsedRealtime()
+
+        var speechSeen =
+            false
+
         var pendingAction:
             (() -> Unit)? = null
 
@@ -719,10 +820,46 @@ class AyanaVoiceService : Service() {
                     continue
                 }
 
+                var peak =
+                    0.0f
+
+                for (index in 0 until count) {
+                    val level =
+                        abs(
+                            buffer[index] /
+                                32768.0f
+                        )
+
+                    if (level > peak) {
+                        peak = level
+                    }
+                }
+
+                val inputGain =
+                    if (
+                        peak >= 0.008f &&
+                        peak < 0.11f
+                    ) {
+                        (0.13f / peak)
+                            .coerceIn(
+                                1.0f,
+                                2.35f
+                            )
+                    } else {
+                        1.0f
+                    }
+
                 val samples =
                     FloatArray(count) {
-                        buffer[it] /
-                            32768.0f
+                        (
+                            buffer[it] /
+                                32768.0f *
+                                inputGain
+                            )
+                            .coerceIn(
+                                -1.0f,
+                                1.0f
+                            )
                     }
 
                 stream.acceptWaveform(
@@ -746,6 +883,18 @@ class AyanaVoiceService : Service() {
                             .getResult(stream)
                             .text
                     )
+
+                if (
+                    (
+                        listenMode ==
+                        ListenMode.QUICK_COMMAND ||
+                        listenMode ==
+                        ListenMode.FOLLOW_UP
+                    ) &&
+                    text.isNotBlank()
+                ) {
+                    speechSeen = true
+                }
 
                 val isEndpoint =
                     localRecognizer
@@ -798,7 +947,7 @@ class AyanaVoiceService : Service() {
                                     ) {
 
                                         {
-                                            acknowledgeWakeAndListen()
+                                            startQuickCommandListening()
                                         }
 
                                     } else {
@@ -821,6 +970,132 @@ class AyanaVoiceService : Service() {
                                 localRecognizer
                                     .reset(stream)
                             }
+                        }
+                    }
+
+                    ListenMode.QUICK_COMMAND -> {
+
+                        if (isEndpoint) {
+
+                            val finalText =
+                                text
+
+                            if (finalText.isNotBlank()) {
+
+                                isRecording =
+                                    false
+
+                                pendingAction =
+                                    {
+                                        executeCommand(
+                                            finalText,
+                                            silent = false
+                                        )
+                                    }
+
+                                break
+
+                            } else {
+
+                                localRecognizer
+                                    .reset(stream)
+                            }
+                        }
+
+                        if (
+                            !speechSeen &&
+                            SystemClock.elapsedRealtime() -
+                                modeStartedAt >=
+                            QUICK_COMMAND_GRACE_MS
+                        ) {
+
+                            isRecording =
+                                false
+
+                            pendingAction =
+                                {
+                                    acknowledgeWakeAndListen()
+                                }
+
+                            break
+                        }
+                    }
+
+                    ListenMode.FOLLOW_UP -> {
+
+                        if (isEndpoint) {
+
+                            val finalText =
+                                text
+
+                            val followUpCommand =
+                                if (
+                                    containsWakeWord(
+                                        finalText
+                                    )
+                                ) {
+                                    extractWakeCommand(
+                                        finalText
+                                    )
+                                } else {
+                                    finalText
+                                }
+
+                            if (followUpCommand.isNotBlank()) {
+
+                                isRecording =
+                                    false
+
+                                pendingAction =
+                                    {
+                                        executeCommand(
+                                            followUpCommand,
+                                            silent = false
+                                        )
+                                    }
+
+                                break
+
+                            } else if (
+                                finalText.isNotBlank() &&
+                                containsWakeWord(
+                                    finalText
+                                )
+                            ) {
+
+                                isRecording =
+                                    false
+
+                                pendingAction =
+                                    {
+                                        acknowledgeWakeAndListen()
+                                    }
+
+                                break
+
+                            } else {
+
+                                localRecognizer
+                                    .reset(stream)
+                            }
+                        }
+
+                        if (
+                            !speechSeen &&
+                            SystemClock.elapsedRealtime() -
+                                modeStartedAt >=
+                            FOLLOW_UP_WINDOW_MS
+                        ) {
+
+                            isRecording =
+                                false
+
+                            pendingAction =
+                                {
+                                    startWakeListening()
+                                }
+
+                            break
                         }
                     }
 
@@ -899,6 +1174,13 @@ class AyanaVoiceService : Service() {
                             }
                         }
 
+                        ListenMode.QUICK_COMMAND -> {
+
+                            {
+                                acknowledgeWakeAndListen()
+                            }
+                        }
+
                         ListenMode.COMMAND -> {
 
                             {
@@ -912,6 +1194,18 @@ class AyanaVoiceService : Service() {
                                         startCommandListening()
                                     },
                                     900L
+                                )
+                            }
+                        }
+
+                        ListenMode.FOLLOW_UP -> {
+
+                            {
+                                mainHandler.postDelayed(
+                                    {
+                                        startWakeListening()
+                                    },
+                                    500L
                                 )
                             }
                         }
@@ -1025,8 +1319,14 @@ class AyanaVoiceService : Service() {
             ListenMode.WAKE ->
                 startWakeListening()
 
+            ListenMode.QUICK_COMMAND ->
+                startQuickCommandListening()
+
             ListenMode.COMMAND ->
                 startCommandListening()
+
+            ListenMode.FOLLOW_UP ->
+                startFollowUpListening()
 
             ListenMode.BUSY ->
                 Unit
@@ -3049,9 +3349,9 @@ class AyanaVoiceService : Service() {
 
             mainHandler.postDelayed(
                 {
-                    startWakeListening()
+                    startFollowUpOrWake()
                 },
-                650L
+                450L
             )
         }
     }
@@ -5438,7 +5738,7 @@ class AyanaVoiceService : Service() {
 
         if (text.isBlank()) {
 
-            startWakeListening()
+            startFollowUpOrWake()
 
             return
         }
@@ -5512,7 +5812,7 @@ class AyanaVoiceService : Service() {
                             readyAudio,
                             deleteAfter = true
                         ) {
-                            startWakeListening()
+                            startFollowUpOrWake()
                         }
 
                     } else {
@@ -6043,10 +6343,22 @@ class AyanaVoiceService : Service() {
             listOf(
                 "аяна",
                 "айана",
+                "айяна",
+                "ай яна",
                 "а яна",
                 "а я на",
                 "ayana"
             )
+
+        // If the wake word ended as a separate endpoint, keep listening briefly
+        // before saying «Да?». This makes «Аяна, открой YouTube» feel one-shot.
+        private const val QUICK_COMMAND_GRACE_MS =
+            950L
+
+        // After a completed voice action, allow a short natural follow-up
+        // without repeating «Аяна». Silence returns to normal wake mode.
+        private const val FOLLOW_UP_WINDOW_MS =
+            8000L
 
         const val STATE_LISTENING =
             "listening"
