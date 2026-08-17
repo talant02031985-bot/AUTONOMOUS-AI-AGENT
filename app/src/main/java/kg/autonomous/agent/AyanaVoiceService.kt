@@ -47,7 +47,8 @@ import kotlin.math.abs
 
 class AyanaVoiceService : Service() {
 
-    // AYANA Voice v2.7.1: stronger quiet-wake sensitivity + Direct Actions.
+    // AYANA Voice v2.7.4: stable quiet-wake + faster local commit + multi-step settings target fix.
+    // Built on the green v2.7.3.1 baseline.
 
     private enum class ListenMode {
         WAKE,
@@ -799,6 +800,15 @@ class AyanaVoiceService : Service() {
         var speechSeen =
             false
 
+        // Sherpa can wait several seconds for an endpoint even after a complete
+        // phrase. Track when the partial transcript last changed so selected
+        // direct local commands can commit earlier without waiting for endpoint.
+        var lastRecognitionText =
+            ""
+
+        var recognitionChangedAt =
+            modeStartedAt
+
         var pendingAction:
             (() -> Unit)? = null
 
@@ -839,29 +849,31 @@ class AyanaVoiceService : Service() {
                     }
                 }
 
-                // Wake sensitivity v2.7.1:
-                // very quiet speech used to receive no boost at all when
-                // peak < 0.008, which made a softly spoken «Аяна» easy to miss.
-                // Use stepped gain so distant/quiet speech is raised while
-                // near-silence is left untouched to avoid amplifying room noise.
+                // Wake sensitivity v2.7.4:
+                // Keep true near-silence unamplified, but boost very quiet
+                // speech more consistently. This improves distant/soft «Аяна»
+                // without changing the recognizer model or microphone source.
                 val inputGain =
                     when {
-                        peak < 0.0012f ->
+                        peak < 0.00035f ->
                             1.0f
 
-                        peak < 0.010f ->
-                            4.5f
+                        peak < 0.0040f ->
+                            5.5f
 
-                        peak < 0.025f ->
-                            3.4f
+                        peak < 0.012f ->
+                            4.8f
 
-                        peak < 0.050f ->
+                        peak < 0.030f ->
+                            3.5f
+
+                        peak < 0.060f ->
                             2.4f
 
-                        peak < 0.090f ->
+                        peak < 0.100f ->
                             1.7f
 
-                        peak < 0.140f ->
+                        peak < 0.150f ->
                             1.25f
 
                         else ->
@@ -903,6 +915,13 @@ class AyanaVoiceService : Service() {
                             .text
                     )
 
+                if (text != lastRecognitionText) {
+                    lastRecognitionText =
+                        text
+                    recognitionChangedAt =
+                        SystemClock.elapsedRealtime()
+                }
+
                 if (
                     (
                         listenMode ==
@@ -934,6 +953,61 @@ class AyanaVoiceService : Service() {
                                 "Слышу «Аяна»…",
                                 STATE_COMMAND
                             )
+                        }
+
+                        // Fast local commit: once a complete direct-settings
+                        // phrase has been stable briefly, execute it without
+                        // waiting for Sherpa's slower endpoint. We deliberately
+                        // exclude the generic settings page to avoid cutting off
+                        // a user who pauses after «открой настройки…».
+                        if (
+                            !isEndpoint &&
+                            wakeSeen &&
+                            text.isNotBlank() &&
+                            SystemClock.elapsedRealtime() -
+                                recognitionChangedAt >=
+                            FAST_LOCAL_PARTIAL_COMMIT_MS
+                        ) {
+
+                            val earlyCommand =
+                                extractWakeCommand(
+                                    text
+                                )
+
+                            val earlySection =
+                                extractDirectSystemSettingsSection(
+                                    earlyCommand
+                                )
+
+                            val earlyAppSettingsTarget =
+                                extractSettingsAppSearchTarget(
+                                    earlyCommand
+                                )
+
+                            if (
+                                earlyAppSettingsTarget != null ||
+                                (
+                                    earlySection != null &&
+                                    earlySection != "general"
+                                )
+                            ) {
+
+                                wakeSeen =
+                                    false
+
+                                isRecording =
+                                    false
+
+                                pendingAction =
+                                    {
+                                        executeCommand(
+                                            earlyCommand,
+                                            silent = false
+                                        )
+                                    }
+
+                                break
+                            }
                         }
 
                         if (isEndpoint) {
@@ -1381,10 +1455,157 @@ class AyanaVoiceService : Service() {
                 text
             )
 
-        return WAKE_VARIANTS
-            .any {
+        if (
+            WAKE_VARIANTS.any {
                 normalized.contains(it)
             }
+        ) {
+            return true
+        }
+
+        // The local STT occasionally returns a one-letter phonetic miss for
+        // «Аяна» (for example «айна»/«яна»). Accept a fuzzy match only at
+        // the beginning of the utterance, where a wake word belongs.
+        return fuzzyWakePrefixLength(
+            normalized
+        ) > 0
+    }
+
+    private fun fuzzyWakePrefixLength(
+        normalized: String
+    ): Int {
+
+        if (normalized.isBlank()) {
+            return 0
+        }
+
+        val firstSpace =
+            normalized.indexOf(' ')
+
+        val firstToken =
+            if (firstSpace >= 0) {
+                normalized.substring(0, firstSpace)
+            } else {
+                normalized
+            }
+
+        if (isWakeLikeToken(firstToken)) {
+            return firstToken.length
+        }
+
+        // Also support split recognition such as «а яна».
+        if (firstSpace > 0) {
+            val secondSpace =
+                normalized.indexOf(
+                    ' ',
+                    firstSpace + 1
+                )
+
+            val prefixEnd =
+                if (secondSpace >= 0) {
+                    secondSpace
+                } else {
+                    normalized.length
+                }
+
+            val compactTwo =
+                normalized
+                    .substring(0, prefixEnd)
+                    .replace(" ", "")
+
+            if (isWakeLikeToken(compactTwo)) {
+                return prefixEnd
+            }
+        }
+
+        return 0
+    }
+
+    private fun isWakeLikeToken(
+        token: String
+    ): Boolean {
+
+        if (token.length !in 3..6) {
+            return false
+        }
+
+        val compactTargets =
+            listOf(
+                "аяна",
+                "айана",
+                "айяна",
+                "ayana"
+            )
+
+        return compactTargets.any { target ->
+            editDistanceAtMostOne(
+                token,
+                target
+            )
+        }
+    }
+
+    private fun editDistanceAtMostOne(
+        left: String,
+        right: String
+    ): Boolean {
+
+        if (left == right) {
+            return true
+        }
+
+        val lengthDiff =
+            kotlin.math.abs(
+                left.length -
+                    right.length
+            )
+
+        if (lengthDiff > 1) {
+            return false
+        }
+
+        var i = 0
+        var j = 0
+        var edits = 0
+
+        while (
+            i < left.length &&
+            j < right.length
+        ) {
+
+            if (left[i] == right[j]) {
+                i++
+                j++
+                continue
+            }
+
+            edits++
+            if (edits > 1) {
+                return false
+            }
+
+            when {
+                left.length > right.length ->
+                    i++
+
+                right.length > left.length ->
+                    j++
+
+                else -> {
+                    i++
+                    j++
+                }
+            }
+        }
+
+        if (
+            i < left.length ||
+            j < right.length
+        ) {
+            edits++
+        }
+
+        return edits <= 1
     }
 
     private fun extractWakeCommand(
@@ -1395,6 +1616,32 @@ class AyanaVoiceService : Service() {
             normalizeRecognitionText(
                 phrase
             )
+
+        // If exact variants did not survive STT but the first token is a
+        // one-edit phonetic match, strip that fuzzy wake prefix too.
+        val fuzzyPrefixLength =
+            fuzzyWakePrefixLength(
+                normalized
+            )
+
+        if (
+            fuzzyPrefixLength > 0 &&
+            !WAKE_VARIANTS.any {
+                normalized.startsWith(it)
+            }
+        ) {
+            normalized =
+                normalized
+                    .substring(
+                        fuzzyPrefixLength
+                    )
+                    .trim()
+                    .trimStart(
+                        '-',
+                        '—'
+                    )
+                    .trim()
+        }
 
         var found =
             false
@@ -1701,7 +1948,45 @@ class AyanaVoiceService : Service() {
             return
         }
 
-        // FAST LOCAL ROUTER v2.7.3
+        // HYBRID SETTINGS TARGET v2.7.4
+        // Example: «открой настройки, зайди в приложения и найди YouTube».
+        // The previous fast router stopped at the Apps list. If a concrete app
+        // target is present, jump directly to that app's system page instead.
+        val settingsAppSearchTarget =
+            extractSettingsAppSearchTarget(
+                normalized
+            )
+
+        if (
+            !settingsAppSearchTarget
+                .isNullOrBlank()
+        ) {
+
+            val result =
+                agentOpenAppInfo(
+                    settingsAppSearchTarget
+                )
+
+            if (
+                result.optBoolean(
+                    "success",
+                    false
+                )
+            ) {
+                finishLocalCommand(
+                    result.optString(
+                        "message",
+                        "Открываю $settingsAppSearchTarget в настройках"
+                    ),
+                    silent
+                )
+                return
+            }
+            // If the direct resolver cannot find the app, do not fail early.
+            // Fall through to Agent Core so Screen Intelligence can continue.
+        }
+
+        // FAST LOCAL ROUTER v2.7.4
         // Common Android settings commands must never wait for Agent Core.
         // Route them directly on-device before the generic command / app router.
         val directSystemSettingsSection =
@@ -2571,6 +2856,99 @@ class AyanaVoiceService : Service() {
             .takeIf {
                 it.isNotBlank()
             }
+    }
+
+    private fun extractSettingsAppSearchTarget(
+        command: String
+    ): String? {
+
+        val c =
+            command
+                .lowercase(
+                    Locale.getDefault()
+                )
+                .replace('ё', 'е')
+                .replace(
+                    Regex("\\s+"),
+                    " "
+                )
+                .trim()
+
+        if (
+            !c.contains("приложени")
+        ) {
+            return null
+        }
+
+        val markers =
+            listOf(
+                "найди ",
+                "найти ",
+                "поищи ",
+                "найди приложение ",
+                "найти приложение ",
+                "выбери "
+            )
+
+        var bestIndex =
+            -1
+
+        var bestMarker =
+            ""
+
+        for (marker in markers) {
+            val index =
+                c.lastIndexOf(marker)
+
+            if (
+                index > bestIndex ||
+                (
+                    index == bestIndex &&
+                    marker.length > bestMarker.length
+                )
+            ) {
+                bestIndex =
+                    index
+                bestMarker =
+                    marker
+            }
+        }
+
+        if (bestIndex < 0) {
+            return null
+        }
+
+        val target =
+            c
+                .substring(
+                    bestIndex +
+                        bestMarker.length
+                )
+                .trim()
+                .trim(
+                    '"',
+                    '\'',
+                    '«',
+                    '»',
+                    '.',
+                    ',',
+                    '!',
+                    '?'
+                )
+
+        if (
+            target.isBlank() ||
+            target in
+                setOf(
+                    "приложение",
+                    "приложения",
+                    "нужное приложение"
+                )
+        ) {
+            return null
+        }
+
+        return target
     }
 
     private fun extractDirectSystemSettingsSection(
@@ -7271,6 +7649,12 @@ class AyanaVoiceService : Service() {
                 "а я на",
                 "ayana"
             )
+
+        // For complete local settings phrases, commit a stable Sherpa partial
+        // before the endpoint detector times out. Long enough to tolerate normal
+        // intra-sentence pauses, short enough to remove multi-second dead time.
+        private const val FAST_LOCAL_PARTIAL_COMMIT_MS =
+            900L
 
         // If the wake word ended as a separate endpoint, keep listening briefly
         // before saying «Да?». This makes «Аяна, открой YouTube» feel one-shot.
