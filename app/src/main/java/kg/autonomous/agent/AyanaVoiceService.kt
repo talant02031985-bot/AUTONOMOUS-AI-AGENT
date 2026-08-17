@@ -260,17 +260,17 @@ class AyanaVoiceService : Service() {
 
                     stopSherpaListening()
 
-                    mainHandler.postDelayed(
-                        {
-                            if (!shuttingDown) {
-                                executeCommand(
-                                    command,
-                                    silent = true
-                                )
-                            }
-                        },
-                        180L
-                    )
+                    // INSTANT TEXT v2.7.4.4
+                    // Text input is already final; unlike voice it does not need an
+                    // endpoint/grace delay. Queue it on the main handler immediately.
+                    mainHandler.post {
+                        if (!shuttingDown) {
+                            executeCommand(
+                                command,
+                                silent = true
+                            )
+                        }
+                    }
                 }
             }
         }
@@ -3105,16 +3105,66 @@ class AyanaVoiceService : Service() {
                     "Подстраница пока не найдена"
                 )
 
-        // LOCAL GOAL STOP v2.7.4.3
-        // Do not blindly try every synonym: each Screen Intelligence click waits
-        // for Android, which added noticeable latency. First inspect the current
-        // App info snapshot and click only a label that is actually present.
-        //
-        // Some One UI Accessibility nodes can report ACTION_CLICK=false even
-        // though the parent row handled the click and the screen changed. Treat
-        // screen_changed as a successful navigation too. This prevents Planner
-        // from continuing after the requested Permissions/Battery page is already
-        // open and eventually hitting MAX_AGENT_STEPS.
+        fun tryLocalTarget(
+            target: String
+        ): JSONObject? {
+
+            val clickResult =
+                screenIntelligence
+                    .click(
+                        target = target,
+                        confirmed = false
+                    )
+
+            lastResult =
+                clickResult
+
+            val clickAccepted =
+                clickResult.optBoolean(
+                    "success",
+                    false
+                )
+
+            val screenChanged =
+                clickResult.optBoolean(
+                    "screen_changed",
+                    false
+                )
+
+            if (
+                clickAccepted ||
+                screenChanged
+            ) {
+
+                return JSONObject(
+                    clickResult.toString()
+                ).apply {
+                    put(
+                        "success",
+                        true
+                    )
+                    put(
+                        "local_goal_reached",
+                        true
+                    )
+                    put(
+                        "message",
+                        "Локальная подстраница открыта: $target"
+                    )
+                }
+            }
+
+            return null
+        }
+
+        // ONE UI APP-SUBPAGE ROUTER v2.7.4.4
+        // 1) Prefer a label that is visible in the fresh Accessibility snapshot.
+        // 2) Lower cards such as Battery/Storage may appear only after scrolling.
+        //    One UI can visually scroll while Accessibility reports success=false
+        //    and screen_changed=false, so never stop only because of those flags.
+        // 3) After the first scroll, try the canonical row directly even if the
+        //    snapshot is briefly stale. This restores the reliable v2.7.4.2 path
+        //    without slowing the already-fast Permissions route.
         repeat(4) { attempt ->
 
             val screenBefore =
@@ -3133,8 +3183,8 @@ class AyanaVoiceService : Service() {
                     )
                     .replace('ё', 'е')
 
-            val visibleTargets =
-                targets.filter { target ->
+            val visibleTarget =
+                targets.firstOrNull { target ->
                     normalizedScreen.contains(
                         target
                             .lowercase(
@@ -3144,53 +3194,46 @@ class AyanaVoiceService : Service() {
                     )
                 }
 
-            for (target in visibleTargets) {
-
-                val clickResult =
-                    screenIntelligence
-                        .click(
-                            target = target,
-                            confirmed = false
-                        )
-
-                lastResult =
-                    clickResult
-
-                val clickAccepted =
-                    clickResult.optBoolean(
-                        "success",
-                        false
+            if (visibleTarget != null) {
+                val reached =
+                    tryLocalTarget(
+                        visibleTarget
                     )
 
-                val screenChanged =
-                    clickResult.optBoolean(
-                        "screen_changed",
-                        false
-                    )
+                if (reached != null) {
+                    return reached
+                }
+            }
 
-                if (
-                    clickAccepted ||
-                    screenChanged
-                ) {
+            // Battery/Storage on Samsung One UI are often below the initial fold.
+            // After a real scroll the Accessibility snapshot can lag behind what is
+            // already visible. Try the most likely row directly before scrolling
+            // again. On later passes try aliases as a compatibility fallback.
+            if (
+                attempt > 0 &&
+                (
+                    subpage == "battery" ||
+                    subpage == "storage"
+                )
+            ) {
 
-                    // Hard-stop the local goal here. The requested row was found
-                    // on App info and Android either accepted the click or moved
-                    // to a new screen. Do not hand this completed goal to Planner.
-                    return JSONObject(
-                        clickResult.toString()
-                    ).apply {
-                        put(
-                            "success",
-                            true
+                val fallbackTargets =
+                    if (attempt == 1) {
+                        listOf(
+                            targets.first()
                         )
-                        put(
-                            "local_goal_reached",
-                            true
+                    } else {
+                        targets
+                    }
+
+                for (target in fallbackTargets) {
+                    val reached =
+                        tryLocalTarget(
+                            target
                         )
-                        put(
-                            "message",
-                            "Локальная подстраница открыта: $target"
-                        )
+
+                    if (reached != null) {
+                        return reached
                     }
                 }
             }
@@ -3206,17 +3249,14 @@ class AyanaVoiceService : Service() {
                 lastResult =
                     scrollResult
 
-                if (
-                    !scrollResult.optBoolean(
-                        "success",
-                        false
-                    ) &&
-                    !scrollResult.optBoolean(
-                        "screen_changed",
-                        false
+                // Do not abort on false Accessibility scroll flags. The user can
+                // already see the list move while the service snapshot is still
+                // catching up. The next loop always re-reads the actual screen.
+                try {
+                    Thread.sleep(
+                        120L
                     )
-                ) {
-                    return lastResult
+                } catch (_: Exception) {
                 }
             }
         }
