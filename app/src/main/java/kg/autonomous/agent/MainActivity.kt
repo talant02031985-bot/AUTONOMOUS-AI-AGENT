@@ -7,7 +7,10 @@ import android.content.ComponentName
 import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
+import android.graphics.Canvas
 import android.graphics.Color
+import android.graphics.Paint
+import android.graphics.Path
 import android.graphics.Typeface
 import android.graphics.drawable.GradientDrawable
 import android.os.Build
@@ -184,6 +187,10 @@ class MainActivity : AppCompatActivity() {
                 .SOFT_INPUT_ADJUST_RESIZE
         )
 
+        // UI v4.1 deliberately disables the floating Mini-Orb.
+        // The main AYANA interface is now the single visual surface.
+        ayanaPreferences.miniOrbEnabled = false
+
         buildAyanaInterface()
 
         requestNeededPermissionsAndStart()
@@ -245,10 +252,9 @@ class MainActivity : AppCompatActivity() {
     override fun onResume() {
         super.onResume()
 
-        if (
-            ayanaPreferences.miniOrbEnabled &&
-            overlayPermissionGranted()
-        ) {
+        ayanaPreferences.miniOrbEnabled = false
+
+        if (AyanaVoiceService.isRunning) {
             refreshMiniOrb()
         }
 
@@ -447,52 +453,38 @@ class MainActivity : AppCompatActivity() {
 
         val bar =
             LinearLayout(this).apply {
-
-                orientation =
-                    LinearLayout.HORIZONTAL
-
-                gravity =
-                    Gravity.CENTER_VERTICAL
-
+                orientation = LinearLayout.HORIZONTAL
+                gravity = Gravity.CENTER_VERTICAL
                 setPadding(
-                    dp(16),
-                    dp(10),
-                    dp(10),
-                    dp(10)
+                    dp(18),
+                    dp(11),
+                    dp(12),
+                    dp(11)
                 )
-
                 background =
                     GradientDrawable(
                         GradientDrawable.Orientation.LEFT_RIGHT,
                         intArrayOf(
-                            Color.parseColor("#0B1020"),
-                            Color.parseColor("#0A1020"),
-                            Color.parseColor("#11102A")
+                            Color.parseColor("#0A0F18"),
+                            Color.parseColor("#0B1220"),
+                            Color.parseColor("#10101D")
                         )
                     ).apply {
-                        cornerRadius =
-                            dp(20).toFloat()
+                        cornerRadius = dp(18).toFloat()
                         setStroke(
                             dp(1),
-                            Color.parseColor("#28324D")
+                            Color.parseColor("#273149")
                         )
                     }
-
-                elevation =
-                    dp(3).toFloat()
+                elevation = dp(2).toFloat()
             }
 
         val mark =
             TextView(this).apply {
-                text =
-                    "A"
-                textSize =
-                    20f
-                gravity =
-                    Gravity.CENTER
-                setTextColor(
-                    Color.WHITE
-                )
+                text = "A"
+                textSize = 22f
+                gravity = Gravity.CENTER
+                setTextColor(Color.WHITE)
                 setTypeface(
                     Typeface.DEFAULT,
                     Typeface.BOLD
@@ -501,16 +493,15 @@ class MainActivity : AppCompatActivity() {
                     GradientDrawable(
                         GradientDrawable.Orientation.TL_BR,
                         intArrayOf(
-                            Color.parseColor("#7C3AED"),
-                            Color.parseColor("#4F46E5"),
-                            Color.parseColor("#0EA5E9")
+                            Color.parseColor("#5B36D6"),
+                            Color.parseColor("#2563EB"),
+                            Color.parseColor("#0891B2")
                         )
                     ).apply {
-                        shape =
-                            GradientDrawable.OVAL
+                        cornerRadius = dp(14).toFloat()
                         setStroke(
                             dp(1),
-                            Color.parseColor("#A78BFA")
+                            Color.parseColor("#7DD3FC")
                         )
                     }
             }
@@ -518,18 +509,16 @@ class MainActivity : AppCompatActivity() {
         bar.addView(
             mark,
             LinearLayout.LayoutParams(
-                dp(42),
-                dp(42)
+                dp(48),
+                dp(48)
             ).apply {
-                marginEnd =
-                    dp(11)
+                marginEnd = dp(13)
             }
         )
 
         val brand =
             LinearLayout(this).apply {
-                orientation =
-                    LinearLayout.VERTICAL
+                orientation = LinearLayout.VERTICAL
                 layoutParams =
                     LinearLayout.LayoutParams(
                         0,
@@ -540,30 +529,23 @@ class MainActivity : AppCompatActivity() {
 
         brand.addView(
             TextView(this).apply {
-                text =
-                    "AYANA AI 1.0  //  CONTROL CENTER"
-                textSize =
-                    18.5f
-                setTextColor(
-                    Color.WHITE
-                )
+                text = "AYANA  //  ЦЕНТР УПРАВЛЕНИЯ"
+                textSize = 22f
+                setTextColor(Color.WHITE)
                 setTypeface(
                     Typeface.DEFAULT,
                     Typeface.BOLD
                 )
-                letterSpacing =
-                    0.02f
+                letterSpacing = 0.015f
             }
         )
 
         brand.addView(
             TextView(this).apply {
-                text =
-                    "Voice • Screen Intelligence • Agent Core"
-                textSize =
-                    10.5f
+                text = "Голос • Анализ экрана • Agent Core"
+                textSize = 14f
                 setTextColor(
-                    Color.parseColor("#71819C")
+                    Color.parseColor("#8291A8")
                 )
                 setPadding(
                     0,
@@ -574,27 +556,23 @@ class MainActivity : AppCompatActivity() {
             }
         )
 
-        bar.addView(
-            brand
-        )
+        bar.addView(brand)
 
         bar.addView(
             headerBadge(
-                "●  LIVE",
-                "#0C1C18",
-                "#175A45",
+                "●  АКТИВНА",
+                "#0A1B18",
+                "#1A5A49",
                 "#86EFAC"
             )
         )
 
         bar.addView(
             headerBadge(
-                if (
-                    AyanaVoiceService.isRunning
-                ) {
-                    "AGENT  ON"
+                if (AyanaVoiceService.isRunning) {
+                    "АГЕНТ  ВКЛ"
                 } else {
-                    "AGENT  OFF"
+                    "АГЕНТ  ВЫКЛ"
                 },
                 "#111526",
                 "#343B68",
@@ -602,19 +580,15 @@ class MainActivity : AppCompatActivity() {
             ),
             LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.WRAP_CONTENT,
-                dp(36)
+                dp(40)
             ).apply {
-                marginStart =
-                    dp(7)
+                marginStart = dp(8)
             }
         )
 
         textModeButton =
-            topIconButton(
-                "⌨"
-            ).apply {
-                contentDescription =
-                    "Текстовый режим"
+            topIconButton("⌨").apply {
+                contentDescription = "Текстовый режим"
                 setOnClickListener {
                     toggleTextMode()
                 }
@@ -623,35 +597,28 @@ class MainActivity : AppCompatActivity() {
         bar.addView(
             textModeButton,
             LinearLayout.LayoutParams(
-                dp(42),
-                dp(42)
+                dp(46),
+                dp(46)
             ).apply {
-                marginStart =
-                    dp(8)
+                marginStart = dp(9)
             }
         )
 
         val settingsButton =
-            topIconButton(
-                "⚙"
-            ).apply {
-                contentDescription =
-                    "Настройки"
+            topIconButton("⚙").apply {
+                contentDescription = "Настройки"
                 setOnClickListener {
-                    switchPage(
-                        Page.SETTINGS
-                    )
+                    switchPage(Page.SETTINGS)
                 }
             }
 
         bar.addView(
             settingsButton,
             LinearLayout.LayoutParams(
-                dp(42),
-                dp(42)
+                dp(46),
+                dp(46)
             ).apply {
-                marginStart =
-                    dp(6)
+                marginStart = dp(7)
             }
         )
 
@@ -693,7 +660,7 @@ class MainActivity : AppCompatActivity() {
 
                 layoutParams =
                     LinearLayout.LayoutParams(
-                        dp(164),
+                        dp(184),
                         ViewGroup.LayoutParams.MATCH_PARENT
                     )
             }
@@ -731,9 +698,9 @@ class MainActivity : AppCompatActivity() {
         navHeader.addView(
             TextView(this).apply {
                 text =
-                    "SYSTEM"
+                    "СИСТЕМА"
                 textSize =
-                    9.5f
+                    14f
                 setTextColor(
                     Color.parseColor("#8E9BB0")
                 )
@@ -815,9 +782,9 @@ class MainActivity : AppCompatActivity() {
         stateBox.addView(
             TextView(this).apply {
                 text =
-                    "AYANA CORE"
+                    "ЯДРО AYANA"
                 textSize =
-                    9f
+                    13.5f
                 setTextColor(
                     Color.parseColor("#667B95")
                 )
@@ -830,12 +797,12 @@ class MainActivity : AppCompatActivity() {
                     if (
                         AyanaVoiceService.isRunning
                     ) {
-                        "●  ACTIVE"
+                        "●  АКТИВНО"
                     } else {
-                        "●  OFFLINE"
+                        "●  ОТКЛЮЧЕНО"
                     }
                 textSize =
-                    10.5f
+                    14.5f
                 setTextColor(
                     Color.parseColor(
                         if (
@@ -878,7 +845,7 @@ class MainActivity : AppCompatActivity() {
                     "■  ОСТАНОВИТЬ"
 
                 textSize =
-                    10.5f
+                    14.5f
 
                 isAllCaps =
                     false
@@ -903,7 +870,7 @@ class MainActivity : AppCompatActivity() {
             stopButton,
             LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT,
-                dp(46)
+                dp(50)
             )
         )
 
@@ -921,7 +888,7 @@ class MainActivity : AppCompatActivity() {
                 label
 
             textSize =
-                13f
+                    15.5f
 
             gravity =
                 Gravity.CENTER_VERTICAL
@@ -942,7 +909,7 @@ class MainActivity : AppCompatActivity() {
             layoutParams =
                 LinearLayout.LayoutParams(
                     ViewGroup.LayoutParams.MATCH_PARENT,
-                    dp(47)
+                    dp(54)
                 ).apply {
 
                     bottomMargin =
@@ -1065,38 +1032,30 @@ class MainActivity : AppCompatActivity() {
 
     private fun renderHome() {
 
-        contentContainer
-            .removeAllViews()
+        contentContainer.removeAllViews()
 
         val titleRow =
             LinearLayout(this).apply {
-                orientation =
-                    LinearLayout.HORIZONTAL
-                gravity =
-                    Gravity.CENTER_VERTICAL
+                orientation = LinearLayout.HORIZONTAL
+                gravity = Gravity.CENTER_VERTICAL
                 setPadding(
                     dp(2),
-                    dp(3),
+                    dp(4),
                     dp(2),
-                    dp(10)
+                    dp(8)
                 )
             }
 
         val titleBlock =
             LinearLayout(this).apply {
-                orientation =
-                    LinearLayout.VERTICAL
+                orientation = LinearLayout.VERTICAL
             }
 
         titleBlock.addView(
             TextView(this).apply {
-                text =
-                    "Mission Control"
-                textSize =
-                    25f
-                setTextColor(
-                    Color.WHITE
-                )
+                text = "Центр управления"
+                textSize = 30f
+                setTextColor(Color.WHITE)
                 setTypeface(
                     Typeface.DEFAULT,
                     Typeface.BOLD
@@ -1106,16 +1065,14 @@ class MainActivity : AppCompatActivity() {
 
         titleBlock.addView(
             TextView(this).apply {
-                text =
-                    "Управление голосом, экраном и автономными действиями"
-                textSize =
-                    11.5f
+                text = "Живая сессия • управление устройством • контекст AYANA"
+                textSize = 15.5f
                 setTextColor(
-                    Color.parseColor("#687992")
+                    Color.parseColor("#8190A7")
                 )
                 setPadding(
                     0,
-                    dp(2),
+                    dp(3),
                     0,
                     0
                 )
@@ -1133,23 +1090,21 @@ class MainActivity : AppCompatActivity() {
 
         titleRow.addView(
             headerBadge(
-                "7 / 7  SYSTEMS",
-                "#0A1719",
-                "#1B4B4C",
-                "#67E8F9"
+                stateTitle(
+                    AyanaVoiceService.currentStatusState
+                ).uppercase(Locale.getDefault()),
+                "#0C1422",
+                "#294766",
+                "#7DD3FC"
             )
         )
 
-        contentContainer.addView(
-            titleRow
-        )
+        contentContainer.addView(titleRow)
 
         val cockpit =
             LinearLayout(this).apply {
-                orientation =
-                    LinearLayout.HORIZONTAL
-                gravity =
-                    Gravity.TOP
+                orientation = LinearLayout.HORIZONTAL
+                gravity = Gravity.TOP
             }
 
         cockpit.addView(
@@ -1157,7 +1112,7 @@ class MainActivity : AppCompatActivity() {
             LinearLayout.LayoutParams(
                 0,
                 ViewGroup.LayoutParams.WRAP_CONTENT,
-                1.34f
+                1.52f
             )
         )
 
@@ -1166,10 +1121,9 @@ class MainActivity : AppCompatActivity() {
             LinearLayout.LayoutParams(
                 0,
                 ViewGroup.LayoutParams.WRAP_CONTENT,
-                1.08f
+                1.02f
             ).apply {
-                marginStart =
-                    dp(10)
+                marginStart = dp(12)
             }
         )
 
@@ -1180,41 +1134,35 @@ class MainActivity : AppCompatActivity() {
                 ViewGroup.LayoutParams.WRAP_CONTENT,
                 0.92f
             ).apply {
-                marginStart =
-                    dp(10)
+                marginStart = dp(12)
             }
         )
 
-        contentContainer.addView(
-            cockpit
-        )
+        contentContainer.addView(cockpit)
 
         val secondRow =
             LinearLayout(this).apply {
-                orientation =
-                    LinearLayout.HORIZONTAL
-                gravity =
-                    Gravity.TOP
+                orientation = LinearLayout.HORIZONTAL
+                gravity = Gravity.TOP
             }
-
-        secondRow.addView(
-            nextReminderCard(),
-            LinearLayout.LayoutParams(
-                0,
-                ViewGroup.LayoutParams.WRAP_CONTENT,
-                1.05f
-            )
-        )
 
         secondRow.addView(
             commandConsoleCard(),
             LinearLayout.LayoutParams(
                 0,
                 ViewGroup.LayoutParams.WRAP_CONTENT,
-                1.2f
+                1.45f
+            )
+        )
+
+        secondRow.addView(
+            nextReminderCard(),
+            LinearLayout.LayoutParams(
+                0,
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+                1.0f
             ).apply {
-                marginStart =
-                    dp(10)
+                marginStart = dp(12)
             }
         )
 
@@ -1223,26 +1171,17 @@ class MainActivity : AppCompatActivity() {
             LinearLayout.LayoutParams(
                 0,
                 ViewGroup.LayoutParams.WRAP_CONTENT,
-                1f
+                0.92f
             ).apply {
-                marginStart =
-                    dp(10)
+                marginStart = dp(12)
             }
         )
 
         contentContainer.addView(
             secondRow,
-            sectionParams(
-                10
-            )
+            sectionParams(12)
         )
 
-        contentContainer.addView(
-            controlFooterStrip(),
-            sectionParams(
-                10
-            )
-        )
     }
 
     private fun controlHeroCard():
@@ -1250,53 +1189,40 @@ class MainActivity : AppCompatActivity() {
 
         val card =
             LinearLayout(this).apply {
-
-                orientation =
-                    LinearLayout.VERTICAL
-
-                gravity =
-                    Gravity.CENTER_HORIZONTAL
-
+                orientation = LinearLayout.VERTICAL
                 setPadding(
                     dp(20),
-                    dp(18),
+                    dp(16),
                     dp(20),
-                    dp(18)
+                    dp(16)
                 )
-
+                minimumHeight = dp(286)
                 background =
                     GradientDrawable(
                         GradientDrawable.Orientation.TL_BR,
                         intArrayOf(
-                            Color.parseColor("#0A1020"),
-                            Color.parseColor("#11142B"),
-                            Color.parseColor("#1B1032")
+                            Color.parseColor("#09101A"),
+                            Color.parseColor("#0D1524"),
+                            Color.parseColor("#151326")
                         )
                     ).apply {
-                        cornerRadius =
-                            dp(26).toFloat()
+                        cornerRadius = dp(24).toFloat()
                         setStroke(
                             dp(1),
-                            Color.parseColor("#3A3566")
+                            Color.parseColor("#33405A")
                         )
                     }
-
-                elevation =
-                    dp(4).toFloat()
+                elevation = dp(3).toFloat()
             }
 
         val top =
             LinearLayout(this).apply {
-                orientation =
-                    LinearLayout.HORIZONTAL
-                gravity =
-                    Gravity.CENTER_VERTICAL
+                orientation = LinearLayout.HORIZONTAL
+                gravity = Gravity.CENTER_VERTICAL
             }
 
         top.addView(
-            smallSectionTitle(
-                "AYANA // LIVE CORE"
-            ),
+            smallSectionTitle("ЯДРО AYANA  /  АКТИВНО"),
             LinearLayout.LayoutParams(
                 0,
                 ViewGroup.LayoutParams.WRAP_CONTENT,
@@ -1312,152 +1238,39 @@ class MainActivity : AppCompatActivity() {
             )
         )
 
-        card.addView(
-            top,
-            LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT,
-                ViewGroup.LayoutParams.WRAP_CONTENT
-            )
-        )
+        card.addView(top)
 
-        val orbArea =
-            FrameLayout(this).apply {
+        val coreRow =
+            LinearLayout(this).apply {
+                orientation = LinearLayout.HORIZONTAL
+                gravity = Gravity.CENTER_VERTICAL
+                setPadding(
+                    0,
+                    dp(10),
+                    0,
+                    0
+                )
+            }
+
+        val stateColumn =
+            LinearLayout(this).apply {
+                orientation = LinearLayout.VERTICAL
                 layoutParams =
                     LinearLayout.LayoutParams(
-                        dp(188),
-                        dp(188)
-                    ).apply {
-                        topMargin =
-                            dp(8)
-                    }
-            }
-
-        val haloOuter =
-            View(this).apply {
-                alpha =
-                    0.55f
-                background =
-                    GradientDrawable(
-                        GradientDrawable.Orientation.TL_BR,
-                        intArrayOf(
-                            Color.parseColor("#4C1D95"),
-                            Color.parseColor("#2563EB"),
-                            Color.parseColor("#0891B2")
-                        )
-                    ).apply {
-                        shape =
-                            GradientDrawable.OVAL
-                    }
-            }
-
-        orbArea.addView(
-            haloOuter,
-            FrameLayout.LayoutParams(
-                dp(184),
-                dp(184),
-                Gravity.CENTER
-            )
-        )
-
-        val haloMiddle =
-            View(this).apply {
-                background =
-                    GradientDrawable().apply {
-                        shape =
-                            GradientDrawable.OVAL
-                        setColor(
-                            Color.parseColor("#070C17")
-                        )
-                        setStroke(
-                            dp(3),
-                            Color.parseColor("#8B5CF6")
-                        )
-                    }
-            }
-
-        orbArea.addView(
-            haloMiddle,
-            FrameLayout.LayoutParams(
-                dp(160),
-                dp(160),
-                Gravity.CENTER
-            )
-        )
-
-        val haloInner =
-            View(this).apply {
-                background =
-                    GradientDrawable().apply {
-                        shape =
-                            GradientDrawable.OVAL
-                        setColor(
-                            Color.parseColor("#07111C")
-                        )
-                        setStroke(
-                            dp(2),
-                            Color.parseColor("#38BDF8")
-                        )
-                    }
-            }
-
-        orbArea.addView(
-            haloInner,
-            FrameLayout.LayoutParams(
-                dp(138),
-                dp(138),
-                Gravity.CENTER
-            )
-        )
-
-        orbText =
-            TextView(this).apply {
-                text =
-                    "A"
-                textSize =
-                    48f
-                gravity =
-                    Gravity.CENTER
-                setTextColor(
-                    Color.WHITE
-                )
-                setTypeface(
-                    Typeface.DEFAULT,
-                    Typeface.BOLD
-                )
-                elevation =
-                    dp(10).toFloat()
-                background =
-                    orbDrawable(
-                        AyanaVoiceService.currentStatusState
+                        0,
+                        ViewGroup.LayoutParams.WRAP_CONTENT,
+                        0.92f
                     )
             }
 
-        orbArea.addView(
-            orbText,
-            FrameLayout.LayoutParams(
-                dp(116),
-                dp(116),
-                Gravity.CENTER
-            )
-        )
-
-        card.addView(
-            orbArea
-        )
-
-        card.addView(
+        stateColumn.addView(
             TextView(this).apply {
                 text =
                     stateTitle(
                         AyanaVoiceService.currentStatusState
                     )
-                textSize =
-                    24f
-                gravity =
-                    Gravity.CENTER
-                setTextColor(
-                    Color.WHITE
-                )
+                textSize = 34f
+                setTextColor(Color.WHITE)
                 setTypeface(
                     Typeface.DEFAULT,
                     Typeface.BOLD
@@ -1467,13 +1280,11 @@ class MainActivity : AppCompatActivity() {
 
         val statusRow =
             LinearLayout(this).apply {
-                orientation =
-                    LinearLayout.HORIZONTAL
-                gravity =
-                    Gravity.CENTER
+                orientation = LinearLayout.HORIZONTAL
+                gravity = Gravity.CENTER_VERTICAL
                 setPadding(
                     0,
-                    dp(8),
+                    dp(9),
                     0,
                     0
                 )
@@ -1492,54 +1303,87 @@ class MainActivity : AppCompatActivity() {
         statusRow.addView(
             statusDot,
             LinearLayout.LayoutParams(
-                dp(9),
-                dp(9)
+                dp(10),
+                dp(10)
             ).apply {
-                marginEnd =
-                    dp(8)
+                marginEnd = dp(9)
             }
         )
 
         statusText =
             TextView(this).apply {
-                text =
-                    AyanaVoiceService.currentStatusText
-                textSize =
-                    12.5f
+                text = AyanaVoiceService.currentStatusText
+                textSize = 17f
+                maxLines = 3
                 setTextColor(
-                    Color.parseColor("#CDD7E7")
+                    Color.parseColor("#D7E0ED")
                 )
-                maxLines =
-                    2
-                gravity =
-                    Gravity.CENTER
             }
 
         statusRow.addView(
-            statusText
-        )
-
-        card.addView(
-            statusRow
-        )
-
-        card.addView(
-            waveformRail(),
+            statusText,
             LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT,
-                dp(34)
-            ).apply {
-                topMargin =
-                    dp(10)
+                0,
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+                1f
+            )
+        )
+
+        stateColumn.addView(statusRow)
+
+        stateColumn.addView(
+            TextView(this).apply {
+                text = "Голос • Экран • Ядро"
+                textSize = 14f
+                setTextColor(
+                    Color.parseColor("#75869F")
+                )
+                setPadding(
+                    0,
+                    dp(11),
+                    0,
+                    0
+                )
             }
         )
 
+        coreRow.addView(stateColumn)
+
+        val liveView =
+            AyanaPulseView(this).apply {
+                background =
+                    GradientDrawable(
+                        GradientDrawable.Orientation.TL_BR,
+                        intArrayOf(
+                            Color.parseColor("#07101A"),
+                            Color.parseColor("#0A1422")
+                        )
+                    ).apply {
+                        cornerRadius = dp(18).toFloat()
+                        setStroke(
+                            dp(1),
+                            Color.parseColor("#223A54")
+                        )
+                    }
+            }
+
+        coreRow.addView(
+            liveView,
+            LinearLayout.LayoutParams(
+                0,
+                dp(122),
+                1.08f
+            ).apply {
+                marginStart = dp(18)
+            }
+        )
+
+        card.addView(coreRow)
+
         val chips =
             LinearLayout(this).apply {
-                orientation =
-                    LinearLayout.HORIZONTAL
-                gravity =
-                    Gravity.CENTER
+                orientation = LinearLayout.HORIZONTAL
+                gravity = Gravity.START
                 setPadding(
                     0,
                     dp(10),
@@ -1549,33 +1393,26 @@ class MainActivity : AppCompatActivity() {
             }
 
         listOf(
-            "VOICE",
-            "SCREEN",
-            "CORE"
+            "ГОЛОС",
+            "ЭКРАН",
+            "ЯДРО"
         ).forEachIndexed {
             index,
             label ->
             chips.addView(
-                statusChip(
-                    label
-                ),
+                statusChip(label),
                 LinearLayout.LayoutParams(
                     ViewGroup.LayoutParams.WRAP_CONTENT,
-                    dp(32)
+                    dp(40)
                 ).apply {
-                    if (
-                        index > 0
-                    ) {
-                        marginStart =
-                            dp(6)
+                    if (index > 0) {
+                        marginStart = dp(8)
                     }
                 }
             )
         }
 
-        card.addView(
-            chips
-        )
+        card.addView(chips)
 
         return card
     }
@@ -1583,23 +1420,17 @@ class MainActivity : AppCompatActivity() {
     private fun executionCard():
         View {
 
-        val card =
-            panel(
-                22
-            )
+        val card = panel(22)
+        card.minimumHeight = dp(286)
 
         val head =
             LinearLayout(this).apply {
-                orientation =
-                    LinearLayout.HORIZONTAL
-                gravity =
-                    Gravity.CENTER_VERTICAL
+                orientation = LinearLayout.HORIZONTAL
+                gravity = Gravity.CENTER_VERTICAL
             }
 
         head.addView(
-            smallSectionTitle(
-                "ТЕКУЩАЯ СЕССИЯ"
-            ),
+            smallSectionTitle("ТЕКУЩАЯ СЕССИЯ"),
             LinearLayout.LayoutParams(
                 0,
                 ViewGroup.LayoutParams.WRAP_CONTENT,
@@ -1609,10 +1440,8 @@ class MainActivity : AppCompatActivity() {
 
         head.addView(
             TextView(this).apply {
-                text =
-                    "● LIVE"
-                textSize =
-                    9.5f
+                text = "●  АКТИВНА"
+                textSize = 13.5f
                 setTextColor(
                     Color.parseColor("#67E8F9")
                 )
@@ -1623,28 +1452,21 @@ class MainActivity : AppCompatActivity() {
             }
         )
 
-        card.addView(
-            head
-        )
+        card.addView(head)
 
         card.addView(
             TextView(this).apply {
-                text =
-                    AyanaVoiceService.currentStatusText
-                textSize =
-                    16f
-                maxLines =
-                    3
-                setTextColor(
-                    Color.WHITE
-                )
+                text = AyanaVoiceService.currentStatusText
+                textSize = 19f
+                maxLines = 3
+                setTextColor(Color.WHITE)
                 setTypeface(
                     Typeface.DEFAULT,
                     Typeface.BOLD
                 )
                 setPadding(
                     0,
-                    dp(12),
+                    dp(13),
                     0,
                     dp(10)
                 )
@@ -1652,30 +1474,20 @@ class MainActivity : AppCompatActivity() {
         )
 
         val stage =
-            when (
-                AyanaVoiceService.currentStatusState
-            ) {
-                AyanaVoiceService.STATE_COMMAND ->
-                    1
-                AyanaVoiceService.STATE_THINKING ->
-                    2
-                AyanaVoiceService.STATE_SPEAKING ->
-                    4
-                AyanaVoiceService.STATE_ERROR ->
-                    4
-                else ->
-                    0
+            when (AyanaVoiceService.currentStatusState) {
+                AyanaVoiceService.STATE_COMMAND -> 1
+                AyanaVoiceService.STATE_THINKING -> 2
+                AyanaVoiceService.STATE_SPEAKING -> 4
+                AyanaVoiceService.STATE_ERROR -> 4
+                else -> 0
             }
 
-        val labels =
-            listOf(
-                "Команда",
-                "План",
-                "Действие",
-                "Проверка"
-            )
-
-        labels.forEachIndexed {
+        listOf(
+            "Команда",
+            "План",
+            "Действие",
+            "Проверка"
+        ).forEachIndexed {
             index,
             label ->
             card.addView(
@@ -1690,13 +1502,11 @@ class MainActivity : AppCompatActivity() {
 
         val lower =
             LinearLayout(this).apply {
-                orientation =
-                    LinearLayout.HORIZONTAL
-                gravity =
-                    Gravity.CENTER_VERTICAL
+                orientation = LinearLayout.HORIZONTAL
+                gravity = Gravity.CENTER_VERTICAL
                 setPadding(
                     0,
-                    dp(10),
+                    dp(12),
                     0,
                     0
                 )
@@ -1704,12 +1514,10 @@ class MainActivity : AppCompatActivity() {
 
         lower.addView(
             TextView(this).apply {
-                text =
-                    "Screen Intelligence"
-                textSize =
-                    10f
+                text = "Анализ экрана"
+                textSize = 14f
                 setTextColor(
-                    Color.parseColor("#71839B")
+                    Color.parseColor("#8291A8")
                 )
             },
             LinearLayout.LayoutParams(
@@ -1722,20 +1530,15 @@ class MainActivity : AppCompatActivity() {
         lower.addView(
             TextView(this).apply {
                 text =
-                    if (
-                        isAccessibilityEnabled()
-                    ) {
-                        "READY"
+                    if (isAccessibilityEnabled()) {
+                        "ГОТОВО"
                     } else {
-                        "OFF"
+                        "ВЫКЛ"
                     }
-                textSize =
-                    9.5f
+                textSize = 13.5f
                 setTextColor(
                     Color.parseColor(
-                        if (
-                            isAccessibilityEnabled()
-                        ) {
+                        if (isAccessibilityEnabled()) {
                             "#86EFAC"
                         } else {
                             "#FCA5A5"
@@ -1749,9 +1552,7 @@ class MainActivity : AppCompatActivity() {
             }
         )
 
-        card.addView(
-            lower
-        )
+        card.addView(lower)
 
         return card
     }
@@ -1759,23 +1560,17 @@ class MainActivity : AppCompatActivity() {
     private fun servicesCompactCard():
         View {
 
-        val card =
-            panel(
-                22
-            )
+        val card = panel(22)
+        card.minimumHeight = dp(286)
 
         val titleRow =
             LinearLayout(this).apply {
-                orientation =
-                    LinearLayout.HORIZONTAL
-                gravity =
-                    Gravity.CENTER_VERTICAL
+                orientation = LinearLayout.HORIZONTAL
+                gravity = Gravity.CENTER_VERTICAL
             }
 
         titleRow.addView(
-            smallSectionTitle(
-                "СИСТЕМА"
-            ),
+            smallSectionTitle("СИСТЕМА"),
             LinearLayout.LayoutParams(
                 0,
                 ViewGroup.LayoutParams.WRAP_CONTENT,
@@ -1784,29 +1579,23 @@ class MainActivity : AppCompatActivity() {
         )
 
         titleRow.addView(
-            statusPill(
-                "${diagnosticsPassed()}/7"
-            )
+            statusPill("ЯДРО ГОТОВО")
         )
 
-        card.addView(
-            titleRow
-        )
+        card.addView(titleRow)
 
         card.addView(
             TextView(this).apply {
-                text =
-                    "Все ключевые контуры AYANA"
-                textSize =
-                    10.5f
+                text = "Ключевые контуры устройства"
+                textSize = 14f
                 setTextColor(
-                    Color.parseColor("#64748B")
+                    Color.parseColor("#75869F")
                 )
                 setPadding(
                     0,
-                    dp(7),
+                    dp(9),
                     0,
-                    dp(7)
+                    dp(8)
                 )
             }
         )
@@ -1817,27 +1606,22 @@ class MainActivity : AppCompatActivity() {
                 checkSelfPermissionCompat(
                     Manifest.permission.RECORD_AUDIO
                 ),
-                "VOICE"
+                "ГОЛОС"
             ),
             Triple(
-                "Accessibility",
+                "Спец. возможности",
                 isAccessibilityEnabled(),
-                "SCREEN"
+                "ЭКРАН"
             ),
             Triple(
                 "Agent Core",
                 AyanaVoiceService.isRunning,
-                "AI"
+                "ИИ"
             ),
             Triple(
                 "Напоминания",
                 taskScheduler.canScheduleExact(),
-                "TASKS"
-            ),
-            Triple(
-                "Mini Orb",
-                ayanaPreferences.miniOrbEnabled,
-                "OVERLAY"
+                "ЗАДАЧИ"
             )
         ).forEach {
             item ->
@@ -1852,33 +1636,27 @@ class MainActivity : AppCompatActivity() {
 
         card.addView(
             TextView(this).apply {
-                text =
-                    "Диагностика  ›"
-                textSize =
-                    10.5f
-                gravity =
-                    Gravity.CENTER
+                text = "Открыть диагностику  ›"
+                textSize = 14f
+                gravity = Gravity.CENTER
                 setTextColor(
-                    Color.parseColor("#B6C4FF")
+                    Color.parseColor("#C5CCFF")
                 )
                 background =
                     softDrawable(
                         "#101529",
                         "#343D69",
-                        13
+                        14
                     )
                 setOnClickListener {
-                    switchPage(
-                        Page.DIAGNOSTICS
-                    )
+                    switchPage(Page.DIAGNOSTICS)
                 }
             },
             LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT,
-                dp(36)
+                dp(42)
             ).apply {
-                topMargin =
-                    dp(10)
+                topMargin = dp(12)
             }
         )
 
@@ -1996,97 +1774,97 @@ class MainActivity : AppCompatActivity() {
 
         val card =
             LinearLayout(this).apply {
-                orientation =
-                    LinearLayout.HORIZONTAL
-                gravity =
-                    Gravity.CENTER_VERTICAL
+                orientation = LinearLayout.HORIZONTAL
+                gravity = Gravity.CENTER_VERTICAL
                 setPadding(
-                    dp(14),
-                    dp(10),
-                    dp(14),
-                    dp(10)
+                    dp(16),
+                    dp(11),
+                    dp(16),
+                    dp(11)
                 )
                 background =
                     GradientDrawable(
                         GradientDrawable.Orientation.LEFT_RIGHT,
                         intArrayOf(
-                            Color.parseColor("#090E18"),
-                            Color.parseColor("#0C1221"),
-                            Color.parseColor("#100D20")
+                            Color.parseColor("#080D15"),
+                            Color.parseColor("#0B1220"),
+                            Color.parseColor("#0E0E1A")
                         )
                     ).apply {
-                        cornerRadius =
-                            dp(18).toFloat()
+                        cornerRadius = dp(16).toFloat()
                         setStroke(
                             dp(1),
-                            Color.parseColor("#252C46")
+                            Color.parseColor("#253047")
                         )
                     }
             }
 
         card.addView(
+            View(this).apply {
+                background =
+                    circleDrawable(
+                        stateColor(
+                            AyanaVoiceService.currentStatusState
+                        )
+                    )
+            },
+            LinearLayout.LayoutParams(
+                dp(10),
+                dp(10)
+            ).apply {
+                marginEnd = dp(10)
+            }
+        )
+
+        card.addView(
             TextView(this).apply {
                 text =
-                    "AGENT STATE"
-                textSize =
-                    9.5f
+                    "AYANA  •  " +
+                        stateTitle(
+                            AyanaVoiceService.currentStatusState
+                        ).uppercase(Locale.getDefault())
+                textSize = 14f
                 setTextColor(
-                    Color.parseColor("#7D70D9")
+                    Color.parseColor("#D7E0ED")
                 )
                 setTypeface(
                     Typeface.DEFAULT,
                     Typeface.BOLD
                 )
-                letterSpacing =
-                    0.08f
             }
         )
 
-        listOf(
-            "СЛУШАЮ" to "#38BDF8",
-            "ДУМАЮ" to "#8B5CF6",
-            "ВЫПОЛНЯЮ" to "#6366F1",
-            "ГОВОРЮ" to "#22D3EE",
-            "ОШИБКА" to "#EF4444"
-        ).forEach {
-            item ->
-            val active =
-                stateMatchesLabel(
-                    item.first
-                )
-            card.addView(
-                stateRailItem(
-                    item.first,
-                    item.second,
-                    active
-                ),
-                LinearLayout.LayoutParams(
-                    ViewGroup.LayoutParams.WRAP_CONTENT,
-                    dp(30)
-                ).apply {
-                    marginStart =
-                        dp(11)
-                }
-            )
-        }
-
         card.addView(
-            Space(this),
+            TextView(this).apply {
+                text = "ГОЛОС  •  ЭКРАН  •  ЯДРО  •  ЗАДАЧИ"
+                textSize = 13.5f
+                setTextColor(
+                    Color.parseColor("#788AA3")
+                )
+                setPadding(
+                    dp(18),
+                    0,
+                    0,
+                    0
+                )
+            },
             LinearLayout.LayoutParams(
                 0,
-                1,
+                ViewGroup.LayoutParams.WRAP_CONTENT,
                 1f
             )
         )
 
         card.addView(
             TextView(this).apply {
-                text =
-                    "AYANA // READY"
-                textSize =
-                    9.5f
+                text = "ГОТОВО"
+                textSize = 13.5f
                 setTextColor(
-                    Color.parseColor("#5F708A")
+                    Color.parseColor("#86EFAC")
+                )
+                setTypeface(
+                    Typeface.DEFAULT,
+                    Typeface.BOLD
                 )
             }
         )
@@ -2105,7 +1883,7 @@ class MainActivity : AppCompatActivity() {
             text =
                 label
             textSize =
-                9.5f
+                    14f
             gravity =
                 Gravity.CENTER
             setTextColor(
@@ -2130,7 +1908,7 @@ class MainActivity : AppCompatActivity() {
             layoutParams =
                 LinearLayout.LayoutParams(
                     ViewGroup.LayoutParams.WRAP_CONTENT,
-                    dp(36)
+                    dp(40)
                 )
         }
     }
@@ -2145,7 +1923,7 @@ class MainActivity : AppCompatActivity() {
                     Locale.getDefault()
                 )
             textSize =
-                8.5f
+                    13.5f
             gravity =
                 Gravity.CENTER
             setTextColor(
@@ -2170,7 +1948,7 @@ class MainActivity : AppCompatActivity() {
             layoutParams =
                 LinearLayout.LayoutParams(
                     ViewGroup.LayoutParams.WRAP_CONTENT,
-                    dp(28)
+                    dp(34)
                 )
         }
     }
@@ -2279,7 +2057,7 @@ class MainActivity : AppCompatActivity() {
                 text =
                     number.toString()
                 textSize =
-                    9.5f
+                    14f
                 gravity =
                     Gravity.CENTER
                 setTextColor(
@@ -2344,7 +2122,7 @@ class MainActivity : AppCompatActivity() {
                 text =
                     label
                 textSize =
-                    11.5f
+                    14.5f
                 setTextColor(
                     Color.parseColor(
                         if (
@@ -2370,7 +2148,7 @@ class MainActivity : AppCompatActivity() {
                     if (
                         active
                     ) {
-                        "ACTIVE"
+                        "СЕЙЧАС"
                     } else if (
                         done
                     ) {
@@ -2379,7 +2157,7 @@ class MainActivity : AppCompatActivity() {
                         "—"
                     }
                 textSize =
-                    8.5f
+                    13.5f
                 setTextColor(
                     Color.parseColor(
                         if (
@@ -2434,9 +2212,9 @@ class MainActivity : AppCompatActivity() {
         title.addView(
             TextView(this).apply {
                 text =
-                    "⌨  TEXT"
+                    "⌨  ТЕКСТ"
                 textSize =
-                    9f
+                    13.5f
                 setTextColor(
                     Color.parseColor("#BDB4FF")
                 )
@@ -2463,7 +2241,7 @@ class MainActivity : AppCompatActivity() {
                 text =
                     "›  Скажите «Аяна» и дайте задачу"
                 textSize =
-                    12.5f
+                    15f
                 setTextColor(
                     Color.parseColor("#D4DEEC")
                 )
@@ -2492,33 +2270,14 @@ class MainActivity : AppCompatActivity() {
             }
         )
 
-        val examples =
-            listOf(
-                "Открой YouTube и найди музыку",
-                "Посмотри экран и продолжи задачу",
-                "Напомни мне позже"
-            )
-
-        examples.forEach {
-            example ->
-            card.addView(
-                TextView(this).apply {
-                    text =
-                        "○  $example"
-                    textSize =
-                        10.5f
-                    setTextColor(
-                        Color.parseColor("#73839B")
-                    )
-                    setPadding(
-                        dp(3),
-                        dp(5),
-                        0,
-                        0
-                    )
-                }
-            )
-        }
+        card.addView(
+            TextView(this).apply {
+                text = "Готова к голосовой или текстовой команде"
+                textSize = 15.5f
+                setTextColor(Color.parseColor("#8291A8"))
+                setPadding(dp(3), dp(9), 0, 0)
+            }
+        )
 
         return card
     }
@@ -2557,7 +2316,7 @@ class MainActivity : AppCompatActivity() {
                 text =
                     symbol
                 textSize =
-                    16f
+                    18f
                 gravity =
                     Gravity.CENTER
                 setTextColor(
@@ -2571,7 +2330,7 @@ class MainActivity : AppCompatActivity() {
                 text =
                     label
                 textSize =
-                    9.5f
+                    14f
                 gravity =
                     Gravity.CENTER
                 setTextColor(
@@ -2673,7 +2432,7 @@ class MainActivity : AppCompatActivity() {
                 text =
                     label
                 textSize =
-                    8.5f
+                    13.5f
                 setTextColor(
                     Color.parseColor(
                         if (
@@ -2711,7 +2470,7 @@ class MainActivity : AppCompatActivity() {
                 "✓  $label"
 
             textSize =
-                10.5f
+                    14.5f
 
             gravity =
                 Gravity.CENTER
@@ -2796,7 +2555,7 @@ class MainActivity : AppCompatActivity() {
                     label
 
                 textSize =
-                    11.5f
+                    14.5f
 
                 setTextColor(
                     Color.parseColor(
@@ -2845,7 +2604,7 @@ class MainActivity : AppCompatActivity() {
                     name
 
                 textSize =
-                    11.5f
+                    14.5f
 
                 setTextColor(
                     Color.parseColor("#CED8E7")
@@ -2865,7 +2624,7 @@ class MainActivity : AppCompatActivity() {
                     caption
 
                 textSize =
-                    9.5f
+                    14f
 
                 setTextColor(
                     Color.parseColor("#66758B")
@@ -2937,7 +2696,7 @@ class MainActivity : AppCompatActivity() {
                     number
 
                 textSize =
-                    20f
+                    22f
 
                 setTypeface(
                     Typeface.DEFAULT,
@@ -2957,7 +2716,7 @@ class MainActivity : AppCompatActivity() {
                     caption
 
                 textSize =
-                    9.5f
+                    14f
 
                 setTextColor(
                     Color.parseColor("#75859D")
@@ -3035,7 +2794,7 @@ class MainActivity : AppCompatActivity() {
                         task.title
 
                     textSize =
-                        16f
+                    18f
 
                     setTypeface(
                         Typeface.DEFAULT,
@@ -3059,7 +2818,7 @@ class MainActivity : AppCompatActivity() {
                             recurrence
 
                     textSize =
-                        12.5f
+                    15f
 
                     setTextColor(
                         Color.parseColor(
@@ -3083,7 +2842,7 @@ class MainActivity : AppCompatActivity() {
                         task.message
 
                     textSize =
-                        13f
+                    15.5f
 
                     setTextColor(
                         Color.parseColor(
@@ -3202,7 +2961,7 @@ class MainActivity : AppCompatActivity() {
                             memory.text
 
                         textSize =
-                            13.5f
+                    16f
 
                         setTextColor(
                             Color.parseColor(
@@ -3245,17 +3004,17 @@ class MainActivity : AppCompatActivity() {
                     "Доступ к голосовым командам"
                 ),
                 Triple(
-                    "Accessibility",
+                    "Спец. возможности",
                     isAccessibilityEnabled(),
                     "Управление интерфейсом Android"
                 ),
                 Triple(
                     "Голосовой сервис",
                     AyanaVoiceService.isRunning,
-                    "Wake-word и фоновые команды"
+                    "Активация «Аяна» и фоновые команды"
                 ),
                 Triple(
-                    "Mini-Orb",
+                    "Плавающая кнопка",
                     !ayanaPreferences.miniOrbEnabled ||
                         overlayPermissionGranted(),
                     if (
@@ -3323,7 +3082,7 @@ class MainActivity : AppCompatActivity() {
                     }
 
                 textSize =
-                    14f
+                    16.5f
 
                 setTypeface(
                     Typeface.DEFAULT,
@@ -3367,18 +3126,12 @@ class MainActivity : AppCompatActivity() {
 
         contentContainer.addView(
             settingsAction(
-                "Плавающий Orb",
-                when {
-                    !overlayPermissionGranted() ->
-                        "Нужен системный доступ «Поверх других приложений»"
-                    ayanaPreferences.miniOrbEnabled ->
-                        "Включён • нажмите, чтобы отключить"
-                    else ->
-                        "Выключен • нажмите, чтобы включить"
-                }
+                "Плавающая кнопка",
+                "Отключена — плавающие круги больше не используются"
             ) {
 
-                configureMiniOrb()
+                ayanaPreferences.miniOrbEnabled = false
+                refreshMiniOrb()
             },
             sectionParams(
                 top =
@@ -3388,7 +3141,7 @@ class MainActivity : AppCompatActivity() {
 
         contentContainer.addView(
             settingsAction(
-                "Accessibility",
+                "Спец. возможности",
                 "Управление приложениями и интерфейсом Android"
             ) {
 
@@ -3531,9 +3284,9 @@ class MainActivity : AppCompatActivity() {
         labelRow.addView(
             TextView(this).apply {
                 text =
-                    "COMMAND LINE"
+                    "ТЕКСТОВАЯ КОМАНДА"
                 textSize =
-                    9.5f
+                    14f
                 setTextColor(
                     Color.parseColor("#8B7CF6")
                 )
@@ -3554,9 +3307,9 @@ class MainActivity : AppCompatActivity() {
         labelRow.addView(
             TextView(this).apply {
                 text =
-                    "ESC  ×"
+                    "ЗАКРЫТЬ  ×"
                 textSize =
-                    10f
+                    14f
                 setTextColor(
                     Color.parseColor("#708097")
                 )
@@ -3589,7 +3342,7 @@ class MainActivity : AppCompatActivity() {
                 hint =
                     "Введите команду AYANA…"
                 textSize =
-                    13.5f
+                    16f
                 setTextColor(
                     Color.WHITE
                 )
@@ -3642,7 +3395,7 @@ class MainActivity : AppCompatActivity() {
                 text =
                     "➤"
                 textSize =
-                    21f
+                    23f
                 gravity =
                     Gravity.CENTER
                 setTextColor(
@@ -3705,7 +3458,7 @@ class MainActivity : AppCompatActivity() {
         textAnswer =
             TextView(this).apply {
                 textSize =
-                    13f
+                    15.5f
                 setTextColor(
                     Color.parseColor("#DCE6F5")
                 )
@@ -4018,33 +3771,14 @@ class MainActivity : AppCompatActivity() {
         state: String
     ) {
 
-        if (
-            ::statusText.isInitialized
-        ) {
-
-            statusText.text =
-                text
+        if (::statusText.isInitialized) {
+            statusText.text = text
         }
 
-        if (
-            ::statusDot.isInitialized
-        ) {
-
+        if (::statusDot.isInitialized) {
             statusDot.background =
                 circleDrawable(
-                    stateColor(
-                        state
-                    )
-                )
-        }
-
-        if (
-            ::orbText.isInitialized
-        ) {
-
-            orbText.background =
-                orbDrawable(
-                    state
+                    stateColor(state)
                 )
         }
     }
@@ -4231,7 +3965,7 @@ class MainActivity : AppCompatActivity() {
                         "Пока ничего не запланировано"
 
                     textSize =
-                        14f
+                    16.5f
 
                     setTextColor(
                         Color.parseColor(
@@ -4259,7 +3993,7 @@ class MainActivity : AppCompatActivity() {
                         )
 
                     textSize =
-                        22f
+                    24f
 
                     setTypeface(
                         Typeface.DEFAULT,
@@ -4286,7 +4020,7 @@ class MainActivity : AppCompatActivity() {
                         next.message
 
                     textSize =
-                        13f
+                    15.5f
 
                     setTextColor(
                         Color.parseColor(
@@ -4460,7 +4194,7 @@ class MainActivity : AppCompatActivity() {
                         item.first
 
                     textSize =
-                        10.5f
+                    14.5f
 
                     setTextColor(
                         Color.parseColor(
@@ -4509,7 +4243,7 @@ class MainActivity : AppCompatActivity() {
                     )
 
                 textSize =
-                    10.5f
+                    14.5f
 
                 setTextColor(
                     Color.parseColor(
@@ -4526,7 +4260,7 @@ class MainActivity : AppCompatActivity() {
                     number
 
                 textSize =
-                    27f
+                    31f
 
                 setTypeface(
                     Typeface.DEFAULT,
@@ -4553,7 +4287,7 @@ class MainActivity : AppCompatActivity() {
                     caption
 
                 textSize =
-                    11.5f
+                    14.5f
 
                 setTextColor(
                     Color.parseColor(
@@ -4618,7 +4352,7 @@ class MainActivity : AppCompatActivity() {
                     name
 
                 textSize =
-                    14f
+                    16.5f
 
                 setTextColor(
                     Color.WHITE
@@ -4633,7 +4367,7 @@ class MainActivity : AppCompatActivity() {
                     description
 
                 textSize =
-                    11.5f
+                    14.5f
 
                 setTextColor(
                     Color.parseColor(
@@ -4667,7 +4401,7 @@ class MainActivity : AppCompatActivity() {
                     }
 
                 textSize =
-                    12f
+                    14.5f
 
                 setTextColor(
                     Color.parseColor(
@@ -4742,7 +4476,7 @@ class MainActivity : AppCompatActivity() {
                     title
 
                 textSize =
-                    14f
+                    16.5f
 
                 setTextColor(
                     Color.WHITE
@@ -4757,7 +4491,7 @@ class MainActivity : AppCompatActivity() {
                     description
 
                 textSize =
-                    11.5f
+                    14.5f
 
                 setTextColor(
                     Color.parseColor(
@@ -4785,7 +4519,7 @@ class MainActivity : AppCompatActivity() {
                     "›"
 
                 textSize =
-                    26f
+                    30f
 
                 setTextColor(
                     Color.parseColor(
@@ -4822,7 +4556,7 @@ class MainActivity : AppCompatActivity() {
                         title
 
                     textSize =
-                        25f
+                    30f
 
                     setTypeface(
                         Typeface.DEFAULT,
@@ -4842,7 +4576,7 @@ class MainActivity : AppCompatActivity() {
                         subtitle
 
                     textSize =
-                        12.5f
+                    15f
 
                     setTextColor(
                         Color.parseColor(
@@ -4888,7 +4622,7 @@ class MainActivity : AppCompatActivity() {
                     title
 
                 textSize =
-                    16f
+                    18f
 
                 setTypeface(
                     Typeface.DEFAULT,
@@ -4910,7 +4644,7 @@ class MainActivity : AppCompatActivity() {
                     subtitle
 
                 textSize =
-                    12.5f
+                    15f
 
                 gravity =
                     Gravity.CENTER
@@ -4969,7 +4703,7 @@ class MainActivity : AppCompatActivity() {
                 textValue
 
             textSize =
-                10.5f
+                    14.5f
 
             setTypeface(
                 Typeface.DEFAULT,
@@ -4997,7 +4731,7 @@ class MainActivity : AppCompatActivity() {
                 symbol
 
             textSize =
-                20f
+                    22f
 
             gravity =
                 Gravity.CENTER
@@ -5028,7 +4762,7 @@ class MainActivity : AppCompatActivity() {
                 label
 
             textSize =
-                11.5f
+                    14.5f
 
             gravity =
                 Gravity.CENTER
@@ -5078,6 +4812,213 @@ class MainActivity : AppCompatActivity() {
                 dp(1),
                 Color.parseColor(stroke)
             )
+        }
+    }
+
+    private inner class AyanaPulseView(
+        context: Context
+    ) : View(context) {
+
+        private val gridPaint =
+            Paint(Paint.ANTI_ALIAS_FLAG).apply {
+                style = Paint.Style.STROKE
+                strokeWidth = 1f
+            }
+
+        private val wavePaint =
+            Paint(Paint.ANTI_ALIAS_FLAG).apply {
+                style = Paint.Style.STROKE
+                strokeCap = Paint.Cap.ROUND
+                strokeJoin = Paint.Join.ROUND
+            }
+
+        private val path = Path()
+        private var attached = false
+
+        override fun onAttachedToWindow() {
+            super.onAttachedToWindow()
+            attached = true
+            postInvalidateOnAnimation()
+        }
+
+        override fun onDetachedFromWindow() {
+            attached = false
+            super.onDetachedFromWindow()
+        }
+
+        override fun onDraw(
+            canvas: Canvas
+        ) {
+            super.onDraw(canvas)
+
+            val w = width.toFloat()
+            val h = height.toFloat()
+
+            if (w <= 1f || h <= 1f) {
+                return
+            }
+
+            gridPaint.color =
+                Color.argb(
+                    34,
+                    83,
+                    108,
+                    143
+                )
+
+            for (i in 1..4) {
+                val y = h * i / 5f
+                canvas.drawLine(
+                    dp(12).toFloat(),
+                    y,
+                    w - dp(12),
+                    y,
+                    gridPaint
+                )
+            }
+
+            for (i in 1..6) {
+                val x = w * i / 7f
+                canvas.drawLine(
+                    x,
+                    dp(12).toFloat(),
+                    x,
+                    h - dp(12),
+                    gridPaint
+                )
+            }
+
+            val state =
+                AyanaVoiceService.currentStatusState
+
+            val amplitude =
+                when (state) {
+                    AyanaVoiceService.STATE_LISTENING -> h * 0.22f
+                    AyanaVoiceService.STATE_COMMAND -> h * 0.28f
+                    AyanaVoiceService.STATE_THINKING -> h * 0.19f
+                    AyanaVoiceService.STATE_SPEAKING -> h * 0.25f
+                    AyanaVoiceService.STATE_ERROR -> h * 0.12f
+                    else -> h * 0.10f
+                }
+
+            val speed =
+                when (state) {
+                    AyanaVoiceService.STATE_THINKING -> 3.6f
+                    AyanaVoiceService.STATE_COMMAND -> 4.4f
+                    AyanaVoiceService.STATE_SPEAKING -> 4.8f
+                    else -> 2.7f
+                }
+
+            val t =
+                (System.nanoTime() / 1_000_000_000.0).toFloat()
+
+            val primary =
+                stateColor(state)
+
+            val secondary =
+                when (state) {
+                    AyanaVoiceService.STATE_ERROR ->
+                        Color.parseColor("#F87171")
+                    AyanaVoiceService.STATE_THINKING ->
+                        Color.parseColor("#A78BFA")
+                    else ->
+                        Color.parseColor("#38BDF8")
+                }
+
+            for (track in 0..2) {
+                path.reset()
+
+                val phaseOffset = track * 0.85f
+                val trackScale = 1f - track * 0.18f
+                val center =
+                    h * (0.48f + (track - 1) * 0.055f)
+
+                var x = 0f
+                var first = true
+
+                while (x <= w) {
+                    val nx = x / w
+                    val envelope =
+                        Math.sin(
+                            Math.PI * nx
+                        ).toFloat()
+
+                    val harmonic =
+                        Math.sin(
+                            nx * Math.PI * 6.0 +
+                                t * speed +
+                                phaseOffset
+                        ).toFloat()
+
+                    val micro =
+                        Math.sin(
+                            nx * Math.PI * 15.0 -
+                                t * (speed * 0.48f) +
+                                track
+                        ).toFloat() *
+                            0.18f
+
+                    val y =
+                        center +
+                            (harmonic + micro) *
+                            amplitude *
+                            envelope *
+                            trackScale
+
+                    if (first) {
+                        path.moveTo(x, y)
+                        first = false
+                    } else {
+                        path.lineTo(x, y)
+                    }
+
+                    x += 4f
+                }
+
+                wavePaint.color =
+                    if (track == 1) {
+                        secondary
+                    } else {
+                        primary
+                    }
+
+                wavePaint.alpha =
+                    when (track) {
+                        0 -> 120
+                        1 -> 230
+                        else -> 90
+                    }
+
+                wavePaint.strokeWidth =
+                    when (track) {
+                        1 -> dp(3).toFloat()
+                        else -> dp(2).toFloat()
+                    }
+
+                canvas.drawPath(
+                    path,
+                    wavePaint
+                )
+            }
+
+            val scanX =
+                ((t * 72f) % w)
+
+            wavePaint.color = secondary
+            wavePaint.alpha = 70
+            wavePaint.strokeWidth = 1f
+
+            canvas.drawLine(
+                scanX,
+                dp(12).toFloat(),
+                scanX,
+                h - dp(12),
+                wavePaint
+            )
+
+            if (attached) {
+                postInvalidateOnAnimation()
+            }
         }
     }
 
@@ -5282,50 +5223,11 @@ class MainActivity : AppCompatActivity() {
 
     private fun configureMiniOrb() {
 
-        if (
-            overlayPermissionGranted()
-        ) {
-
-            ayanaPreferences
-                .miniOrbEnabled =
-                !ayanaPreferences
-                    .miniOrbEnabled
-
-            refreshMiniOrb()
-
-            renderSettings()
-
-            return
-        }
-
-        ayanaPreferences
-            .miniOrbEnabled =
-            true
-
-        try {
-
-            startActivity(
-                Intent(
-                    Settings
-                        .ACTION_MANAGE_OVERLAY_PERMISSION,
-                    android.net.Uri.parse(
-                        "package:$packageName"
-                    )
-                )
-            )
-
-        } catch (_: Exception) {
-
-            startActivity(
-                Intent(
-                    Settings
-                        .ACTION_APPLICATION_DETAILS_SETTINGS,
-                    android.net.Uri.parse(
-                        "package:$packageName"
-                    )
-                )
-            )
-        }
+        // Floating overlays are intentionally disabled in UI v4.1.
+        // This keeps AYANA visually clean and prevents stale duplicate orbs.
+        ayanaPreferences.miniOrbEnabled = false
+        refreshMiniOrb()
+        renderSettings()
     }
 
     private fun refreshMiniOrb() {
