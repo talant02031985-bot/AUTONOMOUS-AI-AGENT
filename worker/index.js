@@ -486,6 +486,72 @@ Screen Intelligence v2:
 Ответы предназначены для озвучивания голосом Marin, поэтому говори естественно и обычно кратко. Не повторяй постоянно своё имя. Не используй Markdown без необходимости.
 `.trim();
 
+const PLANNER_V2_INSTRUCTIONS = `
+PLANNER v2 ДЛЯ ANDROID-ЗАДАЧ:
+
+1. КОНТРАКТ КОНЕЧНОЙ ЦЕЛИ.
+Перед первым действием молча определи конечное состояние устройства, которого хочет пользователь. Если в команде несколько частей, считай их ОДНОЙ задачей и держи все части незавершёнными, пока для каждой нет подтверждения результата.
+
+2. НЕЛЬЗЯ ЗАВЕРШАТЬСЯ НА ПРОМЕЖУТОЧНОМ ШАГЕ.
+Успешное открытие первого экрана не означает выполнение всей команды. Например, для «открой настройки, зайди в приложения и найди YouTube» экран «Приложения» — только промежуточное состояние. Завершение допустимо лишь когда достигнут конечный объект/экран YouTube в системных настройках либо инструмент явно сообщил, что конечная цель достигнута.
+
+3. ПРОВЕРКА ПЕРЕД FINAL.
+Перед любым текстовым final-ответом молча проверь:
+- выполнены ли ВСЕ явно запрошенные части команды;
+- есть ли подтверждение последнего результата в tool result или свежем screen context;
+- не осталась ли конечная сущность, которую ещё нужно открыть, найти, выбрать или проверить.
+Если хотя бы один пункт не выполнен — НЕ отвечай «Готово» и вызови следующий подходящий device tool.
+
+4. САМЫЙ КОРОТКИЙ МАРШРУТ.
+Предпочитай прямой системный переход к конечной цели вместо ручного блуждания по Settings. Если пользователь описал обычный путь словами «открой настройки → приложения → YouTube», а прямой Android tool приводит к тому же конечному состоянию, используй прямой tool. Исключение: пользователь явно просит пройти именно пошагово или показать путь.
+
+5. ПРИОРИТЕТ МАРШРУТОВ.
+Выбирай путь в таком порядке:
+- прямой Android tool к нужному экрану;
+- прямой tool к ближайшему родительскому экрану + один семантический шаг;
+- click_screen_element по свежему Accessibility-экрану;
+- click_text только если семантический target недоступен;
+- координаты только как уже разрешённый крайний резерв.
+Не используй поиск в Settings, когда можно открыть нужную страницу напрямую.
+
+6. ACT → VERIFY → CONTINUE.
+За один ход возвращай максимум ОДИН device tool call. После его результата оцени свежий экран. Если действие приблизило к цели, продолжай со следующего незавершённого пункта. Если не приблизило — не повторяй тот же шаг; выбери другой безопасный маршрут.
+
+7. CONTINUATION НЕ ЯВЛЯЕТСЯ НОВОЙ ЗАДАЧЕЙ.
+Если вход содержит «ПРОДОЛЖЕНИЕ МНОГОШАГОВОЙ ЗАДАЧИ AYANA», восстанови конечную цель из «Исходная команда пользователя», учти весь execution trace и продолжай с текущего Android-экрана. Не сбрасывай цель после каждого tool call и не считай успешно выполненный промежуточный шаг завершением всей задачи.
+
+8. СВЕЖИЙ ЭКРАН УЖЕ ЯВЛЯЕТСЯ ПРОВЕРКОЙ.
+Если в продолжении есть «САМОЕ СВЕЖЕЕ СОСТОЯНИЕ ЭКРАНА», используй его сразу. Не вызывай get_screen_state повторно, если экран не устарел и не противоречит tool result.
+
+9. ССЫЛКИ НА ОБЪЕКТЫ.
+Фразы «его настройки», «его уведомления», «это приложение», «там», «дальше» связывай с последней релевантной сущностью из исходной команды и подтверждённых шагов. Не превращай такие слова в имя приложения или поисковый запрос.
+
+10. КРИТЕРИЙ УСПЕХА.
+Текстовый ответ о завершении разрешён только при наличии наблюдаемого доказательства конечного состояния. Для низкорисковой навигационной задачи после достижения цели ответ должен быть очень коротким.
+`.trim();
+
+function isPlannerContinuation(message = "") {
+  return /ПРОДОЛЖЕНИЕ МНОГОШАГОВОЙ ЗАДАЧИ AYANA|Исходная команда пользователя:|Уже выполненные шаги и результаты инструментов:/i.test(message);
+}
+
+function isLikelyAndroidAction(message = "") {
+  if (isPlannerContinuation(message)) {
+    return true;
+  }
+
+  const normalized = message
+    .toLowerCase()
+    .replace(/ё/g, "е")
+    .trim();
+
+  if (/^(назад|домой|громче|тише|без звука|включи звук)$/.test(normalized)) {
+    return true;
+  }
+
+  return /^(открой|запусти|включи|выключи|нажми|выбери|перейди|зайди|вернись|покажи|сделай|увеличь|уменьши|проверь|посмотри)\b/.test(normalized) &&
+    /(настрой|прилож|экран|уведом|разреш|youtube|ютуб|telegram|телеграм|chrome|хром|галере|wifi|wi-fi|вайфай|bluetooth|блютуз|звук|громк|батар|хранилищ|vpn|nfc|клавиатур|язык|разработчик|устройств|конфиденц|геолокац|безопасн|карта|google|гугл|домой|назад)/.test(normalized);
+}
+
 function extractOutputText(data) {
   return (data.output || [])
     .flatMap(item => item.content || [])
@@ -596,19 +662,32 @@ ${memoryContext}
     input = contextParts.join("\n\n");
   }
 
+  const androidPlannerMode = isLikelyAndroidAction(message || "");
+  const plannerContinuation = isPlannerContinuation(message || "");
+
   const payload = {
     model: "gpt-5.6",
     reasoning: { effort: "low" },
-    instructions: AGENT_INSTRUCTIONS,
+    instructions: androidPlannerMode
+      ? `${AGENT_INSTRUCTIONS}\n\n${PLANNER_V2_INSTRUCTIONS}`
+      : AGENT_INSTRUCTIONS,
     input,
     tools: [
       { type: "web_search" },
       ...DEVICE_TOOLS
     ],
     tool_choice: "auto",
-    max_output_tokens: 1200,
+    max_output_tokens: androidPlannerMode ? 650 : 1200,
     store: true
   };
+
+  // Planner v2 keeps reasoning lean on Android control turns while preserving
+  // normal response capacity for conversational / web questions. Continuation
+  // turns remain tool_choice=auto so the model can legitimately finish once
+  // the end-state completion gate is satisfied.
+  if (plannerContinuation) {
+    payload.max_output_tokens = 550;
+  }
 
   if (previousResponseId) {
     payload.previous_response_id = previousResponseId;
@@ -773,7 +852,7 @@ export default {
         ok: true,
         service: "AYANA AI",
         ai: "ready",
-        agent_core: "v5.3-direct-actions-planner",
+        agent_core: "v5.4-planner-v2",
         voice: "marin"
       });
     }
