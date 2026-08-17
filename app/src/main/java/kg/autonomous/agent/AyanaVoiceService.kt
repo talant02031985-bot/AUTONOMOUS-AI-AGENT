@@ -189,6 +189,10 @@ class AyanaVoiceService : Service() {
         )
     }
 
+    private val androidGoalCompiler by lazy {
+        AyanaAndroidGoalCompiler()
+    }
+
     @Volatile
     private var agentPreviousResponseId:
         String? = null
@@ -4931,6 +4935,34 @@ class AyanaVoiceService : Service() {
                                     arguments
                                 )
 
+                            // ANDROID GOAL v7: execute_android_goal is a complete
+                            // local transaction. Goal Compiler + Task Engine already
+                            // planned, executed and verified the Android navigation.
+                            // Do NOT spend a second Agent Core round-trip merely to
+                            // turn the local result into "Готово" or "не найдено".
+                            if (
+                                toolName ==
+                                "execute_android_goal"
+                            ) {
+                                agentPreviousResponseId =
+                                    null
+
+                                finalAnswer =
+                                    result
+                                        .optString(
+                                            "local_reply"
+                                        )
+                                        .trim()
+                                        .ifBlank {
+                                            localAndroidGoalReply(
+                                                arguments = arguments,
+                                                result = result
+                                            )
+                                        }
+
+                                break
+                            }
+
                             val toolSignature =
                                 toolName +
                                     "|" +
@@ -5478,6 +5510,9 @@ class AyanaVoiceService : Service() {
             "delete_reminder" ->
                 "Удаляю напоминание…"
 
+            "execute_android_goal" ->
+                "Выполняю задачу на устройстве…"
+
             "execute_android_plan" ->
                 "Выполняю план на устройстве…"
 
@@ -5509,6 +5544,12 @@ class AyanaVoiceService : Service() {
         return try {
 
             when (name) {
+
+                "execute_android_goal" -> {
+                    executeAndroidGoal(
+                        arguments
+                    )
+                }
 
                 "execute_android_plan" -> {
 
@@ -5865,6 +5906,193 @@ class AyanaVoiceService : Service() {
                 error.message
                     ?: "Ошибка выполнения инструмента"
             )
+        }
+    }
+
+    private fun executeAndroidGoal(
+        arguments: JSONObject
+    ): JSONObject {
+
+        val compiled =
+            androidGoalCompiler
+                .compile(
+                    arguments
+                )
+
+        if (
+            !compiled.optBoolean(
+                "success",
+                false
+            )
+        ) {
+            return JSONObject(
+                compiled.toString()
+            )
+                .put(
+                    "local_reply",
+                    localAndroidGoalReply(
+                        arguments = arguments,
+                        result = compiled
+                    )
+                )
+        }
+
+        val plan =
+            compiled.optJSONObject(
+                "plan"
+            )
+                ?: return toolResult(
+                    false,
+                    "Goal Compiler не вернул локальный план"
+                )
+                    .put(
+                        "status",
+                        "invalid_goal"
+                    )
+                    .put(
+                        "local_reply",
+                        "Не удалось подготовить Android-задачу."
+                    )
+
+        val result =
+            androidTaskEngine
+                .execute(
+                    plan = plan,
+                    confirmed = false
+                )
+
+        return JSONObject(
+            result.toString()
+        )
+            .put(
+                "goal_type",
+                compiled.optString(
+                    "goal_type"
+                )
+            )
+            .put(
+                "compiled_target",
+                compiled.optString(
+                    "target"
+                )
+            )
+            .put(
+                "stop_if_missing",
+                compiled.optBoolean(
+                    "stop_if_missing",
+                    false
+                )
+            )
+            .put(
+                "local_reply",
+                localAndroidGoalReply(
+                    arguments = arguments,
+                    result = result
+                )
+            )
+    }
+
+    private fun localAndroidGoalReply(
+        arguments: JSONObject,
+        result: JSONObject
+    ): String {
+
+        val status =
+            result
+                .optString(
+                    "status"
+                )
+                .trim()
+                .lowercase(
+                    Locale.ROOT
+                )
+
+        val message =
+            result
+                .optString(
+                    "message"
+                )
+                .trim()
+
+        val target =
+            arguments
+                .optString(
+                    "target"
+                )
+                .trim()
+
+        val stopIfMissing =
+            arguments
+                .optBoolean(
+                    "stop_if_missing",
+                    false
+                )
+
+        return when (status) {
+
+            "success" ->
+                "Готово."
+
+            "needs_confirmation" ->
+                message
+                    .ifBlank {
+                        "Для этого действия нужно ваше подтверждение."
+                    }
+
+            "blocked" -> {
+
+                val missing =
+                    message
+                        .lowercase(
+                            Locale.ROOT
+                        )
+                        .let { text ->
+                            text.contains(
+                                "не найден"
+                            ) ||
+                                text.contains(
+                                    "не найдена"
+                                ) ||
+                                text.contains(
+                                    "не найдено"
+                                )
+                        }
+
+                if (
+                    stopIfMissing &&
+                    missing &&
+                    target.isNotBlank()
+                ) {
+                    "Пункт «$target» не найден, поэтому прекращаю задачу."
+                } else {
+                    message
+                        .ifBlank {
+                            "Не удалось завершить задачу на устройстве."
+                        }
+                }
+            }
+
+            "invalid_goal",
+            "invalid_plan" ->
+                message
+                    .ifBlank {
+                        "Не удалось подготовить эту Android-задачу."
+                    }
+
+            else ->
+                if (
+                    result.optBoolean(
+                        "success",
+                        false
+                    )
+                ) {
+                    "Готово."
+                } else {
+                    message
+                        .ifBlank {
+                            "Не удалось завершить задачу на устройстве."
+                        }
+                }
         }
     }
 
