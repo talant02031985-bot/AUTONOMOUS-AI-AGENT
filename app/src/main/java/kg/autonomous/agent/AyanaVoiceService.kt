@@ -1914,6 +1914,96 @@ class AyanaVoiceService : Service() {
                 normalized
             )
 
+        // HYBRID APP SUBPAGE ROUTER v2.7.4.2
+        // Common app-info subpages should not spend one Agent Core round-trip
+        // merely deciding the obvious first/second step. Open App info locally,
+        // then use semantic Accessibility navigation. If Samsung/Android layout
+        // differs, fall back to Planner v2 instead of failing the whole task.
+        val appInfoSubpageGoal =
+            if (multiStepRequest) {
+                extractAppInfoSubpageGoal(
+                    normalized
+                )
+            } else {
+                null
+            }
+
+        if (
+            appInfoSubpageGoal != null
+        ) {
+
+            val appTarget =
+                appInfoSubpageGoal.first
+
+            val subpage =
+                appInfoSubpageGoal.second
+
+            val openResult =
+                agentOpenAppInfo(
+                    appTarget
+                )
+
+            if (
+                openResult.optBoolean(
+                    "success",
+                    false
+                )
+            ) {
+
+                try {
+                    Thread.sleep(
+                        UI_SETTLE_DELAY_MS
+                    )
+                } catch (_: Exception) {
+                }
+
+                val subpageResult =
+                    tryOpenAppInfoSubpageLocally(
+                        subpage
+                    )
+
+                if (
+                    subpageResult.optBoolean(
+                        "success",
+                        false
+                    )
+                ) {
+
+                    val spokenTarget =
+                        when (subpage) {
+
+                            "permissions" ->
+                                "разрешения приложения $appTarget"
+
+                            "battery" ->
+                                "использование батареи приложения $appTarget"
+
+                            "storage" ->
+                                "хранилище приложения $appTarget"
+
+                            else ->
+                                "нужный раздел приложения $appTarget"
+                        }
+
+                    finishLocalCommand(
+                        "Открываю $spokenTarget",
+                        silent
+                    )
+
+                    return
+                }
+            }
+
+            // Layout can vary between One UI / Android versions. Planner v2 is
+            // the safe fallback for unusual screens; never stop on App info.
+            askAyana(
+                originalCommand,
+                silent
+            )
+
+            return
+        }
+
         if (
             !directAppInfoTarget
                 .isNullOrBlank() &&
@@ -2842,7 +2932,7 @@ class AyanaVoiceService : Service() {
             )
                 ?: return null
 
-        val target =
+        var target =
             match
                 .groupValues
                 .getOrNull(1)
@@ -2855,21 +2945,205 @@ class AyanaVoiceService : Service() {
                     "про "
                 )
                 .trim()
-                .trim(
-                    '"',
-                    '\'',
-                    '«',
-                    '»',
-                    '.',
-                    ',',
-                    '!',
-                    '?'
-                )
+
+        // In a multi-step phrase the regex above also sees the trailing goal,
+        // e.g. «YouTube зайди в использование батареи». Keep only app name.
+        val tailMarkers =
+            listOf(
+                " и зайди ",
+                " и перейди ",
+                " и открой ",
+                " зайди ",
+                " перейди ",
+                " потом ",
+                " затем ",
+                " после этого ",
+                " остановись ",
+                " открой раздел "
+            )
+
+        val tailIndex =
+            tailMarkers
+                .map { marker ->
+                    target.indexOf(
+                        marker
+                    )
+                }
+                .filter { index ->
+                    index > 0
+                }
+                .minOrNull()
+
+        if (tailIndex != null) {
+            target =
+                target
+                    .substring(
+                        0,
+                        tailIndex
+                    )
+                    .trim()
+        }
+
+        target =
+            target.trim(
+                '"',
+                '\'',
+                '«',
+                '»',
+                '.',
+                ',',
+                '!',
+                '?'
+            )
 
         return target
             .takeIf {
                 it.isNotBlank()
             }
+    }
+
+    private fun extractAppInfoSubpageGoal(
+        command: String
+    ): Pair<String, String>? {
+
+        val appTarget =
+            extractDirectAppInfoTarget(
+                command
+            )
+                ?: return null
+
+        val c =
+            command
+                .lowercase(
+                    Locale.getDefault()
+                )
+                .replace('ё', 'е')
+
+        val subpage =
+            when {
+
+                c.contains(
+                    "разрешен"
+                ) ->
+                    "permissions"
+
+                c.contains(
+                    "батаре"
+                ) ||
+                    c.contains(
+                        "аккумулятор"
+                    ) ||
+                    c.contains(
+                        "энергопотреб"
+                    ) ->
+                    "battery"
+
+                c.contains(
+                    "хранилищ"
+                ) ||
+                    c.contains(
+                        "память приложения"
+                    ) ->
+                    "storage"
+
+                else ->
+                    return null
+            }
+
+        return appTarget to subpage
+    }
+
+    private fun tryOpenAppInfoSubpageLocally(
+        subpage: String
+    ): JSONObject {
+
+        val targets =
+            when (subpage) {
+
+                "permissions" ->
+                    listOf(
+                        "Разрешения"
+                    )
+
+                "battery" ->
+                    listOf(
+                        "Батарея",
+                        "Использование батареи",
+                        "Аккумулятор"
+                    )
+
+                "storage" ->
+                    listOf(
+                        "Хранилище",
+                        "Память"
+                    )
+
+                else ->
+                    emptyList()
+            }
+
+        var lastResult =
+            JSONObject()
+                .put(
+                    "success",
+                    false
+                )
+                .put(
+                    "message",
+                    "Локальная цель подстраницы не определена"
+                )
+
+        // First try current App info screen. For lower cards (Battery/Storage),
+        // scroll down and retry. This is faster and more deterministic than
+        // asking Agent Core to rediscover the same path on every request.
+        repeat(3) { attempt ->
+
+            for (target in targets) {
+
+                val clickResult =
+                    screenIntelligence
+                        .click(
+                            target = target,
+                            confirmed = false
+                        )
+
+                lastResult =
+                    clickResult
+
+                if (
+                    clickResult.optBoolean(
+                        "success",
+                        false
+                    )
+                ) {
+                    return clickResult
+                }
+            }
+
+            if (attempt < 2) {
+
+                val scrollResult =
+                    screenIntelligence
+                        .scroll(
+                            "down"
+                        )
+
+                if (
+                    !scrollResult.optBoolean(
+                        "success",
+                        false
+                    ) &&
+                    !scrollResult.optBoolean(
+                        "screen_changed",
+                        false
+                    )
+                ) {
+                    return lastResult
+                }
+            }
+        }
+
+        return lastResult
     }
 
     private fun extractSettingsAppSearchTarget(
@@ -3193,7 +3467,10 @@ class AyanaVoiceService : Service() {
                 "найди",
                 "поищи",
                 "нажми",
-                "выбери"
+                "выбери",
+                "зайди",
+                "перейди",
+                "остановись"
             )
 
         val actionCount =
