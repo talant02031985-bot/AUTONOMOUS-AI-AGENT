@@ -1268,6 +1268,61 @@ class AyanaVoiceService : Service() {
             STATE_THINKING
         )
 
+        // Direct local route for requests such as
+        // «открой информацию о приложении Галерея».
+        // This check MUST run before the generic «открой <app>» router,
+        // otherwise voice commands may be mistaken for a normal app launch.
+        val directAppInfoTarget =
+            extractDirectAppInfoTarget(
+                normalized
+            )
+
+        if (
+            !directAppInfoTarget
+                .isNullOrBlank()
+        ) {
+
+            val result =
+                agentOpenAppInfo(
+                    directAppInfoTarget
+                )
+
+            val resultMessage =
+                result
+                    .optString(
+                        "message",
+                        if (
+                            result.optBoolean(
+                                "success",
+                                false
+                            )
+                        ) {
+                            "Открываю информацию о приложении $directAppInfoTarget"
+                        } else {
+                            "Не удалось открыть информацию о приложении $directAppInfoTarget"
+                        }
+                    )
+
+            if (
+                result.optBoolean(
+                    "success",
+                    false
+                )
+            ) {
+                finishLocalCommand(
+                    resultMessage,
+                    silent
+                )
+            } else {
+                respondAndResume(
+                    resultMessage,
+                    silent
+                )
+            }
+
+            return
+        }
+
         when {
 
             normalized ==
@@ -1979,6 +2034,51 @@ class AyanaVoiceService : Service() {
                 }
             }
         }
+    }
+
+    private fun extractDirectAppInfoTarget(
+        command: String
+    ): String? {
+
+        val pattern =
+            Regex(
+                """(?:информац\p{L}*|сведени\p{L}*|инфо)\s+(?:(?:о|об|про|и)\s+)?приложени\p{L}*\s+(.+)"""
+            )
+
+        val match =
+            pattern.find(
+                command
+            )
+                ?: return null
+
+        val target =
+            match
+                .groupValues
+                .getOrNull(1)
+                .orEmpty()
+                .trim()
+                .removePrefix(
+                    "для "
+                )
+                .removePrefix(
+                    "про "
+                )
+                .trim()
+                .trim(
+                    '"',
+                    '\'',
+                    '«',
+                    '»',
+                    '.',
+                    ',',
+                    '!',
+                    '?'
+                )
+
+        return target
+            .takeIf {
+                it.isNotBlank()
+            }
     }
 
     private fun isMultiStepAgentCommand(
