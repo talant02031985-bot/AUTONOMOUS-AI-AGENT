@@ -1701,6 +1701,60 @@ class AyanaVoiceService : Service() {
             return
         }
 
+        // FAST LOCAL ROUTER v2.7.3
+        // Common Android settings commands must never wait for Agent Core.
+        // Route them directly on-device before the generic command / app router.
+        val directSystemSettingsSection =
+            extractDirectSystemSettingsSection(
+                normalized
+            )
+
+        if (
+            !directSystemSettingsSection
+                .isNullOrBlank()
+        ) {
+
+            val result =
+                agentOpenSettings(
+                    directSystemSettingsSection
+                )
+
+            val resultMessage =
+                result
+                    .optString(
+                        "message",
+                        if (
+                            result.optBoolean(
+                                "success",
+                                false
+                            )
+                        ) {
+                            "Открываю настройки"
+                        } else {
+                            "Не удалось открыть настройки"
+                        }
+                    )
+
+            if (
+                result.optBoolean(
+                    "success",
+                    false
+                )
+            ) {
+                finishLocalCommand(
+                    resultMessage,
+                    silent
+                )
+            } else {
+                respondAndResume(
+                    resultMessage,
+                    silent
+                )
+            }
+
+            return
+        }
+
         when {
 
             normalized ==
@@ -2517,6 +2571,205 @@ class AyanaVoiceService : Service() {
             .takeIf {
                 it.isNotBlank()
             }
+    }
+
+    private fun extractDirectSystemSettingsSection(
+        command: String
+    ): String? {
+
+        val c =
+            command
+                .lowercase(
+                    Locale.getDefault()
+                )
+                .replace('ё', 'е')
+                .replace(
+                    Regex("\\s+"),
+                    " "
+                )
+                .trim()
+
+        // App-specific routes (for example «уведомления YouTube») are
+        // handled earlier and must not be mistaken for global settings.
+        fun hasAny(
+            vararg parts: String
+        ): Boolean =
+            parts.any {
+                c.contains(it)
+            }
+
+        fun opensSettingsTopic(): Boolean =
+            c.startsWith("открой ") ||
+                c.startsWith("покажи ") ||
+                c.startsWith("зайди ") ||
+                c.startsWith("перейди ") ||
+                c.startsWith("настройки ") ||
+                c.startsWith("открой настройки ") ||
+                c.startsWith("покажи настройки ")
+
+        if (!opensSettingsTopic()) {
+            return null
+        }
+
+        return when {
+
+            hasAny(
+                "оптимизац батар",
+                "оптимизация батар",
+                "экономия батареи для прилож",
+                "игнорирование оптимизац"
+            ) ->
+                "battery_optimization"
+
+            hasAny(
+                "батаре",
+                "аккумулятор",
+                "энергосбереж",
+                "экономия энергии"
+            ) ->
+                "battery"
+
+            hasAny(
+                "хранилищ",
+                "память устройства",
+                "внутренняя память"
+            ) ->
+                "storage"
+
+            hasAny(
+                "уведомлен"
+            ) ->
+                "notifications"
+
+            hasAny(
+                "мобильные данные",
+                "использование данных",
+                "расход трафика",
+                "трафик"
+            ) ->
+                "data_usage"
+
+            hasAny(
+                "vpn",
+                "впн"
+            ) ->
+                "vpn"
+
+            hasAny(
+                "nfc",
+                "нфс"
+            ) ->
+                "nfc"
+
+            hasAny(
+                "клавиатур",
+                "метод ввода"
+            ) ->
+                "keyboard"
+
+            hasAny(
+                "приложения по умолчанию",
+                "приложение по умолчанию"
+            ) ->
+                "default_apps"
+
+            hasAny(
+                "для разработчиков",
+                "параметры разработчика",
+                "режим разработчика"
+            ) ->
+                "developer_options"
+
+            hasAny(
+                "сведения об устройстве",
+                "информация об устройстве",
+                "о планшете",
+                "об устройстве"
+            ) ->
+                "device_info"
+
+            hasAny(
+                "конфиденциальност",
+                "приватност"
+            ) ->
+                "privacy"
+
+            hasAny(
+                "специальные возможности",
+                "спец возможности",
+                "accessibility"
+            ) ->
+                "accessibility"
+
+            hasAny(
+                "местополож",
+                "геолокац",
+                "локац"
+            ) ->
+                "location"
+
+            hasAny(
+                "безопасност"
+            ) ->
+                "security"
+
+            hasAny(
+                "дата и время",
+                "время и дата"
+            ) ->
+                "date_time"
+
+            hasAny(
+                "bluetooth",
+                "блютуз"
+            ) ->
+                "bluetooth"
+
+            hasAny(
+                "wi-fi",
+                "wifi",
+                "вай фай",
+                "вайфай"
+            ) ->
+                "wifi"
+
+            hasAny(
+                "звук",
+                "громкост"
+            ) ->
+                "sound"
+
+            hasAny(
+                "экран",
+                "диспле"
+            ) ->
+                "display"
+
+            hasAny(
+                "язык",
+                "локаль"
+            ) ->
+                "language"
+
+            hasAny(
+                "приложени"
+            ) &&
+                !hasAny(
+                    "информация о приложении",
+                    "сведения о приложении",
+                    "уведомления приложения",
+                    "язык приложения"
+                ) ->
+                "apps"
+
+            c == "открой настройки" ||
+                c == "покажи настройки" ||
+                c == "настройки" ->
+                "general"
+
+            else ->
+                null
+        }
     }
 
     private fun isMultiStepAgentCommand(
@@ -5615,7 +5868,7 @@ class AyanaVoiceService : Service() {
 
                 "notifications" ->
                     Settings
-                        .ACTION_NOTIFICATION_SETTINGS
+                        .ACTION_ALL_APPS_NOTIFICATION_SETTINGS
 
                 "data_usage" ->
                     Settings
