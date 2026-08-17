@@ -118,19 +118,33 @@ class AgentAccessibilityService :
             )
                 ?: return false
 
-        val clickable =
+        val actionable =
             findActionableParent(
                 match.node,
                 AccessibilityNodeInfo
                     .ACTION_CLICK
             )
-                ?: match.node
 
-        return clickable
-            .performAction(
+        // First use the Accessibility action exposed by the row/parent.
+        // This is the preferred semantic path and works for normal Android UI.
+        if (
+            actionable != null &&
+            actionable.performAction(
                 AccessibilityNodeInfo
                     .ACTION_CLICK
             )
+        ) {
+            return true
+        }
+
+        // Some Samsung One UI rows are visually tappable but do not expose a
+        // working ACTION_CLICK on the text node/parent. The target was already
+        // resolved semantically, so a gesture at that matched node's center is
+        // still a semantic click — not an arbitrary coordinate guess.
+        return tapNodeCenter(
+            actionable
+                ?: match.node
+        )
     }
 
     fun setText(
@@ -248,6 +262,37 @@ class AgentAccessibilityService :
             .performAction(
                 preferredAction
             )
+    }
+
+    private fun tapNodeCenter(
+        node: AccessibilityNodeInfo
+    ): Boolean {
+
+        if (
+            !node.isVisibleToUser ||
+            !node.isEnabled
+        ) {
+            return false
+        }
+
+        val bounds =
+            Rect()
+
+        node.getBoundsInScreen(
+            bounds
+        )
+
+        if (
+            bounds.width() <= 1 ||
+            bounds.height() <= 1
+        ) {
+            return false
+        }
+
+        return tapCoordinates(
+            bounds.centerX(),
+            bounds.centerY()
+        )
     }
 
     fun tapCoordinates(
