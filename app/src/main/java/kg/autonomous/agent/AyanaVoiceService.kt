@@ -984,11 +984,26 @@ class AyanaVoiceService : Service() {
                                     earlyCommand
                                 )
 
+                            val earlyMultiStep =
+                                isMultiStepAgentCommand(
+                                    earlyCommand
+                                )
+
+                            // ACCESSIBILITY PARTIAL GUARD v2.7.4.5
+                            // Do not commit Accessibility from a partial transcript:
+                            // the user may continue with «найди AYANA AI…». Waiting
+                            // for the endpoint is slightly slower for the single-step
+                            // Accessibility command, but prevents cutting off a real
+                            // multi-step goal before Planner receives it.
                             if (
-                                earlyAppSettingsTarget != null ||
+                                !earlyMultiStep &&
                                 (
-                                    earlySection != null &&
-                                    earlySection != "general"
+                                    earlyAppSettingsTarget != null ||
+                                    (
+                                        earlySection != null &&
+                                        earlySection != "general" &&
+                                        earlySection != "accessibility"
+                                    )
                                 )
                             ) {
 
@@ -2051,10 +2066,12 @@ class AyanaVoiceService : Service() {
             return
         }
 
-        // HYBRID SETTINGS TARGET v2.7.4
+        // HYBRID SETTINGS TARGET v2.7.4.5
         // Example: «открой настройки, зайди в приложения и найди YouTube».
-        // The previous fast router stopped at the Apps list. If a concrete app
-        // target is present, jump directly to that app's system page instead.
+        // This shortcut is intentionally limited to an EXPLICIT Apps-settings
+        // route. A phrase such as «специальные возможности, найди AYANA AI среди
+        // установленных приложений» belongs to Accessibility and must reach
+        // Agent Core instead of being collapsed to ordinary App info.
         val settingsAppSearchTarget =
             extractSettingsAppSearchTarget(
                 normalized
@@ -3280,19 +3297,56 @@ class AyanaVoiceService : Service() {
                 )
                 .trim()
 
-        if (
-            !c.contains("приложени")
-        ) {
+        // ACCESSIBILITY ROUTE GUARD v2.7.4.5
+        // The word «приложения» is not enough to mean Settings > Apps.
+        // Accessibility screens also contain phrases such as
+        // «установленные приложения/службы». Those tasks must stay with
+        // Planner + Screen Intelligence so AYANA can reach the service page.
+        val accessibilityContext =
+            listOf(
+                "специальные возможност",
+                "спец возможност",
+                "accessibility",
+                "установленные службы",
+                "установленных служб",
+                "служба специальных возможностей"
+            ).any { marker ->
+                c.contains(marker)
+            }
+
+        if (accessibilityContext) {
+            return null
+        }
+
+        // Only collapse a command to App info when the user explicitly
+        // describes the normal Settings > Apps route. Merely mentioning an
+        // installed application somewhere in a longer goal is not sufficient.
+        val explicitAppsRoute =
+            listOf(
+                "зайди в приложени",
+                "зайти в приложени",
+                "перейди в приложени",
+                "перейти в приложени",
+                "открой приложени",
+                "открыть приложени",
+                "раздел приложени",
+                "настройки приложени",
+                "список приложени"
+            ).any { marker ->
+                c.contains(marker)
+            }
+
+        if (!explicitAppsRoute) {
             return null
         }
 
         val markers =
             listOf(
+                "найди приложение ",
+                "найти приложение ",
                 "найди ",
                 "найти ",
                 "поищи ",
-                "найди приложение ",
-                "найти приложение ",
                 "выбери "
             )
 
@@ -3324,13 +3378,50 @@ class AyanaVoiceService : Service() {
             return null
         }
 
-        val target =
+        var target =
             c
                 .substring(
                     bestIndex +
                         bestMarker.length
                 )
                 .trim()
+
+        // Keep only the app name when the command continues with another goal.
+        val tailMarkers =
+            listOf(
+                " и останов",
+                " останов",
+                " и зайди ",
+                " и перейди ",
+                " потом ",
+                " затем ",
+                " после этого ",
+                " и открой "
+            )
+
+        val tailIndex =
+            tailMarkers
+                .map { marker ->
+                    target.indexOf(marker)
+                }
+                .filter { index ->
+                    index >= 0
+                }
+                .minOrNull()
+                ?: -1
+
+        if (tailIndex >= 0) {
+            target =
+                target
+                    .substring(
+                        0,
+                        tailIndex
+                    )
+                    .trim()
+        }
+
+        target =
+            target
                 .trim(
                     '"',
                     '\'',
