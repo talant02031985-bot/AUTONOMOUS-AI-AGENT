@@ -131,6 +131,64 @@ class AyanaVoiceService : Service() {
         )
     }
 
+    // =========================================================
+    // ANDROID TASK ENGINE v3 BRIDGE
+    // =========================================================
+    // Agent Core may produce one short structured Android plan. The plan is
+    // executed locally by AyanaAndroidTaskEngine instead of spending one network
+    // round-trip for every obvious UI action. Existing direct/local routes remain
+    // untouched and continue to work as the stable fast path.
+    private val androidTaskEngine by lazy {
+        AyanaAndroidTaskEngine(
+            screenIntelligence = screenIntelligence,
+            gateway =
+                object : AyanaAndroidTaskEngine.ActionGateway {
+
+                    override fun openSettings(
+                        section: String
+                    ): JSONObject =
+                        this@AyanaVoiceService
+                            .agentOpenSettings(
+                                section
+                            )
+
+                    override fun openApp(
+                        name: String
+                    ): JSONObject =
+                        this@AyanaVoiceService
+                            .agentOpenApp(
+                                name
+                            )
+
+                    override fun openAppInfo(
+                        name: String
+                    ): JSONObject =
+                        this@AyanaVoiceService
+                            .agentOpenAppInfo(
+                                name
+                            )
+
+                    override fun openAppSettings(
+                        name: String,
+                        section: String
+                    ): JSONObject =
+                        this@AyanaVoiceService
+                            .agentOpenAppSettings(
+                                requestedName = name,
+                                section = section
+                            )
+
+                    override fun changeVolume(
+                        action: String
+                    ): JSONObject =
+                        this@AyanaVoiceService
+                            .agentChangeVolume(
+                                action
+                            )
+                }
+        )
+    }
+
     @Volatile
     private var agentPreviousResponseId:
         String? = null
@@ -5420,6 +5478,9 @@ class AyanaVoiceService : Service() {
             "delete_reminder" ->
                 "Удаляю напоминание…"
 
+            "execute_android_plan" ->
+                "Выполняю план на устройстве…"
+
             "get_screen_state" ->
                 "Смотрю, что на экране…"
 
@@ -5448,6 +5509,24 @@ class AyanaVoiceService : Service() {
         return try {
 
             when (name) {
+
+                "execute_android_plan" -> {
+
+                    // Universal Android execution bridge. The arguments object is
+                    // itself the structured plan: { goal, max_actions, steps, ... }.
+                    // confirmed is consumed as execution permission and ignored by
+                    // the generic plan parser if it is otherwise unused.
+                    androidTaskEngine
+                        .execute(
+                            plan = arguments,
+                            confirmed =
+                                arguments
+                                    .optBoolean(
+                                        "confirmed",
+                                        false
+                                    )
+                        )
+                }
 
                 "open_app" -> {
 
