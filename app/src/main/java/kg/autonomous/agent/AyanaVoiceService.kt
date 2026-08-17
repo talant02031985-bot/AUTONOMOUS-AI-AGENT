@@ -95,6 +95,18 @@ class AyanaVoiceService : Service() {
     private val conversationHistory =
         mutableListOf<Pair<String, String>>()
 
+    // Persistent command diagnostics. One active command at a time is expected
+    // because the voice service enters BUSY mode while a task is running.
+    private val commandHistoryStore by lazy {
+        AyanaCommandHistoryStore(
+            applicationContext
+        )
+    }
+
+    @Volatile
+    private var activeCommandHistoryId:
+        String? = null
+
     private val memoryStore by lazy {
         AyanaMemoryStore(
             applicationContext
@@ -225,10 +237,13 @@ class AyanaVoiceService : Service() {
             "AYANA запускает локальное распознавание"
         )
 
+        // V8.1 GLOBAL ORB:
+        // The user explicitly wants one persistent draggable Orb above all apps.
+        // Keep the preference enabled whenever the foreground AYANA service runs.
+        ayanaPreferences.miniOrbEnabled = true
+
         miniOrbController.refresh(
-            enabled =
-                ayanaPreferences
-                    .miniOrbEnabled,
+            enabled = true,
             state =
                 currentStatusState
         )
@@ -300,10 +315,10 @@ class AyanaVoiceService : Service() {
 
             ACTION_REFRESH_OVERLAY -> {
 
+                ayanaPreferences.miniOrbEnabled = true
+
                 miniOrbController.refresh(
-                    enabled =
-                        ayanaPreferences
-                            .miniOrbEnabled,
+                    enabled = true,
                     state =
                         currentStatusState
                 )
@@ -1901,6 +1916,12 @@ class AyanaVoiceService : Service() {
 
             return
         }
+
+        activeCommandHistoryId =
+            commandHistoryStore.begin(
+                command = originalCommand,
+                source = if (silent) "text" else "voice"
+            )
 
         broadcastStatus(
             if (silent) {
@@ -4658,9 +4679,14 @@ class AyanaVoiceService : Service() {
         silent: Boolean
     ) {
 
+        finishActiveCommandHistory(
+            success = true,
+            result = text
+        )
+
         broadcastStatus(
             text,
-            STATE_THINKING
+            STATE_SUCCESS
         )
 
         updateNotification(
@@ -4691,6 +4717,11 @@ class AyanaVoiceService : Service() {
         text: String,
         silent: Boolean
     ) {
+
+        finishActiveCommandHistory(
+            success = !looksLikeCommandFailure(text),
+            result = text
+        )
 
         if (silent) {
             showTextAndResume(text)
@@ -4926,7 +4957,14 @@ class AyanaVoiceService : Service() {
                                     toolName,
                                     arguments
                                 ),
-                                STATE_THINKING
+                                STATE_EXECUTING
+                            )
+
+                            commandHistoryStore.addEvent(
+                                activeCommandHistoryId,
+                                state = "tool_call",
+                                message = toolName,
+                                details = arguments.toString()
                             )
 
                             val result =
@@ -4934,6 +4972,13 @@ class AyanaVoiceService : Service() {
                                     toolName,
                                     arguments
                                 )
+
+                            commandHistoryStore.addEvent(
+                                activeCommandHistoryId,
+                                state = "tool_result",
+                                message = toolName,
+                                details = result.toString()
+                            )
 
                             // ANDROID GOAL v7: execute_android_goal is a complete
                             // local transaction. Goal Compiler + Task Engine already
@@ -4946,6 +4991,23 @@ class AyanaVoiceService : Service() {
                             ) {
                                 agentPreviousResponseId =
                                     null
+
+                                val goalSucceeded =
+                                    result.optBoolean(
+                                        "success",
+                                        false
+                                    ) ||
+                                        result.optString(
+                                            "status"
+                                        ) == "success"
+
+                                broadcastStatus(
+                                    result.optString(
+                                        "local_reply",
+                                        if (goalSucceeded) "Готово." else "Не удалось завершить задачу."
+                                    ),
+                                    if (goalSucceeded) STATE_SUCCESS else STATE_ERROR
+                                )
 
                                 finalAnswer =
                                     result
@@ -5954,12 +6016,37 @@ class AyanaVoiceService : Service() {
                         "Не удалось подготовить Android-задачу."
                     )
 
+        commandHistoryStore.addEvent(
+            activeCommandHistoryId,
+            state = "compiled_plan",
+            message = compiled.optString(
+                "goal_type",
+                "android_goal"
+            ),
+            details = plan.toString()
+        )
+
+        broadcastStatus(
+            "Выполняю задачу на устройстве…",
+            STATE_EXECUTING
+        )
+
         val result =
             androidTaskEngine
                 .execute(
                     plan = plan,
                     confirmed = false
                 )
+
+        commandHistoryStore.addEvent(
+            activeCommandHistoryId,
+            state = "engine_result",
+            message = result.optString(
+                "status",
+                if (result.optBoolean("success", false)) "success" else "blocked"
+            ),
+            details = result.toString()
+        )
 
         return JSONObject(
             result.toString()
@@ -8190,6 +8277,48 @@ class AyanaVoiceService : Service() {
     }
 
     // =========================================================
+    // COMMAND HISTORY / DIAGNOSTICS
+    // =========================================================
+
+    private fun finishActiveCommandHistory(
+        success: Boolean,
+        result: String,
+        technical: String = ""
+    ) {
+        val id = activeCommandHistoryId ?: return
+        commandHistoryStore.finish(
+            id = id,
+            success = success,
+            result = result,
+            technical = technical
+        )
+        activeCommandHistoryId = null
+    }
+
+    private fun looksLikeCommandFailure(
+        value: String
+    ): Boolean {
+        val normalized =
+            value
+                .lowercase(
+                    Locale.ROOT
+                )
+                .replace('ё', 'е')
+
+        return listOf(
+            "ошибка",
+            "не удалось",
+            "не найден",
+            "не найдена",
+            "не найдено",
+            "не могу",
+            "не смог",
+            "остановила задачу",
+            "требует подтверждения"
+        ).any { normalized.contains(it) }
+    }
+
+    // =========================================================
     // STATUS
     // =========================================================
 
@@ -8204,6 +8333,12 @@ class AyanaVoiceService : Service() {
         currentStatusState =
             state
 
+        commandHistoryStore.addEvent(
+            activeCommandHistoryId,
+            state = state,
+            message = text
+        )
+
         // Mini orb owns Android Views/WindowManager and must only be
         // touched from the main UI thread. Agent Core runs on its own
         // worker thread, so marshal overlay updates to main.
@@ -8213,9 +8348,7 @@ class AyanaVoiceService : Service() {
         ) {
 
             miniOrbController.refresh(
-                enabled =
-                    ayanaPreferences
-                        .miniOrbEnabled,
+                enabled = true,
                 state =
                     state
             )
@@ -8227,9 +8360,7 @@ class AyanaVoiceService : Service() {
                 if (!shuttingDown) {
 
                     miniOrbController.refresh(
-                        enabled =
-                            ayanaPreferences
-                                .miniOrbEnabled,
+                        enabled = true,
                         state =
                             state
                     )
@@ -8483,6 +8614,12 @@ class AyanaVoiceService : Service() {
 
         const val STATE_THINKING =
             "thinking"
+
+        const val STATE_EXECUTING =
+            "executing"
+
+        const val STATE_SUCCESS =
+            "success"
 
         const val STATE_SPEAKING =
             "speaking"
