@@ -10,6 +10,7 @@ import android.content.ActivityNotFoundException
 import android.content.ComponentName
 import android.content.Context
 import android.content.Intent
+import android.content.IntentFilter
 import android.content.pm.PackageManager
 import android.content.pm.ServiceInfo
 import android.media.AudioFormat
@@ -19,6 +20,7 @@ import android.media.MediaPlayer
 import android.media.MediaRecorder
 import android.media.ToneGenerator
 import android.net.Uri
+import android.os.BatteryManager
 import android.os.Build
 import android.os.Handler
 import android.os.IBinder
@@ -44,6 +46,8 @@ import kotlin.concurrent.thread
 import kotlin.math.abs
 
 class AyanaVoiceService : Service() {
+
+    // AYANA Voice v2.7.1: stronger quiet-wake sensitivity + Direct Actions.
 
     private enum class ListenMode {
         WAKE,
@@ -835,18 +839,33 @@ class AyanaVoiceService : Service() {
                     }
                 }
 
+                // Wake sensitivity v2.7.1:
+                // very quiet speech used to receive no boost at all when
+                // peak < 0.008, which made a softly spoken «Аяна» easy to miss.
+                // Use stepped gain so distant/quiet speech is raised while
+                // near-silence is left untouched to avoid amplifying room noise.
                 val inputGain =
-                    if (
-                        peak >= 0.008f &&
-                        peak < 0.11f
-                    ) {
-                        (0.13f / peak)
-                            .coerceIn(
-                                1.0f,
-                                2.35f
-                            )
-                    } else {
-                        1.0f
+                    when {
+                        peak < 0.0012f ->
+                            1.0f
+
+                        peak < 0.010f ->
+                            4.5f
+
+                        peak < 0.025f ->
+                            3.4f
+
+                        peak < 0.050f ->
+                            2.4f
+
+                        peak < 0.090f ->
+                            1.7f
+
+                        peak < 0.140f ->
+                            1.25f
+
+                        else ->
+                            1.0f
                     }
 
                 val samples =
@@ -1567,6 +1586,65 @@ class AyanaVoiceService : Service() {
             },
             STATE_THINKING
         )
+
+        // Direct local route for app-specific settings such as
+        // «открой уведомления YouTube». This MUST run before the generic
+        // «открой <app>» router, otherwise the whole phrase may be treated
+        // as an application name (for example «уведомления ютуб»).
+        val directAppSettingsTarget =
+            extractDirectAppSettingsTarget(
+                normalized
+            )
+
+        if (directAppSettingsTarget != null) {
+
+            val section =
+                directAppSettingsTarget.first
+
+            val appTarget =
+                directAppSettingsTarget.second
+
+            val result =
+                agentOpenAppSettings(
+                    requestedName = appTarget,
+                    section = section
+                )
+
+            val resultMessage =
+                result
+                    .optString(
+                        "message",
+                        if (
+                            result.optBoolean(
+                                "success",
+                                false
+                            )
+                        ) {
+                            "Открываю параметры приложения $appTarget"
+                        } else {
+                            "Не удалось открыть параметры приложения $appTarget"
+                        }
+                    )
+
+            if (
+                result.optBoolean(
+                    "success",
+                    false
+                )
+            ) {
+                finishLocalCommand(
+                    resultMessage,
+                    silent
+                )
+            } else {
+                respondAndResume(
+                    resultMessage,
+                    silent
+                )
+            }
+
+            return
+        }
 
         // Direct local route for requests such as
         // «открой информацию о приложении Галерея».
@@ -2334,6 +2412,66 @@ class AyanaVoiceService : Service() {
                 }
             }
         }
+    }
+
+    private fun extractDirectAppSettingsTarget(
+        command: String
+    ): Pair<String, String>? {
+
+        val patterns =
+            listOf(
+                "notifications" to
+                    Regex(
+                        """^(?:(?:открой|покажи)\s+)?(?:настройк\p{L}*\s+)?уведомлен\p{L}*(?:\s+(?:для|у))?(?:\s+приложени\p{L}*)?\s+(.+)$"""
+                    ),
+                "open_by_default" to
+                    Regex(
+                        """^(?:(?:открой|покажи)\s+)?(?:настройк\p{L}*\s+)?(?:открыти\p{L}*\s+по\s+умолчани\p{L}*|по\s+умолчани\p{L}*)(?:\s+(?:для|у))?(?:\s+приложени\p{L}*)?\s+(.+)$"""
+                    ),
+                "language" to
+                    Regex(
+                        """^(?:(?:открой|покажи)\s+)?(?:настройк\p{L}*\s+)?язык\p{L}*(?:\s+(?:для|у))?(?:\s+приложени\p{L}*)?\s+(.+)$"""
+                    )
+            )
+
+        for ((section, pattern) in patterns) {
+
+            val match =
+                pattern.find(
+                    command
+                )
+                    ?: continue
+
+            val target =
+                match
+                    .groupValues
+                    .getOrNull(1)
+                    .orEmpty()
+                    .trim()
+                    .removePrefix(
+                        "приложения "
+                    )
+                    .removePrefix(
+                        "приложение "
+                    )
+                    .trim()
+                    .trim(
+                        '"',
+                        '\'',
+                        '«',
+                        '»',
+                        '.',
+                        ',',
+                        '!',
+                        '?'
+                    )
+
+            if (target.isNotBlank()) {
+                return section to target
+            }
+        }
+
+        return null
     }
 
     private fun extractDirectAppInfoTarget(
@@ -4100,6 +4238,12 @@ class AyanaVoiceService : Service() {
             "open_app_info" ->
                 "Открываю информацию о приложении…"
 
+            "open_app_settings" ->
+                "Открываю параметры приложения…"
+
+            "get_device_state" ->
+                "Проверяю состояние устройства…"
+
             "press_back" ->
                 "Назад"
 
@@ -4200,6 +4344,28 @@ class AyanaVoiceService : Service() {
                                 "name"
                             )
                     )
+                }
+
+                "open_app_settings" -> {
+
+                    agentOpenAppSettings(
+                        requestedName =
+                            arguments
+                                .optString(
+                                    "name"
+                                ),
+                        section =
+                            arguments
+                                .optString(
+                                    "section",
+                                    "info"
+                                )
+                    )
+                }
+
+                "get_device_state" -> {
+
+                    agentGetDeviceState()
                 }
 
                 "press_back" -> {
@@ -5439,6 +5605,66 @@ class AyanaVoiceService : Service() {
                     Settings
                         .ACTION_DATE_SETTINGS
 
+                "battery" ->
+                    Settings
+                        .ACTION_BATTERY_SAVER_SETTINGS
+
+                "storage" ->
+                    Settings
+                        .ACTION_INTERNAL_STORAGE_SETTINGS
+
+                "notifications" ->
+                    Settings
+                        .ACTION_NOTIFICATION_SETTINGS
+
+                "data_usage" ->
+                    Settings
+                        .ACTION_DATA_USAGE_SETTINGS
+
+                "vpn" ->
+                    Settings
+                        .ACTION_VPN_SETTINGS
+
+                "nfc" ->
+                    Settings
+                        .ACTION_NFC_SETTINGS
+
+                "language" ->
+                    Settings
+                        .ACTION_LOCALE_SETTINGS
+
+                "keyboard" ->
+                    Settings
+                        .ACTION_INPUT_METHOD_SETTINGS
+
+                "default_apps" ->
+                    Settings
+                        .ACTION_MANAGE_DEFAULT_APPS_SETTINGS
+
+                "developer_options" ->
+                    Settings
+                        .ACTION_APPLICATION_DEVELOPMENT_SETTINGS
+
+                "device_info" ->
+                    Settings
+                        .ACTION_DEVICE_INFO_SETTINGS
+
+                "privacy" ->
+                    if (
+                        Build.VERSION.SDK_INT >=
+                        Build.VERSION_CODES.Q
+                    ) {
+                        Settings
+                            .ACTION_PRIVACY_SETTINGS
+                    } else {
+                        Settings
+                            .ACTION_SECURITY_SETTINGS
+                    }
+
+                "battery_optimization" ->
+                    Settings
+                        .ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS
+
                 else ->
                     Settings
                         .ACTION_SETTINGS
@@ -5466,15 +5692,458 @@ class AyanaVoiceService : Service() {
             error: Exception
         ) {
 
+            try {
+
+                startActivity(
+                    Intent(
+                        Settings.ACTION_SETTINGS
+                    ).apply {
+
+                        addFlags(
+                            Intent.FLAG_ACTIVITY_NEW_TASK
+                        )
+                    }
+                )
+
+                toolResult(
+                    true,
+                    "Точный раздел недоступен; открыты общие настройки"
+                )
+
+            } catch (_: Exception) {
+
+                toolResult(
+                    false,
+                    "Не удалось открыть настройки: " +
+                        (
+                            error.message
+                                ?: "неизвестная ошибка"
+                            )
+                )
+            }
+        }
+    }
+
+    private fun resolveInstalledAppTarget(
+        requestedName: String
+    ): Pair<String, String>? {
+
+        val query =
+            normalizeAppName(
+                requestedName
+            )
+
+        if (query.isBlank()) {
+            return null
+        }
+
+        val known =
+            knownAppForQuery(
+                query
+            )
+
+        if (known != null) {
+
+            for (
+                candidate in
+                known.second
+            ) {
+
+                try {
+
+                    @Suppress("DEPRECATION")
+                    val appInfo =
+                        packageManager
+                            .getApplicationInfo(
+                                candidate,
+                                0
+                            )
+
+                    val label =
+                        try {
+                            appInfo
+                                .loadLabel(
+                                    packageManager
+                                )
+                                ?.toString()
+                                .orEmpty()
+                                .ifBlank {
+                                    known.first
+                                }
+                        } catch (_: Exception) {
+                            known.first
+                        }
+
+                    return candidate to label
+
+                } catch (_: Exception) {
+                }
+            }
+        }
+
+        val launcherIntent =
+            Intent(
+                Intent.ACTION_MAIN
+            ).apply {
+
+                addCategory(
+                    Intent.CATEGORY_LAUNCHER
+                )
+            }
+
+        val activities =
+            try {
+
+                @Suppress("DEPRECATION")
+                packageManager
+                    .queryIntentActivities(
+                        launcherIntent,
+                        0
+                    )
+
+            } catch (_: Exception) {
+
+                emptyList()
+            }
+
+        val best =
+            activities
+                .map { info ->
+
+                    val label =
+                        try {
+                            info
+                                .loadLabel(
+                                    packageManager
+                                )
+                                ?.toString()
+                                .orEmpty()
+                        } catch (_: Exception) {
+                            ""
+                        }
+
+                    Triple(
+                        info,
+                        label,
+                        appNameScore(
+                            query,
+                            label
+                        )
+                    )
+                }
+                .filter {
+                    it.third > 0
+                }
+                .maxByOrNull {
+                    it.third
+                }
+
+        if (
+            best == null ||
+            best.third < 70
+        ) {
+            return null
+        }
+
+        return (
+            best.first
+                .activityInfo
+                .packageName
+            ) to
+            best.second
+                .ifBlank {
+                    requestedName
+                }
+    }
+
+    private fun agentOpenAppSettings(
+        requestedName: String,
+        section: String
+    ): JSONObject {
+
+        val resolved =
+            resolveInstalledAppTarget(
+                requestedName
+            )
+                ?: return toolResult(
+                    false,
+                    "Приложение не найдено: $requestedName"
+                )
+
+        val packageName =
+            resolved.first
+
+        val label =
+            resolved.second
+
+        val normalizedSection =
+            section
+                .lowercase(
+                    Locale.getDefault()
+                )
+                .trim()
+
+        val intent =
+            when (
+                normalizedSection
+            ) {
+
+                "notifications" ->
+                    Intent(
+                        Settings.ACTION_APP_NOTIFICATION_SETTINGS
+                    ).apply {
+
+                        putExtra(
+                            Settings.EXTRA_APP_PACKAGE,
+                            packageName
+                        )
+                    }
+
+                "open_by_default" ->
+                    if (
+                        Build.VERSION.SDK_INT >=
+                        Build.VERSION_CODES.S
+                    ) {
+                        Intent(
+                            Settings.ACTION_APP_OPEN_BY_DEFAULT_SETTINGS,
+                            Uri.parse(
+                                "package:$packageName"
+                            )
+                        )
+                    } else {
+                        Intent(
+                            Settings.ACTION_APPLICATION_DETAILS_SETTINGS,
+                            Uri.parse(
+                                "package:$packageName"
+                            )
+                        )
+                    }
+
+                "language" ->
+                    if (
+                        Build.VERSION.SDK_INT >=
+                        Build.VERSION_CODES.TIRAMISU
+                    ) {
+                        Intent(
+                            Settings.ACTION_APP_LOCALE_SETTINGS,
+                            Uri.parse(
+                                "package:$packageName"
+                            )
+                        )
+                    } else {
+                        Intent(
+                            Settings.ACTION_APPLICATION_DETAILS_SETTINGS,
+                            Uri.parse(
+                                "package:$packageName"
+                            )
+                        )
+                    }
+
+                else ->
+                    Intent(
+                        Settings.ACTION_APPLICATION_DETAILS_SETTINGS,
+                        Uri.parse(
+                            "package:$packageName"
+                        )
+                    )
+            }
+                .apply {
+
+                    addFlags(
+                        Intent.FLAG_ACTIVITY_NEW_TASK
+                    )
+                }
+
+        return try {
+
+            startActivity(
+                intent
+            )
+
+            toolResult(
+                true,
+                "Открыт раздел $normalizedSection для приложения $label"
+            )
+
+        } catch (
+            error: Exception
+        ) {
+
+            if (
+                normalizedSection !=
+                "info"
+            ) {
+
+                try {
+
+                    startActivity(
+                        Intent(
+                            Settings.ACTION_APPLICATION_DETAILS_SETTINGS,
+                            Uri.parse(
+                                "package:$packageName"
+                            )
+                        ).apply {
+
+                            addFlags(
+                                Intent.FLAG_ACTIVITY_NEW_TASK
+                            )
+                        }
+                    )
+
+                    return toolResult(
+                        true,
+                        "Точный раздел недоступен; открыта информация о приложении $label"
+                    )
+
+                } catch (_: Exception) {
+                }
+            }
+
             toolResult(
                 false,
-                "Не удалось открыть настройки: " +
+                "Не удалось открыть параметры приложения $label: " +
                     (
                         error.message
                             ?: "неизвестная ошибка"
                         )
             )
         }
+    }
+
+    private fun agentGetDeviceState():
+        JSONObject {
+
+        val batteryManager =
+            getSystemService(
+                Context.BATTERY_SERVICE
+            ) as BatteryManager
+
+        val batteryPercent =
+            try {
+                batteryManager
+                    .getIntProperty(
+                        BatteryManager
+                            .BATTERY_PROPERTY_CAPACITY
+                    )
+            } catch (_: Exception) {
+                -1
+            }
+
+        val batteryIntent =
+            try {
+                registerReceiver(
+                    null,
+                    IntentFilter(
+                        Intent.ACTION_BATTERY_CHANGED
+                    )
+                )
+            } catch (_: Exception) {
+                null
+            }
+
+        val batteryStatus =
+            batteryIntent
+                ?.getIntExtra(
+                    BatteryManager.EXTRA_STATUS,
+                    BatteryManager.BATTERY_STATUS_UNKNOWN
+                )
+                ?: BatteryManager.BATTERY_STATUS_UNKNOWN
+
+        val charging =
+            batteryStatus ==
+                BatteryManager.BATTERY_STATUS_CHARGING ||
+                batteryStatus ==
+                BatteryManager.BATTERY_STATUS_FULL
+
+        val audioManager =
+            getSystemService(
+                Context.AUDIO_SERVICE
+            ) as AudioManager
+
+        val currentVolume =
+            try {
+                audioManager
+                    .getStreamVolume(
+                        AudioManager.STREAM_MUSIC
+                    )
+            } catch (_: Exception) {
+                -1
+            }
+
+        val maxVolume =
+            try {
+                audioManager
+                    .getStreamMaxVolume(
+                        AudioManager.STREAM_MUSIC
+                    )
+            } catch (_: Exception) {
+                -1
+            }
+
+        val orientation =
+            when (
+                resources
+                    .configuration
+                    .orientation
+            ) {
+
+                android.content
+                    .res
+                    .Configuration
+                    .ORIENTATION_LANDSCAPE ->
+                    "landscape"
+
+                android.content
+                    .res
+                    .Configuration
+                    .ORIENTATION_PORTRAIT ->
+                    "portrait"
+
+                else ->
+                    "unknown"
+            }
+
+        val screen =
+            try {
+                screenIntelligence
+                    .getScreenState()
+            } catch (_: Exception) {
+                JSONObject()
+                    .put(
+                        "success",
+                        false
+                    )
+            }
+
+        return JSONObject()
+            .put(
+                "success",
+                true
+            )
+            .put(
+                "battery_percent",
+                batteryPercent
+            )
+            .put(
+                "charging",
+                charging
+            )
+            .put(
+                "media_volume",
+                currentVolume
+            )
+            .put(
+                "media_volume_max",
+                maxVolume
+            )
+            .put(
+                "orientation",
+                orientation
+            )
+            .put(
+                "screen",
+                screen
+            )
     }
 
     private fun agentChangeVolume(
