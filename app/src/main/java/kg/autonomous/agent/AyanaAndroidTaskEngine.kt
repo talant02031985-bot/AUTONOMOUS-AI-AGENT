@@ -5,7 +5,7 @@ import org.json.JSONObject
 import java.util.Locale
 
 /**
- * AYANA Android Task Engine v3 — deterministic local executor.
+ * AYANA Android Task Engine v3.1 — deterministic local executor with structured semantic node resolver.
  *
  * IMPORTANT ARCHITECTURE RULE:
  * The LLM understands the user's intent and produces ONE short structured plan.
@@ -47,6 +47,13 @@ class AyanaAndroidTaskEngine(
     private val screenIntelligence: AyanaScreenIntelligence,
     private val gateway: ActionGateway
 ) {
+
+    private data class ResolvedVisibleTarget(
+        val requested: String,
+        val clickTarget: String,
+        val label: String,
+        val score: Int
+    )
 
     interface ActionGateway {
 
@@ -756,17 +763,23 @@ class AyanaAndroidTaskEngine(
         ) { pass ->
 
             val visibleTarget =
-                firstVisibleTarget(
+                resolveVisibleTarget(
                     screen = currentScreen,
-                    targets = safeTargets
+                    targets = safeTargets,
+                    allowOverflow = allowOverflow
                 )
 
             if (visibleTarget != null) {
 
                 if (
-                    isStateChangingTarget(
-                        visibleTarget
-                    ) &&
+                    (
+                        isStateChangingTarget(
+                            visibleTarget.requested
+                        ) ||
+                            isStateChangingTarget(
+                                visibleTarget.label
+                            )
+                        ) &&
                     !confirmed
                 ) {
                     return JSONObject()
@@ -798,7 +811,7 @@ class AyanaAndroidTaskEngine(
 
                 val clickResult =
                     screenIntelligence.click(
-                        target = visibleTarget,
+                        target = visibleTarget.clickTarget,
                         confirmed = confirmed
                     )
 
@@ -865,7 +878,19 @@ class AyanaAndroidTaskEngine(
                     )
                     .put(
                         "clicked_target",
-                        visibleTarget
+                        visibleTarget.label
+                    )
+                    .put(
+                        "requested_target",
+                        visibleTarget.requested
+                    )
+                    .put(
+                        "resolved_click_target",
+                        visibleTarget.clickTarget
+                    )
+                    .put(
+                        "resolver_score",
+                        visibleTarget.score
                     )
                     .put(
                         "actions_used",
@@ -1258,23 +1283,469 @@ class AyanaAndroidTaskEngine(
             noneOk
     }
 
-    private fun firstVisibleTarget(
+    /**
+     * Resolve a planner phrase to a REAL visible Accessibility node.
+     *
+     * The planner may say «Использование мобильных данных» while Samsung shows
+     * «Мобильные данные», or «приложение браузера» while the row is simply
+     * «Браузер». We therefore resolve semantically against structured node data
+     * and then click the node's concrete view id/text instead of requiring the
+     * planner phrase to appear verbatim on screen.
+     *
+     * Text matches outrank content descriptions, so a visible settings row wins
+     * over a toolbar overflow icon that may share a generic description.
+     */
+    private fun resolveVisibleTarget(
         screen: JSONObject,
-        targets: List<String>
-    ): String? {
+        targets: List<String>,
+        allowOverflow: Boolean
+    ): ResolvedVisibleTarget? {
 
+        val nodes =
+            screen.optJSONArray(
+                "nodes"
+            )
+
+        var best:
+            ResolvedVisibleTarget? =
+            null
+
+        if (nodes != null) {
+
+            for (
+                index in
+                0 until nodes.length()
+            ) {
+
+                val node =
+                    nodes.optJSONObject(
+                        index
+                    )
+                        ?: continue
+
+                if (
+                    !node.optBoolean(
+                        "visible",
+                        false
+                    ) ||
+                    !node.optBoolean(
+                        "enabled",
+                        true
+                    )
+                ) {
+                    continue
+                }
+
+                if (
+                    !allowOverflow &&
+                    isLikelyOverflowNode(
+                        node
+                    )
+                ) {
+                    continue
+                }
+
+                val text =
+                    node.optString(
+                        "text"
+                    ).trim()
+
+                val description =
+                    node.optString(
+                        "description"
+                    ).trim()
+
+                val viewId =
+                    node.optString(
+                        "view_id"
+                    ).trim()
+
+                for (requested in targets) {
+
+                    val textScore =
+                        semanticFieldScore(
+                            value = text,
+                            target = requested,
+                            exactScore = 125
+                        )
+
+                    val descriptionScore =
+                        semanticFieldScore(
+                            value = description,
+                            target = requested,
+                            exactScore = 108
+                        )
+
+                    val viewIdScore =
+                        semanticFieldScore(
+                            value = viewId,
+                            target = requested,
+                            exactScore = 88
+                        )
+
+                    var score =
+                        maxOf(
+                            textScore,
+                            descriptionScore,
+                            viewIdScore
+                        )
+
+                    if (
+                        score <= 0
+                    ) {
+                        continue
+                    }
+
+                    if (
+                        node.optBoolean(
+                            "clickable",
+                            false
+                        )
+                    ) {
+                        score +=
+                            5
+                    }
+
+                    val label =
+                        when {
+                            text.isNotBlank() ->
+                                text
+
+                            description.isNotBlank() ->
+                                description
+
+                            else ->
+                                requested
+                        }
+
+                    // A concrete view id is the least ambiguous click target. If
+                    // absent, use the actual visible label rather than the planner
+                    // wording so the existing Accessibility matcher gets an exact
+                    // on-screen phrase whenever possible.
+                    val clickTarget =
+                        when {
+                            viewId.isNotBlank() &&
+                                textScore > 0 ->
+                                viewId
+
+                            text.isNotBlank() ->
+                                text
+
+                            viewId.isNotBlank() ->
+                                viewId
+
+                            description.isNotBlank() ->
+                                description
+
+                            else ->
+                                requested
+                        }
+
+                    if (
+                        best == null ||
+                        score >
+                        best.score
+                    ) {
+                        best =
+                            ResolvedVisibleTarget(
+                                requested = requested,
+                                clickTarget = clickTarget,
+                                label = label,
+                                score = score
+                            )
+                    }
+                }
+            }
+        }
+
+        if (
+            best != null &&
+            best.score >=
+            MIN_VISIBLE_TARGET_SCORE
+        ) {
+            return best
+        }
+
+        // Compatibility fallback for older/partial snapshots without node data:
+        // only accept an exact visible-string match, never invent a fuzzy click.
         val normalizedScreen =
             normalize(
                 screen.toString()
             )
 
-        return targets.firstOrNull { target ->
-            normalizedScreen.contains(
-                normalize(
-                    target
+        val exact =
+            targets.firstOrNull { target ->
+                normalizedScreen.contains(
+                    normalize(
+                        target
+                    )
                 )
+            }
+
+        return exact?.let { target ->
+            ResolvedVisibleTarget(
+                requested = target,
+                clickTarget = target,
+                label = target,
+                score = MIN_VISIBLE_TARGET_SCORE
             )
         }
+    }
+
+    private fun semanticFieldScore(
+        value: String,
+        target: String,
+        exactScore: Int
+    ): Int {
+
+        val left =
+            normalize(
+                value
+            )
+
+        val right =
+            normalize(
+                target
+            )
+
+        if (
+            left.isBlank() ||
+            right.isBlank()
+        ) {
+            return 0
+        }
+
+        if (
+            left ==
+            right
+        ) {
+            return exactScore
+        }
+
+        if (
+            left.contains(
+                right
+            )
+        ) {
+            return exactScore -
+                10
+        }
+
+        if (
+            right.contains(
+                left
+            ) &&
+            left.length >=
+            4
+        ) {
+            return exactScore -
+                18
+        }
+
+        val leftKeys =
+            semanticTokenKeys(
+                left
+            )
+
+        val rightKeys =
+            semanticTokenKeys(
+                right
+            )
+
+        if (
+            leftKeys.isEmpty() ||
+            rightKeys.isEmpty()
+        ) {
+            return 0
+        }
+
+        val common =
+            leftKeys
+                .intersect(
+                    rightKeys
+                )
+                .size
+
+        if (common == 0) {
+            return 0
+        }
+
+        val smaller =
+            minOf(
+                leftKeys.size,
+                rightKeys.size
+            )
+
+        val larger =
+            maxOf(
+                leftKeys.size,
+                rightKeys.size
+            )
+
+        val shortCoverage =
+            common.toDouble() /
+                smaller.toDouble()
+
+        val longCoverage =
+            common.toDouble() /
+                larger.toDouble()
+
+        return when {
+
+            shortCoverage >= 1.0 &&
+                longCoverage >= 0.5 ->
+                exactScore -
+                    24
+
+            common >= 2 &&
+                shortCoverage >= 0.75 &&
+                longCoverage >= 0.5 ->
+                exactScore -
+                    32
+
+            rightKeys.size == 1 &&
+                common == 1 ->
+                exactScore -
+                    34
+
+            else ->
+                0
+        }
+    }
+
+    private fun semanticTokenKeys(
+        value: String
+    ): Set<String> {
+
+        return normalize(
+            value
+        )
+            .split(
+                " "
+            )
+            .mapNotNull { token ->
+
+                if (
+                    token.length <
+                    3
+                ) {
+                    return@mapNotNull null
+                }
+
+                val key =
+                    tokenKey(
+                        token
+                    )
+
+                if (
+                    key in
+                    GENERIC_UI_TOKEN_KEYS
+                ) {
+                    null
+                } else {
+                    key
+                }
+            }
+            .toSet()
+    }
+
+    private fun tokenKey(
+        token: String
+    ): String {
+
+        val normalized =
+            normalize(
+                token
+            )
+
+        return if (
+            normalized.length >=
+            6
+        ) {
+            normalized.take(
+                5
+            )
+        } else {
+            normalized
+        }
+    }
+
+    private fun isLikelyOverflowNode(
+        node: JSONObject
+    ): Boolean {
+
+        val text =
+            normalize(
+                node.optString(
+                    "text"
+                )
+            )
+
+        val description =
+            normalize(
+                node.optString(
+                    "description"
+                )
+            )
+
+        val viewId =
+            normalize(
+                node.optString(
+                    "view_id"
+                )
+            )
+
+        val className =
+            normalize(
+                node.optString(
+                    "class"
+                )
+            )
+
+        val iconLike =
+            className.contains(
+                "imagebutton"
+            ) ||
+                className.contains(
+                    "image button"
+                ) ||
+                className.contains(
+                    "imageview"
+                ) ||
+                className.contains(
+                    "image view"
+                )
+
+        val descriptionLooksLikeMenu =
+            description in
+                setOf(
+                    "еще",
+                    "ещё",
+                    "дополнительные параметры",
+                    "другие параметры",
+                    "more",
+                    "more options",
+                    "additional options",
+                    "options"
+                )
+
+        val idLooksLikeMenu =
+            listOf(
+                "overflow",
+                "more",
+                "menu"
+            ).any { marker ->
+                viewId.contains(
+                    marker
+                )
+            }
+
+        return text.isBlank() &&
+            iconLike &&
+            (
+                descriptionLooksLikeMenu ||
+                    idLooksLikeMenu
+                )
     }
 
     private fun sameScreen(
@@ -1591,5 +2062,33 @@ class AyanaAndroidTaskEngine(
 
         private const val DIRECT_ACTION_SETTLE_MS =
             350L
+
+        private const val MIN_VISIBLE_TARGET_SCORE =
+            66
+
+        // Generic UI words are removed only for semantic comparison. This lets
+        // «приложение браузера» match «Браузер» and «использование мобильных
+        // данных» match «Мобильные данные» without hard-coding any app or screen.
+        private val GENERIC_UI_TOKEN_KEYS =
+            setOf(
+                "прило",
+                "разде",
+                "настр",
+                "исполь",
+                "парам",
+                "пункт",
+                "стран",
+                "экран",
+                "откры",
+                "выбор",
+                "appli",
+                "setti",
+                "secti",
+                "usage",
+                "page",
+                "scree",
+                "item",
+                "selec"
+            )
     }
 }
