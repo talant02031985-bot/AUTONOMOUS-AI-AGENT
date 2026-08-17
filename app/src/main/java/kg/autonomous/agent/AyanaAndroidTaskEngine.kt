@@ -5,7 +5,7 @@ import org.json.JSONObject
 import java.util.Locale
 
 /**
- * AYANA Android Task Engine v3.1 — deterministic local executor with structured semantic node resolver.
+ * AYANA Android Task Engine v3.3 — deterministic local executor with strict terminal verification and text-first semantic clicks.
  *
  * IMPORTANT ARCHITECTURE RULE:
  * The LLM understands the user's intent and produces ONE short structured plan.
@@ -854,6 +854,11 @@ class AyanaAndroidTaskEngine(
 
                 val success =
                     when {
+                        expectedVerified != null &&
+                            requireScreenChange ->
+                            expectedVerified &&
+                                changed
+
                         expectedVerified != null ->
                             expectedVerified
 
@@ -1180,10 +1185,6 @@ class AyanaAndroidTaskEngine(
                 screen = screen
             )
 
-        if (expected != null) {
-            return expected
-        }
-
         val requireScreenChange =
             step.optBoolean(
                 "require_screen_change",
@@ -1191,6 +1192,18 @@ class AyanaAndroidTaskEngine(
                     "action"
                 ) == "click_any"
             )
+
+        if (expected != null) {
+            return if (requireScreenChange) {
+                expected &&
+                    stepResult.optBoolean(
+                        "progress",
+                        false
+                    )
+            } else {
+                expected
+            }
+        }
 
         return if (requireScreenChange) {
             stepResult.optBoolean(
@@ -1376,12 +1389,23 @@ class AyanaAndroidTaskEngine(
                             exactScore = 108
                         )
 
+                    // Resource ids such as android:id/title are often reused by
+                    // many rows on Samsung/Android settings screens. Treat view_id
+                    // as a semantic label only when the node has no real visible
+                    // text/description; otherwise it can point at the wrong row.
                     val viewIdScore =
-                        semanticFieldScore(
-                            value = viewId,
-                            target = requested,
-                            exactScore = 88
-                        )
+                        if (
+                            text.isBlank() &&
+                            description.isBlank()
+                        ) {
+                            semanticFieldScore(
+                                value = viewId,
+                                target = requested,
+                                exactScore = 88
+                            )
+                        } else {
+                            0
+                        }
 
                     var score =
                         maxOf(
@@ -1418,24 +1442,21 @@ class AyanaAndroidTaskEngine(
                                 requested
                         }
 
-                    // A concrete view id is the least ambiguous click target. If
-                    // absent, use the actual visible label rather than the planner
-                    // wording so the existing Accessibility matcher gets an exact
-                    // on-screen phrase whenever possible.
+                    // Prefer the actual visible TEXT. Generic resource ids are
+                    // frequently shared by every row (for example android:id/title)
+                    // and are therefore less specific than the visible label.
+                    // Description is second; view id is only the last structured
+                    // fallback when the node has no usable user-visible label.
                     val clickTarget =
                         when {
-                            viewId.isNotBlank() &&
-                                textScore > 0 ->
-                                viewId
-
                             text.isNotBlank() ->
                                 text
 
-                            viewId.isNotBlank() ->
-                                viewId
-
                             description.isNotBlank() ->
                                 description
+
+                            viewId.isNotBlank() ->
+                                viewId
 
                             else ->
                                 requested
