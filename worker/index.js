@@ -36,7 +36,20 @@ const DEVICE_TOOLS = [
             "accessibility",
             "location",
             "security",
-            "date_time"
+            "date_time",
+            "battery",
+            "storage",
+            "notifications",
+            "data_usage",
+            "vpn",
+            "nfc",
+            "language",
+            "keyboard",
+            "default_apps",
+            "developer_options",
+            "device_info",
+            "privacy",
+            "battery_optimization"
           ]
         }
       },
@@ -58,6 +71,39 @@ const DEVICE_TOOLS = [
         }
       },
       required: ["name"],
+      additionalProperties: false
+    }
+  },
+  {
+    type: "function",
+    name: "open_app_settings",
+    description: "Open a direct Android settings page for a specific installed app. Prefer this over manual Settings navigation. Use section=notifications for that app's notification settings, open_by_default for link/default-opening settings, language for per-app language when supported, and info for the general App info page.",
+    strict: true,
+    parameters: {
+      type: "object",
+      properties: {
+        name: {
+          type: "string",
+          description: "User-visible installed app name, for example Галерея, YouTube, Telegram, Chrome."
+        },
+        section: {
+          type: "string",
+          enum: ["info", "notifications", "open_by_default", "language"]
+        }
+      },
+      required: ["name", "section"],
+      additionalProperties: false
+    }
+  },
+  {
+    type: "function",
+    name: "get_device_state",
+    description: "Read lightweight current Android device context: battery percentage/charging, media volume, orientation, and the current accessibility screen snapshot. Use when device state materially affects the next action or when the user asks about the device state.",
+    strict: true,
+    parameters: {
+      type: "object",
+      properties: {},
+      required: [],
       additionalProperties: false
     }
   },
@@ -386,7 +432,7 @@ const AGENT_INSTRUCTIONS = `
 КРИТИЧЕСКОЕ ПРАВИЛО:
 Никогда не утверждай, что действие выполнено, пока не получен результат соответствующего tool call. Если инструмент сообщил об ошибке — попробуй разумный следующий шаг или честно сообщи о проблеме.
 
-Ты можешь выполнять многошаговые задачи последовательно. Для задач на Android-экране действует строгий цикл: ОДИН tool call за один ответ модели → дождись результата инструмента и нового состояния экрана → только затем решай следующий шаг. Никогда не выдавай два или больше device tool calls в одном ходе. Если экран неизвестен, get_screen_state является единственным tool call этого хода. После click/input/scroll/open обязательно используй результат этого действия и обновлённый screen/screen_changed, прежде чем выбирать следующий шаг. Продолжай этот цикл до достижения цели пользователя, необходимости подтверждения или реальной невозможности продолжить.
+Ты можешь выполнять многошаговые задачи последовательно. Для задач на Android-экране действует строгий цикл: ОДИН tool call за один ответ модели → дождись результата инструмента и нового состояния экрана → только затем решай следующий шаг. Никогда не выдавай два или больше device tool calls в одном ходе. Если экран действительно неизвестен, get_screen_state является единственным tool call этого хода. Но если предыдущий action tool уже вернул свежий screen/screen_changed, НЕ трать следующий ход на повторный get_screen_state без причины. После click/input/scroll/open используй возвращённый результат и только при недостатке данных читай экран отдельно. Продолжай цикл до достижения конечной цели, необходимости подтверждения или реальной невозможности продолжить.
 
 ВАЖНО ДЛЯ СОВМЕСТИМОСТИ: даже если платформа технически допускает несколько tool calls, ты всё равно должна возвращать максимум ОДИН device function call за ход. Это требование оркестратора AYANA.
 
@@ -410,10 +456,15 @@ const AGENT_INSTRUCTIONS = `
 - Если время неоднозначно и пользователь не указал достаточно данных для безопасного выбора, задай короткий уточняющий вопрос вместо выдумывания времени.
 - После tool result не утверждай, что напоминание создано или удалено, если локальный инструмент сообщил об ошибке.
 
-Прямые Android-переходы:
-- Если пользователь просит открыть раздел «Приложения» в системных настройках, используй open_settings с section="apps". Не прокручивай общие Настройки и не запускай поиск вручную.
-- Если пользователь просит открыть «информацию о приложении», «сведения о приложении», permissions/разрешения, хранилище, батарею, уведомления или системные параметры КОНКРЕТНОГО установленного приложения, сначала используй open_app_info с его видимым именем. Это предпочтительнее Accessibility-навигации.
-- Описание конечного состояния пользователя — например «остановись на странице Информация о приложении Галерея» — является ЦЕЛЬЮ, а не буквальным текстом кнопки или поискового запроса. Не ищи фразы вроде «информация о приложении Галерея» на экране.
+Планирование и прямые Android-переходы:
+- Перед многошаговой задачей сформируй для себя короткий план достижения КОНЕЧНОЙ ЦЕЛИ. Не озвучивай внутренний план подробно пользователю. После каждого tool result проверяй: приблизилось ли состояние устройства к цели, изменился ли экран и не повторяешь ли ты уже выполненный шаг.
+- Всегда предпочитай самый короткий прямой Android tool. Accessibility-навигация — резерв только для экранов, куда нет прямого системного перехода.
+- open_settings умеет напрямую открывать: apps, wifi, bluetooth, sound, display, accessibility, location, security, date_time, battery, storage, notifications, data_usage, vpn, nfc, language, keyboard, default_apps, developer_options, device_info, privacy, battery_optimization. Не открывай общие Настройки и не ищи эти разделы вручную.
+- Для системных параметров КОНКРЕТНОГО приложения используй open_app_settings. section="notifications" открывает уведомления приложения; section="open_by_default" — открытие по умолчанию; section="language" — язык приложения на поддерживаемых Android; section="info" — общую страницу приложения.
+- open_app_info сохраняется как быстрый совместимый путь к общей странице «Информация о приложении».
+- Если пользователь просит «разрешения», «хранилище» или «батарею» конкретного приложения и отдельного прямого subpage tool нет, сначала открой info этого приложения, затем используй возвращённый экран и Screen Intelligence только для одного необходимого перехода внутри страницы.
+- get_device_state используй, когда заряд, ориентация, громкость или текущий экран реально влияют на решение. Не вызывай его без причины.
+- Описание конечного состояния пользователя — например «остановись на странице Информация о приложении Галерея» — является ЦЕЛЬЮ, а не буквальным текстом кнопки или поискового запроса.
 - Не используй поиск в Настройках, если существует прямой Android tool для нужного раздела или страницы приложения.
 
 Screen Intelligence v2:
@@ -721,7 +772,7 @@ export default {
         ok: true,
         service: "AYANA AI",
         ai: "ready",
-        agent_core: "v5.2-direct-app-info",
+        agent_core: "v5.3-direct-actions-planner",
         voice: "marin"
       });
     }
