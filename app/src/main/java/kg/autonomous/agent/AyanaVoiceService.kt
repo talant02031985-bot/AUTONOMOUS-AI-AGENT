@@ -13,9 +13,11 @@ import android.content.Intent
 import android.content.IntentFilter
 import android.content.pm.PackageManager
 import android.content.pm.ServiceInfo
+import android.media.AudioAttributes
 import android.media.AudioFormat
 import android.media.AudioRecord
 import android.media.AudioManager
+import android.media.AudioTrack
 import android.media.MediaPlayer
 import android.media.MediaRecorder
 import android.media.audiofx.AcousticEchoCanceler
@@ -37,6 +39,7 @@ import com.k2fsa.sherpa.onnx.OnlineTransducerModelConfig
 import org.json.JSONArray
 import org.json.JSONObject
 import java.io.File
+import java.net.SocketTimeoutException
 import java.net.URL
 import java.time.Instant
 import java.time.LocalDateTime
@@ -49,10 +52,12 @@ import kotlin.math.abs
 
 class AyanaVoiceService : Service() {
 
-    // AYANA FINAL VOICE PACKAGE v8.7.
-    // Base: confirmed installed v8.5. Integrates the reliable speaking barge-in
-    // patch from the intermediate v8.6 without treating v8.6 as the baseline.
-    // Marin TTS remains interruptible during download and active playback.
+    // AYANA v9.0 FINAL — AUDIO + LATENCY STABILIZATION.
+    // Built from v8.9 final candidate after instrumented device tests.
+    // Main voice replies use streamed 24 kHz PCM through AudioTrack with a
+    // voice-communication audio path; the cached short wake acknowledgement
+    // remains MP3. Local routing is tolerant of selected Sherpa recognition
+    // distortions and simple Russian spoken-number arithmetic stays offline.
 
     private enum class ListenMode {
         WAKE,
@@ -93,6 +98,24 @@ class AyanaVoiceService : Service() {
 
     private var mediaPlayer:
         MediaPlayer? = null
+
+    @Volatile
+    private var audioTrack:
+        AudioTrack? = null
+
+    @Volatile
+    private var currentTtsConnection:
+        HttpsURLConnection? = null
+
+    private var previousAudioMode:
+        Int? = null
+
+    private var communicationAudioModeOwned =
+        false
+
+    @Volatile
+    private var bargeInAudioDiagnosticLogged =
+        false
 
     private var cancelEchoCanceler:
         AcousticEchoCanceler? = null
@@ -945,6 +968,9 @@ class AyanaVoiceService : Service() {
         var recorder: AudioRecord? =
             null
 
+        var selectedAudioSource =
+            -1
+
         val cancelDuringSpeech =
             listenMode ==
                 ListenMode.CANCEL &&
@@ -988,6 +1014,7 @@ class AyanaVoiceService : Service() {
                 AudioRecord.STATE_INITIALIZED
             ) {
                 recorder = candidate
+                selectedAudioSource = source
                 break
             }
 
@@ -1035,6 +1062,30 @@ class AyanaVoiceService : Service() {
 
             isRecording =
                 true
+
+            if (
+                cancelDuringSpeech &&
+                !bargeInAudioDiagnosticLogged
+            ) {
+                bargeInAudioDiagnosticLogged =
+                    true
+
+                val audioManager =
+                    getSystemService(
+                        Context.AUDIO_SERVICE
+                    ) as AudioManager
+
+                commandHistoryStore.addEvent(
+                    activeCommandHistoryId,
+                    state = "barge_in_audio",
+                    message = "Аудиоканал STOP активирован",
+                    details =
+                        "source=${audioSourceName(selectedAudioSource)};" +
+                            " mode=${audioManager.mode};" +
+                            " aec=${cancelEchoCanceler?.enabled == true};" +
+                            " ns=${cancelNoiseSuppressor?.enabled == true}"
+                )
+            }
 
         } catch (_: Exception) {
 
@@ -2393,6 +2444,15 @@ class AyanaVoiceService : Service() {
             return
         }
 
+        // ROUTING REPAIR v9.0
+        // Never rewrite the user's stored/original command. Only the deterministic
+        // local router receives a conservative repaired form for known Sherpa
+        // distortions observed on the target tablet.
+        val routingNormalized =
+            repairCommonRecognitionForRouting(
+                normalized
+            )
+
         if (
             isShutdownAyanaPhrase(
                 normalized
@@ -2515,7 +2575,7 @@ class AyanaVoiceService : Service() {
         // Simple two-number arithmetic must not spend a network round-trip.
         val localCalculation =
             evaluateSimpleCalculation(
-                normalized
+                routingNormalized
             )
 
         if (localCalculation != null) {
@@ -2535,7 +2595,7 @@ class AyanaVoiceService : Service() {
         // Android destination. State-changing phrases are intentionally excluded.
         val fastAppDetailGoal =
             extractFastAppDetailGoal(
-                normalized
+                routingNormalized
             )
 
         if (
@@ -2596,7 +2656,7 @@ class AyanaVoiceService : Service() {
         // after the first Android screen instead of returning early.
         val multiStepRequest =
             isMultiStepAgentCommand(
-                normalized
+                routingNormalized
             )
 
         // Direct local route for app-specific settings such as
@@ -2605,7 +2665,7 @@ class AyanaVoiceService : Service() {
         // as an application name (for example «уведомления ютуб»).
         val directAppSettingsTarget =
             extractDirectAppSettingsTarget(
-                normalized
+                routingNormalized
             )
 
         if (
@@ -2668,7 +2728,7 @@ class AyanaVoiceService : Service() {
         // otherwise voice commands may be mistaken for a normal app launch.
         val directAppInfoTarget =
             extractDirectAppInfoTarget(
-                normalized
+                routingNormalized
             )
 
         // HYBRID APP SUBPAGE ROUTER v2.7.4.2
@@ -2679,7 +2739,7 @@ class AyanaVoiceService : Service() {
         val appInfoSubpageGoal =
             if (multiStepRequest) {
                 extractAppInfoSubpageGoal(
-                    normalized
+                    routingNormalized
                 )
             } else {
                 null
@@ -2817,7 +2877,7 @@ class AyanaVoiceService : Service() {
         // Agent Core instead of being collapsed to ordinary App info.
         val settingsAppSearchTarget =
             extractSettingsAppSearchTarget(
-                normalized
+                routingNormalized
             )
 
         if (
@@ -2854,7 +2914,7 @@ class AyanaVoiceService : Service() {
         // Route them directly on-device before the generic command / app router.
         val directSystemSettingsSection =
             extractDirectSystemSettingsSection(
-                normalized
+                routingNormalized
             )
 
         if (
@@ -2907,9 +2967,9 @@ class AyanaVoiceService : Service() {
 
         when {
 
-            normalized ==
+            routingNormalized ==
                 "назад" ||
-                normalized ==
+                routingNormalized ==
                 "вернись назад" -> {
 
                 val ok =
@@ -2933,11 +2993,11 @@ class AyanaVoiceService : Service() {
                 return
             }
 
-            normalized ==
+            routingNormalized ==
                 "домой" ||
-                normalized ==
+                routingNormalized ==
                 "на главный экран" ||
-                normalized ==
+                routingNormalized ==
                 "главный экран" -> {
 
                 val ok =
@@ -3035,7 +3095,7 @@ class AyanaVoiceService : Service() {
             }
 
             isVolumeUpCommand(
-                normalized
+                routingNormalized
             ) -> {
 
                 changeVolume(
@@ -3051,7 +3111,7 @@ class AyanaVoiceService : Service() {
             }
 
             isVolumeDownCommand(
-                normalized
+                routingNormalized
             ) -> {
 
                 changeVolume(
@@ -3067,7 +3127,7 @@ class AyanaVoiceService : Service() {
             }
 
             isMuteCommand(
-                normalized
+                routingNormalized
             ) -> {
 
                 changeVolume(
@@ -3083,7 +3143,7 @@ class AyanaVoiceService : Service() {
             }
 
             isUnmuteCommand(
-                normalized
+                routingNormalized
             ) -> {
 
                 changeVolume(
@@ -3298,7 +3358,7 @@ class AyanaVoiceService : Service() {
         }
 
         val target =
-            normalized
+            routingNormalized
                 .removePrefix(
                     "открой "
                 )
@@ -3628,7 +3688,7 @@ class AyanaVoiceService : Service() {
         // «отключи уведомления» must continue to the safe Agent Core path.
         val appPattern =
             Regex(
-                """(?:открой|покажи)?\s*настройк\p{L}*\s+приложени\p{L}*\s+(.+?)(?:\s+и\s+(?:перейди|зайди|открой|покажи)\s+|\s+(?:потом|затем)\s+(?:перейди|зайди|открой|покажи)\s+)"""
+                """(?:(?:открой|покажи)\s+)?(?:настройк\p{L}*\s+)?приложени\p{L}*\s+(.+?)(?:\s+и\s+(?:перейди|зайди|открой|покажи)\s+|\s+(?:потом|затем)\s+(?:перейди|зайди|открой|покажи)\s+)"""
             )
 
         val match =
@@ -5412,31 +5472,101 @@ class AyanaVoiceService : Service() {
         }
     }
 
+    private fun repairCommonRecognitionForRouting(
+        value: String
+    ): String {
+
+        var repaired =
+            value
+                .lowercase(
+                    Locale.ROOT
+                )
+                .replace('ё', 'е')
+                .replace(
+                    Regex("\\s+"),
+                    " "
+                )
+                .trim()
+
+        // Conservative, device-observed substitutions only. These repairs are
+        // intentionally NOT used as the text sent to Agent Core.
+        repaired =
+            repaired
+                .replace(
+                    Regex("(?<!\\p{L})(?:плютус|блютус|блютузс)(?!\\p{L})"),
+                    "блютуз"
+                )
+                .replace(
+                    Regex("^то будет\\s+"),
+                    "сколько будет "
+                )
+
+        return repaired
+    }
+
     private fun evaluateSimpleCalculation(
         command: String
     ): String? {
 
-        val match =
+        val cleaned =
+            command
+                .trim()
+                .replace(
+                    Regex("^(?:(?:сколько|что|то)\\s+будет|посчитай|вычисли)\\s+"),
+                    ""
+                )
+                .trim()
+
+        val numericMatch =
             Regex(
-                """^(?:(?:сколько будет|посчитай|вычисли)\s+)?(-?\d+)\s*(плюс|\+|минус|-|умножить на|умножь на|\*|x|х|разделить на|поделить на|/)\s*(-?\d+)$"""
+                """^(-?\d+)\s*(плюс|\+|минус|-|умножить на|умножь на|\*|x|х|разделить на|поделить на|/)\s*(-?\d+)$"""
             )
                 .matchEntire(
-                    command.trim()
+                    cleaned
                 )
-                ?: return null
 
-        val left =
-            match.groupValues[1]
-                .toLongOrNull()
-                ?: return null
+        val left: Long
+        val operation: String
+        val right: Long
 
-        val operation =
-            match.groupValues[2]
+        if (numericMatch != null) {
+            left =
+                numericMatch.groupValues[1]
+                    .toLongOrNull()
+                    ?: return null
 
-        val right =
-            match.groupValues[3]
-                .toLongOrNull()
-                ?: return null
+            operation =
+                numericMatch.groupValues[2]
+
+            right =
+                numericMatch.groupValues[3]
+                    .toLongOrNull()
+                    ?: return null
+        } else {
+            val spokenMatch =
+                Regex(
+                    """^(.+?)\s+(плюс|минус|умножить на|умножь на|разделить на|поделить на)\s+(.+)$"""
+                )
+                    .matchEntire(
+                        cleaned
+                    )
+                    ?: return null
+
+            left =
+                parseRussianIntegerPhrase(
+                    spokenMatch.groupValues[1]
+                )
+                    ?: return null
+
+            operation =
+                spokenMatch.groupValues[2]
+
+            right =
+                parseRussianIntegerPhrase(
+                    spokenMatch.groupValues[3]
+                )
+                    ?: return null
+        }
 
         val resultText =
             when (operation) {
@@ -5487,6 +5617,177 @@ class AyanaVoiceService : Service() {
         }
 
         return "Результат: $resultText."
+    }
+
+    private fun parseRussianIntegerPhrase(
+        value: String
+    ): Long? {
+
+        val normalized =
+            value
+                .lowercase(
+                    Locale.ROOT
+                )
+                .replace('ё', 'е')
+                .replace(
+                    Regex("[^а-я0-9-]+"),
+                    " "
+                )
+                .replace(
+                    Regex("\\s+"),
+                    " "
+                )
+                .trim()
+
+        normalized.toLongOrNull()
+            ?.let {
+                return it
+            }
+
+        if (normalized.isBlank()) {
+            return null
+        }
+
+        val tokens =
+            normalized
+                .split(" ")
+                .filter {
+                    it.isNotBlank()
+                }
+                .toMutableList()
+
+        var negative =
+            false
+
+        if (
+            tokens.firstOrNull() ==
+            "минус"
+        ) {
+            negative =
+                true
+
+            tokens.removeAt(0)
+        }
+
+        if (tokens.isEmpty()) {
+            return null
+        }
+
+        val small =
+            mapOf(
+                "ноль" to 0L,
+                "один" to 1L,
+                "одна" to 1L,
+                "два" to 2L,
+                "две" to 2L,
+                "три" to 3L,
+                "четыре" to 4L,
+                "пять" to 5L,
+                "шесть" to 6L,
+                "семь" to 7L,
+                "восемь" to 8L,
+                "девять" to 9L,
+                "десять" to 10L,
+                "одиннадцать" to 11L,
+                "двенадцать" to 12L,
+                "тринадцать" to 13L,
+                "четырнадцать" to 14L,
+                "пятнадцать" to 15L,
+                "шестнадцать" to 16L,
+                "семнадцать" to 17L,
+                "восемнадцать" to 18L,
+                "девятнадцать" to 19L,
+                "двадцать" to 20L,
+                "тридцать" to 30L,
+                "сорок" to 40L,
+                "пятьдесят" to 50L,
+                "шестьдесят" to 60L,
+                "семьдесят" to 70L,
+                "восемьдесят" to 80L,
+                "девяносто" to 90L,
+                "сто" to 100L,
+                "двести" to 200L,
+                "триста" to 300L,
+                "четыреста" to 400L,
+                "пятьсот" to 500L,
+                "шестьсот" to 600L,
+                "семьсот" to 700L,
+                "восемьсот" to 800L,
+                "девятьсот" to 900L
+            )
+
+        var total =
+            0L
+
+        var group =
+            0L
+
+        for (token in tokens) {
+            when (token) {
+                "тысяча", "тысячи", "тысяч" -> {
+                    val thousands =
+                        if (group == 0L) {
+                            1L
+                        } else {
+                            group
+                        }
+
+                    total =
+                        try {
+                            Math.addExact(
+                                total,
+                                Math.multiplyExact(
+                                    thousands,
+                                    1000L
+                                )
+                            )
+                        } catch (_: ArithmeticException) {
+                            return null
+                        }
+
+                    group =
+                        0L
+                }
+
+                else -> {
+                    val part =
+                        small[token]
+                            ?: return null
+
+                    group =
+                        try {
+                            Math.addExact(
+                                group,
+                                part
+                            )
+                        } catch (_: ArithmeticException) {
+                            return null
+                        }
+                }
+            }
+        }
+
+        val valueLong =
+            try {
+                Math.addExact(
+                    total,
+                    group
+                )
+            } catch (_: ArithmeticException) {
+                return null
+            }
+
+        return if (negative) {
+            try {
+                Math.negateExact(
+                    valueLong
+                )
+            } catch (_: ArithmeticException) {
+                null
+            }
+        } else {
+            valueLong
+        }
     }
 
     private fun finishLocalCommand(
@@ -5912,6 +6213,36 @@ class AyanaVoiceService : Service() {
                                 break
                             }
 
+                            // SINGLE-STEP TERMINAL v9.0
+                            // If the user's original goal is a single deterministic
+                            // Android action and the local tool already confirmed
+                            // success, a second model round-trip adds latency but no
+                            // planning value. Multi-step commands deliberately keep
+                            // the orchestrator loop.
+                            if (
+                                shouldFinishAfterSingleTool(
+                                    originalGoal = originalGoal,
+                                    toolName = toolName,
+                                    arguments = arguments,
+                                    result = result
+                                )
+                            ) {
+                                agentPreviousResponseId =
+                                    null
+
+                                finalSuccess =
+                                    true
+
+                                finalAnswer =
+                                    localSingleToolReply(
+                                        toolName = toolName,
+                                        arguments = arguments,
+                                        result = result
+                                    )
+
+                                break
+                            }
+
                             val toolSignature =
                                 toolName +
                                     "|" +
@@ -6265,6 +6596,123 @@ class AyanaVoiceService : Service() {
 
         currentAgentThread =
             worker
+    }
+
+    private fun shouldFinishAfterSingleTool(
+        originalGoal: String,
+        toolName: String,
+        arguments: JSONObject,
+        result: JSONObject
+    ): Boolean {
+
+        if (
+            !result.optBoolean(
+                "success",
+                false
+            )
+        ) {
+            return false
+        }
+
+        val normalizedGoal =
+            repairCommonRecognitionForRouting(
+                normalizeRecognitionText(
+                    originalGoal
+                )
+            )
+
+        if (
+            isMultiStepAgentCommand(
+                normalizedGoal
+            )
+        ) {
+            return false
+        }
+
+        // Only terminal, low-risk actions that already have an observable local
+        // success result are eligible. UI clicks/text entry remain orchestrated.
+        return toolName in
+            setOf(
+                "open_app",
+                "open_settings",
+                "open_app_info",
+                "open_app_settings",
+                "press_back",
+                "press_home",
+                "change_volume",
+                "youtube_search",
+                "google_search",
+                "map_search"
+            )
+    }
+
+    private fun localSingleToolReply(
+        toolName: String,
+        arguments: JSONObject,
+        result: JSONObject
+    ): String {
+
+        return when (toolName) {
+            "open_app" ->
+                "Открываю ${arguments.optString("name", "приложение")}."
+
+            "open_settings" -> {
+                val section =
+                    arguments.optString(
+                        "section"
+                    )
+
+                when (section) {
+                    "bluetooth" -> "Настройки Bluetooth открыты."
+                    "wifi" -> "Настройки Wi-Fi открыты."
+                    "sound" -> "Настройки звука открыты."
+                    "display" -> "Настройки экрана открыты."
+                    "apps" -> "Настройки приложений открыты."
+                    "accessibility" -> "Специальные возможности открыты."
+                    else -> result.optString(
+                        "message",
+                        "Настройки открыты."
+                    )
+                }
+            }
+
+            "open_app_info" ->
+                "Информация о приложении ${arguments.optString("name", "")} открыта."
+                    .replace(
+                        "  ",
+                        " "
+                    )
+
+            "open_app_settings" -> {
+                val app =
+                    arguments.optString(
+                        "name"
+                    )
+
+                when (
+                    arguments.optString(
+                        "section"
+                    )
+                ) {
+                    "notifications" -> "Уведомления приложения $app открыты."
+                    "open_by_default" -> "Параметры открытия приложения $app открыты."
+                    "language" -> "Языковые настройки приложения $app открыты."
+                    else -> "Настройки приложения $app открыты."
+                }
+            }
+
+            "press_back" -> "Назад."
+            "press_home" -> "Главный экран."
+            "change_volume" -> "Громкость изменена."
+            "youtube_search" -> "Открываю поиск в YouTube."
+            "google_search" -> "Открываю поиск Google."
+            "map_search" -> "Открываю поиск на карте."
+            else ->
+                result.optString(
+                    "message",
+                    "Готово."
+                )
+        }
     }
 
     private fun callAgentCore(
@@ -8942,14 +9390,12 @@ class AyanaVoiceService : Service() {
     ) {
 
         if (text.isBlank()) {
-
             finishActiveCommandHistory(
                 success = historySuccess,
                 result = text
             )
 
             startFollowUpOrWake()
-
             return
         }
 
@@ -8967,132 +9413,671 @@ class AyanaVoiceService : Service() {
             "AYANA отвечает"
         )
 
+        val token =
+            ++audioToken
+
+        // Stop/release any previous output BEFORE publishing the new TTS text.
+        // v8.9 did this in the opposite order, so stopCurrentAudio() erased the
+        // reference transcript used by the self-echo protection.
+        stopCurrentAudio(
+            keepToken = true
+        )
+
         activeTtsTextNormalized =
             normalizeRecognitionText(
                 text
             )
 
-        // Voice STOP must remain available while TTS is downloading and while
-        // Marin is speaking. The exact/short stop-phrase filter below avoids
-        // treating ordinary speech as cancellation.
+        bargeInAudioDiagnosticLogged =
+            false
+
+        enterCommunicationAudioMode()
+
+        // The cancel microphone is started only after the communication audio
+        // mode is active, so VOICE_COMMUNICATION + AEC can share one route.
         startCancelListening()
-
-        val token =
-            ++audioToken
-
-        stopCurrentAudio(
-            keepToken = true
-        )
 
         commandHistoryStore.addEvent(
             activeCommandHistoryId,
             state = "tts_request",
-            message = "Marin: запрос голоса отправлен"
+            message = "Marin: потоковый запрос голоса отправлен"
         )
 
         thread(
             start = true,
-            name = "AyanaTTS"
+            name = "AyanaTTSStream"
         ) {
+            streamTtsPcmAndPlay(
+                text = text,
+                token = token,
+                historySuccess = historySuccess
+            )
+        }
+    }
 
-            var file:
-                File? = null
+    private fun streamTtsPcmAndPlay(
+        text: String,
+        token: Long,
+        historySuccess: Boolean
+    ) {
 
-            try {
+        var connection:
+            HttpsURLConnection? = null
 
-                file =
-                    File.createTempFile(
-                        "ayana_voice_",
-                        ".mp3",
-                        cacheDir
+        var track:
+            AudioTrack? = null
+
+        var completedNormally =
+            false
+
+        var totalBytes =
+            0L
+
+        val requestStartedAt =
+            SystemClock.elapsedRealtime()
+
+        try {
+            val url =
+                URL(
+                    "$WORKER_URL/tts"
+                )
+
+            connection =
+                url.openConnection()
+                    as HttpsURLConnection
+
+            currentTtsConnection =
+                connection
+
+            connection.requestMethod =
+                "POST"
+
+            connection.setRequestProperty(
+                "Content-Type",
+                "application/json"
+            )
+
+            connection.setRequestProperty(
+                "Accept",
+                "application/octet-stream"
+            )
+
+            connection.connectTimeout =
+                TTS_CONNECT_TIMEOUT_MS
+
+            connection.readTimeout =
+                TTS_READ_TIMEOUT_MS
+
+            connection.doOutput =
+                true
+
+            val requestJson =
+                JSONObject().apply {
+                    put(
+                        "text",
+                        text
                     )
 
-                downloadTtsToFile(
-                    text,
-                    file
-                )
-
-                commandHistoryStore.addEvent(
-                    activeCommandHistoryId,
-                    state = "tts_ready",
-                    message = "Marin: аудио получено"
-                )
-
-                if (
-                    token !=
-                    audioToken ||
-                    shuttingDown
-                ) {
-
-                    file.delete()
-
-                    return@thread
+                    put(
+                        "format",
+                        "pcm"
+                    )
                 }
 
-                val readyAudio =
-                    file
+            connection.outputStream
+                .use { output ->
+                    output.write(
+                        requestJson
+                            .toString()
+                            .toByteArray(
+                                Charsets.UTF_8
+                            )
+                    )
+                }
 
-                mainHandler.post {
+            val responseCode =
+                connection.responseCode
 
-                    if (
-                        token ==
-                        audioToken &&
+            if (
+                responseCode !in
+                200..299
+            ) {
+                val errorBody =
+                    try {
+                        connection.errorStream
+                            ?.bufferedReader()
+                            ?.use {
+                                it.readText()
+                            }
+                            .orEmpty()
+                            .take(500)
+                    } catch (_: Exception) {
+                        ""
+                    }
+
+                throw IllegalStateException(
+                    "TTS HTTP $responseCode ${errorBody.trim()}"
+                        .trim()
+                )
+            }
+
+            val minBuffer =
+                AudioTrack.getMinBufferSize(
+                    TTS_PCM_SAMPLE_RATE_HZ,
+                    AudioFormat.CHANNEL_OUT_MONO,
+                    AudioFormat.ENCODING_PCM_16BIT
+                )
+
+            if (minBuffer <= 0) {
+                throw IllegalStateException(
+                    "AudioTrack minBuffer=$minBuffer"
+                )
+            }
+
+            val builtTrack =
+                AudioTrack.Builder()
+                    .setAudioAttributes(
+                        AudioAttributes.Builder()
+                            .setUsage(
+                                AudioAttributes.USAGE_VOICE_COMMUNICATION
+                            )
+                            .setContentType(
+                                AudioAttributes.CONTENT_TYPE_SPEECH
+                            )
+                            .build()
+                    )
+                    .setAudioFormat(
+                        AudioFormat.Builder()
+                            .setEncoding(
+                                AudioFormat.ENCODING_PCM_16BIT
+                            )
+                            .setSampleRate(
+                                TTS_PCM_SAMPLE_RATE_HZ
+                            )
+                            .setChannelMask(
+                                AudioFormat.CHANNEL_OUT_MONO
+                            )
+                            .build()
+                    )
+                    .setBufferSizeInBytes(
+                        maxOf(
+                            minBuffer * 4,
+                            TTS_STREAM_BUFFER_BYTES
+                        )
+                    )
+                    .setTransferMode(
+                        AudioTrack.MODE_STREAM
+                    )
+                    .build()
+
+            if (
+                builtTrack.state !=
+                AudioTrack.STATE_INITIALIZED
+            ) {
+                builtTrack.release()
+                throw IllegalStateException(
+                    "AudioTrack not initialized"
+                )
+            }
+
+            builtTrack.setVolume(
+                BARGE_IN_TTS_VOLUME
+            )
+
+            track =
+                builtTrack
+
+            audioTrack =
+                builtTrack
+
+            // PCM16 mono uses 2 bytes per frame. HTTP chunk boundaries are not
+            // guaranteed to be frame-aligned, so preserve one trailing byte and
+            // prepend it to the next network chunk instead of feeding an odd byte
+            // count to AudioTrack.
+            val networkBuffer =
+                ByteArray(
+                    TTS_STREAM_BUFFER_BYTES
+                )
+
+            val alignedBuffer =
+                ByteArray(
+                    TTS_STREAM_BUFFER_BYTES +
+                        TTS_PCM_BYTES_PER_FRAME
+                )
+
+            var pendingByte: Byte? =
+                null
+
+            var firstAudioByte =
+                true
+
+            connection.inputStream
+                .use { input ->
+                    while (
+                        token == audioToken &&
+                        !cancelRequested &&
                         !shuttingDown
                     ) {
-
-                        commandHistoryStore.addEvent(
-                            activeCommandHistoryId,
-                            state = "tts_play",
-                            message = "Marin: воспроизведение начато"
-                        )
-
-                        playFile(
-                            readyAudio,
-                            deleteAfter = true
-                        ) {
-                            finishActiveCommandHistory(
-                                success = historySuccess,
-                                result = text
+                        val read =
+                            input.read(
+                                networkBuffer
                             )
-                            startFollowUpOrWake()
+
+                        if (read < 0) {
+                            if (pendingByte != null) {
+                                throw IllegalStateException(
+                                    "PCM stream ended mid-frame"
+                                )
+                            }
+
+                            completedNormally =
+                                true
+                            break
                         }
 
-                    } else {
+                        if (read == 0) {
+                            continue
+                        }
 
-                        readyAudio
-                            .delete()
+                        var alignedCount =
+                            0
+
+                        pendingByte
+                            ?.let { carry ->
+                                alignedBuffer[0] =
+                                    carry
+
+                                alignedCount =
+                                    1
+
+                                pendingByte =
+                                    null
+                            }
+
+                        System.arraycopy(
+                            networkBuffer,
+                            0,
+                            alignedBuffer,
+                            alignedCount,
+                            read
+                        )
+
+                        alignedCount +=
+                            read
+
+                        if (
+                            alignedCount %
+                            TTS_PCM_BYTES_PER_FRAME !=
+                            0
+                        ) {
+                            pendingByte =
+                                alignedBuffer[
+                                    alignedCount -
+                                        1
+                                ]
+
+                            alignedCount--
+                        }
+
+                        if (alignedCount <= 0) {
+                            continue
+                        }
+
+                        if (firstAudioByte) {
+                            firstAudioByte =
+                                false
+
+                            val firstByteMs =
+                                SystemClock.elapsedRealtime() -
+                                    requestStartedAt
+
+                            commandHistoryStore.addEvent(
+                                activeCommandHistoryId,
+                                state = "tts_first_byte",
+                                message = "Marin: первый PCM-байт получен",
+                                details = "latency_ms=$firstByteMs"
+                            )
+
+                            builtTrack.play()
+
+                            commandHistoryStore.addEvent(
+                                activeCommandHistoryId,
+                                state = "tts_play",
+                                message = "Marin: потоковое воспроизведение начато"
+                            )
+                        }
+
+                        var offset =
+                            0
+
+                        while (
+                            offset < alignedCount &&
+                            token == audioToken &&
+                            !cancelRequested &&
+                            !shuttingDown
+                        ) {
+                            val written =
+                                builtTrack.write(
+                                    alignedBuffer,
+                                    offset,
+                                    alignedCount - offset,
+                                    AudioTrack.WRITE_BLOCKING
+                                )
+
+                            if (written < 0) {
+                                throw IllegalStateException(
+                                    "AudioTrack write=$written"
+                                )
+                            }
+
+                            if (written == 0) {
+                                Thread.yield()
+                                continue
+                            }
+
+                            offset +=
+                                written
+
+                            totalBytes +=
+                                written.toLong()
+                        }
                     }
                 }
 
-            } catch (_: Exception) {
+            if (
+                completedNormally &&
+                totalBytes <=
+                0L
+            ) {
+                throw IllegalStateException(
+                    "TTS PCM stream was empty"
+                )
+            }
 
-                activeTtsTextNormalized =
-                    ""
+            if (
+                completedNormally &&
+                token == audioToken &&
+                !cancelRequested &&
+                !shuttingDown
+            ) {
+                waitForAudioTrackDrain(
+                    builtTrack,
+                    totalBytes,
+                    token
+                )
+            }
 
-                file
-                    ?.delete()
+        } catch (error: Exception) {
+            if (
+                token == audioToken &&
+                !cancelRequested &&
+                !shuttingDown
+            ) {
+                val technical =
+                    ttsTechnicalError(
+                        error
+                    )
+
+                commandHistoryStore.addEvent(
+                    activeCommandHistoryId,
+                    state = "tts_error",
+                    message = "Marin: ошибка потокового TTS",
+                    details = technical
+                )
 
                 mainHandler.post {
+                    if (
+                        token == audioToken &&
+                        !cancelRequested &&
+                        !shuttingDown
+                    ) {
+                        finishActiveCommandHistory(
+                            success = false,
+                            result = "Голос временно недоступен",
+                            technical = technical
+                        )
 
-                    finishActiveCommandHistory(
-                        success = false,
-                        result = "Голос временно недоступен",
-                        technical = "TTS download/playback failed"
-                    )
+                        broadcastStatus(
+                            "Голос временно недоступен",
+                            STATE_ERROR
+                        )
 
-                    broadcastStatus(
-                        "Голос временно недоступен",
-                        STATE_ERROR
-                    )
-
-                    mainHandler.postDelayed(
-                        {
-                            startWakeListening()
-                        },
-                        1000L
-                    )
+                        mainHandler.postDelayed(
+                            {
+                                startWakeListening()
+                            },
+                            700L
+                        )
+                    }
                 }
             }
+        } finally {
+            if (
+                currentTtsConnection ===
+                connection
+            ) {
+                currentTtsConnection =
+                    null
+            }
+
+            try {
+                connection?.disconnect()
+            } catch (_: Exception) {
+            }
+
+            releaseAudioTrack(
+                track
+            )
+
+            exitCommunicationAudioMode()
+        }
+
+        if (
+            completedNormally &&
+            token == audioToken &&
+            !cancelRequested &&
+            !shuttingDown
+        ) {
+            commandHistoryStore.addEvent(
+                activeCommandHistoryId,
+                state = "tts_complete",
+                message = "Marin: поток полностью воспроизведён",
+                details = "pcm_bytes=$totalBytes"
+            )
+
+            mainHandler.post {
+                if (
+                    token == audioToken &&
+                    !cancelRequested &&
+                    !shuttingDown
+                ) {
+                    finishActiveCommandHistory(
+                        success = historySuccess,
+                        result = text
+                    )
+
+                    startFollowUpOrWake()
+                }
+            }
+        }
+    }
+
+    private fun waitForAudioTrackDrain(
+        track: AudioTrack,
+        totalBytes: Long,
+        token: Long
+    ) {
+
+        val targetFrames =
+            totalBytes /
+                TTS_PCM_BYTES_PER_FRAME
+
+        val deadline =
+            SystemClock.elapsedRealtime() +
+                TTS_DRAIN_MAX_WAIT_MS
+
+        while (
+            token == audioToken &&
+            !cancelRequested &&
+            !shuttingDown &&
+            SystemClock.elapsedRealtime() <
+            deadline
+        ) {
+            val playedFrames =
+                track.playbackHeadPosition
+                    .toLong()
+                    .and(
+                        0xffffffffL
+                    )
+
+            if (
+                playedFrames >=
+                targetFrames
+            ) {
+                break
+            }
+
+            try {
+                Thread.sleep(
+                    20L
+                )
+            } catch (_: InterruptedException) {
+                break
+            }
+        }
+    }
+
+    private fun ttsTechnicalError(
+        error: Exception
+    ): String {
+
+        val kind =
+            when (error) {
+                is SocketTimeoutException ->
+                    "SocketTimeoutException"
+
+                else ->
+                    error.javaClass.simpleName
+            }
+
+        val message =
+            error.message
+                .orEmpty()
+                .replace(
+                    "\\n",
+                    " "
+                )
+                .take(320)
+
+        return if (message.isBlank()) {
+            "TTS stream failed: $kind"
+        } else {
+            "TTS stream failed: $kind: $message"
+        }
+    }
+
+    private fun enterCommunicationAudioMode() {
+        try {
+            val manager =
+                getSystemService(
+                    Context.AUDIO_SERVICE
+                ) as AudioManager
+
+            if (!communicationAudioModeOwned) {
+                previousAudioMode =
+                    manager.mode
+
+                communicationAudioModeOwned =
+                    true
+            }
+
+            if (
+                manager.mode !=
+                AudioManager.MODE_IN_COMMUNICATION
+            ) {
+                manager.mode =
+                    AudioManager.MODE_IN_COMMUNICATION
+            }
+
+        } catch (_: Exception) {
+        }
+    }
+
+    private fun exitCommunicationAudioMode() {
+        if (!communicationAudioModeOwned) {
+            return
+        }
+
+        try {
+            val manager =
+                getSystemService(
+                    Context.AUDIO_SERVICE
+                ) as AudioManager
+
+            val restore =
+                previousAudioMode
+                    ?: AudioManager.MODE_NORMAL
+
+            manager.mode =
+                restore
+
+        } catch (_: Exception) {
+        } finally {
+            previousAudioMode =
+                null
+
+            communicationAudioModeOwned =
+                false
+        }
+    }
+
+    private fun audioSourceName(
+        source: Int
+    ): String =
+        when (source) {
+            MediaRecorder.AudioSource.VOICE_COMMUNICATION ->
+                "VOICE_COMMUNICATION"
+
+            MediaRecorder.AudioSource.VOICE_RECOGNITION ->
+                "VOICE_RECOGNITION"
+
+            MediaRecorder.AudioSource.MIC ->
+                "MIC"
+
+            else ->
+                "UNKNOWN($source)"
+        }
+
+    private fun releaseAudioTrack(
+        track: AudioTrack?
+    ) {
+        if (track == null) {
+            return
+        }
+
+        if (
+            audioTrack ===
+            track
+        ) {
+            audioTrack =
+                null
+        }
+
+        try {
+            if (
+                track.playState ==
+                AudioTrack.PLAYSTATE_PLAYING
+            ) {
+                track.pause()
+                track.flush()
+                track.stop()
+            }
+        } catch (_: Exception) {
+        }
+
+        try {
+            track.release()
+        } catch (_: Exception) {
         }
     }
 
@@ -9138,6 +10123,12 @@ class AyanaVoiceService : Service() {
                     put(
                         "text",
                         text
+                    )
+
+                    // Wake acknowledgement is intentionally cached as MP3.
+                    put(
+                        "format",
+                        "mp3"
                     )
                 }
 
@@ -9314,8 +10305,43 @@ class AyanaVoiceService : Service() {
     ) {
 
         if (!keepToken) {
-
             audioToken++
+        }
+
+        val ttsConnection =
+            currentTtsConnection
+
+        currentTtsConnection =
+            null
+
+        try {
+            ttsConnection?.disconnect()
+        } catch (_: Exception) {
+        }
+
+        val track =
+            audioTrack
+
+        audioTrack =
+            null
+
+        if (track != null) {
+            try {
+                if (
+                    track.playState ==
+                    AudioTrack.PLAYSTATE_PLAYING
+                ) {
+                    track.pause()
+                    track.flush()
+                    track.stop()
+                }
+            } catch (_: Exception) {
+            }
+
+            try {
+                track.release()
+            } catch (_: Exception) {
+            }
         }
 
         val player =
@@ -9328,16 +10354,10 @@ class AyanaVoiceService : Service() {
             ""
 
         if (player != null) {
-
             try {
-
-                if (
-                    player.isPlaying
-                ) {
-
+                if (player.isPlaying) {
                     player.stop()
                 }
-
             } catch (_: Exception) {
             }
 
@@ -9346,6 +10366,8 @@ class AyanaVoiceService : Service() {
             } catch (_: Exception) {
             }
         }
+
+        exitCommunicationAudioMode()
     }
 
     // =========================================================
@@ -10174,10 +11196,28 @@ class AyanaVoiceService : Service() {
             5
 
         private const val BARGE_IN_TTS_VOLUME =
-            0.52f
+            0.48f
 
         private const val CANCEL_DIAGNOSTIC_INTERVAL_MS =
-            700L
+            1200L
+
+        private const val TTS_PCM_SAMPLE_RATE_HZ =
+            24000
+
+        private const val TTS_PCM_BYTES_PER_FRAME =
+            2
+
+        private const val TTS_STREAM_BUFFER_BYTES =
+            8192
+
+        private const val TTS_CONNECT_TIMEOUT_MS =
+            15000
+
+        private const val TTS_READ_TIMEOUT_MS =
+            45000
+
+        private const val TTS_DRAIN_MAX_WAIT_MS =
+            3000L
 
         private const val CHANNEL_ID =
             "ayana_voice_service"
