@@ -3508,11 +3508,105 @@ class MainActivity : AppCompatActivity() {
                 )
             }
 
+            card.addView(
+                TextView(this).apply {
+                    text = "Копировать запись"
+                    textSize = 13.5f
+                    gravity = Gravity.CENTER
+                    setTextColor(Color.parseColor("#DDE7FF"))
+                    background = softDrawable("#11182A", "#334369", 13)
+                    setPadding(dp(12), dp(8), dp(12), dp(8))
+                    setOnClickListener {
+                        val clipboard =
+                            getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+                        clipboard.setPrimaryClip(
+                            ClipData.newPlainText(
+                                "AYANA command record",
+                                formatHistoryRecordForClipboard(record)
+                            )
+                        )
+                        Toast.makeText(
+                            this@MainActivity,
+                            "Запись истории скопирована",
+                            Toast.LENGTH_SHORT
+                        ).show()
+                    }
+                },
+                LinearLayout.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT,
+                    dp(40)
+                ).apply {
+                    topMargin = dp(12)
+                }
+            )
+
             contentContainer.addView(
                 card,
                 sectionParams(top = 9)
             )
         }
+    }
+
+    private fun formatHistoryRecordForClipboard(
+        record: org.json.JSONObject
+    ): String {
+
+        val started = record.optLong("started_at", 0L)
+        val formatter = SimpleDateFormat(
+            "yyyy-MM-dd HH:mm:ss",
+            Locale.getDefault()
+        )
+        val status = record.optString("status", "running")
+        val statusText = when (status) {
+            "success" -> "SUCCESS"
+            "error" -> "ERROR"
+            "cancelled" -> "CANCELLED"
+            else -> "RUNNING"
+        }
+
+        return buildString {
+            append("AYANA COMMAND HISTORY\n")
+            append("#1 ")
+            append(statusText)
+
+            if (started > 0L) {
+                append("  ")
+                append(formatter.format(Date(started)))
+            }
+
+            append("\nsource=")
+            append(record.optString("source"))
+            append("\nduration_ms=")
+            append(record.opt("duration_ms"))
+            append("\ncommand=")
+            append(record.optString("command"))
+            append("\nresult=")
+            append(record.optString("result"))
+
+            val technical = record.optString("technical")
+            if (technical.isNotBlank()) {
+                append("\ntechnical=")
+                append(technical)
+            }
+
+            append("\nevents:\n")
+            val events = record.optJSONArray("events")
+            if (events != null) {
+                for (eventIndex in 0 until events.length()) {
+                    val event = events.optJSONObject(eventIndex) ?: continue
+                    append("  - ")
+                    append(event.optString("state"))
+                    append(": ")
+                    append(event.optString("message"))
+                    val details = event.optString("details")
+                    if (details.isNotBlank()) {
+                        append(" | ")
+                        append(details)
+                    }
+                    append("\n")
+                }
+            }
+        }.trimEnd()
     }
 
     private fun renderDiagnostics() {
