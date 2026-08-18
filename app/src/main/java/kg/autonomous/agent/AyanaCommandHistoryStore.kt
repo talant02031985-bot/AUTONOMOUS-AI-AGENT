@@ -209,6 +209,14 @@ class AyanaCommandHistoryStore(
                 return
             }
 
+            val storedDetails =
+                compactDetailsForStorage(
+                    state =
+                        state,
+                    details =
+                        details
+                )
+
             events.put(
                 eventJson(
                     state =
@@ -216,7 +224,7 @@ class AyanaCommandHistoryStore(
                     message =
                         message,
                     details =
-                        details.take(
+                        storedDetails.take(
                             MAX_DETAILS_CHARS
                         )
                 )
@@ -783,6 +791,314 @@ class AyanaCommandHistoryStore(
         }
     }
 
+    private fun compactDetailsForStorage(
+        state: String,
+        details: String
+    ): String {
+
+        if (
+            details.isBlank()
+        ) {
+            return ""
+        }
+
+        if (
+            state ==
+            "tool_call"
+        ) {
+            return details.take(
+                MAX_DETAILS_CHARS
+            )
+        }
+
+        if (
+            state !in
+            setOf(
+                "tool_result",
+                "engine_result",
+                "compiled_plan"
+            )
+        ) {
+            return details.take(
+                MAX_DETAILS_CHARS
+            )
+        }
+
+        val json =
+            try {
+                JSONObject(
+                    details
+                )
+            } catch (_: Exception) {
+                return details
+                    .replace(
+                        "\n",
+                        " "
+                    )
+                    .take(
+                        MAX_DETAILS_CHARS
+                    )
+            }
+
+        if (
+            state ==
+            "compiled_plan"
+        ) {
+
+            val out =
+                JSONObject()
+
+            copyIfPresent(
+                source = json,
+                target = out,
+                key = "goal"
+            )
+
+            copyIfPresent(
+                source = json,
+                target = out,
+                key = "max_actions"
+            )
+
+            val steps =
+                json.optJSONArray(
+                    "steps"
+                )
+
+            if (
+                steps !=
+                null
+            ) {
+
+                val compactSteps =
+                    JSONArray()
+
+                for (
+                    index in
+                    0 until minOf(
+                        steps.length(),
+                        12
+                    )
+                ) {
+
+                    val step =
+                        steps.optJSONObject(
+                            index
+                        )
+                            ?: continue
+
+                    compactSteps.put(
+                        JSONObject()
+                            .put(
+                                "id",
+                                step.optString(
+                                    "id"
+                                )
+                            )
+                            .put(
+                                "action",
+                                step.optString(
+                                    "action"
+                                )
+                            )
+                            .put(
+                                "terminal",
+                                step.optBoolean(
+                                    "terminal",
+                                    false
+                                )
+                            )
+                            .put(
+                                "targets",
+                                step.optJSONArray(
+                                    "targets"
+                                )
+                                    ?: JSONArray()
+                            )
+                    )
+                }
+
+                out.put(
+                    "steps",
+                    compactSteps
+                )
+            }
+
+            return out.toString()
+                .take(
+                    MAX_DETAILS_CHARS
+                )
+        }
+
+        val out =
+            JSONObject()
+
+        listOf(
+            "success",
+            "status",
+            "message",
+            "screen_changed",
+            "actions_used",
+            "replan_recommended",
+            "goal",
+            "goal_type",
+            "clicked_target",
+            "requested_target",
+            "resolved_click_target",
+            "resolver_score"
+        ).forEach {
+            key ->
+
+            copyIfPresent(
+                source = json,
+                target = out,
+                key = key
+            )
+        }
+
+        val screen =
+            json.optJSONObject(
+                "screen"
+            )
+
+        if (
+            screen !=
+            null
+        ) {
+
+            val compactScreen =
+                JSONObject()
+
+            listOf(
+                "success",
+                "package",
+                "root_class",
+                "root_source",
+                "window_count",
+                "node_count",
+                "message"
+            ).forEach {
+                key ->
+
+                copyIfPresent(
+                    source = screen,
+                    target = compactScreen,
+                    key = key
+                )
+            }
+
+            val visible =
+                screen.optJSONArray(
+                    "visible_text"
+                )
+
+            if (
+                visible !=
+                null
+            ) {
+
+                val compactVisible =
+                    JSONArray()
+
+                for (
+                    index in
+                    0 until minOf(
+                        visible.length(),
+                        14
+                    )
+                ) {
+
+                    compactVisible.put(
+                        visible.optString(
+                            index
+                        )
+                    )
+                }
+
+                compactScreen.put(
+                    "visible_text",
+                    compactVisible
+                )
+            }
+
+            out.put(
+                "screen",
+                compactScreen
+            )
+        }
+
+        val trace =
+            json.optJSONArray(
+                "trace"
+            )
+
+        if (
+            trace !=
+            null
+        ) {
+
+            val compactTrace =
+                JSONArray()
+
+            for (
+                index in
+                0 until minOf(
+                    trace.length(),
+                    16
+                )
+            ) {
+
+                val item =
+                    trace.optJSONObject(
+                        index
+                    )
+                        ?: continue
+
+                compactTrace.put(
+                    JSONObject()
+                        .put(
+                            "id",
+                            item.optString(
+                                "id"
+                            )
+                        )
+                        .put(
+                            "action",
+                            item.optString(
+                                "action"
+                            )
+                        )
+                        .put(
+                            "success",
+                            item.optBoolean(
+                                "success",
+                                false
+                            )
+                        )
+                        .put(
+                            "message",
+                            item.optString(
+                                "message"
+                            )
+                                .take(
+                                    180
+                                )
+                        )
+                )
+            }
+
+            out.put(
+                "trace",
+                compactTrace
+            )
+        }
+
+        return out.toString()
+            .take(
+                MAX_DETAILS_CHARS
+            )
+    }
+
     private fun compactDetailsForExport(
         state: String,
         details: String
@@ -1210,7 +1526,7 @@ class AyanaCommandHistoryStore(
             120
 
         private const val MAX_EVENTS_PER_RECORD =
-            50
+            100
 
         private const val MAX_DETAILS_CHARS =
             5000
