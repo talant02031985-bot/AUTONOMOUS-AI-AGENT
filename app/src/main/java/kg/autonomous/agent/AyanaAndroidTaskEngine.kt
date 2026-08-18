@@ -5,7 +5,7 @@ import org.json.JSONObject
 import java.util.Locale
 
 /**
- * AYANA Android Task Engine v3.3 — deterministic local executor with strict terminal verification and text-first semantic clicks.
+ * AYANA Android Task Engine v4.0 — resumable deterministic executor with durable checkpoints, strict terminal verification and text-first semantic clicks.
  *
  * IMPORTANT ARCHITECTURE RULE:
  * The LLM understands the user's intent and produces ONE short structured plan.
@@ -82,7 +82,10 @@ class AyanaAndroidTaskEngine(
 
     fun execute(
         plan: JSONObject,
-        confirmed: Boolean = false
+        confirmed: Boolean = false,
+        startIndex: Int = 0,
+        initialActionsUsed: Int = 0,
+        onCheckpoint: ((JSONObject) -> Boolean)? = null
     ): JSONObject {
 
         val goal =
@@ -132,10 +135,63 @@ class AyanaAndroidTaskEngine(
         var currentScreen =
             safeScreenState()
 
-        var actionsUsed = 0
+        val resumeIndex =
+            startIndex.coerceIn(
+                0,
+                steps.length()
+            )
+
+        if (
+            resumeIndex >=
+            steps.length()
+        ) {
+            return engineBlocked(
+                goal = goal,
+                reason = "Нет оставшихся шагов для безопасного восстановления; нужна повторная проверка цели",
+                trace = trace,
+                screen = currentScreen,
+                actionsUsed = initialActionsUsed.coerceAtLeast(0),
+                replanRecommended = true
+            )
+        }
+
+        var actionsUsed =
+            initialActionsUsed.coerceIn(
+                0,
+                maxActions
+            )
+
         var noProgressStreak = 0
 
-        for (index in 0 until steps.length()) {
+        // A fresh user approval is a one-shot capability. During a resumed
+        // sensitive Android-plan step it may authorize only the FIRST step
+        // we attempt. A second sensitive step must request a new approval.
+        var confirmationAvailable =
+            confirmed
+
+        if (
+            !emitCheckpoint(
+                onCheckpoint,
+                checkpoint = "engine_resume",
+                nextStepIndex = resumeIndex,
+                actionsUsed = actionsUsed,
+                step = null,
+                stepResult = null,
+                screen = currentScreen
+            )
+        ) {
+            return engineBlocked(
+                goal = goal,
+                reason = "Не удалось сохранить checkpoint перед продолжением Android-плана",
+                trace = trace,
+                screen = currentScreen,
+                actionsUsed = actionsUsed,
+                replanRecommended = false,
+                checkpointFailed = true
+            )
+        }
+
+        for (index in resumeIndex until steps.length()) {
 
             if (
                 isCancelled()
@@ -179,9 +235,14 @@ class AyanaAndroidTaskEngine(
                 executeStep(
                     step = step,
                     screenBefore = currentScreen,
-                    confirmed = confirmed,
+                    confirmed = confirmationAvailable,
                     remainingBudget = remainingBudget
                 )
+
+            if (confirmationAvailable) {
+                confirmationAvailable =
+                    false
+            }
 
             val usedByStep =
                 stepResult
@@ -254,6 +315,65 @@ class AyanaAndroidTaskEngine(
                         usedByStep
                     )
             )
+
+            val checkpointStepSuccess =
+                stepResult.optBoolean(
+                    "success",
+                    false
+                )
+
+            val checkpointTerminal =
+                step.optBoolean(
+                    "terminal",
+                    false
+                )
+
+            val checkpointNextIndex =
+                if (
+                    checkpointStepSuccess &&
+                    !checkpointTerminal &&
+                    !stepResult.optBoolean(
+                        "requires_confirmation",
+                        false
+                    )
+                ) {
+                    index + 1
+                } else {
+                    index
+                }
+
+            if (
+                !emitCheckpoint(
+                    onCheckpoint,
+                    checkpoint =
+                        when {
+                            stepResult.optBoolean(
+                                "requires_confirmation",
+                                false
+                            ) ->
+                                "needs_confirmation"
+                            checkpointStepSuccess ->
+                                "step_complete"
+                            else ->
+                                "step_blocked"
+                        },
+                    nextStepIndex = checkpointNextIndex,
+                    actionsUsed = actionsUsed,
+                    step = step,
+                    stepResult = stepResult,
+                    screen = currentScreen
+                )
+            ) {
+                return engineBlocked(
+                    goal = goal,
+                    reason = "Android-шаг выполнен, но его checkpoint не удалось надёжно сохранить; дальнейшее выполнение остановлено",
+                    trace = trace,
+                    screen = currentScreen,
+                    actionsUsed = actionsUsed,
+                    replanRecommended = false,
+                    checkpointFailed = true
+                )
+            }
 
             if (
                 stepResult.optString(
@@ -416,6 +536,73 @@ class AyanaAndroidTaskEngine(
             screen = currentScreen,
             actionsUsed = actionsUsed
         )
+    }
+
+    private fun emitCheckpoint(
+        callback: ((JSONObject) -> Boolean)?,
+        checkpoint: String,
+        nextStepIndex: Int,
+        actionsUsed: Int,
+        step: JSONObject?,
+        stepResult: JSONObject?,
+        screen: JSONObject
+    ): Boolean {
+
+        if (callback == null) {
+            return true
+        }
+
+        return try {
+            callback(
+                JSONObject()
+                    .put(
+                        "checkpoint",
+                        checkpoint
+                    )
+                    .put(
+                        "next_step_index",
+                        nextStepIndex.coerceAtLeast(0)
+                    )
+                    .put(
+                        "actions_used",
+                        actionsUsed.coerceAtLeast(0)
+                    )
+                    .put(
+                        "step_id",
+                        step?.optString(
+                            "id"
+                        ).orEmpty()
+                    )
+                    .put(
+                        "step_action",
+                        step?.optString(
+                            "action"
+                        ).orEmpty()
+                    )
+                    .put(
+                        "step_success",
+                        stepResult?.optBoolean(
+                            "success",
+                            false
+                        ) ?: false
+                    )
+                    .put(
+                        "requires_confirmation",
+                        stepResult?.optBoolean(
+                            "requires_confirmation",
+                            false
+                        ) ?: false
+                    )
+                    .put(
+                        "screen_package",
+                        screen.optString(
+                            "package"
+                        )
+                    )
+            )
+        } catch (_: Exception) {
+            false
+        }
     }
 
     private fun executeStep(
@@ -2208,7 +2395,8 @@ class AyanaAndroidTaskEngine(
         trace: JSONArray,
         screen: JSONObject,
         actionsUsed: Int,
-        replanRecommended: Boolean
+        replanRecommended: Boolean,
+        checkpointFailed: Boolean = false
     ): JSONObject {
 
         return JSONObject()
@@ -2235,6 +2423,10 @@ class AyanaAndroidTaskEngine(
             .put(
                 "replan_recommended",
                 replanRecommended
+            )
+            .put(
+                "checkpoint_failed",
+                checkpointFailed
             )
             .put(
                 "trace",
