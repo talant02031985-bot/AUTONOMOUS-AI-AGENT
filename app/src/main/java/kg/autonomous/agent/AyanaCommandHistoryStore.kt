@@ -11,6 +11,7 @@ import java.util.UUID
 
 /**
  * Persistent command/event history for AYANA diagnostics.
+ * v2.3 final: per-event relative timing retained for whole-history and single-record diagnostics.
  *
  * v2:
  * - SUCCESS / ERROR / CANCELLED are explicit statuses;
@@ -588,6 +589,32 @@ class AyanaCommandHistoryStore(
                     append(
                         "  - "
                     )
+
+                    val eventAt =
+                        event.optLong(
+                            "at",
+                            0L
+                        )
+
+                    if (
+                        started >
+                        0L &&
+                        eventAt >=
+                        started
+                    ) {
+                        append(
+                            "+"
+                        )
+
+                        append(
+                            eventAt -
+                                started
+                        )
+
+                        append(
+                            "ms "
+                        )
+                    }
 
                     val state =
                         event.optString(
