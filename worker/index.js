@@ -1,4 +1,4 @@
-// AYANA Worker v7.6 — Capability Awareness v2 + autonomy self-knowledge; audio path unchanged
+// AYANA Worker v7.7 — Capability Awareness v2.1 polish; generic-definition guard + compact self-autonomy; audio path unchanged
 const ANDROID_GOAL_TOOL = {
   type: "function",
   name: "execute_android_goal",
@@ -607,6 +607,21 @@ const AYANA_SELF_REVIEW_INSTRUCTIONS = `
 6. Разделяй «усилить существующее» и «добавить новое», если это делает ответ точнее.
 `.trim();
 
+const AYANA_SELF_AUTONOMY_COMPACT_INSTRUCTIONS = `
+Если вопрос именно о том, что AYANA нужно для большей автономности или насколько она автономна сейчас:
+1. Начни с точного статуса: база контролируемого Android ИИ-агента уже реализована, автономность сейчас частичная.
+2. По умолчанию дай 4–6 коротких пунктов и не пересказывай всю карту возможностей.
+3. Сосредоточься на следующем разрыве: durable goal runner, восстановление/перепланирование, проверка результата, управление памятью/задачами, безопасные интеграции/offline fallback.
+4. Для обычного текстового вопроса старайся уложиться примерно в 120–160 слов. Для голоса — ещё короче.
+5. Если пользователь явно просит подробно/глубоко, ограничение длины можно снять.
+`.trim();
+
+const GENERIC_AGENT_DEFINITION_GUARD = `
+ПОЛЬЗОВАТЕЛЬ СПРАШИВАЕТ ОБ ОБЩЕМ ПОНЯТИИ ИИ-АГЕНТА, А НЕ О ТЕКУЩЕЙ AYANA.
+Ответь только на общий вопрос. Не переходи в конце ответа к фразам «я уже умею...», «у меня есть...», возможностям, ограничениям, версиям или планам AYANA, если пользователь сам об этом не спросил.
+Дай нейтральное определение и основные признаки понятия.
+`.trim();
+
 const AYANA_VOICE_STYLE = `
 РЕЖИМ ОТВЕТА: ГОЛОС.
 Говори разговорно, коротко и без Markdown-разметки. Не произноси заголовки со звёздочками, решётками или служебными символами.
@@ -682,6 +697,28 @@ function isAyanaCapabilityRequest(message = "") {
   const capabilityTopic = /(умеешь|можешь|возможност|функц|автоном|ограничен|не хватает|нужно|необходимо|требует|реализован|готово|состояни|уровень|развити|улучш|исправ|доработ|что добавить|что изменить|что уже|чего нет|что отсутствует|чтобы .* стала|чтобы .* стать)/.test(n);
 
   return capabilityTopic && selfReference;
+}
+
+function hasAyanaSelfReference(message = "") {
+  const n = normalizeIntentText(message);
+  return /(аяна|ayana)/.test(n)
+    || /(?:^|[^а-яa-z0-9])(ты|тебе|тебя|твой|твои|твоя|твое|твоей|твоего|твою|твоих|себе|себя)(?:$|[^а-яa-z0-9])/.test(n);
+}
+
+function isAyanaAutonomyRequest(message = "") {
+  const n = normalizeIntentText(message);
+  return hasAyanaSelfReference(n)
+    && /(автоном|самостоятельн)/.test(n);
+}
+
+function isGenericAgentDefinitionRequest(message = "") {
+  const n = normalizeIntentText(message);
+  if (!n || hasAyanaSelfReference(n)) return false;
+
+  const asksDefinition = /(что такое|что значит|объясни(?:,)? что такое|дай определение|определи)/.test(n);
+  const agentTopic = /(ии[-\s]?агент|ai[-\s]?агент|агент(?:а|ом|ы|ов)? искусственн|автономн(?:ый|ого|ому|ым)? агент)/.test(n);
+
+  return asksDefinition && agentTopic;
 }
 
 function isFastEverydayRequest(message = "", source = "text") {
@@ -822,13 +859,22 @@ ${memoryContext}
   }
 
   const androidNavigationMode = isLikelyAndroidNavigation(message || "");
+  const normalizedMessage = normalizeIntentText(message || "");
+  const genericAgentDefinitionMode = isGenericAgentDefinitionRequest(message || "");
   const capabilityFollowUpMode = Boolean(previousResponseId)
+    && !genericAgentDefinitionMode
     && String(message || "").length <= 160
-    && /(улучш|исправ|доработ|глобальн|автоном|не хватает|ограничен|возможност|реализован|функц|что уже уме|что умеешь)/.test(normalizeIntentText(message || ""));
+    && (
+      isAyanaCapabilityRequest(message || "")
+      || /^(?:а\s+)?(?:что еще|еще|глобальн|что улучшить|что исправить|что доработать|чего не хватает|какие ограничения|что дальше|для автономности|что нужно дальше)(?:\s|$|[?.!,])/.test(normalizedMessage)
+    );
   const selfReviewMode = isAyanaSelfReviewRequest(message || "");
-  const capabilityMode = selfReviewMode
-    || isAyanaCapabilityRequest(message || "")
-    || capabilityFollowUpMode;
+  const capabilityMode = !genericAgentDefinitionMode
+    && (selfReviewMode
+      || isAyanaCapabilityRequest(message || "")
+      || capabilityFollowUpMode);
+  const selfAutonomyMode = capabilityMode
+    && isAyanaAutonomyRequest(message || "");
   const deepRequest = isDeepRequest(message || "");
   const fastEverydayMode = !androidNavigationMode
     && !deepRequest
@@ -845,7 +891,13 @@ ${AYANA_CURRENT_CAPABILITIES}
 
 ${AYANA_CAPABILITY_AWARENESS_INSTRUCTIONS}
 
-${selfReviewMode ? AYANA_SELF_REVIEW_INSTRUCTIONS : ""}`
+${selfReviewMode ? AYANA_SELF_REVIEW_INSTRUCTIONS : ""}
+
+${selfAutonomyMode ? AYANA_SELF_AUTONOMY_COMPACT_INSTRUCTIONS : ""}`
+    : "";
+
+  const scopeInstructions = genericAgentDefinitionMode
+    ? `\n\n${GENERIC_AGENT_DEFINITION_GUARD}`
     : "";
 
   const payload = {
@@ -863,7 +915,7 @@ ${selfReviewMode ? AYANA_SELF_REVIEW_INSTRUCTIONS : ""}`
 ${ANDROID_GOAL_V7_INSTRUCTIONS}`
       : `${AGENT_INSTRUCTIONS}
 
-${styleInstructions}${productInstructions}`,
+${styleInstructions}${productInstructions}${scopeInstructions}`,
     input,
     max_output_tokens: androidNavigationMode
       ? 260
@@ -871,9 +923,13 @@ ${styleInstructions}${productInstructions}`,
         ? (source === "voice" ? 650 : 1600)
         : source === "voice"
           ? 420
-          : capabilityMode
-            ? 600
-            : fastEverydayMode
+          : selfAutonomyMode
+            ? 450
+            : capabilityMode
+              ? 520
+              : genericAgentDefinitionMode
+                ? 520
+                : fastEverydayMode
               ? 700
               : 1000,
     store: !androidNavigationMode
