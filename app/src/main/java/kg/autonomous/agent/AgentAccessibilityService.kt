@@ -137,6 +137,13 @@ class AgentAccessibilityService :
             )
                 ?: return false
 
+        // One UI can return ACTION_CLICK=true while the UI does not actually
+        // navigate. A boolean acknowledgement is not enough. Verify a real
+        // screen-signature change before declaring success; if it does not
+        // change, fall back to a semantic tap on the already-resolved node.
+        val before =
+            screenSignature()
+
         val actionable =
             findActionableParent(
                 match.node,
@@ -144,26 +151,103 @@ class AgentAccessibilityService :
                     .ACTION_CLICK
             )
 
-        // First use the Accessibility action exposed by the row/parent.
-        // This is the preferred semantic path and works for normal Android UI.
         if (
-            actionable != null &&
-            actionable.performAction(
-                AccessibilityNodeInfo
-                    .ACTION_CLICK
+            actionable != null
+        ) {
+
+            val accepted =
+                try {
+                    actionable.performAction(
+                        AccessibilityNodeInfo
+                            .ACTION_CLICK
+                    )
+                } catch (_: Exception) {
+                    false
+                }
+
+            if (
+                accepted &&
+                waitForScreenChange(
+                    before
+                )
+            ) {
+                return true
+            }
+        }
+
+        val semanticTapAccepted =
+            tapNodeCenter(
+                match.node
+            )
+
+        if (
+            semanticTapAccepted &&
+            waitForScreenChange(
+                before
             )
         ) {
             return true
         }
 
-        // Some Samsung One UI rows are visually tappable but do not expose a
-        // working ACTION_CLICK on the text node/parent. The target was already
-        // resolved semantically, so a gesture at that matched node's center is
-        // still a semantic click — not an arbitrary coordinate guess.
-        return tapNodeCenter(
-            actionable
-                ?: match.node
-        )
+        if (
+            actionable != null &&
+            actionable !== match.node
+        ) {
+
+            val rowTapAccepted =
+                tapNodeCenter(
+                    actionable
+                )
+
+            if (
+                rowTapAccepted &&
+                waitForScreenChange(
+                    before
+                )
+            ) {
+                return true
+            }
+        }
+
+        return false
+    }
+
+    private fun waitForScreenChange(
+        before: String
+    ): Boolean {
+
+        val deadline =
+            System.currentTimeMillis() +
+                CLICK_VERIFY_TIMEOUT_MS
+
+        while (
+            System.currentTimeMillis() <
+            deadline
+        ) {
+
+            try {
+
+                Thread.sleep(
+                    CLICK_VERIFY_POLL_MS
+                )
+
+            } catch (_: InterruptedException) {
+
+                Thread.currentThread()
+                    .interrupt()
+
+                return false
+            }
+
+            if (
+                screenSignature() !=
+                before
+            ) {
+                return true
+            }
+        }
+
+        return false
     }
 
     fun setText(
@@ -1454,6 +1538,12 @@ class AgentAccessibilityService :
         "unavailable"
 
     companion object {
+
+        private const val CLICK_VERIFY_TIMEOUT_MS =
+            650L
+
+        private const val CLICK_VERIFY_POLL_MS =
+            100L
 
         private const val MIN_MATCH_SCORE =
             55
