@@ -1130,6 +1130,12 @@ class AyanaVoiceService : Service() {
         var pendingAction:
             (() -> Unit)? = null
 
+        var lastCancelDiagnosticText =
+            ""
+
+        var lastCancelDiagnosticAt =
+            0L
+
         try {
 
             while (
@@ -1588,6 +1594,34 @@ class AyanaVoiceService : Service() {
                     }
 
                     ListenMode.CANCEL -> {
+
+                        if (
+                            currentStatusState ==
+                            STATE_SPEAKING &&
+                            text.isNotBlank() &&
+                            text !=
+                            lastCancelDiagnosticText &&
+                            (
+                                isEndpoint ||
+                                SystemClock.elapsedRealtime() -
+                                    lastCancelDiagnosticAt >=
+                                CANCEL_DIAGNOSTIC_INTERVAL_MS
+                            )
+                        ) {
+                            lastCancelDiagnosticText =
+                                text
+
+                            lastCancelDiagnosticAt =
+                                SystemClock.elapsedRealtime()
+
+                            commandHistoryStore.addEvent(
+                                activeCommandHistoryId,
+                                state = "cancel_heard",
+                                message = text.take(
+                                    220
+                                )
+                            )
+                        }
 
                         if (
                             text.isNotBlank() &&
@@ -2476,6 +2510,85 @@ class AyanaVoiceService : Service() {
             },
             STATE_THINKING
         )
+
+        // BASIC LOCAL CALCULATOR v8.9
+        // Simple two-number arithmetic must not spend a network round-trip.
+        val localCalculation =
+            evaluateSimpleCalculation(
+                normalized
+            )
+
+        if (localCalculation != null) {
+            respondAndResume(
+                localCalculation,
+                silent,
+                success = true
+            )
+            return
+        }
+
+        // FAST APP DETAIL ROUTER v8.8
+        // Common read-only app-settings destinations can be resolved locally even
+        // when the user phrases them as two steps, e.g.
+        // «открой настройки приложения YouTube и перейди в уведомления».
+        // This avoids a network classifier round-trip for an already deterministic
+        // Android destination. State-changing phrases are intentionally excluded.
+        val fastAppDetailGoal =
+            extractFastAppDetailGoal(
+                normalized
+            )
+
+        if (
+            fastAppDetailGoal !=
+            null
+        ) {
+            val appTarget =
+                fastAppDetailGoal.first
+
+            val section =
+                fastAppDetailGoal.second
+
+            val result =
+                agentOpenAppSettings(
+                    requestedName = appTarget,
+                    section = section
+                )
+
+            val resultMessage =
+                result.optString(
+                    "message",
+                    if (
+                        result.optBoolean(
+                            "success",
+                            false
+                        )
+                    ) {
+                        "Открываю параметры приложения $appTarget"
+                    } else {
+                        "Не удалось открыть параметры приложения $appTarget"
+                    }
+                )
+
+            if (
+                result.optBoolean(
+                    "success",
+                    false
+                )
+            ) {
+                finishLocalCommand(
+                    resultMessage,
+                    silent
+                )
+            } else {
+                respondAndResume(
+                    resultMessage,
+                    silent,
+                    success = false
+                )
+            }
+
+            return
+        }
 
         // PLANNER HANDOFF v2.7.4.1
         // Fast local routes are only allowed to finish SINGLE-STEP commands.
@@ -3505,6 +3618,70 @@ class AyanaVoiceService : Service() {
                 }
             }
         }
+    }
+
+    private fun extractFastAppDetailGoal(
+        command: String
+    ): Pair<String, String>? {
+
+        // Only navigation/view verbs are accepted here. Commands such as
+        // «отключи уведомления» must continue to the safe Agent Core path.
+        val appPattern =
+            Regex(
+                """(?:открой|покажи)?\s*настройк\p{L}*\s+приложени\p{L}*\s+(.+?)(?:\s+и\s+(?:перейди|зайди|открой|покажи)\s+|\s+(?:потом|затем)\s+(?:перейди|зайди|открой|покажи)\s+)"""
+            )
+
+        val match =
+            appPattern.find(
+                command
+            )
+                ?: return null
+
+        val appTarget =
+            match.groupValues
+                .getOrNull(1)
+                .orEmpty()
+                .trim()
+                .trim(
+                    '"',
+                    '\'',
+                    '«',
+                    '»',
+                    '.',
+                    ',',
+                    '!',
+                    '?'
+                )
+
+        if (
+            appTarget.isBlank()
+        ) {
+            return null
+        }
+
+        val section =
+            when {
+                command.contains(
+                    "уведомлен"
+                ) ->
+                    "notifications"
+
+                command.contains(
+                    "по умолчани"
+                ) ->
+                    "open_by_default"
+
+                command.contains(
+                    "язык"
+                ) ->
+                    "language"
+
+                else ->
+                    null
+            }
+                ?: return null
+
+        return appTarget to section
     }
 
     private fun extractDirectAppSettingsTarget(
@@ -5235,6 +5412,83 @@ class AyanaVoiceService : Service() {
         }
     }
 
+    private fun evaluateSimpleCalculation(
+        command: String
+    ): String? {
+
+        val match =
+            Regex(
+                """^(?:(?:сколько будет|посчитай|вычисли)\s+)?(-?\d+)\s*(плюс|\+|минус|-|умножить на|умножь на|\*|x|х|разделить на|поделить на|/)\s*(-?\d+)$"""
+            )
+                .matchEntire(
+                    command.trim()
+                )
+                ?: return null
+
+        val left =
+            match.groupValues[1]
+                .toLongOrNull()
+                ?: return null
+
+        val operation =
+            match.groupValues[2]
+
+        val right =
+            match.groupValues[3]
+                .toLongOrNull()
+                ?: return null
+
+        val resultText =
+            when (operation) {
+                "плюс", "+" ->
+                    try {
+                        Math.addExact(left, right).toString()
+                    } catch (_: ArithmeticException) {
+                        return null
+                    }
+
+                "минус", "-" ->
+                    try {
+                        Math.subtractExact(left, right).toString()
+                    } catch (_: ArithmeticException) {
+                        return null
+                    }
+
+                "умножить на", "умножь на", "*", "x", "х" ->
+                    try {
+                        Math.multiplyExact(left, right).toString()
+                    } catch (_: ArithmeticException) {
+                        return null
+                    }
+
+                "разделить на", "поделить на", "/" -> {
+                    if (right == 0L) {
+                        "На ноль делить нельзя."
+                    } else if (left % right == 0L) {
+                        (left / right).toString()
+                    } else {
+                        String.format(
+                            Locale.US,
+                            "%.6f",
+                            left.toDouble() / right.toDouble()
+                        )
+                            .trimEnd('0')
+                            .trimEnd('.')
+                            .replace('.', ',')
+                    }
+                }
+
+                else ->
+                    return null
+            }
+
+        if (resultText == "На ноль делить нельзя.") {
+            return resultText
+        }
+
+        return "Результат: $resultText."
+    }
+
     private fun finishLocalCommand(
         text: String,
         silent: Boolean
@@ -5280,15 +5534,24 @@ class AyanaVoiceService : Service() {
         success: Boolean = true
     ) {
 
-        finishActiveCommandHistory(
-            success = success,
-            result = text
-        )
-
         if (silent) {
+
+            finishActiveCommandHistory(
+                success = success,
+                result = text
+            )
+
             showTextAndResume(text)
+
         } else {
-            speakAndResume(text)
+
+            // Keep the history record active through TTS. This is required for
+            // reliable SPEAKING diagnostics and for voice STOP to finish the same
+            // command as CANCELLED instead of losing activeCommandHistoryId.
+            speakAndResume(
+                text = text,
+                historySuccess = success
+            )
         }
     }
 
@@ -5412,6 +5675,12 @@ class AyanaVoiceService : Service() {
 
                     step++
 
+                    commandHistoryStore.addEvent(
+                        activeCommandHistoryId,
+                        state = "agent_request",
+                        message = "Agent Core: запрос отправлен"
+                    )
+
                     val response =
                         callAgentCore(
                             message =
@@ -5425,8 +5694,21 @@ class AyanaVoiceService : Service() {
                                     memoryContext
                                 } else {
                                     null
+                                },
+                            source =
+                                if (silent) {
+                                    "text"
+                                } else {
+                                    "voice"
                                 }
                         )
+
+                    commandHistoryStore.addEvent(
+                        activeCommandHistoryId,
+                        state = "agent_response",
+                        message = "Agent Core: ответ получен",
+                        details = response.optString("type")
+                    )
 
                     val type =
                         response
@@ -5989,7 +6271,8 @@ class AyanaVoiceService : Service() {
         message: String?,
         previousResponseId: String?,
         toolResults: JSONArray?,
-        memoryContext: String?
+        memoryContext: String?,
+        source: String
     ): JSONObject {
 
         var connection:
@@ -6028,6 +6311,11 @@ class AyanaVoiceService : Service() {
 
             val requestJson =
                 JSONObject()
+
+            requestJson.put(
+                "source",
+                source
+            )
 
             if (
                 !message.isNullOrBlank()
@@ -8649,10 +8937,16 @@ class AyanaVoiceService : Service() {
     // =========================================================
 
     private fun speakAndResume(
-        text: String
+        text: String,
+        historySuccess: Boolean
     ) {
 
         if (text.isBlank()) {
+
+            finishActiveCommandHistory(
+                success = historySuccess,
+                result = text
+            )
 
             startFollowUpOrWake()
 
@@ -8690,6 +8984,12 @@ class AyanaVoiceService : Service() {
             keepToken = true
         )
 
+        commandHistoryStore.addEvent(
+            activeCommandHistoryId,
+            state = "tts_request",
+            message = "Marin: запрос голоса отправлен"
+        )
+
         thread(
             start = true,
             name = "AyanaTTS"
@@ -8710,6 +9010,12 @@ class AyanaVoiceService : Service() {
                 downloadTtsToFile(
                     text,
                     file
+                )
+
+                commandHistoryStore.addEvent(
+                    activeCommandHistoryId,
+                    state = "tts_ready",
+                    message = "Marin: аудио получено"
                 )
 
                 if (
@@ -8734,10 +9040,20 @@ class AyanaVoiceService : Service() {
                         !shuttingDown
                     ) {
 
+                        commandHistoryStore.addEvent(
+                            activeCommandHistoryId,
+                            state = "tts_play",
+                            message = "Marin: воспроизведение начато"
+                        )
+
                         playFile(
                             readyAudio,
                             deleteAfter = true
                         ) {
+                            finishActiveCommandHistory(
+                                success = historySuccess,
+                                result = text
+                            )
                             startFollowUpOrWake()
                         }
 
@@ -8757,6 +9073,12 @@ class AyanaVoiceService : Service() {
                     ?.delete()
 
                 mainHandler.post {
+
+                    finishActiveCommandHistory(
+                        success = false,
+                        result = "Голос временно недоступен",
+                        technical = "TTS download/playback failed"
+                    )
 
                     broadcastStatus(
                         "Голос временно недоступен",
@@ -9104,10 +9426,10 @@ class AyanaVoiceService : Service() {
      * plus the user's "стоп". In that case the transcript may be a long phrase,
      * so the normal <=5-word cancel filter intentionally rejects it.
      *
-     * For SPEAKING only, accept a cancel keyword when it appears at the END of
-     * the mixed transcript and that keyword is not present in the text AYANA is
-     * currently speaking. This prevents the common echo case from blocking
-     * user barge-in without turning arbitrary long speech into a cancel command.
+     * For SPEAKING only, accept a recognized cancel keyword anywhere in the
+     * mixed transcript when that keyword is not present in the text AYANA is
+     * currently speaking. This tolerates speaker echo that can be appended after
+     * the user's word without turning arbitrary speech into a cancel command.
      */
     private fun isBargeInCancelPhrase(
         value: String
@@ -9147,15 +9469,6 @@ class AyanaVoiceService : Service() {
             return false
         }
 
-        val tail =
-            words
-                .takeLast(
-                    BARGE_IN_TAIL_WORDS
-                )
-                .joinToString(
-                    " "
-                )
-
         val spoken =
             activeTtsTextNormalized
 
@@ -9172,18 +9485,18 @@ class AyanaVoiceService : Service() {
             shortKeywords
         ) {
 
-            val heardAtTail =
-                tail
-                    .split(
-                        " "
-                    )
-                    .any {
-                        it ==
-                            keyword
-                    }
+            // Sherpa may append AYANA's echo after the user's word, so requiring
+            // the cancel token to remain in the last four words is too strict.
+            // Accept it anywhere in the mixed transcript as long as AYANA's own
+            // current TTS text does not contain that token.
+            val heardAnywhere =
+                words.any {
+                    it ==
+                        keyword
+                }
 
             if (
-                heardAtTail &&
+                heardAnywhere &&
                 !containsWholeWord(
                     spoken,
                     keyword
@@ -9206,7 +9519,7 @@ class AyanaVoiceService : Service() {
         ) {
 
             if (
-                tail.contains(
+                normalized.contains(
                     phrase
                 ) &&
                 !spoken.contains(
@@ -9861,10 +10174,10 @@ class AyanaVoiceService : Service() {
             5
 
         private const val BARGE_IN_TTS_VOLUME =
-            0.62f
+            0.52f
 
-        private const val BARGE_IN_TAIL_WORDS =
-            4
+        private const val CANCEL_DIAGNOSTIC_INTERVAL_MS =
+            700L
 
         private const val CHANNEL_ID =
             "ayana_voice_service"
@@ -9900,7 +10213,7 @@ class AyanaVoiceService : Service() {
         // before the endpoint detector times out. Long enough to tolerate normal
         // intra-sentence pauses, short enough to remove multi-second dead time.
         private const val FAST_LOCAL_PARTIAL_COMMIT_MS =
-            900L
+            550L
 
         // If the wake word ended as a separate endpoint, keep listening briefly
         // before saying «Да?». This makes «Аяна, открой YouTube» feel one-shot.
