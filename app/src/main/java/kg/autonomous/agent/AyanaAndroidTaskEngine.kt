@@ -45,7 +45,8 @@ import java.util.Locale
  */
 class AyanaAndroidTaskEngine(
     private val screenIntelligence: AyanaScreenIntelligence,
-    private val gateway: ActionGateway
+    private val gateway: ActionGateway,
+    private val shouldCancel: () -> Boolean = { false }
 ) {
 
     private data class ResolvedVisibleTarget(
@@ -89,6 +90,17 @@ class AyanaAndroidTaskEngine(
                 "goal"
             ).trim()
 
+        if (
+            isCancelled()
+        ) {
+            return engineCancelled(
+                goal = goal,
+                trace = JSONArray(),
+                screen = safeScreenState(),
+                actionsUsed = 0
+            )
+        }
+
         val steps =
             plan.optJSONArray(
                 "steps"
@@ -124,6 +136,17 @@ class AyanaAndroidTaskEngine(
         var noProgressStreak = 0
 
         for (index in 0 until steps.length()) {
+
+            if (
+                isCancelled()
+            ) {
+                return engineCancelled(
+                    goal = goal,
+                    trace = trace,
+                    screen = currentScreen,
+                    actionsUsed = actionsUsed
+                )
+            }
 
             val step =
                 steps.optJSONObject(
@@ -231,6 +254,21 @@ class AyanaAndroidTaskEngine(
                         usedByStep
                     )
             )
+
+            if (
+                stepResult.optString(
+                    "status"
+                ) ==
+                "cancelled" ||
+                isCancelled()
+            ) {
+                return engineCancelled(
+                    goal = goal,
+                    trace = trace,
+                    screen = currentScreen,
+                    actionsUsed = actionsUsed
+                )
+            }
 
             if (
                 stepResult.optBoolean(
@@ -541,6 +579,14 @@ class AyanaAndroidTaskEngine(
         screenChangeRequired: Boolean = true
     ): JSONObject {
 
+        if (
+            isCancelled()
+        ) {
+            return cancelledStep(
+                screenBefore
+            )
+        }
+
         val raw =
             try {
                 call()
@@ -592,10 +638,19 @@ class AyanaAndroidTaskEngine(
                 )
         }
 
-        settleDirectAction()
-
         val screenAfter =
-            safeScreenState()
+            awaitReadyScreen(
+                screenBefore = screenBefore,
+                screenChangeRequired = screenChangeRequired
+            )
+
+        if (
+            isCancelled()
+        ) {
+            return cancelledStep(
+                screenAfter
+            )
+        }
 
         val changed =
             !sameScreen(
@@ -1786,18 +1841,38 @@ class AyanaAndroidTaskEngine(
         screen: JSONObject
     ): String {
 
-        return normalize(
-            screen.toString()
-        )
-            .replace(
-                Regex("\\d{1,2}:\\d{2}"),
-                "<time>"
+        val packageName =
+            normalize(
+                screen.optString(
+                    "package"
+                )
             )
-            .replace(
-                Regex("\\s+"),
-                " "
+
+        val rootClass =
+            normalize(
+                screen.optString(
+                    "root_class"
+                )
             )
-            .trim()
+
+        val visibleText =
+            jsonStringList(
+                screen.optJSONArray(
+                    "visible_text"
+                )
+            )
+                .joinToString(
+                    separator = "|"
+                ) {
+                    normalize(
+                        it
+                    )
+                }
+
+        // Do not compare event_age_ms, node bounds or other volatile metadata:
+        // those values change even when the user is still on exactly the same
+        // screen and previously caused false "screen_changed=true" results.
+        return "$packageName::$rootClass::$visibleText"
     }
 
     private fun normalize(
@@ -1924,17 +1999,164 @@ class AyanaAndroidTaskEngine(
         }
     }
 
-    private fun settleDirectAction() {
+    /**
+     * Samsung One UI may accept an Intent immediately while Accessibility still
+     * reports "Активное окно недоступно". Poll for a short bounded interval and
+     * continue as soon as a usable window is available.
+     */
+    private fun awaitReadyScreen(
+        screenBefore: JSONObject,
+        screenChangeRequired: Boolean
+    ): JSONObject {
 
-        try {
-            Thread.sleep(
-                DIRECT_ACTION_SETTLE_MS
-            )
-        } catch (_: InterruptedException) {
-            Thread
-                .currentThread()
-                .interrupt()
+        val deadline =
+            System.currentTimeMillis() +
+                DIRECT_ACTION_READY_TIMEOUT_MS
+
+        var latest =
+            safeScreenState()
+
+        while (
+            System.currentTimeMillis() <
+            deadline &&
+            !isCancelled()
+        ) {
+
+            val ready =
+                latest.optBoolean(
+                    "success",
+                    false
+                ) &&
+                    (
+                        latest.optInt(
+                            "node_count",
+                            0
+                        ) >
+                            0 ||
+                        latest.optJSONArray(
+                            "visible_text"
+                        ) !=
+                            null
+                    )
+
+            val changed =
+                !sameScreen(
+                    screenBefore,
+                    latest
+                )
+
+            if (
+                ready &&
+                (
+                    !screenChangeRequired ||
+                    changed
+                )
+            ) {
+                return latest
+            }
+
+            try {
+
+                Thread.sleep(
+                    DIRECT_ACTION_POLL_MS
+                )
+
+            } catch (_: InterruptedException) {
+
+                Thread.currentThread()
+                    .interrupt()
+
+                break
+            }
+
+            latest =
+                safeScreenState()
         }
+
+        return latest
+    }
+
+    private fun isCancelled():
+        Boolean {
+
+        return try {
+            shouldCancel()
+        } catch (_: Exception) {
+            false
+        }
+    }
+
+    private fun cancelledStep(
+        screen: JSONObject
+    ): JSONObject {
+
+        return JSONObject()
+            .put(
+                "success",
+                false
+            )
+            .put(
+                "progress",
+                false
+            )
+            .put(
+                "status",
+                "cancelled"
+            )
+            .put(
+                "actions_used",
+                0
+            )
+            .put(
+                "screen",
+                screen
+            )
+            .put(
+                "message",
+                "Команда остановлена пользователем"
+            )
+    }
+
+    private fun engineCancelled(
+        goal: String,
+        trace: JSONArray,
+        screen: JSONObject,
+        actionsUsed: Int
+    ): JSONObject {
+
+        return JSONObject()
+            .put(
+                "success",
+                false
+            )
+            .put(
+                "status",
+                "cancelled"
+            )
+            .put(
+                "goal",
+                goal
+            )
+            .put(
+                "message",
+                "Команда остановлена пользователем"
+            )
+            .put(
+                "actions_used",
+                actionsUsed
+            )
+            .put(
+                "replan_recommended",
+                false
+            )
+            .put(
+                "trace",
+                trace
+            )
+            .put(
+                "screen",
+                screen
+            )
     }
 
     private fun engineSuccess(
@@ -2081,8 +2303,11 @@ class AyanaAndroidTaskEngine(
         private const val MAX_SCROLLS_PER_STEP =
             2
 
-        private const val DIRECT_ACTION_SETTLE_MS =
-            350L
+        private const val DIRECT_ACTION_READY_TIMEOUT_MS =
+            1600L
+
+        private const val DIRECT_ACTION_POLL_MS =
+            80L
 
         private const val MIN_VISIBLE_TARGET_SCORE =
             66
