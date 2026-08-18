@@ -100,6 +100,12 @@ class MainActivity : AppCompatActivity() {
         )
     }
 
+    private val durableGoalStore by lazy {
+        AyanaDurableGoalStore(
+            applicationContext
+        )
+    }
+
     private val ayanaPreferences by lazy {
         AyanaPreferences(
             applicationContext
@@ -3026,9 +3032,11 @@ class MainActivity : AppCompatActivity() {
         contentContainer.addView(
             pageTitle(
                 "Задачи",
-                "Напоминания и повторяющиеся задачи"
+                "Активная цель, напоминания и повторяющиеся задачи"
             )
         )
+
+        renderDurableGoalCard()
 
         val tasks =
             taskStore
@@ -3043,11 +3051,26 @@ class MainActivity : AppCompatActivity() {
                     "Активных напоминаний нет",
                     "Скажите: «Аяна, завтра в 9 напомни позвонить»."
                 ),
-                sectionParams()
+                sectionParams(
+                    top = 10
+                )
             )
 
             return
         }
+
+        contentContainer.addView(
+            smallSectionTitle(
+                "НАПОМИНАНИЯ"
+            ),
+            LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT
+            ).apply {
+                topMargin = dp(14)
+                bottomMargin = dp(5)
+            }
+        )
 
         tasks.forEach {
             task ->
@@ -3085,7 +3108,7 @@ class MainActivity : AppCompatActivity() {
                         task.title
 
                     textSize =
-                    18f
+                        18f
 
                     setTypeface(
                         Typeface.DEFAULT,
@@ -3109,7 +3132,7 @@ class MainActivity : AppCompatActivity() {
                             recurrence
 
                     textSize =
-                    15f
+                        15f
 
                     setTextColor(
                         Color.parseColor(
@@ -3133,7 +3156,7 @@ class MainActivity : AppCompatActivity() {
                         task.message
 
                     textSize =
-                    15.5f
+                        15.5f
 
                     setTextColor(
                         Color.parseColor(
@@ -3195,6 +3218,314 @@ class MainActivity : AppCompatActivity() {
                         8
                 )
             )
+        }
+    }
+
+    private fun renderDurableGoalCard() {
+
+        val goal =
+            durableGoalStore
+                .getCurrentForUi()
+                ?: return
+
+        contentContainer.addView(
+            smallSectionTitle(
+                "АКТИВНАЯ ЦЕЛЬ"
+            ),
+            LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT
+            ).apply {
+                topMargin = dp(8)
+                bottomMargin = dp(5)
+            }
+        )
+
+        val card =
+            panel(
+                20
+            )
+
+        val statusLabel =
+            durableGoalStore
+                .statusLabel(
+                    goal.status
+                )
+
+        card.addView(
+            TextView(this).apply {
+                text = statusLabel
+                textSize = 13.5f
+                setTypeface(
+                    Typeface.DEFAULT,
+                    Typeface.BOLD
+                )
+                setTextColor(
+                    Color.parseColor(
+                        when (goal.status) {
+                            AyanaDurableGoalStore.STATUS_ACTIVE -> "#67E8F9"
+                            AyanaDurableGoalStore.STATUS_WAITING_CONFIRMATION -> "#FBBF24"
+                            AyanaDurableGoalStore.STATUS_PAUSED,
+                            AyanaDurableGoalStore.STATUS_RECOVERY_PENDING -> "#C4B5FD"
+                            else -> "#A8B5C7"
+                        }
+                    )
+                )
+            }
+        )
+
+        card.addView(
+            TextView(this).apply {
+                text = goal.command
+                textSize = 17f
+                setTypeface(
+                    Typeface.DEFAULT,
+                    Typeface.BOLD
+                )
+                setTextColor(Color.WHITE)
+                setPadding(
+                    0,
+                    dp(8),
+                    0,
+                    0
+                )
+            }
+        )
+
+        val progressText =
+            buildString {
+                if (goal.planSize > 0) {
+                    append("Шаг ")
+                    append(
+                        (goal.nextPlanStep + 1)
+                            .coerceAtMost(goal.planSize)
+                    )
+                    append(" из ")
+                    append(goal.planSize)
+                    append("  •  ")
+                }
+                append("действий: ")
+                append(goal.totalActions)
+                if (goal.recoveryCount > 0) {
+                    append("  •  восстановлений: ")
+                    append(goal.recoveryCount)
+                    append("/")
+                    append(AyanaDurableGoalStore.MAX_RECOVERIES)
+                }
+            }
+
+        card.addView(
+            TextView(this).apply {
+                text = progressText
+                textSize = 14f
+                setTextColor(
+                    Color.parseColor("#8FA0B7")
+                )
+                setPadding(
+                    0,
+                    dp(7),
+                    0,
+                    0
+                )
+            }
+        )
+
+        val diagnostic =
+            goal.lastError
+                .ifBlank {
+                    goal.recoveryReason
+                }
+                .ifBlank {
+                    goal.lastCheckpoint
+                }
+
+        if (diagnostic.isNotBlank()) {
+            card.addView(
+                TextView(this).apply {
+                    text = diagnostic
+                    textSize = 13.5f
+                    setTextColor(
+                        Color.parseColor("#75869F")
+                    )
+                    setPadding(
+                        0,
+                        dp(6),
+                        0,
+                        0
+                    )
+                }
+            )
+        }
+
+        val actionsRow =
+            LinearLayout(this).apply {
+                orientation = LinearLayout.HORIZONTAL
+                gravity = Gravity.CENTER_VERTICAL
+                setPadding(
+                    0,
+                    dp(13),
+                    0,
+                    0
+                )
+            }
+
+        val waitingConfirmation =
+            goal.status ==
+            AyanaDurableGoalStore.STATUS_WAITING_CONFIRMATION
+
+        val runningNow =
+            goal.status ==
+            AyanaDurableGoalStore.STATUS_ACTIVE &&
+                AyanaVoiceService.isRunning &&
+                isCommandBusyState(
+                    AyanaVoiceService.currentStatusState
+                )
+
+        val resumeButton =
+            TextView(this).apply {
+                text =
+                    when {
+                        runningNow -> "Выполняется"
+                        waitingConfirmation -> "Подтвердить"
+                        else -> "Продолжить"
+                    }
+                textSize = 13.5f
+                gravity = Gravity.CENTER
+                setTextColor(
+                    Color.parseColor(
+                        if (runningNow) {
+                            "#64748B"
+                        } else {
+                            "#BAE6FD"
+                        }
+                    )
+                )
+                background =
+                    softDrawable(
+                        if (runningNow) "#111827" else "#10202B",
+                        if (runningNow) "#253044" else "#28566B",
+                        13
+                    )
+                setPadding(
+                    dp(12),
+                    dp(8),
+                    dp(12),
+                    dp(8)
+                )
+                isEnabled = !runningNow
+                alpha = if (runningNow) 0.62f else 1f
+                setOnClickListener {
+                    sendDurableGoalAction(
+                        if (waitingConfirmation) {
+                            AyanaVoiceService.ACTION_CONFIRM_GOAL
+                        } else {
+                            AyanaVoiceService.ACTION_RESUME_GOAL
+                        }
+                    )
+                }
+            }
+
+        actionsRow.addView(
+            resumeButton,
+            LinearLayout.LayoutParams(
+                0,
+                dp(40),
+                1f
+            ).apply {
+                marginEnd = dp(6)
+            }
+        )
+
+        val cancelButton =
+            TextView(this).apply {
+                text = "Отменить"
+                textSize = 13.5f
+                gravity = Gravity.CENTER
+                setTextColor(Color.parseColor("#FCA5A5"))
+                background = softDrawable("#1B1017", "#5B2838", 13)
+                setPadding(
+                    dp(12),
+                    dp(8),
+                    dp(12),
+                    dp(8)
+                )
+                setOnClickListener {
+                    android.app.AlertDialog.Builder(this@MainActivity)
+                        .setTitle("Отменить активную цель?")
+                        .setMessage(goal.command)
+                        .setNegativeButton("Нет", null)
+                        .setPositiveButton("Отменить") { _, _ ->
+                            sendDurableGoalAction(
+                                AyanaVoiceService.ACTION_CANCEL_GOAL
+                            )
+                        }
+                        .show()
+                }
+            }
+
+        actionsRow.addView(
+            cancelButton,
+            LinearLayout.LayoutParams(
+                0,
+                dp(40),
+                1f
+            ).apply {
+                marginStart = dp(6)
+            }
+        )
+
+        card.addView(actionsRow)
+
+        contentContainer.addView(
+            card,
+            sectionParams(
+                top = 6
+            )
+        )
+    }
+
+    private fun sendDurableGoalAction(
+        action: String
+    ) {
+
+        val intent =
+            Intent(
+                this,
+                AyanaVoiceService::class.java
+            ).apply {
+                this.action = action
+            }
+
+        try {
+            if (
+                AyanaVoiceService.isRunning
+            ) {
+                startService(intent)
+            } else if (
+                Build.VERSION.SDK_INT >= 26
+            ) {
+                startForegroundService(intent)
+            } else {
+                startService(intent)
+            }
+
+            contentContainer.postDelayed(
+                {
+                    if (
+                        currentPage ==
+                        Page.TASKS
+                    ) {
+                        renderTasks()
+                    }
+                },
+                450L
+            )
+        } catch (_: Exception) {
+            Toast.makeText(
+                this,
+                "Не удалось выполнить действие с активной целью",
+                Toast.LENGTH_SHORT
+            ).show()
         }
     }
 
@@ -3665,6 +3996,10 @@ class MainActivity : AppCompatActivity() {
             )
         )
 
+        val durableGoal =
+            durableGoalStore
+                .getCurrentForUi()
+
         val checks =
             listOf(
                 Triple(
@@ -3704,6 +4039,20 @@ class MainActivity : AppCompatActivity() {
                     "Память и задачи",
                     true,
                     "${memoryStore.count()} фактов • ${taskStore.count()} задач"
+                ),
+                Triple(
+                    "Autonomous Core",
+                    true,
+                    if (durableGoal == null) {
+                        "Durable goals готовы • активной цели нет"
+                    } else {
+                        "${durableGoalStore.statusLabel(durableGoal.status)} • checkpoint=${durableGoal.lastCheckpoint}"
+                    }
+                ),
+                Triple(
+                    "Safety Engine",
+                    true,
+                    "4 уровня риска • локальный fail-closed policy gate"
                 )
             )
 
