@@ -1,4 +1,4 @@
-// AYANA Worker v7.4 — final response router + capability awareness
+// AYANA Worker v7.5 — streamed Marin PCM + latency stabilization + capability awareness
 const ANDROID_GOAL_TOOL = {
   type: "function",
   name: "execute_android_goal",
@@ -575,7 +575,7 @@ const AYANA_SELF_REVIEW_INSTRUCTIONS = `
 const AYANA_VOICE_STYLE = `
 РЕЖИМ ОТВЕТА: ГОЛОС.
 Говори разговорно, коротко и без Markdown-разметки. Не произноси заголовки со звёздочками, решётками или служебными символами.
-По умолчанию 2–5 коротких предложений или максимум 5 коротких пунктов. Если пользователь явно просит подробно/глубоко/тщательно — можно отвечать подробнее.
+По умолчанию 1–3 коротких предложения. Не перечисляй лишние справочные детали, если пользователь их не просил. Если пользователь явно просит подробно/глубоко/тщательно — можно отвечать подробнее, но голосовой ответ всё равно должен оставаться удобным для прослушивания.
 `.trim();
 
 const AYANA_TEXT_STYLE = `
@@ -637,12 +637,22 @@ function isAyanaSelfReviewRequest(message = "") {
   return mentionsProduct && asksImprovement;
 }
 
-function isFastEverydayRequest(message = "") {
+function isFastEverydayRequest(message = "", source = "text") {
   const n = normalizeIntentText(message);
   if (!n || isDeepRequest(n)) return false;
 
-  return /^(кто такой|кто такая|что такое|что значит|сколько будет|посчитай|вычисли|привет|здравствуй|спасибо|благодарю)(?:\s|$)/.test(n)
-    || /^(предложи|посоветуй)(?:\s|$)/.test(n);
+  if (/^(кто такой|кто такая|что такое|что значит|сколько будет|посчитай|вычисли|привет|здравствуй|спасибо|благодарю)(?:\s|$)/.test(n)) {
+    return true;
+  }
+
+  if (/^(предложи|посоветуй)(?:\s|$)/.test(n)) {
+    return true;
+  }
+
+  // On the target tablet Sherpa occasionally drops the first short word from
+  // «что такое ...» and sends «такое ...». This only changes model routing,
+  // never the user's actual message.
+  return source === "voice" && /^такое\s+/.test(n);
 }
 
 function getDeviceStateTool() {
@@ -773,7 +783,7 @@ ${memoryContext}
   const deepRequest = isDeepRequest(message || "");
   const fastEverydayMode = !androidNavigationMode
     && !deepRequest
-    && (selfReviewMode || isFastEverydayRequest(message || ""));
+    && (selfReviewMode || isFastEverydayRequest(message || "", source));
 
   const styleInstructions = source === "voice"
     ? AYANA_VOICE_STYLE
@@ -807,9 +817,9 @@ ${styleInstructions}${productInstructions}`,
     max_output_tokens: androidNavigationMode
       ? 260
       : deepRequest
-        ? 1600
+        ? (source === "voice" ? 650 : 1600)
         : source === "voice"
-          ? 650
+          ? 420
           : fastEverydayMode
             ? 700
             : 1000,
@@ -884,6 +894,7 @@ async function handleTts(request, env) {
   }
 
   const speechText = text.slice(0, 4000);
+  const responseFormat = body.format === "pcm" ? "pcm" : "mp3";
 
   const ttsResponse = await fetch(
     "https://api.openai.com/v1/audio/speech",
@@ -898,7 +909,8 @@ async function handleTts(request, env) {
         voice: "marin",
         input: speechText,
         speed: speechText === "Да?" ? 1.35 : 1.1,
-        response_format: "mp3",
+        response_format: responseFormat,
+        stream_format: "audio",
         instructions: `
 Говори ТОЛЬКО по-русски как молодая девушка в обычном дружеском разговоре.
 Не переходи на кыргызский или другой язык, даже если входной текст содержит такие слова.
@@ -927,14 +939,25 @@ async function handleTts(request, env) {
     );
   }
 
-  const audio = await ttsResponse.arrayBuffer();
+  if (!ttsResponse.body) {
+    return Response.json(
+      { error: "OpenAI TTS returned no audio body" },
+      { status: 502 }
+    );
+  }
 
-  return new Response(audio, {
+  // Do NOT buffer the generated voice in the Worker. Passing the body through
+  // keeps OpenAI's chunked audio stream intact so Android can start playback
+  // as soon as PCM bytes arrive.
+  return new Response(ttsResponse.body, {
     status: 200,
     headers: {
-      "Content-Type": "audio/mpeg",
+      "Content-Type": responseFormat === "pcm"
+        ? "application/octet-stream"
+        : "audio/mpeg",
       "Cache-Control": "no-store",
-      "X-Ayana-Voice": "marin"
+      "X-Ayana-Voice": "marin",
+      "X-Ayana-Audio-Format": responseFormat
     }
   });
 }
