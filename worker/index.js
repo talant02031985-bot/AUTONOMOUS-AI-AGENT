@@ -557,7 +557,11 @@ function isLikelyAndroidNavigation(message = "") {
   const normalized = message
     .toLowerCase()
     .replace(/ё/g, "е")
-    .trim();
+    .trim()
+    // Text commands are often pasted with quotes/bullets/punctuation, for
+    // example: «Открой приложения по умолчанию...». Classification must not
+    // fall out of deterministic Android Goal mode because of a leading symbol.
+    .replace(/^[^\p{L}\p{N}]+/u, "");
 
   const navigationVerb = /^(открой|запусти|нажми|выбери|перейди|зайди|вернись|покажи|найди|найти|отыщи)(?:\s|$)/.test(normalized);
   if (!navigationVerb) return false;
