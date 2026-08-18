@@ -3150,6 +3150,44 @@ class MainActivity : AppCompatActivity() {
                 }
             )
 
+            card.addView(
+                TextView(this).apply {
+                    text = "Удалить напоминание"
+                    textSize = 13.5f
+                    gravity = Gravity.CENTER
+                    setTextColor(Color.parseColor("#FCA5A5"))
+                    background = softDrawable("#1B1017", "#5B2838", 13)
+                    setPadding(dp(12), dp(8), dp(12), dp(8))
+                    setOnClickListener {
+                        android.app.AlertDialog.Builder(this@MainActivity)
+                            .setTitle("Удалить напоминание?")
+                            .setMessage(task.title)
+                            .setNegativeButton("Отмена", null)
+                            .setPositiveButton("Удалить") { _, _ ->
+                                taskScheduler.cancel(task)
+                                val deleted = taskStore.deleteTask(task.id)
+                                Toast.makeText(
+                                    this@MainActivity,
+                                    if (deleted) {
+                                        "Напоминание удалено"
+                                    } else {
+                                        "Не удалось удалить напоминание"
+                                    },
+                                    Toast.LENGTH_SHORT
+                                ).show()
+                                renderTasks()
+                            }
+                            .show()
+                    }
+                },
+                LinearLayout.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT,
+                    dp(40)
+                ).apply {
+                    topMargin = dp(12)
+                }
+            )
+
             contentContainer.addView(
                 card,
                 sectionParams(
@@ -3595,6 +3633,12 @@ class MainActivity : AppCompatActivity() {
                 for (eventIndex in 0 until events.length()) {
                     val event = events.optJSONObject(eventIndex) ?: continue
                     append("  - ")
+                    val eventAt = event.optLong("at", 0L)
+                    if (started > 0L && eventAt >= started) {
+                        append("+")
+                        append(eventAt - started)
+                        append("ms ")
+                    }
                     append(event.optString("state"))
                     append(": ")
                     append(event.optString("message"))
