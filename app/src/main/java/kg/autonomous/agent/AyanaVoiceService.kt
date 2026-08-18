@@ -49,8 +49,10 @@ import kotlin.math.abs
 
 class AyanaVoiceService : Service() {
 
-    // AYANA Voice v2.7.4: stable quiet-wake + faster local commit + multi-step settings target fix.
-    // Built on the green v2.7.3.1 baseline.
+    // AYANA FINAL VOICE PACKAGE v8.7.
+    // Base: confirmed installed v8.5. Integrates the reliable speaking barge-in
+    // patch from the intermediate v8.6 without treating v8.6 as the baseline.
+    // Marin TTS remains interruptible during download and active playback.
 
     private enum class ListenMode {
         WAKE,
@@ -97,6 +99,10 @@ class AyanaVoiceService : Service() {
 
     private var cancelNoiseSuppressor:
         NoiseSuppressor? = null
+
+    @Volatile
+    private var activeTtsTextNormalized =
+        ""
 
     private var audioToken:
         Long = 0L
@@ -1603,8 +1609,13 @@ class AyanaVoiceService : Service() {
 
                         if (
                             text.isNotBlank() &&
-                            isCancelCommandPhrase(
-                                text
+                            (
+                                isBargeInCancelPhrase(
+                                    text
+                                ) ||
+                                isCancelCommandPhrase(
+                                    text
+                                )
                             )
                         ) {
 
@@ -8662,6 +8673,11 @@ class AyanaVoiceService : Service() {
             "AYANA отвечает"
         )
 
+        activeTtsTextNormalized =
+            normalizeRecognitionText(
+                text
+            )
+
         // Voice STOP must remain available while TTS is downloading and while
         // Marin is speaking. The exact/short stop-phrase filter below avoids
         // treating ordinary speech as cancellation.
@@ -8733,6 +8749,9 @@ class AyanaVoiceService : Service() {
                 }
 
             } catch (_: Exception) {
+
+                activeTtsTextNormalized =
+                    ""
 
                 file
                     ?.delete()
@@ -8951,6 +8970,9 @@ class AyanaVoiceService : Service() {
 
             mediaPlayer =
                 null
+
+            activeTtsTextNormalized =
+                ""
         }
 
         try {
@@ -8979,6 +9001,9 @@ class AyanaVoiceService : Service() {
 
         mediaPlayer =
             null
+
+        activeTtsTextNormalized =
+            ""
 
         if (player != null) {
 
@@ -9072,6 +9097,168 @@ class AyanaVoiceService : Service() {
                 it
             )
         }
+    }
+
+    /**
+     * While Marin is speaking, Sherpa can hear a mixture of AYANA's own voice
+     * plus the user's "стоп". In that case the transcript may be a long phrase,
+     * so the normal <=5-word cancel filter intentionally rejects it.
+     *
+     * For SPEAKING only, accept a cancel keyword when it appears at the END of
+     * the mixed transcript and that keyword is not present in the text AYANA is
+     * currently speaking. This prevents the common echo case from blocking
+     * user barge-in without turning arbitrary long speech into a cancel command.
+     */
+    private fun isBargeInCancelPhrase(
+        value: String
+    ): Boolean {
+
+        if (
+            currentStatusState !=
+            STATE_SPEAKING
+        ) {
+            return false
+        }
+
+        val normalized =
+            normalizeRecognitionText(
+                value
+            )
+                .trim()
+
+        if (
+            normalized.isBlank()
+        ) {
+            return false
+        }
+
+        val words =
+            normalized
+                .split(
+                    " "
+                )
+                .filter {
+                    it.isNotBlank()
+                }
+
+        if (
+            words.isEmpty()
+        ) {
+            return false
+        }
+
+        val tail =
+            words
+                .takeLast(
+                    BARGE_IN_TAIL_WORDS
+                )
+                .joinToString(
+                    " "
+                )
+
+        val spoken =
+            activeTtsTextNormalized
+
+        val shortKeywords =
+            listOf(
+                "стоп",
+                "отмена",
+                "отмени",
+                "хватит"
+            )
+
+        for (
+            keyword in
+            shortKeywords
+        ) {
+
+            val heardAtTail =
+                tail
+                    .split(
+                        " "
+                    )
+                    .any {
+                        it ==
+                            keyword
+                    }
+
+            if (
+                heardAtTail &&
+                !containsWholeWord(
+                    spoken,
+                    keyword
+                )
+            ) {
+                return true
+            }
+        }
+
+        val longPhrases =
+            listOf(
+                "прекрати",
+                "останови команд",
+                "останови выполн"
+            )
+
+        for (
+            phrase in
+            longPhrases
+        ) {
+
+            if (
+                tail.contains(
+                    phrase
+                ) &&
+                !spoken.contains(
+                    phrase
+                )
+            ) {
+                return true
+            }
+        }
+
+        // If AYANA herself is currently saying one of the stop words, require
+        // the user to include the wake name as an extra disambiguation signal.
+        if (
+            containsWakeWord(
+                normalized
+            )
+        ) {
+
+            val withoutWake =
+                removeLeadingWakeWord(
+                    normalized
+                )
+                    .trim()
+
+            return isCancelCommandPhrase(
+                withoutWake
+            )
+        }
+
+        return false
+    }
+
+    private fun containsWholeWord(
+        value: String,
+        word: String
+    ): Boolean {
+
+        if (
+            value.isBlank() ||
+            word.isBlank()
+        ) {
+            return false
+        }
+
+        return value
+            .split(
+                Regex("\\s+")
+            )
+            .any {
+                it ==
+                    word
+            }
     }
 
     private fun isCancelCommandPhrase(
@@ -9674,7 +9861,10 @@ class AyanaVoiceService : Service() {
             5
 
         private const val BARGE_IN_TTS_VOLUME =
-            0.72f
+            0.62f
+
+        private const val BARGE_IN_TAIL_WORDS =
+            4
 
         private const val CHANNEL_ID =
             "ayana_voice_service"
