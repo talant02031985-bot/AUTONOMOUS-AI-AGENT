@@ -4,7 +4,7 @@ import org.json.JSONObject
 import java.util.Locale
 
 /**
- * AYANA Safety Policy v1.0.
+ * AYANA Safety Policy v1.1.
  *
  * Local fail-closed guard executed immediately before Agent Core device tools.
  * It is intentionally independent from model instructions: a model mistake must
@@ -25,6 +25,59 @@ class AyanaSafetyPolicy {
         val riskName: String,
         val reason: String
     )
+
+    /**
+     * Early command-level guard used before Agent Core.
+     *
+     * It intentionally triggers only for an explicit text-entry imperative.
+     * A discussion such as "что такое API-ключ" is not blocked, while
+     * "введи sk-..." is rejected locally before any network/tool planning.
+     */
+    fun evaluateUserCommand(
+        command: String
+    ): Decision {
+
+        val normalized =
+            normalize(
+                command
+            )
+
+        if (
+            !EXPLICIT_TEXT_ENTRY_PREFIX
+                .containsMatchIn(
+                    normalized
+                )
+        ) {
+            return allow(
+                RISK_READ_ONLY,
+                "command_not_sensitive"
+            )
+        }
+
+        if (
+            containsCredential(
+                command
+            ) ||
+            containsPaymentCard(
+                command
+            ) ||
+            COMMAND_SECRET_CONTEXT_WORDS.any {
+                token ->
+                normalized.contains(
+                    token
+                )
+            }
+        ) {
+            return prohibit(
+                "Локальный Safety Engine заблокировал попытку автоматического ввода секрета, токена, API-ключа или платёжных данных. Введите чувствительные данные вручную."
+            )
+        }
+
+        return allow(
+            RISK_SAFE_ACTION,
+            "ordinary_text_entry_request"
+        )
+    }
 
     fun evaluateTool(
         toolName: String,
@@ -217,6 +270,13 @@ class AyanaSafetyPolicy {
 
     private fun looksLikeCredential(
         text: String
+    ): Boolean =
+        containsCredential(
+            text
+        )
+
+    private fun containsCredential(
+        text: String
     ): Boolean {
 
         val value =
@@ -235,19 +295,31 @@ class AyanaSafetyPolicy {
         return value.startsWith(
             "bearer "
         ) ||
-            value.matches(
-                Regex(
-                    "sk-[a-z0-9_-]{12,}",
-                    RegexOption.IGNORE_CASE
+            CREDENTIAL_PATTERN
+                .containsMatchIn(
+                    value
+                ) ||
+            NAMED_SECRET_PATTERN
+                .containsMatchIn(
+                    value
                 )
-            ) ||
-            value.matches(
-                Regex(
-                    "(?:api[_ -]?key|token|secret)\\s*[:=]\\s*\\S+",
-                    RegexOption.IGNORE_CASE
-                )
-            )
     }
+
+    private fun containsPaymentCard(
+        text: String
+    ): Boolean =
+        PAYMENT_CARD_CANDIDATE_PATTERN
+            .findAll(
+                text
+            )
+            .any {
+                match ->
+                looksLikePaymentCard(
+                    match.groupValues[
+                        1
+                    ]
+                )
+            }
 
     private fun looksLikePaymentCard(
         text: String
@@ -393,6 +465,48 @@ class AyanaSafetyPolicy {
 
         const val RISK_PROHIBITED =
             3
+
+        private val COMMAND_SECRET_CONTEXT_WORDS =
+            setOf(
+                "api key",
+                "api ключ",
+                "пароль",
+                "password",
+                "pin код",
+                "пин код",
+                "otp",
+                "одноразовый код",
+                "код подтверждения",
+                "sms код",
+                "смс код",
+                "cvv",
+                "cvc",
+                "номер карты",
+                "card number"
+            )
+
+        private val EXPLICIT_TEXT_ENTRY_PREFIX =
+            Regex(
+                "^(?:введи|введите|вставь|вставьте|впиши|впишите|напечатай|напечатайте|набери|наберите)(?:\\s|$)",
+                RegexOption.IGNORE_CASE
+            )
+
+        private val CREDENTIAL_PATTERN =
+            Regex(
+                "(?:^|[^a-z0-9])sk-[a-z0-9_-]{12,}(?:$|[^a-z0-9_-])",
+                RegexOption.IGNORE_CASE
+            )
+
+        private val NAMED_SECRET_PATTERN =
+            Regex(
+                "(?:api[_ -]?(?:key|ключ)|token|токен|secret|секрет)\\s*[:=]\\s*\\S+",
+                RegexOption.IGNORE_CASE
+            )
+
+        private val PAYMENT_CARD_CANDIDATE_PATTERN =
+            Regex(
+                "(?:^|[^\\d])((?:\\d[ -]?){12,18}\\d)(?:$|[^\\d])"
+            )
 
         private val DANGEROUS_CLICK_WORDS =
             setOf(
