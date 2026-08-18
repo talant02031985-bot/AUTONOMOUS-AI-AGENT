@@ -52,12 +52,12 @@ import kotlin.math.abs
 
 class AyanaVoiceService : Service() {
 
-    // AYANA v9.0 FINAL — AUDIO + LATENCY STABILIZATION.
-    // Built from v8.9 final candidate after instrumented device tests.
-    // Main voice replies use streamed 24 kHz PCM through AudioTrack with a
-    // voice-communication audio path; the cached short wake acknowledgement
-    // remains MP3. Local routing is tolerant of selected Sherpa recognition
-    // distortions and simple Russian spoken-number arithmetic stays offline.
+    // AYANA v10.0 AUTONOMOUS CORE FINAL.
+    // Built on the confirmed v9.1 baseline. The v9.0/v9.1 audio, STOP and local
+    // fast-routing stack is intentionally frozen: streamed 24 kHz Marin PCM,
+    // VOICE_COMMUNICATION/AEC/NS, barge-in STOP and Russian local arithmetic
+    // remain unchanged. v10 adds durable goals/checkpoints/recovery, bounded
+    // replanning and a local fail-closed Safety Engine around device actions.
 
     private enum class ListenMode {
         WAKE,
@@ -195,6 +195,22 @@ class AyanaVoiceService : Service() {
     private var activeCommandHistoryId:
         String? = null
 
+    // AUTONOMOUS CORE v10: persistent state of the currently executing
+    // multi-step device goal. Factual/chat requests never create a durable goal.
+    private val durableGoalStore by lazy {
+        AyanaDurableGoalStore(
+            applicationContext
+        )
+    }
+
+    @Volatile
+    private var currentDurableGoalId:
+        String? = null
+
+    @Volatile
+    private var recoveryDispatchPending =
+        false
+
     private val memoryStore by lazy {
         AyanaMemoryStore(
             applicationContext
@@ -231,8 +247,14 @@ class AyanaVoiceService : Service() {
         )
     }
 
+    // Local fail-closed safety layer. This executes on Android before
+    // Agent Core device tools, independently from model instructions.
+    private val safetyPolicy by lazy {
+        AyanaSafetyPolicy()
+    }
+
     // =========================================================
-    // ANDROID TASK ENGINE v3 BRIDGE
+    // ANDROID TASK ENGINE v4 BRIDGE
     // =========================================================
     // Agent Core may produce one short structured Android plan. The plan is
     // executed locally by AyanaAndroidTaskEngine instead of spending one network
@@ -340,6 +362,14 @@ class AyanaVoiceService : Service() {
         currentStatusState =
             STATE_THINKING
 
+        try {
+            durableGoalStore
+                .markInterruptedGoals(
+                    "service_recreated"
+                )
+        } catch (_: Exception) {
+        }
+
         prefetchReadyVoice()
 
         thread(
@@ -399,6 +429,58 @@ class AyanaVoiceService : Service() {
                 return START_STICKY
             }
 
+            ACTION_RESUME_GOAL -> {
+
+                isRunning =
+                    true
+
+                ensureOrbForActiveService()
+
+                mainHandler.post {
+                    resumeDurableGoal(
+                        silent = true,
+                        explicitConfirmation = false,
+                        allowAutoResume = false
+                    )
+                }
+
+                return START_STICKY
+            }
+
+            ACTION_CONFIRM_GOAL -> {
+
+                isRunning =
+                    true
+
+                ensureOrbForActiveService()
+
+                mainHandler.post {
+                    resumeDurableGoal(
+                        silent = true,
+                        explicitConfirmation = true,
+                        allowAutoResume = false
+                    )
+                }
+
+                return START_STICKY
+            }
+
+            ACTION_CANCEL_GOAL -> {
+
+                isRunning =
+                    true
+
+                ensureOrbForActiveService()
+
+                mainHandler.post {
+                    cancelDurableGoalFromControl(
+                        silent = true
+                    )
+                }
+
+                return START_STICKY
+            }
+
             ACTION_START -> {
 
                 isRunning =
@@ -429,6 +511,8 @@ class AyanaVoiceService : Service() {
                 ) {
                     startWakeListening()
                 }
+
+                maybeAutoResumeDurableGoal()
             }
 
             ACTION_REFRESH_OVERLAY -> {
@@ -488,6 +572,26 @@ class AyanaVoiceService : Service() {
                         }
                     }
                 }
+            }
+
+            null -> {
+                // START_STICKY process recreation. Unlike BOOT_COMPLETED, this
+                // is a service lifecycle recovery. Restore only a recent,
+                // explicitly low-risk goal and keep the recovery bounded.
+                isRunning =
+                    true
+
+                ensureOrbForActiveService()
+
+                if (
+                    !shuttingDown &&
+                    modelReady &&
+                    !isRecording
+                ) {
+                    startWakeListening()
+                }
+
+                maybeAutoResumeDurableGoal()
             }
         }
 
@@ -2465,6 +2569,9 @@ class AyanaVoiceService : Service() {
         if (
             isCancelCommandPhrase(
                 normalized
+            ) &&
+            !isDurableGoalCancelPhrase(
+                routingNormalized
             )
         ) {
 
@@ -2570,6 +2677,54 @@ class AyanaVoiceService : Service() {
             },
             STATE_THINKING
         )
+
+        if (
+            isDurableGoalStatusPhrase(
+                routingNormalized
+            )
+        ) {
+            showDurableGoalStatus(
+                silent
+            )
+            return
+        }
+
+        if (
+            isDurableGoalCancelPhrase(
+                routingNormalized
+            )
+        ) {
+            cancelDurableGoalFromControl(
+                silent
+            )
+            return
+        }
+
+        if (
+            isDurableGoalConfirmPhrase(
+                routingNormalized
+            )
+        ) {
+            resumeDurableGoal(
+                silent = silent,
+                explicitConfirmation = true,
+                allowAutoResume = false
+            )
+            return
+        }
+
+        if (
+            isDurableGoalResumePhrase(
+                routingNormalized
+            )
+        ) {
+            resumeDurableGoal(
+                silent = silent,
+                explicitConfirmation = false,
+                allowAutoResume = false
+            )
+            return
+        }
 
         // BASIC LOCAL CALCULATOR v8.9
         // Simple two-number arithmetic must not spend a network round-trip.
@@ -5147,6 +5302,50 @@ class AyanaVoiceService : Service() {
             return
         }
 
+        // Local voice shortcuts ("нажми …" / "выбери …") must pass the
+        // same fail-closed Safety Engine as Agent Core tool calls. Otherwise a
+        // direct shortcut could bypass the policy layer entirely.
+        val safetyDecision =
+            try {
+                safetyPolicy.evaluateTool(
+                    "click_text",
+                    JSONObject()
+                        .put(
+                            "text",
+                            target
+                        )
+                )
+            } catch (error: Exception) {
+                AyanaSafetyPolicy.Decision(
+                    allowed = false,
+                    requiresConfirmation = false,
+                    riskLevel = AyanaSafetyPolicy.RISK_PROHIBITED,
+                    riskName = "policy_error",
+                    reason = error.message
+                        ?: "Ошибка локальной политики безопасности"
+                )
+            }
+
+        if (!safetyDecision.allowed) {
+            commandHistoryStore.addEvent(
+                activeCommandHistoryId,
+                state = "safety_gate",
+                message = safetyDecision.riskName,
+                details = safetyDecision.reason.take(260)
+            )
+
+            respondAndResume(
+                safetyDecision.reason
+                    .ifBlank {
+                        "Действие остановлено локальным Safety Engine AYANA."
+                    },
+                silent,
+                success = false
+            )
+
+            return
+        }
+
         val service =
             AgentAccessibilityService
                 .instance
@@ -5501,6 +5700,36 @@ class AyanaVoiceService : Service() {
                     "сколько будет "
                 )
 
+        // LOCAL ROUTING v9.1:
+        // Sherpa can lose the first syllable of «открой» (observed: «трой ютуб»).
+        // Never rewrite an arbitrary phrase globally. Repair the truncated verb
+        // only when the rest of the utterance is an exact known local launch target.
+        val truncatedLaunch =
+            Regex(
+                """^(?:трой|ткрой|крой|рой|откро|аткрой)\s+(.+)$"""
+            )
+                .matchEntire(
+                    repaired
+                )
+
+        if (
+            truncatedLaunch !=
+            null
+        ) {
+            val target =
+                truncatedLaunch
+                    .groupValues[1]
+                    .trim()
+
+            if (
+                target in
+                KNOWN_LOCAL_LAUNCH_ALIASES
+            ) {
+                repaired =
+                    "открой $target"
+            }
+        }
+
         return repaired
     }
 
@@ -5512,7 +5741,9 @@ class AyanaVoiceService : Service() {
             command
                 .trim()
                 .replace(
-                    Regex("^(?:(?:сколько|что|то)\\s+будет|посчитай|вычисли)\\s+"),
+                    Regex(
+                        "^(?:(?:(?:сколько|что|то)\\s+)?будет|сколько|посчитай|вычисли)\\s+"
+                    ),
                     ""
                 )
                 .trim()
@@ -5888,7 +6119,9 @@ class AyanaVoiceService : Service() {
 
     private fun askAyana(
         message: String,
-        silent: Boolean
+        silent: Boolean,
+        resumeGoal: JSONObject? = null,
+        automaticRecovery: Boolean = false
     ) {
 
         stopSherpaListening()
@@ -5921,8 +6154,28 @@ class AyanaVoiceService : Service() {
                 val originalGoal =
                     message
 
+                if (resumeGoal != null) {
+                    currentDurableGoalId =
+                        resumeGoal
+                            .optString(
+                                "id"
+                            )
+                            .trim()
+                            .takeIf {
+                                it.isNotBlank()
+                            }
+                }
+
                 var nextMessage:
-                    String? = message
+                    String? =
+                        if (resumeGoal == null) {
+                            message
+                        } else {
+                            buildDurableContinuationPrompt(
+                                resumeGoal,
+                                automaticRecovery = automaticRecovery
+                            )
+                        }
 
                 val memoryContext =
                     memoryStore
@@ -5942,20 +6195,42 @@ class AyanaVoiceService : Service() {
                     JSONArray? = null
 
                 val executionTrace =
-                    StringBuilder()
+                    StringBuilder(
+                        resumeGoal
+                            ?.optString(
+                                "execution_trace"
+                            )
+                            .orEmpty()
+                    )
 
                 // Keep only the freshest screen snapshot separately from the
                 // action trace. This lets the model continue from the real
                 // current UI without spending another Agent Core turn just to
                 // reread an unchanged screen.
                 var latestScreenContext =
-                    ""
+                    resumeGoal
+                        ?.optString(
+                            "latest_screen_context"
+                        )
+                        .orEmpty()
 
                 var lastToolSignature =
-                    ""
+                    resumeGoal
+                        ?.optString(
+                            "last_tool_signature"
+                        )
+                        .orEmpty()
 
                 var sameToolRepeatCount =
-                    0
+                    resumeGoal
+                        ?.optInt(
+                            "same_tool_repeat_count",
+                            0
+                        )
+                        ?.coerceAtLeast(
+                            0
+                        )
+                        ?: 0
 
                 var finalAnswer:
                     String? = null
@@ -5963,7 +6238,31 @@ class AyanaVoiceService : Service() {
                 var finalSuccess =
                     true
 
-                var step = 0
+                var step =
+                    resumeGoal
+                        ?.optInt(
+                            "agent_steps",
+                            0
+                        )
+                        ?.coerceAtLeast(0)
+                        ?: 0
+
+                var totalActions =
+                    resumeGoal
+                        ?.optInt(
+                            "total_actions",
+                            0
+                        )
+                        ?.coerceAtLeast(0)
+                        ?: 0
+
+                var androidGoalFallbackUsed =
+                    resumeGoal
+                        ?.optBoolean(
+                            "android_goal_fallback_used",
+                            false
+                        )
+                        ?: false
 
                 while (
                     step <
@@ -6025,6 +6324,36 @@ class AyanaVoiceService : Service() {
                             .trim()
 
                     when (type) {
+
+                        "durable_final" -> {
+
+                            // Internal recovery turns use an explicit machine
+                            // status from Worker v8.0. Natural-language text
+                            // alone is never enough to mark a persisted goal as
+                            // completed after a crash/replan boundary.
+                            agentPreviousResponseId =
+                                null
+
+                            finalAnswer =
+                                response
+                                    .optString(
+                                        "reply",
+                                        "Цель сохранена и приостановлена."
+                                    )
+                                    .trim()
+                                    .ifBlank {
+                                        "Цель сохранена и приостановлена."
+                                    }
+
+                            finalSuccess =
+                                response
+                                    .optString(
+                                        "goal_status"
+                                    ) ==
+                                "success"
+
+                            break
+                        }
 
                         "final" -> {
 
@@ -6123,6 +6452,154 @@ class AyanaVoiceService : Service() {
                                 break
                             }
 
+                            // A model-provided confirmed=true is never trusted.
+                            // Fresh approval is injected only by resumeDurableGoal() after
+                            // an explicit Android-side user confirmation.
+                            if (
+                                toolName in
+                                setOf(
+                                    "click_screen_element",
+                                    "tap_screen_coordinates",
+                                    "execute_android_plan"
+                                )
+                            ) {
+                                arguments.put(
+                                    "confirmed",
+                                    false
+                                )
+                            }
+
+                            if (
+                                automaticRecovery &&
+                                !isSafeAutoResumeTool(
+                                    toolName
+                                )
+                            ) {
+                                commandHistoryStore.addEvent(
+                                    activeCommandHistoryId,
+                                    state = "recovery_gate",
+                                    message = "Автовосстановление остановлено перед активным шагом",
+                                    details = "tool=$toolName"
+                                )
+
+                                durableGoalStore.markPaused(
+                                    currentDurableGoalId,
+                                    "Автоматическое восстановление требует явного продолжения перед шагом: $toolName"
+                                )
+
+                                finalAnswer =
+                                    "Цель сохранена. Для следующего активного шага нажмите «Продолжить» или скажите «продолжи текущую цель»."
+
+                                finalSuccess =
+                                    false
+
+                                break
+                            }
+
+                            val durableSafetyPreflight =
+                                try {
+                                    safetyPolicy
+                                        .evaluateTool(
+                                            toolName,
+                                            arguments
+                                        )
+                                } catch (_: Exception) {
+                                    AyanaSafetyPolicy.Decision(
+                                        allowed = false,
+                                        requiresConfirmation = false,
+                                        riskLevel = AyanaSafetyPolicy.RISK_PROHIBITED,
+                                        riskName = "policy_error",
+                                        reason = "Ошибка локальной политики безопасности"
+                                    )
+                                }
+
+                            if (
+                                isDurableDeviceTool(
+                                    toolName
+                                ) &&
+                                durableSafetyPreflight.riskLevel !=
+                                AyanaSafetyPolicy.RISK_PROHIBITED &&
+                                currentDurableGoalId ==
+                                null
+                            ) {
+                                currentDurableGoalId =
+                                    startDurableGoalForTool(
+                                        originalGoal = originalGoal,
+                                        silent = silent,
+                                        toolName = toolName
+                                    )
+
+                                if (
+                                    currentDurableGoalId ==
+                                    null
+                                ) {
+                                    finalAnswer =
+                                        "Я остановила выполнение до действия: не удалось надёжно создать состояние активной цели. Повторите команду после проверки хранилища AYANA."
+
+                                    finalSuccess =
+                                        false
+
+                                    break
+                                }
+                            }
+
+                            if (
+                                currentDurableGoalId !=
+                                null
+                            ) {
+                                val toolStartedCheckpoint =
+                                    durableGoalStore
+                                        .checkpoint(
+                                            currentDurableGoalId,
+                                            JSONObject()
+                                                .put(
+                                                    "last_tool_name",
+                                                    toolName
+                                                )
+                                                .put(
+                                                    "last_tool_args",
+                                                    durableArgumentsForPersistence(
+                                                        toolName,
+                                                        arguments
+                                                    )
+                                                )
+                                                .put(
+                                                    "last_result",
+                                                    ""
+                                                )
+                                                .put(
+                                                    "safe_auto_resume",
+                                                    isSafeAutoResumeTool(
+                                                        toolName
+                                                    )
+                                                )
+                                                .put(
+                                                    "last_checkpoint",
+                                                    "tool_started"
+                                                )
+                                        )
+
+                                if (
+                                    toolStartedCheckpoint ==
+                                    null
+                                ) {
+                                    commandHistoryStore.addEvent(
+                                        activeCommandHistoryId,
+                                        state = "goal_checkpoint_error",
+                                        message = "Не удалось сохранить checkpoint перед tool call",
+                                        details = "tool=$toolName"
+                                    )
+
+                                    finalAnswer =
+                                        "Я остановила выполнение до следующего действия: checkpoint цели не сохранился. Это защищает задачу от продолжения с неверного состояния."
+
+                                    finalSuccess =
+                                        false
+
+                                    break
+                                }
+                            }
+
                             broadcastStatus(
                                 agentToolStatus(
                                     toolName,
@@ -6150,6 +6627,166 @@ class AyanaVoiceService : Service() {
                                 message = toolName,
                                 details = result.toString()
                             )
+
+                            if (
+                                currentDurableGoalId !=
+                                null &&
+                                toolName !=
+                                "execute_android_goal"
+                            ) {
+                                totalActions +=
+                                    maxOf(
+                                        1,
+                                        result.optInt(
+                                            "actions_used",
+                                            0
+                                        )
+                                    )
+
+                                val durableCheckpoint =
+                                    try {
+                                        durableGoalStore
+                                            .checkpointOrchestrator(
+                                                id = currentDurableGoalId,
+                                                agentSteps = step,
+                                                totalActions = totalActions,
+                                                executionTrace = executionTrace.toString(),
+                                                lastToolName = toolName,
+                                                lastToolArgs = durableArgumentsForPersistence(
+                                                    toolName,
+                                                    arguments
+                                                ),
+                                                latestScreenPackage = extractResultScreenPackage(
+                                                    result
+                                                ),
+                                                safeAutoResume = isSafeAutoResumeTool(
+                                                    toolName
+                                                ),
+                                                checkpoint = "tool_result",
+                                                lastResult = durableToolResultForPersistence(
+                                                    result
+                                                )
+                                            )
+                                    } catch (error: Exception) {
+                                        commandHistoryStore.addEvent(
+                                            activeCommandHistoryId,
+                                            state = "goal_checkpoint_error",
+                                            message = "Checkpoint после tool result выбросил ошибку",
+                                            details = error.message.orEmpty().take(220)
+                                        )
+                                        null
+                                    }
+
+                                if (durableCheckpoint == null) {
+                                    commandHistoryStore.addEvent(
+                                        activeCommandHistoryId,
+                                        state = "goal_checkpoint_error",
+                                        message = "Checkpoint после tool result не сохранён",
+                                        details = "goal_id=${currentDurableGoalId}; step=$step; tool=$toolName"
+                                    )
+
+                                    finalAnswer =
+                                        "Действие выполнено, но checkpoint цели не удалось сохранить. Я остановила дальнейшие шаги, чтобы не потерять фактическое состояние устройства."
+
+                                    finalSuccess =
+                                        false
+
+                                    // The persisted file may still contain
+                                    // last_checkpoint=tool_started. That is an
+                                    // intentionally uncertain outcome: no more
+                                    // actions are executed in this process. On a
+                                    // later resume AYANA must inspect the fresh
+                                    // screen before deciding what happened.
+                                    currentDurableGoalId =
+                                        null
+
+                                    break
+                                }
+
+                                commandHistoryStore.addEvent(
+                                    activeCommandHistoryId,
+                                    state = "goal_checkpoint",
+                                    message = "Цель сохранена",
+                                    details = "goal_id=${currentDurableGoalId}; step=$step; tool=$toolName"
+                                )
+
+                                if (
+                                    result.optBoolean(
+                                        "requires_confirmation",
+                                        false
+                                    )
+                                ) {
+                                    val waitingSaved =
+                                        try {
+                                            durableGoalStore
+                                                .markWaitingConfirmation(
+                                                    currentDurableGoalId,
+                                                    result.optString(
+                                                        "message",
+                                                        "Требуется подтверждение пользователя"
+                                                    )
+                                                ) !=
+                                                null
+                                        } catch (error: Exception) {
+                                            commandHistoryStore.addEvent(
+                                                activeCommandHistoryId,
+                                                state = "goal_checkpoint_error",
+                                                message = "Не удалось сохранить ожидание подтверждения",
+                                                details = error.message.orEmpty().take(220)
+                                            )
+                                            false
+                                        }
+
+                                    finalAnswer =
+                                        if (waitingSaved) {
+                                            result.optString(
+                                                "message",
+                                                "Для продолжения требуется явное подтверждение пользователя."
+                                            )
+                                        } else {
+                                            "Я остановила цель: чувствительное действие не выполнено, потому что состояние ожидания подтверждения не удалось надёжно сохранить."
+                                        }
+
+                                    finalSuccess =
+                                        false
+
+                                    break
+                                }
+                            }
+
+                            if (
+                                result.optBoolean(
+                                    "safety_blocked",
+                                    false
+                                ) &&
+                                !result.optBoolean(
+                                    "requires_confirmation",
+                                    false
+                                )
+                            ) {
+                                val safetyMessage =
+                                    result.optString(
+                                        "message",
+                                        "Действие остановлено локальным Safety Engine."
+                                    )
+
+                                if (currentDurableGoalId != null) {
+                                    try {
+                                        durableGoalStore
+                                            .markPaused(
+                                                currentDurableGoalId,
+                                                safetyMessage
+                                            )
+                                    } catch (_: Exception) {
+                                    }
+                                }
+
+                                finalAnswer =
+                                    safetyMessage
+                                finalSuccess =
+                                    false
+                                break
+                            }
 
                             // ANDROID GOAL v7: execute_android_goal is a complete
                             // local transaction. Goal Compiler + Task Engine already
@@ -6210,6 +6847,207 @@ class AyanaVoiceService : Service() {
                                             )
                                         }
 
+                                if (goalSucceeded) {
+                                    completeCurrentDurableGoal(
+                                        finalAnswer.orEmpty()
+                                    )
+                                    break
+                                }
+
+                                val canReplan =
+                                    !automaticRecovery &&
+                                        result.optBoolean(
+                                            "replan_recommended",
+                                            false
+                                        ) &&
+                                        !compiledStopIfMissing(
+                                            arguments,
+                                            result
+                                        ) &&
+                                        !androidGoalFallbackUsed
+
+                                if (canReplan) {
+                                    androidGoalFallbackUsed =
+                                        true
+
+                                    totalActions =
+                                        maxOf(
+                                            totalActions,
+                                            result.optInt(
+                                                "actions_used",
+                                                0
+                                            )
+                                        )
+
+                                    val replanResult =
+                                        JSONObject(
+                                            result.toString()
+                                        ).apply {
+                                            remove(
+                                                "screen"
+                                            )
+                                        }
+
+                                    executionTrace
+                                        .append(
+                                            "Локальный Android-план остановлен и требует альтернативного пути.\nРезультат: "
+                                        )
+                                        .append(
+                                            replanResult
+                                                .toString()
+                                                .take(1800)
+                                        )
+                                        .append(
+                                            "\n\n"
+                                        )
+
+                                    latestScreenContext =
+                                        result.optJSONObject(
+                                            "screen"
+                                        )
+                                            ?.toString()
+                                            ?.take(
+                                                MAX_SCREEN_CONTEXT_CHARS
+                                            )
+                                            .orEmpty()
+
+                                    if (
+                                        latestScreenContext.isBlank()
+                                    ) {
+                                        try {
+                                            latestScreenContext =
+                                                screenIntelligence
+                                                    .getScreenState()
+                                                    .toString()
+                                                    .take(
+                                                        MAX_SCREEN_CONTEXT_CHARS
+                                                    )
+                                        } catch (_: Exception) {
+                                        }
+                                    }
+
+                                    val replanCheckpoint =
+                                        try {
+                                            durableGoalStore
+                                                .checkpoint(
+                                                    currentDurableGoalId,
+                                                    JSONObject()
+                                                        .put(
+                                                            "mode",
+                                                            AyanaDurableGoalStore.MODE_ORCHESTRATOR
+                                                        )
+                                                        .put(
+                                                            "status",
+                                                            AyanaDurableGoalStore.STATUS_ACTIVE
+                                                        )
+                                                        .put(
+                                                            "safe_auto_resume",
+                                                            false
+                                                        )
+                                                        .put(
+                                                            "execution_trace",
+                                                            executionTrace.toString()
+                                                        )
+                                                        .put(
+                                                            "latest_screen_context",
+                                                            latestScreenContext
+                                                        )
+                                                        .put(
+                                                            "android_goal_fallback_used",
+                                                            true
+                                                        )
+                                                        .put(
+                                                            "agent_steps",
+                                                            step
+                                                        )
+                                                        .put(
+                                                            "total_actions",
+                                                            totalActions
+                                                        )
+                                                        .put(
+                                                            "last_checkpoint",
+                                                            "android_goal_replan"
+                                                        )
+                                                )
+                                        } catch (error: Exception) {
+                                            commandHistoryStore.addEvent(
+                                                activeCommandHistoryId,
+                                                state = "goal_checkpoint_error",
+                                                message = "Не удалось сохранить состояние перед replan",
+                                                details = error.message.orEmpty().take(220)
+                                            )
+                                            null
+                                        }
+
+                                    if (replanCheckpoint == null) {
+                                        finalAnswer =
+                                            "Я остановила перепланирование: состояние цели перед новым маршрутом не удалось надёжно сохранить."
+                                        finalSuccess =
+                                            false
+                                        break
+                                    }
+
+                                    commandHistoryStore.addEvent(
+                                        activeCommandHistoryId,
+                                        state = "goal_replan",
+                                        message = "Ищу альтернативный путь",
+                                        details = result.optString(
+                                            "message"
+                                        )
+                                    )
+
+                                    previousResponseId =
+                                        null
+                                    agentPreviousResponseId =
+                                        null
+                                    toolResults =
+                                        null
+                                    finalAnswer =
+                                        null
+                                    finalSuccess =
+                                        true
+
+                                    nextMessage =
+                                        buildAndroidGoalReplanPrompt(
+                                            originalGoal = originalGoal,
+                                            executionTrace = executionTrace.toString(),
+                                            latestScreenContext = latestScreenContext
+                                        )
+
+                                    continue
+                                }
+
+                                if (
+                                    currentDurableGoalId !=
+                                    null
+                                ) {
+                                    val stopRequested =
+                                        compiledStopIfMissing(
+                                            arguments,
+                                            result
+                                        )
+
+                                    if (stopRequested) {
+                                        durableGoalStore
+                                            .markFailed(
+                                                currentDurableGoalId,
+                                                result.optString(
+                                                    "message",
+                                                    "Цель остановлена по условию stop_if_missing"
+                                                )
+                                            )
+                                    } else {
+                                        durableGoalStore
+                                            .markPaused(
+                                                currentDurableGoalId,
+                                                result.optString(
+                                                    "message",
+                                                    "Локальная цель требует перепланирования"
+                                                )
+                                            )
+                                    }
+                                }
+
                                 break
                             }
 
@@ -6240,13 +7078,23 @@ class AyanaVoiceService : Service() {
                                         result = result
                                     )
 
+                                completeCurrentDurableGoal(
+                                    finalAnswer.orEmpty()
+                                )
+
                                 break
                             }
+
+                            val persistedArguments =
+                                durableArgumentsForPersistence(
+                                    toolName,
+                                    arguments
+                                )
 
                             val toolSignature =
                                 toolName +
                                     "|" +
-                                    arguments.toString()
+                                    persistedArguments.toString()
 
                             if (
                                 toolSignature ==
@@ -6393,7 +7241,7 @@ class AyanaVoiceService : Service() {
                                     " "
                                 )
                                 .append(
-                                    arguments
+                                    persistedArguments
                                         .toString()
                                 )
                                 .append(
@@ -6418,6 +7266,62 @@ class AyanaVoiceService : Service() {
                                 )
                             }
 
+                            if (
+                                currentDurableGoalId !=
+                                null
+                            ) {
+                                val continuationCheckpoint =
+                                    durableGoalStore
+                                        .checkpoint(
+                                            currentDurableGoalId,
+                                            JSONObject()
+                                                .put(
+                                                    "execution_trace",
+                                                    executionTrace.toString()
+                                                )
+                                                .put(
+                                                    "latest_screen_context",
+                                                    latestScreenContext
+                                                )
+                                                .put(
+                                                    "last_tool_signature",
+                                                    lastToolSignature
+                                                )
+                                                .put(
+                                                    "same_tool_repeat_count",
+                                                    sameToolRepeatCount
+                                                )
+                                                .put(
+                                                    "agent_steps",
+                                                    step
+                                                )
+                                                .put(
+                                                    "total_actions",
+                                                    totalActions
+                                                )
+                                                .put(
+                                                    "last_checkpoint",
+                                                    "orchestrator_continue"
+                                                )
+                                        )
+
+                                if (continuationCheckpoint == null) {
+                                    commandHistoryStore.addEvent(
+                                        activeCommandHistoryId,
+                                        state = "goal_checkpoint_error",
+                                        message = "Не удалось сохранить состояние перед следующим Agent Core шагом"
+                                    )
+
+                                    finalAnswer =
+                                        "Я приостановила цель: состояние после последнего действия не удалось сохранить надёжно."
+
+                                    finalSuccess =
+                                        false
+
+                                    break
+                                }
+                            }
+
                             // IMPORTANT: do not continue the OpenAI function
                             // call chain here. We start a fresh Agent Core turn
                             // carrying the original goal + verified tool result.
@@ -6436,6 +7340,7 @@ class AyanaVoiceService : Service() {
                             nextMessage =
                                 """
                                 ПРОДОЛЖЕНИЕ МНОГОШАГОВОЙ ЗАДАЧИ AYANA.
+                                РЕЖИМ ВОССТАНОВЛЕНИЯ: ${if (automaticRecovery) "АВТОМАТИЧЕСКИЙ_НИЗКОРИСКОВЫЙ" else "ОБЫЧНОЕ_ПРОДОЛЖЕНИЕ"}.
 
                                 Исходная команда пользователя:
                                 $originalGoal
@@ -6487,15 +7392,82 @@ class AyanaVoiceService : Service() {
                 ) {
 
                     finalAnswer =
-                        "Я остановила задачу: слишком много последовательных действий."
+                        "Я приостановила задачу: достигнут безопасный лимит последовательных действий. Её можно продолжить позже."
 
                     finalSuccess =
                         false
+
+                    if (
+                        currentDurableGoalId !=
+                        null
+                    ) {
+                        durableGoalStore
+                            .markPaused(
+                                currentDurableGoalId,
+                                "Достигнут безопасный лимит шагов Agent Core"
+                            )
+                    }
                 }
 
                 val answer =
                     finalAnswer
                         ?: "Готово."
+
+                if (
+                    finalSuccess &&
+                    currentDurableGoalId !=
+                    null
+                ) {
+                    completeCurrentDurableGoal(
+                        answer
+                    )
+                } else if (
+                    !finalSuccess &&
+                    currentDurableGoalId !=
+                    null
+                ) {
+                    val durableSnapshot =
+                        durableGoalStore
+                            .getById(
+                                currentDurableGoalId
+                            )
+
+                    if (
+                        durableSnapshot != null &&
+                        durableSnapshot.optString(
+                            "status"
+                        ) ==
+                        AyanaDurableGoalStore.STATUS_ACTIVE
+                    ) {
+                        durableGoalStore
+                            .markPaused(
+                                currentDurableGoalId,
+                                answer
+                            )
+                    }
+                }
+
+                if (
+                    currentDurableGoalId !=
+                    null
+                ) {
+                    val durableAfterTurn =
+                        durableGoalStore
+                            .getById(
+                                currentDurableGoalId
+                            )
+
+                    if (
+                        durableAfterTurn == null ||
+                        durableAfterTurn.optString(
+                            "status"
+                        ) !=
+                        AyanaDurableGoalStore.STATUS_ACTIVE
+                    ) {
+                        currentDurableGoalId =
+                            null
+                    }
+                }
 
                 synchronized(
                     conversationHistory
@@ -6556,6 +7528,32 @@ class AyanaVoiceService : Service() {
                     return@thread
                 }
 
+                if (
+                    currentDurableGoalId !=
+                    null
+                ) {
+                    val durableIdOnError =
+                        currentDurableGoalId
+
+                    try {
+                        durableGoalStore
+                            .markRecoveryPending(
+                                durableIdOnError,
+                                "agent_core_error:${technicalMessage.ifBlank { "unknown" }}"
+                            )
+                    } catch (storeError: Exception) {
+                        commandHistoryStore.addEvent(
+                            activeCommandHistoryId,
+                            state = "goal_store_error",
+                            message = "Не удалось сохранить recovery checkpoint после ошибки",
+                            details = storeError.message.orEmpty().take(220)
+                        )
+                    }
+
+                    currentDurableGoalId =
+                        null
+                }
+
                 mainHandler.post {
 
                     if (
@@ -6597,6 +7595,1640 @@ class AyanaVoiceService : Service() {
         currentAgentThread =
             worker
     }
+
+    // =========================================================
+    // AUTONOMOUS CORE v10 — DURABLE GOAL CONTROL
+    // =========================================================
+
+    private fun ensureOrbForActiveService() {
+
+        ayanaPreferences.miniOrbEnabled =
+            true
+
+        miniOrbController.refresh(
+            enabled = true,
+            state =
+                if (
+                    currentStatusState ==
+                    STATE_STOPPED
+                ) {
+                    STATE_LISTENING
+                } else {
+                    currentStatusState
+                }
+        )
+    }
+
+    private fun maybeAutoResumeDurableGoal() {
+
+        if (
+            shuttingDown ||
+            recoveryDispatchPending ||
+            currentAgentThread?.isAlive ==
+            true
+        ) {
+            return
+        }
+
+        val goal =
+            try {
+                durableGoalStore
+                    .getRecoverable()
+            } catch (_: Exception) {
+                null
+            }
+                ?: return
+
+        if (
+            !durableGoalStore
+                .canAutoResume(
+                    goal
+                )
+        ) {
+            return
+        }
+
+        recoveryDispatchPending =
+            true
+
+        mainHandler.postDelayed(
+            {
+                recoveryDispatchPending =
+                    false
+
+                if (
+                    !shuttingDown &&
+                    isRunning &&
+                    currentAgentThread?.isAlive !=
+                    true
+                ) {
+                    resumeDurableGoal(
+                        silent =
+                            goal.optString(
+                                "source"
+                            ) ==
+                            "text",
+                        explicitConfirmation = false,
+                        allowAutoResume = true
+                    )
+                }
+            },
+            350L
+        )
+    }
+
+    private fun prepareDurableControlHistory(
+        command: String,
+        silent: Boolean
+    ) {
+
+        if (
+            activeCommandHistoryId !=
+            null
+        ) {
+            return
+        }
+
+        stopSherpaListening()
+
+        listenMode =
+            ListenMode.BUSY
+
+        cancelRequested =
+            false
+
+        activeCommandToken =
+            ++commandGeneration
+
+        activeCommandHistoryId =
+            commandHistoryStore.begin(
+                command = command,
+                source = if (silent) "text" else "voice"
+            )
+
+        broadcastStatus(
+            command,
+            STATE_THINKING
+        )
+    }
+
+    private fun resumeDurableGoal(
+        silent: Boolean,
+        explicitConfirmation: Boolean,
+        allowAutoResume: Boolean
+    ) {
+
+        try {
+            resumeDurableGoalInternal(
+                silent = silent,
+                explicitConfirmation = explicitConfirmation,
+                allowAutoResume = allowAutoResume
+            )
+        } catch (error: Exception) {
+            currentDurableGoalId =
+                null
+
+            if (activeCommandHistoryId == null) {
+                prepareDurableControlHistory(
+                    "Восстанавливаю активную цель",
+                    silent
+                )
+            }
+
+            commandHistoryStore.addEvent(
+                activeCommandHistoryId,
+                state = "goal_store_error",
+                message = "Autonomous Core безопасно остановил recovery после ошибки",
+                details = error.message.orEmpty().take(220)
+            )
+
+            respondAndResume(
+                "Я остановила восстановление цели из-за ошибки состояния. Дальнейшие действия не выполнялись.",
+                silent,
+                success = false
+            )
+        }
+    }
+
+    private fun resumeDurableGoalInternal(
+        silent: Boolean,
+        explicitConfirmation: Boolean,
+        allowAutoResume: Boolean
+    ) {
+
+        if (
+            shuttingDown ||
+            currentAgentThread?.isAlive ==
+            true
+        ) {
+            return
+        }
+
+        val goal =
+            try {
+                durableGoalStore
+                    .getRecoverable()
+            } catch (_: Exception) {
+                null
+            }
+
+        if (goal == null) {
+            prepareDurableControlHistory(
+                "Проверяю активную цель",
+                silent
+            )
+            respondAndResume(
+                "Сейчас нет сохранённой активной цели.",
+                silent,
+                success = true
+            )
+            return
+        }
+
+        val goalId =
+            goal.optString(
+                "id"
+            )
+
+        val status =
+            goal.optString(
+                "status"
+            )
+
+        if (
+            allowAutoResume &&
+            !durableGoalStore
+                .canAutoResume(
+                    goal
+                )
+        ) {
+            return
+        }
+
+        prepareDurableControlHistory(
+            if (explicitConfirmation) {
+                "Подтверждаю продолжение активной цели"
+            } else {
+                "Продолжаю активную цель"
+            },
+            silent
+        )
+
+        if (
+            status ==
+            AyanaDurableGoalStore.STATUS_WAITING_CONFIRMATION
+        ) {
+
+            if (!explicitConfirmation) {
+                respondAndResume(
+                    "Эта цель остановлена перед чувствительным действием. Для продолжения нужно явно подтвердить её.",
+                    silent,
+                    success = false
+                )
+                return
+            }
+
+            if (
+                !durableGoalStore
+                    .confirmationIsFresh(
+                        goal
+                    )
+            ) {
+                durableGoalStore
+                    .markPaused(
+                        goalId,
+                        "Подтверждение устарело: состояние экрана нужно проверить заново"
+                    )
+
+                respondAndResume(
+                    "Старый чувствительный шаг уже устарел. Нажмите «Продолжить», чтобы я заново проверила текущий экран и построила безопасный следующий шаг.",
+                    silent,
+                    success = false
+                )
+                return
+            }
+
+            if (
+                goal.optString(
+                    "mode"
+                ) ==
+                AyanaDurableGoalStore.MODE_ANDROID_GOAL
+            ) {
+                val confirmationConsumed =
+                    try {
+                        durableGoalStore
+                            .checkpoint(
+                                goalId,
+                                JSONObject()
+                                    .put(
+                                        "status",
+                                        AyanaDurableGoalStore.STATUS_ACTIVE
+                                    )
+                                    .put(
+                                        "requires_confirmation",
+                                        false
+                                    )
+                                    .put(
+                                        "safe_auto_resume",
+                                        false
+                                    )
+                                    .put(
+                                        "last_checkpoint",
+                                        "confirmation_consumed_android_plan"
+                                    )
+                            )
+                    } catch (error: Exception) {
+                        commandHistoryStore.addEvent(
+                            activeCommandHistoryId,
+                            state = "goal_checkpoint_error",
+                            message = "Подтверждение Android-плана не применено: checkpoint не сохранён",
+                            details = error.message.orEmpty().take(220)
+                        )
+                        null
+                    }
+
+                if (confirmationConsumed == null) {
+                    respondAndResume(
+                        "Я не выполнила чувствительный Android-шаг: не удалось сначала надёжно зафиксировать использование подтверждения.",
+                        silent,
+                        success = false
+                    )
+                    return
+                }
+
+                currentDurableGoalId =
+                    goalId
+
+                commandHistoryStore.addEvent(
+                    activeCommandHistoryId,
+                    state = "goal_recovery",
+                    message = "Подтверждён ожидающий шаг Android-плана",
+                    details =
+                        "goal_id=$goalId; step=${confirmationConsumed.optInt("next_plan_step")}"
+                )
+
+                resumeAndroidGoalPlan(
+                    confirmationConsumed,
+                    silent,
+                    automaticRecovery = false,
+                    confirmedFirstStep = true
+                )
+                return
+            }
+
+            val toolName =
+                goal.optString(
+                    "last_tool_name"
+                )
+
+            if (
+                toolName !in
+                setOf(
+                    "click_screen_element",
+                    "tap_screen_coordinates"
+                )
+            ) {
+                durableGoalStore
+                    .markPaused(
+                        goalId,
+                        "Нельзя безопасно восстановить подтверждение для инструмента $toolName"
+                    )
+
+                respondAndResume(
+                    "Я не буду автоматически повторять это чувствительное действие. Запустите его заново явной командой.",
+                    silent,
+                    success = false
+                )
+                return
+            }
+
+            val confirmationConsumed =
+                try {
+                    durableGoalStore
+                        .checkpoint(
+                            goalId,
+                            JSONObject()
+                                .put(
+                                    "status",
+                                    AyanaDurableGoalStore.STATUS_ACTIVE
+                                )
+                                .put(
+                                    "requires_confirmation",
+                                    false
+                                )
+                                .put(
+                                    "safe_auto_resume",
+                                    false
+                                )
+                                .put(
+                                    "last_checkpoint",
+                                    "confirmation_consumed"
+                                )
+                        )
+                } catch (error: Exception) {
+                    commandHistoryStore.addEvent(
+                        activeCommandHistoryId,
+                        state = "goal_checkpoint_error",
+                        message = "Подтверждение не применено: checkpoint не сохранён",
+                        details = error.message.orEmpty().take(220)
+                    )
+                    null
+                }
+
+            if (confirmationConsumed == null) {
+                respondAndResume(
+                    "Я не выполнила чувствительное действие: не удалось сначала надёжно зафиксировать использование подтверждения.",
+                    silent,
+                    success = false
+                )
+                return
+            }
+
+            currentDurableGoalId =
+                goalId
+
+            val arguments =
+                goal.optJSONObject(
+                    "last_tool_args"
+                )
+                    ?: JSONObject()
+
+            arguments.put(
+                "confirmed",
+                true
+            )
+
+            commandHistoryStore.addEvent(
+                activeCommandHistoryId,
+                state = "goal_recovery",
+                message = "Подтверждён чувствительный checkpoint",
+                details = "goal_id=$goalId; tool=$toolName"
+            )
+
+            val result =
+                executeAgentTool(
+                    toolName,
+                    arguments,
+                    trustedUserConfirmation = true
+                )
+
+            if (
+                !result.optBoolean(
+                    "success",
+                    false
+                )
+            ) {
+                durableGoalStore
+                    .markPaused(
+                        goalId,
+                        result.optString(
+                            "message",
+                            "Подтверждённое действие не выполнено"
+                        )
+                    )
+
+                respondAndResume(
+                    result.optString(
+                        "message",
+                        "Не удалось продолжить подтверждённое действие."
+                    ),
+                    silent,
+                    success = false
+                )
+                return
+            }
+
+            val confirmedActions =
+                maxOf(
+                    1,
+                    result.optInt(
+                        "actions_used",
+                        0
+                    )
+                )
+
+            val oldTrace =
+                goal.optString(
+                    "execution_trace"
+                )
+
+            val newTrace =
+                buildString {
+                    append(oldTrace)
+                    if (isNotEmpty()) {
+                        append("\n")
+                    }
+                    append("Подтверждённый шаг: ")
+                    append(toolName)
+                    append(" ")
+                    append(arguments.toString())
+                    append("\nРезультат: ")
+                    append(result.toString().take(1600))
+                    append("\n")
+                }
+                    .takeLast(9000)
+
+            val afterConfirmation =
+                try {
+                    durableGoalStore
+                        .checkpoint(
+                            goalId,
+                            JSONObject()
+                                .put(
+                                    "status",
+                                    AyanaDurableGoalStore.STATUS_ACTIVE
+                                )
+                                .put(
+                                    "requires_confirmation",
+                                    false
+                                )
+                                .put(
+                                    "safe_auto_resume",
+                                    false
+                                )
+                                .put(
+                                    "total_actions",
+                                    goal.optInt(
+                                        "total_actions",
+                                        0
+                                    ) + confirmedActions
+                                )
+                                .put(
+                                    "latest_screen_package",
+                                    extractResultScreenPackage(
+                                        result
+                                    )
+                                )
+                                .put(
+                                    "execution_trace",
+                                    newTrace
+                                )
+                                .put(
+                                    "last_checkpoint",
+                                    "confirmation_completed"
+                                )
+                        )
+                } catch (error: Exception) {
+                    commandHistoryStore.addEvent(
+                        activeCommandHistoryId,
+                        state = "goal_checkpoint_error",
+                        message = "Действие выполнено, но post-confirmation checkpoint не сохранён",
+                        details = error.message.orEmpty().take(220)
+                    )
+                    null
+                }
+
+            if (afterConfirmation == null) {
+                currentDurableGoalId =
+                    null
+
+                respondAndResume(
+                    "Подтверждённое действие выполнено, но я остановила дальнейшую цель: новое состояние не удалось надёжно сохранить.",
+                    silent,
+                    success = false
+                )
+                return
+            }
+
+            resumeDurableGoalFromSnapshot(
+                afterConfirmation,
+                silent
+            )
+
+            return
+        }
+
+        if (
+            goal.optInt(
+                "recovery_count",
+                0
+            ) >=
+            AyanaDurableGoalStore.MAX_RECOVERIES
+        ) {
+            durableGoalStore
+                .markFailed(
+                    goalId,
+                    "Исчерпан безопасный лимит восстановлений"
+                )
+
+            respondAndResume(
+                "Я остановила эту цель после двух восстановлений, чтобы не зациклиться. Её лучше запустить заново.",
+                silent,
+                success = false
+            )
+            return
+        }
+
+        val recovered =
+            try {
+                durableGoalStore
+                    .incrementRecovery(
+                        goalId
+                    )
+            } catch (error: Exception) {
+                commandHistoryStore.addEvent(
+                    activeCommandHistoryId,
+                    state = "goal_checkpoint_error",
+                    message = "Не удалось зафиксировать начало recovery",
+                    details = error.message.orEmpty().take(220)
+                )
+                null
+            }
+
+        if (recovered == null) {
+            respondAndResume(
+                "Я не начала восстановление: checkpoint начала recovery не удалось надёжно сохранить.",
+                silent,
+                success = false
+            )
+            return
+        }
+
+        commandHistoryStore.addEvent(
+            activeCommandHistoryId,
+            state = "goal_recovery",
+            message = "Восстанавливаю сохранённую цель",
+            details =
+                "goal_id=$goalId; recovery=${recovered.optInt("recovery_count")}; mode=${recovered.optString("mode")}"
+        )
+
+        resumeDurableGoalFromSnapshot(
+            recovered,
+            silent,
+            automaticRecovery = allowAutoResume
+        )
+    }
+
+    private fun resumeDurableGoalFromSnapshot(
+        goal: JSONObject,
+        silent: Boolean,
+        automaticRecovery: Boolean = false
+    ) {
+
+        currentDurableGoalId =
+            goal.optString(
+                "id"
+            )
+
+        if (
+            goal.optString(
+                "mode"
+            ) ==
+            AyanaDurableGoalStore.MODE_ANDROID_GOAL &&
+            goal.optJSONObject(
+                "compiled_plan"
+            ) !=
+            null
+        ) {
+            resumeAndroidGoalPlan(
+                goal,
+                silent,
+                automaticRecovery = automaticRecovery
+            )
+            return
+        }
+
+        askAyana(
+            message =
+                goal.optString(
+                    "command"
+                ),
+            silent = silent,
+            resumeGoal = goal,
+            automaticRecovery = automaticRecovery
+        )
+    }
+
+    private fun resumeAndroidGoalPlan(
+        goal: JSONObject,
+        silent: Boolean,
+        automaticRecovery: Boolean = false,
+        confirmedFirstStep: Boolean = false
+    ) {
+
+        val goalId =
+            goal.optString(
+                "id"
+            )
+
+        val plan =
+            goal.optJSONObject(
+                "compiled_plan"
+            )
+                ?: run {
+                    durableGoalStore
+                        .markPaused(
+                            goalId,
+                            "Сохранённый Android-план отсутствует"
+                        )
+                    respondAndResume(
+                        "Не удалось восстановить локальный план. Запустите эту цель заново.",
+                        silent,
+                        success = false
+                    )
+                    return
+                }
+
+        val arguments =
+            goal.optJSONObject(
+                "android_goal_arguments"
+            )
+                ?: JSONObject()
+
+        val storedSteps =
+            plan.optJSONArray(
+                "steps"
+            )
+
+        if (
+            storedSteps == null ||
+            storedSteps.length() ==
+            0
+        ) {
+            val reason =
+                "Процесс остановился до сохранения compiled Android-плана"
+
+            val updated =
+                try {
+                    durableGoalStore
+                        .checkpoint(
+                            goalId,
+                            JSONObject()
+                                .put(
+                                    "mode",
+                                    AyanaDurableGoalStore.MODE_ORCHESTRATOR
+                                )
+                                .put(
+                                    "status",
+                                    if (automaticRecovery) {
+                                        AyanaDurableGoalStore.STATUS_PAUSED
+                                    } else {
+                                        AyanaDurableGoalStore.STATUS_ACTIVE
+                                    }
+                                )
+                                .put(
+                                    "safe_auto_resume",
+                                    false
+                                )
+                                .put(
+                                    "last_error",
+                                    reason
+                                )
+                                .put(
+                                    "last_checkpoint",
+                                    "compiled_plan_missing"
+                                )
+                        )
+                } catch (error: Exception) {
+                    commandHistoryStore.addEvent(
+                        activeCommandHistoryId,
+                        state = "goal_checkpoint_error",
+                        message = "Не удалось сохранить переход к перестроению плана",
+                        details = error.message.orEmpty().take(220)
+                    )
+                    null
+                }
+
+            if (updated == null) {
+                currentDurableGoalId =
+                    null
+                respondAndResume(
+                    "Я остановила восстановление: состояние перед перестроением локального плана не удалось надёжно сохранить.",
+                    silent,
+                    success = false
+                )
+                return
+            }
+
+            commandHistoryStore.addEvent(
+                activeCommandHistoryId,
+                state = "goal_recovery",
+                message = "Compiled plan не успел сохраниться",
+                details = "goal_id=$goalId; automatic=$automaticRecovery"
+            )
+
+            if (automaticRecovery) {
+                currentDurableGoalId =
+                    null
+
+                respondAndResume(
+                    "Цель сохранена, но локальный план не успел записаться до остановки процесса. Нажмите «Продолжить», чтобы безопасно перестроить маршрут.",
+                    silent,
+                    success = false
+                )
+            } else {
+                askAyana(
+                    message = goal.optString(
+                        "command"
+                    ),
+                    silent = silent,
+                    resumeGoal = updated,
+                    automaticRecovery = false
+                )
+            }
+
+            return
+        }
+
+        val storedStartIndex =
+            goal.optInt(
+                "next_plan_step",
+                0
+            )
+
+        val planSize =
+            plan.optJSONArray(
+                "steps"
+            )
+                ?.length()
+                ?: 0
+
+        val startIndex =
+            if (
+                planSize > 0 &&
+                storedStartIndex >=
+                planSize
+            ) {
+                // Crash may happen after the last checkpoint but before the
+                // terminal result is persisted. Re-run only the final safe
+                // navigation step so Task Engine can verify the final screen.
+                planSize - 1
+            } else {
+                storedStartIndex
+            }
+
+        val initialActions =
+            goal.optInt(
+                "actions_used",
+                0
+            )
+
+        broadcastStatus(
+            "Восстанавливаю Android-задачу…",
+            STATE_EXECUTING
+        )
+
+        val result =
+            androidTaskEngine
+                .execute(
+                    plan = plan,
+                    confirmed = confirmedFirstStep,
+                    startIndex = startIndex,
+                    initialActionsUsed = initialActions,
+                    onCheckpoint =
+                        { checkpoint ->
+                            persistAndroidGoalCheckpoint(
+                                goalId = goalId,
+                                checkpoint = checkpoint,
+                                historyMessage = "Android recovery checkpoint"
+                            )
+                        }
+                )
+
+        val success =
+            result.optBoolean(
+                "success",
+                false
+            ) ||
+                result.optString(
+                    "status"
+                ) ==
+                "success"
+
+        if (success) {
+            val reply =
+                localAndroidGoalReply(
+                    arguments,
+                    result
+                )
+
+            durableGoalStore
+                .markCompleted(
+                    goalId,
+                    reply
+                )
+
+            currentDurableGoalId =
+                null
+
+            respondAndResume(
+                reply,
+                silent,
+                success = true
+            )
+            return
+        }
+
+        if (
+            result.optBoolean(
+                "requires_confirmation",
+                false
+            )
+        ) {
+            durableGoalStore
+                .markWaitingConfirmation(
+                    goalId,
+                    result.optString(
+                        "message",
+                        "Требуется подтверждение"
+                    )
+                )
+
+            currentDurableGoalId =
+                null
+
+            respondAndResume(
+                result.optString(
+                    "message",
+                    "Для продолжения требуется подтверждение."
+                ),
+                silent,
+                success = false
+            )
+            return
+        }
+
+        val canReplan =
+            !automaticRecovery &&
+            result.optBoolean(
+                "replan_recommended",
+                false
+            ) &&
+                !compiledStopIfMissing(
+                    arguments,
+                    result
+                ) &&
+                !goal.optBoolean(
+                    "android_goal_fallback_used",
+                    false
+                )
+
+        if (canReplan) {
+            val replanTrace =
+                buildString {
+                    append(
+                        goal.optString(
+                            "execution_trace"
+                        )
+                    )
+                    if (isNotEmpty()) {
+                        append("\n")
+                    }
+                    append("Восстановленный локальный Android-план снова заблокирован.\nРезультат: ")
+                    append(
+                        JSONObject(
+                            result.toString()
+                        ).apply {
+                            remove("screen")
+                        }.toString().take(1800)
+                    )
+                }
+                    .takeLast(9000)
+
+            val latestScreen =
+                result.optJSONObject(
+                    "screen"
+                )
+                    ?.toString()
+                    ?.take(
+                        MAX_SCREEN_CONTEXT_CHARS
+                    )
+                    .orEmpty()
+
+            val updated =
+                try {
+                    durableGoalStore
+                        .checkpoint(
+                            goalId,
+                            JSONObject()
+                                .put(
+                                    "mode",
+                                    AyanaDurableGoalStore.MODE_ORCHESTRATOR
+                                )
+                                .put(
+                                    "status",
+                                    AyanaDurableGoalStore.STATUS_ACTIVE
+                                )
+                                .put(
+                                    "safe_auto_resume",
+                                    false
+                                )
+                                .put(
+                                    "execution_trace",
+                                    replanTrace
+                                )
+                                .put(
+                                    "latest_screen_context",
+                                    latestScreen
+                                )
+                                .put(
+                                    "android_goal_fallback_used",
+                                    true
+                                )
+                                .put(
+                                    "last_checkpoint",
+                                    "android_goal_replan"
+                                )
+                        )
+                } catch (error: Exception) {
+                    commandHistoryStore.addEvent(
+                        activeCommandHistoryId,
+                        state = "goal_checkpoint_error",
+                        message = "Не удалось сохранить recovery replan checkpoint",
+                        details = error.message.orEmpty().take(220)
+                    )
+                    null
+                }
+
+            if (updated == null) {
+                currentDurableGoalId =
+                    null
+                respondAndResume(
+                    "Я остановила перепланирование после восстановления: checkpoint нового маршрута не удалось сохранить.",
+                    silent,
+                    success = false
+                )
+                return
+            }
+
+            commandHistoryStore.addEvent(
+                activeCommandHistoryId,
+                state = "goal_replan",
+                message = "Перепланирую после восстановления",
+                details = result.optString("message")
+            )
+
+            askAyana(
+                message = goal.optString("command"),
+                silent = silent,
+                resumeGoal = updated
+            )
+            return
+        }
+
+        if (
+            compiledStopIfMissing(
+                arguments,
+                result
+            )
+        ) {
+            val stopReason =
+                result.optString(
+                    "message",
+                    "Цель остановлена по условию stop_if_missing"
+                )
+
+            durableGoalStore
+                .markFailed(
+                    goalId,
+                    stopReason
+                )
+
+            currentDurableGoalId =
+                null
+
+            respondAndResume(
+                stopReason,
+                silent,
+                success = false
+            )
+            return
+        }
+
+        val pauseReason =
+            if (
+                automaticRecovery &&
+                result.optBoolean(
+                    "replan_recommended",
+                    false
+                )
+            ) {
+                "Автоматическое восстановление остановлено перед перепланированием. Нажмите «Продолжить», чтобы разрешить новый безопасный маршрут."
+            } else {
+                result.optString(
+                    "message",
+                    "Восстановление локального плана остановлено"
+                )
+            }
+
+        durableGoalStore
+            .markPaused(
+                goalId,
+                pauseReason
+            )
+
+        currentDurableGoalId =
+            null
+
+        respondAndResume(
+            pauseReason,
+            silent,
+            success = false
+        )
+    }
+
+    private fun compiledStopIfMissing(
+        arguments: JSONObject,
+        result: JSONObject
+    ): Boolean =
+        arguments.optBoolean(
+            "stop_if_missing",
+            false
+        ) ||
+            result.optBoolean(
+                "stop_if_missing",
+                false
+            )
+
+    private fun buildAndroidGoalReplanPrompt(
+        originalGoal: String,
+        executionTrace: String,
+        latestScreenContext: String
+    ): String {
+
+        return """
+            ВОССТАНОВЛЕНИЕ ANDROID-ЦЕЛИ AYANA ПОСЛЕ БЛОКИРОВКИ СТРОГОГО ЛОКАЛЬНОГО ПЛАНА.
+
+            Исходная цель пользователя:
+            $originalGoal
+
+            Что уже было выполнено и почему строгий план остановился:
+            $executionTrace
+
+            СВЕЖЕЕ СОСТОЯНИЕ ЭКРАНА:
+            ${if (latestScreenContext.isBlank()) "(экран недоступен)" else latestScreenContext}
+            КОНЕЦ СОСТОЯНИЯ ЭКРАНА.
+
+            Это ОДИН ограниченный fallback-проход перепланирования.
+            НЕ вызывай execute_android_goal повторно для этой же цели в этой recovery-сессии.
+            Используй текущее состояние экрана и максимум ОДИН другой безопасный device tool call.
+            Не повторяй уже подтверждённые успешные шаги.
+            Если цель уже достигнута, заверши без инструмента.
+            Если нужен чувствительный шаг — запроси новое явное подтверждение.
+            Если безопасного пути нет — честно остановись, не зацикливайся.
+        """
+            .trimIndent()
+    }
+
+    private fun durableToolResultForPersistence(
+        result: JSONObject
+    ): String {
+
+        return try {
+            JSONObject(
+                result.toString()
+            ).apply {
+                remove(
+                    "screen"
+                )
+            }
+                .toString()
+                .take(
+                    1800
+                )
+        } catch (_: Exception) {
+            ""
+        }
+    }
+
+    private fun buildDurableContinuationPrompt(
+        goal: JSONObject,
+        automaticRecovery: Boolean
+    ): String {
+
+        val trace =
+            goal.optString(
+                "execution_trace"
+            )
+
+        val screen =
+            try {
+                screenIntelligence
+                    .getScreenState()
+                    .toString()
+                    .take(
+                        MAX_SCREEN_CONTEXT_CHARS
+                    )
+            } catch (_: Exception) {
+                ""
+            }
+
+        val lastCheckpoint =
+            goal.optString(
+                "last_checkpoint"
+            )
+
+        val lastToolName =
+            goal.optString(
+                "last_tool_name"
+            )
+
+        val lastToolResult =
+            goal.optString(
+                "last_result"
+            )
+
+        val uncertainOutcome =
+            lastCheckpoint ==
+                "tool_started" &&
+                lastToolName.isNotBlank() &&
+                lastToolResult.isBlank()
+
+        return """
+            ВОССТАНОВЛЕНИЕ СОХРАНЁННОЙ ЦЕЛИ AYANA.
+            РЕЖИМ ВОССТАНОВЛЕНИЯ: ${if (automaticRecovery) "АВТОМАТИЧЕСКИЙ_НИЗКОРИСКОВЫЙ" else "ЯВНО_ИНИЦИИРОВАН_ПОЛЬЗОВАТЕЛЕМ"}.
+
+            Исходная команда пользователя:
+            ${goal.optString("command")}
+
+            Уже подтверждённые выполненные шаги:
+            ${if (trace.isBlank()) "(нет сохранённых шагов)" else trace}
+
+            ПОСЛЕДНИЙ DURABLE CHECKPOINT: $lastCheckpoint
+            ПОСЛЕДНИЙ ИНСТРУМЕНТ: ${if (lastToolName.isBlank()) "(нет)" else lastToolName}
+            СОХРАНЁННЫЙ РЕЗУЛЬТАТ ПОСЛЕДНЕГО ИНСТРУМЕНТА: ${if (lastToolResult.isBlank()) "(нет надёжно сохранённого результата)" else lastToolResult}
+            ${if (uncertainOutcome) "КРИТИЧЕСКИ ВАЖНО: процесс мог остановиться ПОСЛЕ выполнения последнего инструмента, но ДО надёжной записи его результата. Не повторяй этот активный шаг вслепую. Сначала используй свежий экран ниже как источник истины; если по нему нельзя понять исход — приостанови цель." else ""}
+
+            СВЕЖЕЕ СОСТОЯНИЕ ЭКРАНА:
+            ${if (screen.isBlank()) "(экран недоступен)" else screen}
+            КОНЕЦ СОСТОЯНИЯ ЭКРАНА.
+
+            Продолжай только незавершённую часть исходной цели.
+            Не повторяй успешно подтверждённые шаги без необходимости.
+            Если состояние экрана уже соответствует конечной цели, заверши задачу без нового действия.
+            Не считай старое подтверждение пользователя действующим после восстановления.
+            Для чувствительного действия запроси новое явное подтверждение.
+            ${if (automaticRecovery) "Это автоматическое низкорисковое восстановление: не выполняй click/input/back/scroll/change-volume/tap и другие неидемпотентные действия. Если они нужны — остановись и предложи пользователю явно продолжить цель." else "Пользователь явно инициировал продолжение; соблюдай обычные safety-confirmation правила."}
+            Используй максимум ОДИН device tool call в этом ходе.
+        """
+            .trimIndent()
+    }
+
+    private fun startDurableGoalForTool(
+        originalGoal: String,
+        silent: Boolean,
+        toolName: String
+    ): String? {
+
+        return try {
+            val item =
+                durableGoalStore
+                    .startGoal(
+                        command = originalGoal,
+                        source = if (silent) "text" else "voice",
+                        mode =
+                            if (
+                                toolName ==
+                                "execute_android_goal"
+                            ) {
+                                AyanaDurableGoalStore.MODE_ANDROID_GOAL
+                            } else {
+                                AyanaDurableGoalStore.MODE_ORCHESTRATOR
+                            },
+                        safeAutoResume =
+                            isSafeAutoResumeTool(
+                                toolName
+                            )
+                    )
+
+            val id =
+                item.optString(
+                    "id"
+                )
+                    .trim()
+                    .takeIf {
+                        it.isNotBlank()
+                    }
+
+            commandHistoryStore.addEvent(
+                activeCommandHistoryId,
+                state = "goal_started",
+                message = "Создана долговечная цель",
+                details = "goal_id=$id; tool=$toolName"
+            )
+
+            id
+        } catch (error: Exception) {
+            commandHistoryStore.addEvent(
+                activeCommandHistoryId,
+                state = "goal_store_error",
+                message = "Не удалось создать долговечную цель",
+                details = error.message.orEmpty().take(180)
+            )
+            null
+        }
+    }
+
+    private fun completeCurrentDurableGoal(
+        result: String
+    ) {
+
+        val id =
+            currentDurableGoalId
+                ?: return
+
+        try {
+            val snapshot =
+                durableGoalStore
+                    .getById(
+                        id
+                    )
+
+            if (
+                snapshot == null ||
+                snapshot.optString(
+                    "status"
+                ) !=
+                AyanaDurableGoalStore.STATUS_ACTIVE
+            ) {
+                currentDurableGoalId =
+                    null
+                return
+            }
+
+            val completed =
+                durableGoalStore
+                    .markCompleted(
+                        id,
+                        result
+                    )
+
+            commandHistoryStore.addEvent(
+                activeCommandHistoryId,
+                state =
+                    if (completed != null) {
+                        "goal_completed"
+                    } else {
+                        "goal_checkpoint_error"
+                    },
+                message =
+                    if (completed != null) {
+                        "Долговечная цель завершена"
+                    } else {
+                        "Результат достигнут, но completion checkpoint не сохранён"
+                    },
+                details = "goal_id=$id"
+            )
+        } catch (error: Exception) {
+            commandHistoryStore.addEvent(
+                activeCommandHistoryId,
+                state = "goal_checkpoint_error",
+                message = "Ошибка сохранения completion checkpoint",
+                details = error.message.orEmpty().take(220)
+            )
+        } finally {
+            // A persistence problem must never keep the in-memory executor
+            // running or cause the already completed action to be repeated in
+            // this process. Any valid .tmp/.bak generation is recovered later.
+            currentDurableGoalId =
+                null
+        }
+    }
+
+    private fun persistAndroidGoalCheckpoint(
+        goalId: String?,
+        checkpoint: JSONObject,
+        historyMessage: String
+    ): Boolean {
+
+        if (goalId.isNullOrBlank()) {
+            commandHistoryStore.addEvent(
+                activeCommandHistoryId,
+                state = "goal_checkpoint_error",
+                message = "Checkpoint отклонён: отсутствует goal_id",
+                details = checkpoint.toString().take(900)
+            )
+            return false
+        }
+
+        return try {
+            val saved =
+                durableGoalStore
+                    .checkpointAndroidStep(
+                        goalId,
+                        checkpoint
+                    ) !=
+                    null
+
+            commandHistoryStore.addEvent(
+                activeCommandHistoryId,
+                state =
+                    if (saved) {
+                        "goal_checkpoint"
+                    } else {
+                        "goal_checkpoint_error"
+                    },
+                message =
+                    if (saved) {
+                        historyMessage
+                    } else {
+                        "Не удалось сохранить Android checkpoint"
+                    },
+                details = checkpoint.toString().take(1400)
+            )
+
+            saved
+        } catch (error: Exception) {
+            commandHistoryStore.addEvent(
+                activeCommandHistoryId,
+                state = "goal_checkpoint_error",
+                message = "Ошибка сохранения Android checkpoint",
+                details = error.message.orEmpty().take(220)
+            )
+            false
+        }
+    }
+
+    private fun extractResultScreenPackage(
+        result: JSONObject
+    ): String =
+        result.optJSONObject(
+            "screen"
+        )
+            ?.optString(
+                "package"
+            )
+            .orEmpty()
+
+    private fun showDurableGoalStatus(
+        silent: Boolean
+    ) {
+
+        val goal =
+            durableGoalStore
+                .getCurrentForUi()
+
+        val text =
+            if (goal == null) {
+                "Сейчас нет сохранённой активной цели."
+            } else {
+                buildString {
+                    append(
+                        durableGoalStore
+                            .statusLabel(
+                                goal.status
+                            )
+                    )
+                    append(": ")
+                    append(goal.command)
+                    if (goal.planSize > 0) {
+                        append(". Сохранён шаг ")
+                        append(
+                            (goal.nextPlanStep + 1)
+                                .coerceAtMost(
+                                    goal.planSize
+                                )
+                        )
+                        append(" из ")
+                        append(goal.planSize)
+                    }
+                    if (goal.lastError.isNotBlank()) {
+                        append(". ")
+                        append(goal.lastError)
+                    }
+                }
+            }
+
+        respondAndResume(
+            text,
+            silent,
+            success = true
+        )
+    }
+
+    private fun cancelDurableGoalFromControl(
+        silent: Boolean
+    ) {
+
+        if (
+            currentAgentThread?.isAlive ==
+            true ||
+            currentDurableGoalId !=
+            null
+        ) {
+            cancelCurrentCommand(
+                source = "durable_goal"
+            )
+            return
+        }
+
+        val goal =
+            durableGoalStore
+                .getRecoverable()
+
+        prepareDurableControlHistory(
+            "Отменяю активную цель",
+            silent
+        )
+
+        if (goal == null) {
+            respondAndResume(
+                "Сейчас нет сохранённой активной цели.",
+                silent,
+                success = true
+            )
+            return
+        }
+
+        val cancelled =
+            try {
+                durableGoalStore
+                    .markCancelled(
+                        goal.optString(
+                            "id"
+                        ),
+                        "Отменена пользователем"
+                    ) !=
+                    null
+            } catch (error: Exception) {
+                commandHistoryStore.addEvent(
+                    activeCommandHistoryId,
+                    state = "goal_store_error",
+                    message = "Не удалось сохранить отмену активной цели",
+                    details = error.message.orEmpty().take(220)
+                )
+                false
+            }
+
+        currentDurableGoalId =
+            null
+
+        respondAndResume(
+            if (cancelled) {
+                "Активная цель отменена."
+            } else {
+                "Я остановила выполнение, но не смогла надёжно записать отмену цели. Новые действия не выполнялись."
+            },
+            silent,
+            success = cancelled
+        )
+    }
+
+    private fun isDurableGoalStatusPhrase(
+        normalized: String
+    ): Boolean =
+        normalized in
+            setOf(
+                "какая текущая задача",
+                "какая активная задача",
+                "какая текущая цель",
+                "какая активная цель",
+                "что с текущей задачей",
+                "что с активной задачей",
+                "что с текущей целью",
+                "покажи активную цель",
+                "покажи текущую цель"
+            )
+
+    private fun isDurableGoalResumePhrase(
+        normalized: String
+    ): Boolean =
+        normalized in
+            setOf(
+                "продолжи задачу",
+                "продолжи текущую задачу",
+                "продолжи активную задачу",
+                "продолжи цель",
+                "продолжи текущую цель",
+                "продолжи активную цель",
+                "возобнови задачу",
+                "возобнови текущую задачу",
+                "возобнови цель"
+            )
+
+    private fun isDurableGoalConfirmPhrase(
+        normalized: String
+    ): Boolean =
+        normalized in
+            setOf(
+                "подтверждаю продолжение задачи",
+                "подтверждаю продолжение цели",
+                "подтверждаю текущую задачу",
+                "подтверждаю текущую цель"
+            )
+
+    private fun isDurableGoalCancelPhrase(
+        normalized: String
+    ): Boolean =
+        normalized in
+            setOf(
+                "отмени текущую задачу",
+                "отмени активную задачу",
+                "отмени текущую цель",
+                "отмени активную цель",
+                "забудь текущую задачу",
+                "забудь активную цель"
+            )
+
+    private fun durableArgumentsForPersistence(
+        toolName: String,
+        arguments: JSONObject
+    ): JSONObject {
+
+        val copy =
+            try {
+                JSONObject(
+                    arguments.toString()
+                )
+            } catch (_: Exception) {
+                JSONObject()
+            }
+
+        if (
+            toolName ==
+            "input_screen_text" &&
+            copy.has(
+                "text"
+            )
+        ) {
+            copy.put(
+                "text",
+                "[не сохраняется]"
+            )
+        }
+
+        return copy
+    }
+
+    private fun isDurableDeviceTool(
+        toolName: String
+    ): Boolean =
+        toolName in
+            setOf(
+                "execute_android_goal",
+                "execute_android_plan",
+                "open_app",
+                "open_settings",
+                "open_app_info",
+                "open_app_settings",
+                "press_back",
+                "press_home",
+                "change_volume",
+                "click_text",
+                "youtube_search",
+                "google_search",
+                "map_search",
+                "get_screen_state",
+                "click_screen_element",
+                "input_screen_text",
+                "scroll_screen",
+                "tap_screen_coordinates"
+            )
+
+    private fun isSafeAutoResumeTool(
+        toolName: String
+    ): Boolean =
+        toolName in
+            setOf(
+                "execute_android_goal",
+                "open_app",
+                "open_settings",
+                "open_app_info",
+                "open_app_settings",
+                "press_home",
+                "get_screen_state"
+            )
+
 
     private fun shouldFinishAfterSingleTool(
         originalGoal: String,
@@ -6998,8 +9630,77 @@ class AyanaVoiceService : Service() {
 
     private fun executeAgentTool(
         name: String,
-        arguments: JSONObject
+        arguments: JSONObject,
+        trustedUserConfirmation: Boolean = false
     ): JSONObject {
+
+        // Confirmation is a local user-authored fact, never a model-authored
+        // field. Sensitive tools receive confirmed=true only on the explicit
+        // resume/confirm path above.
+        if (
+            name in
+            setOf(
+                "click_screen_element",
+                "tap_screen_coordinates",
+                "execute_android_plan"
+            )
+        ) {
+            arguments.put(
+                "confirmed",
+                trustedUserConfirmation
+            )
+        }
+
+        val safetyDecision =
+            try {
+                safetyPolicy
+                    .evaluateTool(
+                        name,
+                        arguments
+                    )
+            } catch (error: Exception) {
+                AyanaSafetyPolicy.Decision(
+                    allowed = false,
+                    requiresConfirmation = false,
+                    riskLevel = AyanaSafetyPolicy.RISK_PROHIBITED,
+                    riskName = "policy_error",
+                    reason = error.message
+                        ?: "Ошибка локальной политики безопасности"
+                )
+            }
+
+        if (!safetyDecision.allowed) {
+            commandHistoryStore.addEvent(
+                activeCommandHistoryId,
+                state = "safety_gate",
+                message = safetyDecision.riskName,
+                details = safetyDecision.reason.take(260)
+            )
+
+            return toolResult(
+                false,
+                safetyDecision.reason
+                    .ifBlank {
+                        "Действие остановлено локальной политикой безопасности AYANA."
+                    }
+            )
+                .put(
+                    "safety_blocked",
+                    true
+                )
+                .put(
+                    "risk_level",
+                    safetyDecision.riskLevel
+                )
+                .put(
+                    "risk_name",
+                    safetyDecision.riskName
+                )
+                .put(
+                    "requires_confirmation",
+                    safetyDecision.requiresConfirmation
+                )
+        }
 
         return try {
 
@@ -7013,10 +9714,48 @@ class AyanaVoiceService : Service() {
 
                 "execute_android_plan" -> {
 
-                    // Universal Android execution bridge. The arguments object is
-                    // itself the structured plan: { goal, max_actions, steps, ... }.
-                    // confirmed is consumed as execution permission and ignored by
-                    // the generic plan parser if it is otherwise unused.
+                    // Universal Android execution bridge. Persist the plan before
+                    // execution so an interrupted low-risk plan can resume from a
+                    // checkpoint instead of restarting the whole navigation.
+                    val durableId =
+                        currentDurableGoalId
+
+                    if (durableId != null) {
+                        val planSaved =
+                            try {
+                                durableGoalStore
+                                    .attachAndroidPlan(
+                                        id = durableId,
+                                        arguments = arguments,
+                                        plan = arguments
+                                    ) !=
+                                    null
+                            } catch (error: Exception) {
+                                commandHistoryStore.addEvent(
+                                    activeCommandHistoryId,
+                                    state = "goal_checkpoint_error",
+                                    message = "Android plan не сохранён перед выполнением",
+                                    details = error.message.orEmpty().take(220)
+                                )
+                                false
+                            }
+
+                        if (!planSaved) {
+                            return toolResult(
+                                false,
+                                "Android-план не выполнен: durable checkpoint плана не удалось сохранить."
+                            )
+                                .put(
+                                    "status",
+                                    "checkpoint_failed"
+                                )
+                                .put(
+                                    "checkpoint_failed",
+                                    true
+                                )
+                        }
+                    }
+
                     androidTaskEngine
                         .execute(
                             plan = arguments,
@@ -7025,7 +9764,17 @@ class AyanaVoiceService : Service() {
                                     .optBoolean(
                                         "confirmed",
                                         false
+                                    ),
+                            startIndex = 0,
+                            initialActionsUsed = 0,
+                            onCheckpoint =
+                                { checkpoint ->
+                                    persistAndroidGoalCheckpoint(
+                                        goalId = durableId,
+                                        checkpoint = checkpoint,
+                                        historyMessage = "Android plan checkpoint"
                                     )
+                                }
                         )
                 }
 
@@ -7432,6 +10181,53 @@ class AyanaVoiceService : Service() {
         val goalCommandToken =
             activeCommandToken
 
+        val durableId =
+            currentDurableGoalId
+
+        if (durableId != null) {
+            val planSaved =
+                try {
+                    durableGoalStore
+                        .attachAndroidPlan(
+                            id = durableId,
+                            arguments = arguments,
+                            plan = plan
+                        ) !=
+                        null
+                } catch (error: Exception) {
+                    commandHistoryStore.addEvent(
+                        activeCommandHistoryId,
+                        state = "goal_checkpoint_error",
+                        message = "Compiled Android plan не сохранён перед выполнением",
+                        details = error.message.orEmpty().take(220)
+                    )
+                    false
+                }
+
+            if (!planSaved) {
+                return toolResult(
+                    false,
+                    "Android-задача не запущена: compiled plan не удалось надёжно сохранить."
+                )
+                    .put(
+                        "status",
+                        "checkpoint_failed"
+                    )
+                    .put(
+                        "checkpoint_failed",
+                        true
+                    )
+                    .put(
+                        "replan_recommended",
+                        false
+                    )
+                    .put(
+                        "local_reply",
+                        "Я остановила Android-задачу до первого действия: план не удалось сохранить."
+                    )
+            }
+        }
+
         val result =
             AyanaAndroidTaskEngine(
                 screenIntelligence = screenIntelligence,
@@ -7491,7 +10287,17 @@ class AyanaVoiceService : Service() {
             )
                 .execute(
                     plan = plan,
-                    confirmed = false
+                    confirmed = false,
+                    startIndex = 0,
+                    initialActionsUsed = 0,
+                    onCheckpoint =
+                        { checkpoint ->
+                            persistAndroidGoalCheckpoint(
+                                goalId = durableId,
+                                checkpoint = checkpoint,
+                                historyMessage = "Android checkpoint"
+                            )
+                        }
                 )
 
         commandHistoryStore.addEvent(
@@ -10795,6 +13601,31 @@ class AyanaVoiceService : Service() {
         stopCurrentAudio()
         stopSherpaListening()
 
+        val durableId =
+            currentDurableGoalId
+
+        if (durableId != null) {
+            try {
+                durableGoalStore
+                    .markCancelled(
+                        durableId,
+                        "Команда остановлена пользователем ($source)"
+                    )
+            } catch (error: Exception) {
+                // STOP always wins over persistence. A broken goal checkpoint
+                // must never prevent immediate Agent/TTS cancellation.
+                commandHistoryStore.addEvent(
+                    activeCommandHistoryId,
+                    state = "goal_store_error",
+                    message = "STOP выполнен, но durable-cancel не записан",
+                    details = error.message.orEmpty().take(220)
+                )
+            } finally {
+                currentDurableGoalId =
+                    null
+            }
+        }
+
         val historyId =
             activeCommandHistoryId
 
@@ -10999,6 +13830,26 @@ class AyanaVoiceService : Service() {
         stopCancelListenerWatchdog()
         miniOrbController.hide()
 
+        try {
+            val durable =
+                durableGoalStore
+                    .getRecoverable()
+
+            if (durable != null) {
+                durableGoalStore
+                    .markCancelled(
+                        durable.optString(
+                            "id"
+                        ),
+                        "AYANA полностью остановлена пользователем"
+                    )
+            }
+        } catch (_: Exception) {
+        }
+
+        currentDurableGoalId =
+            null
+
         val historyId =
             activeCommandHistoryId
 
@@ -11137,6 +13988,14 @@ class AyanaVoiceService : Service() {
         miniOrbController
             .hide()
 
+        try {
+            durableGoalStore
+                .markInterruptedGoals(
+                    "service_destroyed"
+                )
+        } catch (_: Exception) {
+        }
+
         super.onDestroy()
     }
 
@@ -11150,6 +14009,15 @@ class AyanaVoiceService : Service() {
 
         const val ACTION_CANCEL_COMMAND =
             "kg.autonomous.agent.action.CANCEL_COMMAND"
+
+        const val ACTION_RESUME_GOAL =
+            "kg.autonomous.agent.action.RESUME_DURABLE_GOAL"
+
+        const val ACTION_CONFIRM_GOAL =
+            "kg.autonomous.agent.action.CONFIRM_DURABLE_GOAL"
+
+        const val ACTION_CANCEL_GOAL =
+            "kg.autonomous.agent.action.CANCEL_DURABLE_GOAL"
 
         const val ACTION_TEXT_COMMAND =
             "kg.autonomous.agent.action.TEXT_COMMAND"
@@ -11236,6 +14104,71 @@ class AyanaVoiceService : Service() {
                 "включи приложение ",
                 "открой приложение ",
                 "запусти приложение "
+            )
+
+        // Exact aliases already handled by the deterministic local `when (target)`
+        // router. Used only to repair a truncated «открой» prefix safely.
+        private val KNOWN_LOCAL_LAUNCH_ALIASES =
+            setOf(
+                "youtube",
+                "ютуб",
+                "chrome",
+                "хром",
+                "гугл хром",
+                "браузер",
+                "интернет",
+                "самсунг интернет",
+                "gmail",
+                "джимейл",
+                "почта",
+                "электронная почта",
+                "карты",
+                "google maps",
+                "гугл карты",
+                "play market",
+                "play store",
+                "плей маркет",
+                "гугл плей",
+                "камера",
+                "камеру",
+                "галерея",
+                "галерею",
+                "фото",
+                "фотографии",
+                "переводчик",
+                "переводчика",
+                "google переводчик",
+                "гугл переводчик",
+                "translate",
+                "google translate",
+                "google фото",
+                "гугл фото",
+                "файлы",
+                "мои файлы",
+                "калькулятор",
+                "календарь",
+                "часы",
+                "будильник",
+                "сообщения",
+                "смс",
+                "контакты",
+                "chatgpt",
+                "чат gpt",
+                "чатгпт",
+                "чат джипити",
+                "telegram",
+                "телеграм",
+                "whatsapp",
+                "ватсап",
+                "вотсап",
+                "google",
+                "гугл",
+                "диск",
+                "google диск",
+                "гугл диск",
+                "заметки",
+                "samsung notes",
+                "самсунг ноутс"
             )
 
         private val WAKE_VARIANTS =
