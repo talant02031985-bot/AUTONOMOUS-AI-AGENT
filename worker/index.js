@@ -1,4 +1,4 @@
-// AYANA Worker v7.7 — Capability Awareness v2.1 polish; generic-definition guard + compact self-autonomy; audio path unchanged
+// AYANA Worker v8.0 — Autonomous Core awareness; durable goals/checkpoints/recovery; audio path unchanged
 const ANDROID_GOAL_TOOL = {
   type: "function",
   name: "execute_android_goal",
@@ -532,54 +532,69 @@ Screen Intelligence v2:
 
 Безопасность:
 - Низкорисковые действия (открыть приложение, навигация, громкость, поиск, переход в настройки) можно выполнять без дополнительного подтверждения.
-- Не выполняй финансовые операции, ввод паролей, подтверждение платежей, удаление данных, отправку сообщений/писем или изменение критичных настроек без отдельного явного разрешения пользователя. Таких инструментов в этой версии вообще нет.
+- Не выполняй финансовые операции, ввод паролей, подтверждение платежей, удаление данных, отправку сообщений/писем или изменение критичных настроек без отдельного явного разрешения пользователя. Generic Android-инструменты дополнительно проходят локальный Safety Engine на устройстве.
 - Не пытайся обходить ограничения Android или разрешения.
 
 Ответы предназначены для озвучивания голосом Marin, поэтому говори естественно и обычно кратко. Не повторяй постоянно своё имя. Не используй Markdown без необходимости.
 `.trim();
 
 const AYANA_CURRENT_CAPABILITIES = `
-КАРТА ФАКТИЧЕСКОГО СОСТОЯНИЯ AYANA. ЭТО ФАКТЫ О ТЕКУЩЕЙ СБОРКЕ, А НЕ ИДЕИ НА БУДУЩЕЕ.
+КАРТА ФАКТИЧЕСКОГО СОСТОЯНИЯ AYANA. ЭТО ФАКТЫ О СБОРКЕ AYANA v10 AUTONOMOUS CORE, А НЕ ИДЕИ НА БУДУЩЕЕ.
 
 СТАТУС «ПОДТВЕРЖДЕНО НА УСТРОЙСТВЕ»:
 - голосовая активация по имени «Аяна» и локальное распознавание команд;
 - фирменный голос Marin с потоковым PCM-воспроизведением;
 - голосовой STOP во время THINKING и во время активной речи Marin;
-- STOP во время речи Marin прошёл серию 5 из 5, а тест на ложную остановку от собственного слова «стоп» прошёл без отмены;
+- STOP во время речи Marin прошёл серию 5 из 5, а false-cancel тест собственного слова «стоп» прошёл без отмены;
 - VOICE_COMMUNICATION + MODE_IN_COMMUNICATION + AcousticEchoCanceler + NoiseSuppressor работают в barge-in аудиоконтуре;
-- тихий текстовый режим: текстовые команды выполняются без обязательной озвучки;
-- один глобальный плавающий Orb, который возвращается после выхода из системных экранов, где Android может временно скрывать overlay;
-- прямые локальные Android-команды и системные настройки работают без Agent Core для поддерживаемых маршрутов;
-- журнал команд сохраняет SUCCESS / ERROR / CANCELLED, события и время этапов.
+- тихий текстовый режим;
+- один глобальный плавающий Orb;
+- прямые локальные Android-команды и системные настройки;
+- журнал команд SUCCESS / ERROR / CANCELLED с техническими событиями и таймингами.
 
 СТАТУС «РЕАЛИЗОВАНО В ТЕКУЩЕЙ АРХИТЕКТУРЕ»:
 - Goal Compiler + Android Task Engine + Accessibility + Screen Intelligence для многошаговой навигации и проверки прогресса;
+- Durable Goal Store: одна активная многошаговая цель сохраняется на диск как отдельная сущность;
+- checkpoint после локальных Android-шагов и после инструментальных шагов Agent Core;
+- checkpointing работает fail-closed: если состояние после шага не удалось надёжно записать, следующие Android/Agent Core действия останавливаются вместо продолжения с рассинхронизированным состоянием;
+- восстановление сохранённой цели после уничтожения процесса с ограниченным числом попыток и anti-loop защитой;
+- автоматическое восстановление жёстко ограничено низкорисковым allowlist инструментов; click/input/back/scroll/change-volume/tap автоматически после сбоя не выполняются;
+- сохранение текущего шага Android-плана, суммарного бюджета действий, execution trace, последней ошибки и причины восстановления;
+- если строгий Goal Compiler/Task Engine заблокирован изменившимся экраном, разрешён один контролируемый replan-fallback по свежему состоянию экрана; повторный fallback запрещён;
+- после полной перезагрузки устройства цель сохраняется как «можно продолжить», но не запускает микрофонный foreground-service самовольно; продолжение инициирует пользователь;
+- старое подтверждение чувствительного действия не переносится через восстановление: требуется новое явное подтверждение;
+- пользователь может посмотреть активную цель, продолжить/подтвердить её или отменить из раздела задач и голосовой/текстовой командой;
+- recovery-финал имеет машинный статус complete/pause: неоднозначный текст никогда не превращается в ложный SUCCESS;
+- явная смена темы после self-review (например, общее определение агента или улучшения внешнего приложения) разрывает старый Agent Core response-chain, чтобы контекст AYANA не протекал в новую тему;
 - локальная долговременная память: запомнить, вспомнить, забыть;
 - напоминания и повторяющиеся задачи: создание, просмотр, удаление, расписание и восстановление после перезагрузки;
 - экран диагностики основных разрешений и служб;
-- безопасные подтверждения для чувствительных действий Screen Intelligence;
+- Safety Engine v1: отдельный локальный fail-closed policy gate с четырьмя уровнями риска (read-only / safe action / confirmation required / prohibited), который проверяет device tools независимо от инструкций модели;
+- Safety Engine блокирует generic-click по явно опасным целям, неизвестные инструменты и ввод паролей/PIN/OTP/SMS-кодов, данных карт, API-ключей и токенов; старые локальные команды «нажми/выбери» проходят тот же policy gate;
+- safety confirmations для чувствительных семантических действий Screen Intelligence;
 - быстрый локальный калькулятор и локальные роутеры типовых Android-команд;
 - рабочий язык текущей версии — только русский.
 
 СТАТУС «ЧАСТИЧНО РЕАЛИЗОВАНО / НУЖНО УСИЛИТЬ»:
-- автономное выполнение многошаговых целей уже возможно, но активная сложная цель не является полноценной долговечной задачей, которая гарантированно переживает перезапуск процесса и продолжает выполнение с сохранённого шага;
-- проверка результата Android-действий существует, но её покрытие и надёжность можно расширять для разных экранов и приложений;
-- память существует, но пользовательское управление памятью в интерфейсе пока ограничено: нужны более удобные поиск, исправление и точечное удаление;
-- задачи и напоминания существуют, но интерфейсу ещё полезны редактирование, перенос, включение/выключение и отметка выполнения;
-- диагностика существует, но можно сделать более подробную самодиагностику по этапам Agent Core / Android / TTS / распознавание;
+- durable goal runner уже сохраняет и восстанавливает цель, но покрытие перепланирования после сильно изменившегося интерфейса можно расширять;
+- проверка результата Android-действий существует и строгая для Goal Compiler/Task Engine, но покрытие разных сторонних приложений можно расширять;
+- память существует, но пользовательскому интерфейсу нужны более удобные поиск, исправление, категории и точечное удаление;
+- задачи и напоминания существуют, но интерфейсу полезны редактирование, перенос, включение/выключение и отметка выполнения;
+- диагностика уже показывает Autonomous Core и Safety Engine, но можно развить единый health/status экран Agent Core / Android / TTS / STT / durable goals с измеримыми health-checks;
 - локальное распознавание и fuzzy-router работают, но устойчивость к шуму и редким искажениям Sherpa можно продолжать улучшать;
-- проактивность сейчас в основном ограничена напоминаниями и явно запущенными пользователем задачами.
+- проактивность сейчас ограничена напоминаниями и явно запущенными пользователем целями; широкого фонового наблюдения за внешними событиями пока нет.
 
 СТАТУС «ПОКА НЕ РЕАЛИЗОВАНО КАК ГОТОВАЯ ФУНКЦИЯ»:
 - полноценный офлайн-ИИ для произвольных вопросов;
-- безопасные пользовательские интеграции с почтой, календарём, файлами и внешними сервисами как часть Android-приложения AYANA;
+- безопасные встроенные интеграции AYANA с почтой, календарём, файлами и внешними сервисами;
+- защищённое хранилище учётных данных/токенов интеграций через Android Keystore и отдельный permission layer для таких подключений;
 - облачное резервное копирование памяти, задач и настроек;
 - полноценная обработка камеры, фото и документов внутри Android-приложения;
-- пользовательские темы и выбор другого фирменного голоса;
+- расширенный Vision-путь для понимания сложных экранов, когда Accessibility недостаточно;
+- конструктор сложных пользовательских сценариев/рутин и условных автоматизаций;
+- широкая самостоятельная проактивность/мониторинг внешних событий вне явно настроенных задач;
 - универсальная безопасная отмена уже совершённого произвольного Android-действия;
-- конструктор сложных пользовательских сценариев/рутин;
-- постоянный durable goal runner: сохранение состояния произвольной активной многошаговой цели на диск и автоматическое продолжение после перезапуска;
-- широкая самостоятельная проактивность/мониторинг внешних событий вне явно настроенных задач и напоминаний.
+- большой каталог специализированных action executors для внешних приложений/API за пределами текущего Android-навигационного набора.
 `.trim();
 
 const AYANA_CAPABILITY_AWARENESS_INSTRUCTIONS = `
@@ -588,13 +603,14 @@ const AYANA_CAPABILITY_AWARENESS_INSTRUCTIONS = `
 1. Всегда сверяй ответ с КАРТОЙ ФАКТИЧЕСКОГО СОСТОЯНИЯ AYANA выше. Не отвечай как абстрактная новая ИИ-система «с нуля».
 2. Никогда не называй отсутствующей функцию, которая уже указана как «подтверждено», «реализовано» или «частично реализовано».
 3. Никогда не называй «подтверждённым на устройстве» то, что в карте отмечено только как реализованное или частичное.
-4. Если пользователь спрашивает «что нужно, чтобы стать автономным ИИ-агентом», исходная позиция такая: AYANA УЖЕ является контролируемым Android ИИ-агентом с частичной автономностью. Объясни, что нужно не «создать всё с нуля», а усилить долговечность целей, восстановление после ошибок/перезапуска, покрытие проверки результата, управление памятью/задачами и безопасные внешние интеграции.
+4. Если пользователь спрашивает «что нужно, чтобы стать автономным ИИ-агентом», исходная позиция такая: AYANA УЖЕ является контролируемым Android ИИ-агентом с частичной автономностью и теперь имеет durable goals/checkpoints/recovery. Следующий разрыв — расширить перепланирование и проверку разных приложений, затем безопасные внешние интеграции, защищённые credentials, offline fallback, vision/documents и управляемую проактивность.
 5. Если пользователь спрашивает «что ты умеешь», перечисляй прежде всего уже реализованные возможности. Не засоряй ответ будущими идеями, если он их не спрашивал.
 6. Если спрашивает «чего тебе не хватает / какие ограничения», перечисляй прежде всего статусы «частично» и «не реализовано», а не повторяй уже готовые функции как отсутствующие.
 7. Если спрашивает «что улучшить», формулируй существующие вещи как «улучшить / расширить / усилить», а отсутствующие — как «добавить».
-8. Приоритет развития после текущей стабильной базы: надёжное долговременное выполнение сложных целей; восстановление/перепланирование; проверяемость действий; управление памятью и задачами; самодиагностика; затем безопасные внешние интеграции и offline fallback.
-9. STOP во время речи Marin уже подтверждён 5/5 и false-cancel тест пройден. Не представляй саму функцию STOP как нерешённую. Допустимо предлагать только дальнейшее повышение устойчивости распознавания в шуме.
-10. По умолчанию отвечай компактно. Для вопроса об автономности удобно разделить ответ на «Уже есть», «Нужно усилить», «Пока нет», но не обязан использовать именно эти заголовки, особенно в голосовом режиме.
+8. Safety Engine с локальным fail-closed policy gate уже реализован в Autonomous Core. Не предлагай «добавить Safety Engine» как отсутствующую функцию; можно предлагать расширять его политики и покрытие новых инструментов.
+9. Приоритет развития после Autonomous Core: расширение перепланирования/валидации; управление памятью и задачами; единая самодиагностика; безопасные внешние интеграции + Keystore/permission layer; offline fallback; vision/documents; сценарии и управляемая проактивность.
+10. STOP во время речи Marin уже подтверждён 5/5 и false-cancel тест пройден. Не представляй саму функцию STOP как нерешённую. Допустимо предлагать только дальнейшее повышение устойчивости распознавания в шуме.
+11. По умолчанию отвечай компактно. Для вопроса об автономности удобно разделить ответ на «Уже есть», «Нужно усилить», «Пока нет», но не обязан использовать именно эти заголовки, особенно в голосовом режиме.
 `.trim();
 
 const AYANA_SELF_REVIEW_INSTRUCTIONS = `
@@ -602,7 +618,7 @@ const AYANA_SELF_REVIEW_INSTRUCTIONS = `
 1. Сначала сверяй предложение с картой фактического состояния.
 2. Не предлагай как новую функцию то, что уже реализовано. Если существующая функция требует улучшения, так и скажи: «улучшить существующую ...», а не «добавить ...».
 3. Не называй голосовой STOP нерешённой функцией: он подтверждён на устройстве. Можно улучшать только устойчивость распознавания в сложной акустике.
-4. Приоритеты: долговечность многошаговых целей и восстановление после сбоев, проверяемость Android-действий, качество распознавания, понятная самодиагностика, управление памятью и задачами, затем безопасные внешние интеграции.
+4. Durable goals, восстановление и отдельный Safety Engine уже входят в Autonomous Core. Следующие приоритеты: расширенное перепланирование/проверяемость Android-действий, качество распознавания, единая самодиагностика, управление памятью и задачами, затем безопасные внешние интеграции/credentials, offline и vision.
 5. По умолчанию дай 3–6 наиболее полезных пунктов, а не длинный список из 10–15 общих идей.
 6. Разделяй «усилить существующее» и «добавить новое», если это делает ответ точнее.
 `.trim();
@@ -611,7 +627,7 @@ const AYANA_SELF_AUTONOMY_COMPACT_INSTRUCTIONS = `
 Если вопрос именно о том, что AYANA нужно для большей автономности или насколько она автономна сейчас:
 1. Начни с точного статуса: база контролируемого Android ИИ-агента уже реализована, автономность сейчас частичная.
 2. По умолчанию дай 4–6 коротких пунктов и не пересказывай всю карту возможностей.
-3. Сосредоточься на следующем разрыве: durable goal runner, восстановление/перепланирование, проверка результата, управление памятью/задачами, безопасные интеграции/offline fallback.
+3. Durable goal runner уже реализован в Autonomous Core. Сосредоточься на следующем разрыве: расширенное перепланирование/проверка результата, управление памятью/задачами, безопасные интеграции и credentials, offline fallback, vision/documents и управляемая проактивность.
 4. Для обычного текстового вопроса старайся уложиться примерно в 120–160 слов. Для голоса — ещё короче.
 5. Если пользователь явно просит подробно/глубоко, ограничение длины можно снять.
 `.trim();
@@ -621,6 +637,88 @@ const GENERIC_AGENT_DEFINITION_GUARD = `
 Ответь только на общий вопрос. Не переходи в конце ответа к фразам «я уже умею...», «у меня есть...», возможностям, ограничениям, версиям или планам AYANA, если пользователь сам об этом не спросил.
 Дай нейтральное определение и основные признаки понятия.
 `.trim();
+
+const AYANA_DURABLE_RECOVERY_INSTRUCTIONS = `
+ВНУТРЕННИЙ РЕЖИМ AUTONOMOUS CORE: ПРОДОЛЖЕНИЕ ИЛИ ВОССТАНОВЛЕНИЕ УЖЕ СОХРАНЁННОЙ ЦЕЛИ.
+
+1. Это не новый пользовательский запрос и не повод начинать задачу заново. Исходная цель, подтверждённые шаги, checkpoint и свежее состояние экрана приведены во входе.
+2. В этом ходе разрешён максимум ОДИН device tool call. После результата Android снова даст свежий checkpoint и отдельный следующий ход.
+3. Не повторяй шаг, который уже отмечен как успешно выполненный. Не сбрасывайся на начало маршрута только потому, что текущий экран изменился.
+4. Используй только device tools. Web search для восстановления Android-цели не нужен и не должен использоваться.
+5. Если текущий экран уже дан во входе, не вызывай get_screen_state только ради повторного чтения. Читай экран заново лишь если контекст отсутствует, явно устарел или результат последнего действия неожиданен.
+6. Никакое подтверждение чувствительного действия из прошлой сессии не считается действующим после восстановления. Если следующий шаг чувствительный, остановись и запроси новое явное подтверждение.
+7. Не вводи секреты, пароли, PIN, OTP, банковские данные или токены. Не обходи системные разрешения, биометрию и экраны безопасности.
+8. Маркер [[AYANA_GOAL_COMPLETE]] разрешён только при проверяемом свидетельстве завершения: подтверждённый успешный результат инструмента или свежее состояние экрана, явно соответствующее конечной цели. Не объявляй COMPLETE только по предположению. Если последний инструмент завершился ошибкой и независимого подтверждения на свежем экране нет — используй PAUSE.
+9. Если цель уже достигнута и новый tool не нужен, начни финальный ответ РОВНО с маркера [[AYANA_GOAL_COMPLETE]], затем коротко сообщи результат.
+10. Если безопасного пути нет, требуется явное действие пользователя или следующий шаг нельзя надёжно проверить, начни финальный ответ РОВНО с маркера [[AYANA_GOAL_PAUSE]], затем коротко объясни, что нужно.
+11. Никогда не используй эти два маркера в обычных пользовательских ответах — только во внутреннем recovery/continuation режиме.
+12. Если вход прямо запрещает повторный execute_android_goal после блокировки локального плана, не вызывай его снова; используй максимум один другой безопасный device tool или остановись.
+`.trim();
+
+function isDurableRecoveryRequest(message = "") {
+  const n = normalizeIntentText(message);
+  return n.startsWith("восстановление сохраненной цели ayana")
+    || n.startsWith("восстановление android-цели ayana")
+    || n.startsWith("продолжение многошаговой задачи ayana");
+}
+
+function isAutomaticDurableRecoveryRequest(message = "") {
+  const n = normalizeIntentText(message);
+  return isDurableRecoveryRequest(message)
+    && n.includes("автоматический_низкорисковый");
+}
+
+function isExplicitExternalImprovementRequest(message = "") {
+  const n = normalizeIntentText(message);
+  if (!n) return false;
+
+  const asksImprovement = /(улучш|доработ|измен|развит|что добавить|чего не хватает)/.test(n);
+  if (!asksImprovement || isAyanaCapabilityRequest(message)) return false;
+
+  // A clearly named external app/product is a new subject. Do not drag a
+  // previous AYANA self-review response into this standalone evaluation.
+  return /(youtube|ютуб|telegram|телеграм|chrome|хром|whatsapp|ватсап|instagram|инстаграм|приложени[ея]\s+[\p{L}\p{N}])/u.test(n);
+}
+
+const DURABLE_AUTO_SAFE_TOOL_NAMES = new Set([
+  "open_app",
+  "open_settings",
+  "open_app_info",
+  "open_app_settings",
+  "press_home",
+  "get_screen_state"
+]);
+
+function durableAutoSafeTools() {
+  return DEVICE_TOOLS.filter(tool => DURABLE_AUTO_SAFE_TOOL_NAMES.has(tool.name));
+}
+
+function parseDurableFinalReply(reply = "") {
+  const raw = String(reply || "").trim();
+  const completeMarker = "[[AYANA_GOAL_COMPLETE]]";
+  const pauseMarker = "[[AYANA_GOAL_PAUSE]]";
+
+  if (raw.startsWith(completeMarker)) {
+    return {
+      goal_status: "success",
+      reply: raw.slice(completeMarker.length).trim() || "Готово."
+    };
+  }
+
+  if (raw.startsWith(pauseMarker)) {
+    return {
+      goal_status: "paused",
+      reply: raw.slice(pauseMarker.length).trim() || "Цель сохранена и приостановлена."
+    };
+  }
+
+  // Fail safe: a recovery turn may never silently convert an ambiguous natural
+  // language final into durable SUCCESS. Missing protocol => keep goal paused.
+  return {
+    goal_status: "paused",
+    reply: raw || "Цель сохранена и приостановлена: не удалось надёжно подтвердить завершение."
+  };
+}
 
 const AYANA_VOICE_STYLE = `
 РЕЖИМ ОТВЕТА: ГОЛОС.
@@ -858,9 +956,14 @@ ${memoryContext}
     input = contextParts.join("\n\n");
   }
 
-  const androidNavigationMode = isLikelyAndroidNavigation(message || "");
+  const durableRecoveryMode = isDurableRecoveryRequest(message || "");
+  const automaticDurableRecoveryMode = isAutomaticDurableRecoveryRequest(message || "");
+  const androidNavigationMode = !durableRecoveryMode
+    && isLikelyAndroidNavigation(message || "");
   const normalizedMessage = normalizeIntentText(message || "");
   const genericAgentDefinitionMode = isGenericAgentDefinitionRequest(message || "");
+  const explicitExternalImprovementMode = isExplicitExternalImprovementRequest(message || "");
+  const dropPreviousContext = genericAgentDefinitionMode || explicitExternalImprovementMode;
   const capabilityFollowUpMode = Boolean(previousResponseId)
     && !genericAgentDefinitionMode
     && String(message || "").length <= 160
@@ -876,7 +979,8 @@ ${memoryContext}
   const selfAutonomyMode = capabilityMode
     && isAyanaAutonomyRequest(message || "");
   const deepRequest = isDeepRequest(message || "");
-  const fastEverydayMode = !androidNavigationMode
+  const fastEverydayMode = !durableRecoveryMode
+    && !androidNavigationMode
     && !deepRequest
     && (capabilityMode || isFastEverydayRequest(message || "", source));
 
@@ -900,6 +1004,10 @@ ${selfAutonomyMode ? AYANA_SELF_AUTONOMY_COMPACT_INSTRUCTIONS : ""}`
     ? `\n\n${GENERIC_AGENT_DEFINITION_GUARD}`
     : "";
 
+  const recoveryInstructions = durableRecoveryMode
+    ? `\n\n${AYANA_DURABLE_RECOVERY_INSTRUCTIONS}`
+    : "";
+
   const payload = {
     model: androidNavigationMode || fastEverydayMode
       ? "gpt-5.6-luna"
@@ -915,10 +1023,12 @@ ${selfAutonomyMode ? AYANA_SELF_AUTONOMY_COMPACT_INSTRUCTIONS : ""}`
 ${ANDROID_GOAL_V7_INSTRUCTIONS}`
       : `${AGENT_INSTRUCTIONS}
 
-${styleInstructions}${productInstructions}${scopeInstructions}`,
+${styleInstructions}${productInstructions}${scopeInstructions}${recoveryInstructions}`,
     input,
     max_output_tokens: androidNavigationMode
       ? 260
+      : durableRecoveryMode
+        ? (source === "voice" ? 420 : 520)
       : deepRequest
         ? (source === "voice" ? 650 : 1600)
         : source === "voice"
@@ -932,12 +1042,17 @@ ${styleInstructions}${productInstructions}${scopeInstructions}`,
                 : fastEverydayMode
               ? 700
               : 1000,
-    store: !androidNavigationMode
+    store: !androidNavigationMode && !durableRecoveryMode
   };
 
   if (androidNavigationMode) {
     payload.tools = [ANDROID_GOAL_TOOL];
     payload.tool_choice = { type: "function", name: "execute_android_goal" };
+  } else if (durableRecoveryMode) {
+    payload.tools = automaticDurableRecoveryMode
+      ? durableAutoSafeTools()
+      : DEVICE_TOOLS;
+    payload.tool_choice = "auto";
   } else if (!fastEverydayMode && !capabilityMode) {
     payload.tools = [
       { type: "web_search" },
@@ -946,7 +1061,19 @@ ${styleInstructions}${productInstructions}${scopeInstructions}`,
     payload.tool_choice = "auto";
   }
 
-  if (previousResponseId && !androidNavigationMode) {
+  // AYANA executes and validates one device transition at a time. Disabling
+  // parallel tool calls prevents multiple actions from being planned against
+  // the same stale Android screen before the first result is observed.
+  if (payload.tools) {
+    payload.parallel_tool_calls = false;
+  }
+
+  if (
+    previousResponseId
+    && !androidNavigationMode
+    && !durableRecoveryMode
+    && !dropPreviousContext
+  ) {
     payload.previous_response_id = previousResponseId;
   }
 
@@ -982,6 +1109,18 @@ ${styleInstructions}${productInstructions}${scopeInstructions}`,
   }
 
   const reply = extractOutputText(data);
+
+  if (durableRecoveryMode) {
+    const durableFinal = parseDurableFinalReply(reply);
+
+    return Response.json({
+      ok: true,
+      type: "durable_final",
+      response_id: data.id,
+      goal_status: durableFinal.goal_status,
+      reply: durableFinal.reply
+    });
+  }
 
   return Response.json({
     ok: true,
@@ -1125,7 +1264,7 @@ export default {
         ok: true,
         service: "AYANA AI",
         ai: "ready",
-        agent_core: "v6.0-android-task-engine",
+        agent_core: "v8.0-autonomous-core",
         voice: "marin"
       });
     }
