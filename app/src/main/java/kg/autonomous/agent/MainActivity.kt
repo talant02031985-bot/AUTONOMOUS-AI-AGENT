@@ -61,6 +61,7 @@ class MainActivity : AppCompatActivity() {
     private lateinit var statusDot: View
     private var homeStateTitle:
         TextView? = null
+    private lateinit var cancelCommandButton: Button
     private lateinit var stopButton: Button
 
     private lateinit var textModeButton: TextView
@@ -179,6 +180,7 @@ class MainActivity : AppCompatActivity() {
                         AyanaVoiceService.STATE_ERROR,
                         AyanaVoiceService.STATE_TEXT,
                         AyanaVoiceService.STATE_SPEAKING,
+                        AyanaVoiceService.STATE_CANCELLED,
                         AyanaVoiceService.STATE_STOPPED
                     )
                 ) {
@@ -277,10 +279,8 @@ class MainActivity : AppCompatActivity() {
 
         ayanaPreferences.miniOrbEnabled = true
 
-        if (AyanaVoiceService.isRunning) {
-            refreshMiniOrb()
-        }
-
+        // The VoiceService is the only lifecycle owner of the global Orb.
+        // Resuming the Activity must never create/refresh an overlay instance.
         renderCurrentPage()
     }
 
@@ -680,6 +680,48 @@ class MainActivity : AppCompatActivity() {
             }
         )
 
+        cancelCommandButton =
+            Button(this).apply {
+                text = "Стоп команды"
+                textSize = 14f
+                isAllCaps = false
+                setTextColor(
+                    Color.parseColor("#FCD34D")
+                )
+                background =
+                    softDrawable(
+                        "#1C1609",
+                        "#6B4D18",
+                        14
+                    )
+                isEnabled =
+                    isCommandBusyState(
+                        AyanaVoiceService.currentStatusState
+                    )
+                alpha =
+                    if (
+                        isEnabled
+                    ) {
+                        1.0f
+                    } else {
+                        0.45f
+                    }
+                setOnClickListener {
+                    cancelCurrentCommand()
+                }
+            }
+
+        side.addView(
+            cancelCommandButton,
+            LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                dp(44)
+            ).apply {
+                bottomMargin =
+                    dp(7)
+            }
+        )
+
         stopButton =
             Button(this).apply {
                 text = "Остановить AYANA"
@@ -694,6 +736,16 @@ class MainActivity : AppCompatActivity() {
                         "#56303A",
                         14
                     )
+                isEnabled =
+                    AyanaVoiceService.isRunning
+                alpha =
+                    if (
+                        isEnabled
+                    ) {
+                        1.0f
+                    } else {
+                        0.45f
+                    }
                 setOnClickListener {
                     stopAyanaService()
                 }
@@ -3326,6 +3378,7 @@ class MainActivity : AppCompatActivity() {
                     "running"
                 )
             val running = status == "running"
+            val cancelled = status == "cancelled"
             val duration =
                 record.optLong(
                     "duration_ms",
@@ -3365,6 +3418,7 @@ class MainActivity : AppCompatActivity() {
                     text =
                         when {
                             running -> "●  В РАБОТЕ"
+                            cancelled -> "■  ОСТАНОВЛЕНО ПОЛЬЗОВАТЕЛЕМ"
                             success -> "✓  ВЫПОЛНЕНО"
                             else -> "!  ОШИБКА / НЕ ЗАВЕРШЕНО"
                         }
@@ -3374,6 +3428,7 @@ class MainActivity : AppCompatActivity() {
                         Color.parseColor(
                             when {
                                 running -> "#67E8F9"
+                                cancelled -> "#FCD34D"
                                 success -> "#86EFAC"
                                 else -> "#FCA5A5"
                             }
@@ -3494,7 +3549,7 @@ class MainActivity : AppCompatActivity() {
                 Triple(
                     "Orb AYANA",
                     true,
-                    "Один встроенный Orb на главном экране • overlay-кнопки отключены"
+                    "Один глобальный Orb поверх всех окон • управляется только голосовым сервисом"
                 ),
                 Triple(
                     "Точные напоминания",
@@ -4192,6 +4247,17 @@ class MainActivity : AppCompatActivity() {
             stopButton.alpha =
                 1.0f
 
+            if (
+                ::cancelCommandButton.isInitialized
+            ) {
+
+                cancelCommandButton.isEnabled =
+                    false
+
+                cancelCommandButton.alpha =
+                    0.45f
+            }
+
             setStatus(
                 "Жду: «Аяна»",
                 AyanaVoiceService.STATE_LISTENING
@@ -4206,32 +4272,96 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    private fun stopAyanaService() {
+    private fun cancelCurrentCommand() {
 
-        val stopIntent =
+        if (
+            !AyanaVoiceService.isRunning ||
+            !isCommandBusyState(
+                AyanaVoiceService.currentStatusState
+            )
+        ) {
+            return
+        }
+
+        val intent =
             Intent(
                 this,
                 AyanaVoiceService::class.java
             ).apply {
 
                 action =
-                    AyanaVoiceService.ACTION_STOP
+                    AyanaVoiceService.ACTION_CANCEL_COMMAND
             }
 
         try {
 
             startService(
-                stopIntent
+                intent
             )
 
         } catch (_: Exception) {
+        }
+    }
 
-            stopService(
+    private fun stopAyanaService() {
+
+        // Critical lifecycle rule: do not start AyanaVoiceService merely to
+        // deliver STOP when it is already stopped. That was the source of
+        // repeated service creation and duplicated overlay Orbs.
+        if (
+            AyanaVoiceService.isRunning
+        ) {
+
+            val stopIntent =
                 Intent(
                     this,
                     AyanaVoiceService::class.java
+                ).apply {
+
+                    action =
+                        AyanaVoiceService.ACTION_STOP
+                }
+
+            try {
+
+                startService(
+                    stopIntent
                 )
-            )
+
+            } catch (_: Exception) {
+
+                try {
+                    stopService(
+                        Intent(
+                            this,
+                            AyanaVoiceService::class.java
+                        )
+                    )
+                } catch (_: Exception) {
+                }
+            }
+        }
+
+        if (
+            ::cancelCommandButton.isInitialized
+        ) {
+
+            cancelCommandButton.isEnabled =
+                false
+
+            cancelCommandButton.alpha =
+                0.45f
+        }
+
+        if (
+            ::stopButton.isInitialized
+        ) {
+
+            stopButton.isEnabled =
+                false
+
+            stopButton.alpha =
+                0.45f
         }
 
         setStatus(
@@ -4258,6 +4388,64 @@ class MainActivity : AppCompatActivity() {
 
         homeStateTitle?.text =
             stateTitle(state)
+
+        if (
+            ::cancelCommandButton.isInitialized
+        ) {
+
+            val busy =
+                isCommandBusyState(
+                    state
+                ) &&
+                    AyanaVoiceService.isRunning
+
+            cancelCommandButton.isEnabled =
+                busy
+
+            cancelCommandButton.alpha =
+                if (
+                    busy
+                ) {
+                    1.0f
+                } else {
+                    0.45f
+                }
+        }
+
+        if (
+            ::stopButton.isInitialized
+        ) {
+
+            val running =
+                state !=
+                    AyanaVoiceService.STATE_STOPPED &&
+                    AyanaVoiceService.isRunning
+
+            stopButton.isEnabled =
+                running
+
+            stopButton.alpha =
+                if (
+                    running
+                ) {
+                    1.0f
+                } else {
+                    0.45f
+                }
+        }
+    }
+
+    private fun isCommandBusyState(
+        state: String
+    ): Boolean {
+
+        return state in
+            setOf(
+                AyanaVoiceService.STATE_COMMAND,
+                AyanaVoiceService.STATE_THINKING,
+                AyanaVoiceService.STATE_EXECUTING,
+                AyanaVoiceService.STATE_SPEAKING
+            )
     }
 
     private fun stateTitle(
@@ -4291,6 +4479,9 @@ class MainActivity : AppCompatActivity() {
 
             AyanaVoiceService.STATE_ERROR ->
                 "Нужна помощь"
+
+            AyanaVoiceService.STATE_CANCELLED ->
+                "Команда остановлена"
 
             AyanaVoiceService.STATE_STOPPED ->
                 "Остановлена"
@@ -4332,6 +4523,9 @@ class MainActivity : AppCompatActivity() {
 
                 AyanaVoiceService.STATE_ERROR ->
                     "#EF4444"
+
+                AyanaVoiceService.STATE_CANCELLED ->
+                    "#F59E0B"
 
                 AyanaVoiceService.STATE_STOPPED ->
                     "#64748B"
