@@ -21,17 +21,17 @@ import kotlin.math.abs
 import kotlin.math.sin
 
 /**
- * AYANA Floating Orb v2
+ * AYANA Floating Orb v3 — SINGLE INSTANCE.
  *
- * One process-wide overlay only.
- * - TYPE_APPLICATION_OVERLAY: visible above apps and launcher.
- * - Draggable anywhere on screen.
- * - Position persists across app/service restarts.
- * - Tap opens AYANA.
- * - State-driven animation: listening / command / thinking / executing /
- *   success / speaking / error / stopped.
+ * Rules:
+ * 1) exactly one overlay View per app process;
+ * 2) STOPPED always removes the overlay;
+ * 3) repeated refresh() only updates the existing View;
+ * 4) drag position is persisted;
+ * 5) tapping the Orb opens AYANA.
  *
- * No long-press hide gesture: the Orb should not disappear accidentally.
+ * The service owns WHEN the Orb exists. This controller only owns HOW it is
+ * rendered. It never starts/stops AyanaVoiceService itself.
  */
 class AyanaMiniOrbController(
     context: Context
@@ -40,21 +40,30 @@ class AyanaMiniOrbController(
     private val appContext =
         context.applicationContext
 
-    private val windowManager =
-        appContext.getSystemService(
-            WindowManager::class.java
-        )
-
     private val mainHandler =
         Handler(
             Looper.getMainLooper()
         )
 
-    private val positionPrefs =
+    private val prefs =
         appContext.getSharedPreferences(
-            "ayana_floating_orb",
+            PREFS_NAME,
             Context.MODE_PRIVATE
         )
+
+    fun canDrawOverlays():
+        Boolean {
+
+        return if (
+            Build.VERSION.SDK_INT >= 23
+        ) {
+            Settings.canDrawOverlays(
+                appContext
+            )
+        } else {
+            true
+        }
+    }
 
     fun refresh(
         enabled: Boolean,
@@ -65,6 +74,7 @@ class AyanaMiniOrbController(
 
             if (
                 !enabled ||
+                state == AyanaVoiceService.STATE_STOPPED ||
                 !canDrawOverlays()
             ) {
                 hideInternal()
@@ -72,22 +82,22 @@ class AyanaMiniOrbController(
             }
 
             synchronized(
-                overlayLock
+                LOCK
             ) {
 
-                val current =
-                    sharedOrbView
+                val existing =
+                    sharedView
 
                 if (
-                    current != null &&
-                    current.isAttachedToWindow
+                    existing != null &&
+                    existing.isAttachedToWindow
                 ) {
 
-                    current.setAyanaState(
+                    existing.setAyanaState(
                         state
                     )
 
-                    sharedLayoutParams
+                    sharedParams
                         ?.let {
                             clampToScreen(
                                 it
@@ -97,10 +107,11 @@ class AyanaMiniOrbController(
                     return@synchronized
                 }
 
-                sharedOrbView =
+                // A detached/stale reference must never be reused.
+                sharedView =
                     null
 
-                sharedLayoutParams =
+                sharedParams =
                     null
 
                 showInternal(
@@ -114,58 +125,17 @@ class AyanaMiniOrbController(
         state: String
     ) {
 
-        runOnMain {
-
-            synchronized(
-                overlayLock
-            ) {
-
-                val view =
-                    sharedOrbView
-                        ?: return@synchronized
-
-                if (
-                    !view.isAttachedToWindow
-                ) {
-
-                    sharedOrbView =
-                        null
-
-                    sharedLayoutParams =
-                        null
-
-                    return@synchronized
-                }
-
-                view.setAyanaState(
-                    state
-                )
-            }
-        }
+        refresh(
+            enabled =
+                state != AyanaVoiceService.STATE_STOPPED,
+            state = state
+        )
     }
 
     fun hide() {
 
         runOnMain {
             hideInternal()
-        }
-    }
-
-    fun canDrawOverlays():
-        Boolean {
-
-        return if (
-            Build.VERSION.SDK_INT >= 23
-        ) {
-
-            Settings
-                .canDrawOverlays(
-                    appContext
-                )
-
-        } else {
-
-            true
         }
     }
 
@@ -179,20 +149,8 @@ class AyanaMiniOrbController(
             return
         }
 
-        val existing =
-            sharedOrbView
-
-        if (
-            existing != null &&
-            existing.isAttachedToWindow
-        ) {
-
-            existing.setAyanaState(
-                state
-            )
-
-            return
-        }
+        val wm =
+            windowManager()
 
         val size =
             dp(
@@ -200,87 +158,74 @@ class AyanaMiniOrbController(
             )
 
         val params =
-            WindowManager
-                .LayoutParams(
-                    size,
-                    size,
-                    if (
-                        Build.VERSION.SDK_INT >= 26
-                    ) {
-                        WindowManager
-                            .LayoutParams
-                            .TYPE_APPLICATION_OVERLAY
-                    } else {
-                        @Suppress("DEPRECATION")
-                        WindowManager
-                            .LayoutParams
-                            .TYPE_PHONE
-                    },
-                    WindowManager
-                        .LayoutParams
-                        .FLAG_NOT_FOCUSABLE or
-                        WindowManager
-                            .LayoutParams
-                            .FLAG_LAYOUT_NO_LIMITS or
-                        WindowManager
-                            .LayoutParams
-                            .FLAG_LAYOUT_IN_SCREEN,
-                    PixelFormat.TRANSLUCENT
-                ).apply {
+            WindowManager.LayoutParams(
+                size,
+                size,
+                if (
+                    Build.VERSION.SDK_INT >= 26
+                ) {
+                    WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY
+                } else {
+                    @Suppress("DEPRECATION")
+                    WindowManager.LayoutParams.TYPE_PHONE
+                },
+                WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
+                    WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS or
+                    WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN,
+                PixelFormat.TRANSLUCENT
+            ).apply {
 
-                    gravity =
-                        Gravity.TOP or
-                            Gravity.START
+                gravity =
+                    Gravity.TOP or
+                        Gravity.START
 
-                    val savedX =
-                        positionPrefs.getInt(
-                            PREF_X,
-                            Int.MIN_VALUE
-                        )
-
-                    val savedY =
-                        positionPrefs.getInt(
-                            PREF_Y,
-                            Int.MIN_VALUE
-                        )
-
-                    if (
-                        savedX !=
-                        Int.MIN_VALUE &&
-                        savedY !=
+                val savedX =
+                    prefs.getInt(
+                        PREF_X,
                         Int.MIN_VALUE
-                    ) {
-
-                        x =
-                            savedX
-
-                        y =
-                            savedY
-
-                    } else {
-
-                        x =
-                            (
-                                screenWidth() -
-                                    size -
-                                    dp(
-                                        DEFAULT_MARGIN_DP
-                                    )
-                                )
-                                .coerceAtLeast(
-                                    0
-                                )
-
-                        y =
-                            dp(
-                                DEFAULT_Y_DP
-                            )
-                    }
-
-                    clampToScreen(
-                        this
                     )
+
+                val savedY =
+                    prefs.getInt(
+                        PREF_Y,
+                        Int.MIN_VALUE
+                    )
+
+                if (
+                    savedX != Int.MIN_VALUE &&
+                    savedY != Int.MIN_VALUE
+                ) {
+
+                    x =
+                        savedX
+
+                    y =
+                        savedY
+
+                } else {
+
+                    x =
+                        (
+                            screenWidth() -
+                                size -
+                                dp(
+                                    DEFAULT_MARGIN_DP
+                                )
+                            )
+                            .coerceAtLeast(
+                                0
+                            )
+
+                    y =
+                        dp(
+                            DEFAULT_Y_DP
+                        )
                 }
+
+                clampToScreen(
+                    this
+                )
+            }
 
         val view =
             FloatingOrbView(
@@ -292,7 +237,7 @@ class AyanaMiniOrbController(
                 )
 
                 contentDescription =
-                    "Orb AYANA. Перетащите, чтобы переместить. Нажмите, чтобы открыть AYANA."
+                    "Orb AYANA. Перетащите для перемещения. Нажмите, чтобы открыть AYANA."
             }
 
         attachTouchBehavior(
@@ -302,24 +247,24 @@ class AyanaMiniOrbController(
 
         try {
 
-            windowManager
-                .addView(
-                    view,
-                    params
-                )
+            wm.addView(
+                view,
+                params
+            )
 
-            sharedOrbView =
+            sharedView =
                 view
 
-            sharedLayoutParams =
+            sharedParams =
                 params
 
         } catch (_: Exception) {
 
-            sharedOrbView =
+            // Never keep a reference to a View that WindowManager rejected.
+            sharedView =
                 null
 
-            sharedLayoutParams =
+            sharedParams =
                 null
         }
     }
@@ -327,11 +272,11 @@ class AyanaMiniOrbController(
     private fun hideInternal() {
 
         synchronized(
-            overlayLock
+            LOCK
         ) {
 
             val view =
-                sharedOrbView
+                sharedView
 
             if (
                 view != null
@@ -339,24 +284,19 @@ class AyanaMiniOrbController(
 
                 try {
 
-                    if (
-                        view.isAttachedToWindow
-                    ) {
-
-                        windowManager
-                            .removeViewImmediate(
-                                view
-                            )
-                    }
+                    windowManager()
+                        .removeViewImmediate(
+                            view
+                        )
 
                 } catch (_: Exception) {
                 }
             }
 
-            sharedOrbView =
+            sharedView =
                 null
 
-            sharedLayoutParams =
+            sharedParams =
                 null
         }
     }
@@ -456,10 +396,21 @@ class AyanaMiniOrbController(
                         params
                     )
 
-                    updateLayoutSafely(
-                        view,
-                        params
-                    )
+                    try {
+
+                        if (
+                            view.isAttachedToWindow
+                        ) {
+
+                            windowManager()
+                                .updateViewLayout(
+                                    view,
+                                    params
+                                )
+                        }
+
+                    } catch (_: Exception) {
+                    }
 
                     true
                 }
@@ -487,6 +438,7 @@ class AyanaMiniOrbController(
                     if (
                         moved
                     ) {
+
                         savePosition(
                             params
                         )
@@ -501,33 +453,11 @@ class AyanaMiniOrbController(
         }
     }
 
-    private fun updateLayoutSafely(
-        view: View,
-        params: WindowManager.LayoutParams
-    ) {
-
-        try {
-
-            if (
-                view.isAttachedToWindow
-            ) {
-
-                windowManager
-                    .updateViewLayout(
-                        view,
-                        params
-                    )
-            }
-
-        } catch (_: Exception) {
-        }
-    }
-
     private fun savePosition(
         params: WindowManager.LayoutParams
     ) {
 
-        positionPrefs
+        prefs
             .edit()
             .putInt(
                 PREF_X,
@@ -579,28 +509,32 @@ class AyanaMiniOrbController(
 
     private fun openAyana() {
 
-        val intent =
-            Intent(
-                appContext,
-                MainActivity::class.java
-            ).apply {
-
-                addFlags(
-                    Intent.FLAG_ACTIVITY_NEW_TASK or
-                        Intent.FLAG_ACTIVITY_SINGLE_TOP or
-                        Intent.FLAG_ACTIVITY_CLEAR_TOP
-                )
-            }
-
         try {
 
-            appContext
-                .startActivity(
-                    intent
-                )
+            appContext.startActivity(
+                Intent(
+                    appContext,
+                    MainActivity::class.java
+                ).apply {
+
+                    addFlags(
+                        Intent.FLAG_ACTIVITY_NEW_TASK or
+                            Intent.FLAG_ACTIVITY_SINGLE_TOP or
+                            Intent.FLAG_ACTIVITY_CLEAR_TOP
+                    )
+                }
+            )
 
         } catch (_: Exception) {
         }
+    }
+
+    private fun windowManager():
+        WindowManager {
+
+        return appContext.getSystemService(
+            WindowManager::class.java
+        )
     }
 
     private fun screenWidth():
@@ -654,7 +588,12 @@ class AyanaMiniOrbController(
             .toInt()
     }
 
-    private inner class FloatingOrbView(
+    /**
+     * Static nested View: it does not retain a controller instance.
+     * This is important because several short-lived controller objects may call
+     * refresh(), while the actual overlay remains one process-wide View.
+     */
+    private class FloatingOrbView(
         context: Context
     ) : View(context) {
 
@@ -663,7 +602,7 @@ class AyanaMiniOrbController(
                 Paint.ANTI_ALIAS_FLAG
             )
 
-        private val glowPaint =
+        private val ringPaint =
             Paint(
                 Paint.ANTI_ALIAS_FLAG
             ).apply {
@@ -672,10 +611,10 @@ class AyanaMiniOrbController(
                     Paint.Style.STROKE
 
                 strokeWidth =
-                    dp(
-                        3
-                    )
-                        .toFloat()
+                    3f *
+                        resources
+                            .displayMetrics
+                            .density
             }
 
         private val labelPaint =
@@ -690,19 +629,13 @@ class AyanaMiniOrbController(
                     Paint.Align.CENTER
 
                 typeface =
-                    android.graphics
-                        .Typeface
-                        .DEFAULT_BOLD
+                    android.graphics.Typeface.DEFAULT_BOLD
             }
 
         private var ayanaState =
-            AyanaVoiceService
-                .currentStatusState
+            AyanaVoiceService.STATE_LISTENING
 
-        private var successFlashUntil =
-            0L
-
-        private var errorFlashUntil =
+        private var terminalFlashUntil =
             0L
 
         fun setAyanaState(
@@ -712,30 +645,18 @@ class AyanaMiniOrbController(
             ayanaState =
                 state
 
-            val now =
-                SystemClock
-                    .uptimeMillis()
-
             if (
                 state ==
-                AyanaVoiceService
-                    .STATE_SUCCESS
-            ) {
-
-                successFlashUntil =
-                    now +
-                        1200L
-            }
-
-            if (
+                AyanaVoiceService.STATE_SUCCESS ||
                 state ==
-                AyanaVoiceService
-                    .STATE_ERROR
+                AyanaVoiceService.STATE_ERROR ||
+                state ==
+                AyanaVoiceService.STATE_CANCELLED
             ) {
 
-                errorFlashUntil =
-                    now +
-                        1500L
+                terminalFlashUntil =
+                    SystemClock.uptimeMillis() +
+                        TERMINAL_FLASH_MS
             }
 
             invalidate()
@@ -750,8 +671,7 @@ class AyanaMiniOrbController(
             )
 
             val now =
-                SystemClock
-                    .uptimeMillis()
+                SystemClock.uptimeMillis()
 
             val cx =
                 width /
@@ -766,7 +686,7 @@ class AyanaMiniOrbController(
                     width,
                     height
                 ) *
-                    0.31f
+                    0.30f
 
             val speed =
                 when (
@@ -774,16 +694,16 @@ class AyanaMiniOrbController(
                 ) {
 
                     AyanaVoiceService.STATE_COMMAND ->
-                        150.0
+                        145.0
 
                     AyanaVoiceService.STATE_EXECUTING ->
-                        130.0
+                        125.0
 
                     AyanaVoiceService.STATE_THINKING ->
-                        250.0
+                        245.0
 
                     AyanaVoiceService.STATE_SPEAKING ->
-                        220.0
+                        215.0
 
                     AyanaVoiceService.STATE_LISTENING ->
                         520.0
@@ -807,7 +727,7 @@ class AyanaMiniOrbController(
                         0.065f
 
                     AyanaVoiceService.STATE_SPEAKING ->
-                        0.07f
+                        0.070f
 
                     AyanaVoiceService.STATE_LISTENING ->
                         0.035f
@@ -833,11 +753,6 @@ class AyanaMiniOrbController(
                             pulse
                         )
 
-            val colors =
-                stateGradient(
-                    ayanaState
-                )
-
             corePaint.shader =
                 RadialGradient(
                     cx -
@@ -848,7 +763,9 @@ class AyanaMiniOrbController(
                         0.30f,
                     radius *
                         1.35f,
-                    colors,
+                    gradientFor(
+                        ayanaState
+                    ),
                     null,
                     Shader.TileMode.CLAMP
                 )
@@ -863,28 +780,27 @@ class AyanaMiniOrbController(
             corePaint.shader =
                 null
 
-            glowPaint.color =
-                stateStrokeColor(
+            ringPaint.color =
+                strokeFor(
                     ayanaState
                 )
 
-            glowPaint.alpha =
-                210
+            ringPaint.alpha =
+                215
 
             canvas.drawCircle(
                 cx,
                 cy,
                 radius +
-                    dp(
+                    dpLocal(
                         5
                     ),
-                glowPaint
+                ringPaint
             )
 
             if (
                 ayanaState ==
-                AyanaVoiceService
-                    .STATE_EXECUTING
+                AyanaVoiceService.STATE_EXECUTING
             ) {
 
                 val phase =
@@ -894,7 +810,7 @@ class AyanaMiniOrbController(
                         ) /
                         850f
 
-                glowPaint.alpha =
+                ringPaint.alpha =
                     (
                         220 *
                             (
@@ -912,25 +828,25 @@ class AyanaMiniOrbController(
                     cx,
                     cy,
                     radius +
-                        dp(
+                        dpLocal(
                             6
                         ) +
-                        dp(
+                        dpLocal(
                             15
                         ) *
                             phase,
-                    glowPaint
+                    ringPaint
                 )
             }
 
             if (
                 now <
-                successFlashUntil
+                terminalFlashUntil
             ) {
 
                 val remaining =
                     (
-                        successFlashUntil -
+                        terminalFlashUntil -
                             now
                         )
                         .coerceAtLeast(
@@ -940,14 +856,14 @@ class AyanaMiniOrbController(
                 val phase =
                     1f -
                         remaining /
-                            1200f
+                            TERMINAL_FLASH_MS.toFloat()
 
-                glowPaint.color =
-                    Color.parseColor(
-                        "#4ADE80"
+                ringPaint.color =
+                    strokeFor(
+                        ayanaState
                     )
 
-                glowPaint.alpha =
+                ringPaint.alpha =
                     (
                         235 *
                             (
@@ -965,67 +881,14 @@ class AyanaMiniOrbController(
                     cx,
                     cy,
                     radius +
-                        dp(
+                        dpLocal(
                             7
                         ) +
-                        dp(
-                            19
+                        dpLocal(
+                            18
                         ) *
                             phase,
-                    glowPaint
-                )
-            }
-
-            if (
-                now <
-                errorFlashUntil
-            ) {
-
-                val remaining =
-                    (
-                        errorFlashUntil -
-                            now
-                        )
-                        .coerceAtLeast(
-                            0L
-                        )
-
-                val phase =
-                    1f -
-                        remaining /
-                            1500f
-
-                glowPaint.color =
-                    Color.parseColor(
-                        "#F87171"
-                    )
-
-                glowPaint.alpha =
-                    (
-                        235 *
-                            (
-                                1f -
-                                    phase
-                                )
-                        )
-                        .toInt()
-                        .coerceIn(
-                            0,
-                            235
-                        )
-
-                canvas.drawCircle(
-                    cx,
-                    cy,
-                    radius +
-                        dp(
-                            7
-                        ) +
-                        dp(
-                            17
-                        ) *
-                            phase,
-                    glowPaint
+                    ringPaint
                 )
             }
 
@@ -1037,8 +900,7 @@ class AyanaMiniOrbController(
                 "A",
                 cx,
                 cy +
-                    labelPaint
-                        .textSize *
+                    labelPaint.textSize *
                         0.34f,
                 labelPaint
             )
@@ -1051,6 +913,108 @@ class AyanaMiniOrbController(
 
                 postInvalidateOnAnimation()
             }
+        }
+
+        private fun gradientFor(
+            state: String
+        ): IntArray {
+
+            return when (
+                state
+            ) {
+
+                AyanaVoiceService.STATE_COMMAND ->
+                    intArrayOf(
+                        Color.parseColor("#22D3EE"),
+                        Color.parseColor("#2563EB"),
+                        Color.parseColor("#111827")
+                    )
+
+                AyanaVoiceService.STATE_THINKING ->
+                    intArrayOf(
+                        Color.parseColor("#A78BFA"),
+                        Color.parseColor("#6D28D9"),
+                        Color.parseColor("#111827")
+                    )
+
+                AyanaVoiceService.STATE_EXECUTING ->
+                    intArrayOf(
+                        Color.parseColor("#2DD4BF"),
+                        Color.parseColor("#0E7490"),
+                        Color.parseColor("#0F172A")
+                    )
+
+                AyanaVoiceService.STATE_SUCCESS ->
+                    intArrayOf(
+                        Color.parseColor("#4ADE80"),
+                        Color.parseColor("#15803D"),
+                        Color.parseColor("#0F172A")
+                    )
+
+                AyanaVoiceService.STATE_ERROR ->
+                    intArrayOf(
+                        Color.parseColor("#F87171"),
+                        Color.parseColor("#B91C1C"),
+                        Color.parseColor("#111827")
+                    )
+
+                AyanaVoiceService.STATE_CANCELLED ->
+                    intArrayOf(
+                        Color.parseColor("#FBBF24"),
+                        Color.parseColor("#D97706"),
+                        Color.parseColor("#111827")
+                    )
+
+                AyanaVoiceService.STATE_SPEAKING ->
+                    intArrayOf(
+                        Color.parseColor("#818CF8"),
+                        Color.parseColor("#4F46E5"),
+                        Color.parseColor("#111827")
+                    )
+
+                else ->
+                    intArrayOf(
+                        Color.parseColor("#38BDF8"),
+                        Color.parseColor("#2563EB"),
+                        Color.parseColor("#0F172A")
+                    )
+            }
+        }
+
+        private fun strokeFor(
+            state: String
+        ): Int {
+
+            return Color.parseColor(
+                when (
+                    state
+                ) {
+
+                    AyanaVoiceService.STATE_COMMAND ->
+                        "#67E8F9"
+
+                    AyanaVoiceService.STATE_THINKING ->
+                        "#C4B5FD"
+
+                    AyanaVoiceService.STATE_EXECUTING ->
+                        "#5EEAD4"
+
+                    AyanaVoiceService.STATE_SUCCESS ->
+                        "#86EFAC"
+
+                    AyanaVoiceService.STATE_ERROR ->
+                        "#FCA5A5"
+
+                    AyanaVoiceService.STATE_CANCELLED ->
+                        "#FCD34D"
+
+                    AyanaVoiceService.STATE_SPEAKING ->
+                        "#A5B4FC"
+
+                    else ->
+                        "#7DD3FC"
+                }
+            )
         }
 
         private fun shouldAnimate(
@@ -1066,163 +1030,30 @@ class AyanaMiniOrbController(
                     AyanaVoiceService.STATE_SPEAKING
                 ) ||
                 now <
-                successFlashUntil ||
-                now <
-                errorFlashUntil
+                terminalFlashUntil
         }
-    }
 
-    private fun stateGradient(
-        state: String
-    ): IntArray {
+        private fun dpLocal(
+            value: Int
+        ): Float {
 
-        return when (
-            state
-        ) {
-
-            AyanaVoiceService.STATE_COMMAND ->
-                intArrayOf(
-                    Color.parseColor(
-                        "#22D3EE"
-                    ),
-                    Color.parseColor(
-                        "#2563EB"
-                    ),
-                    Color.parseColor(
-                        "#111827"
-                    )
-                )
-
-            AyanaVoiceService.STATE_THINKING ->
-                intArrayOf(
-                    Color.parseColor(
-                        "#A78BFA"
-                    ),
-                    Color.parseColor(
-                        "#6D28D9"
-                    ),
-                    Color.parseColor(
-                        "#111827"
-                    )
-                )
-
-            AyanaVoiceService.STATE_EXECUTING ->
-                intArrayOf(
-                    Color.parseColor(
-                        "#2DD4BF"
-                    ),
-                    Color.parseColor(
-                        "#0E7490"
-                    ),
-                    Color.parseColor(
-                        "#0F172A"
-                    )
-                )
-
-            AyanaVoiceService.STATE_SUCCESS ->
-                intArrayOf(
-                    Color.parseColor(
-                        "#4ADE80"
-                    ),
-                    Color.parseColor(
-                        "#15803D"
-                    ),
-                    Color.parseColor(
-                        "#0F172A"
-                    )
-                )
-
-            AyanaVoiceService.STATE_ERROR ->
-                intArrayOf(
-                    Color.parseColor(
-                        "#F87171"
-                    ),
-                    Color.parseColor(
-                        "#B91C1C"
-                    ),
-                    Color.parseColor(
-                        "#111827"
-                    )
-                )
-
-            AyanaVoiceService.STATE_STOPPED ->
-                intArrayOf(
-                    Color.parseColor(
-                        "#475569"
-                    ),
-                    Color.parseColor(
-                        "#1F2937"
-                    ),
-                    Color.parseColor(
-                        "#0F172A"
-                    )
-                )
-
-            AyanaVoiceService.STATE_SPEAKING ->
-                intArrayOf(
-                    Color.parseColor(
-                        "#818CF8"
-                    ),
-                    Color.parseColor(
-                        "#4F46E5"
-                    ),
-                    Color.parseColor(
-                        "#111827"
-                    )
-                )
-
-            else ->
-                intArrayOf(
-                    Color.parseColor(
-                        "#38BDF8"
-                    ),
-                    Color.parseColor(
-                        "#2563EB"
-                    ),
-                    Color.parseColor(
-                        "#0F172A"
-                    )
-                )
+            return value *
+                resources
+                    .displayMetrics
+                    .density
         }
-    }
-
-    private fun stateStrokeColor(
-        state: String
-    ): Int {
-
-        return Color.parseColor(
-            when (
-                state
-            ) {
-
-                AyanaVoiceService.STATE_COMMAND ->
-                    "#67E8F9"
-
-                AyanaVoiceService.STATE_THINKING ->
-                    "#C4B5FD"
-
-                AyanaVoiceService.STATE_EXECUTING ->
-                    "#5EEAD4"
-
-                AyanaVoiceService.STATE_SUCCESS ->
-                    "#86EFAC"
-
-                AyanaVoiceService.STATE_ERROR ->
-                    "#FCA5A5"
-
-                AyanaVoiceService.STATE_STOPPED ->
-                    "#64748B"
-
-                AyanaVoiceService.STATE_SPEAKING ->
-                    "#A5B4FC"
-
-                else ->
-                    "#7DD3FC"
-            }
-        )
     }
 
     companion object {
+
+        private const val PREFS_NAME =
+            "ayana_floating_orb"
+
+        private const val PREF_X =
+            "orb_x"
+
+        private const val PREF_Y =
+            "orb_y"
 
         private const val ORB_SIZE_DP =
             72
@@ -1236,21 +1067,18 @@ class AyanaMiniOrbController(
         private const val MOVE_THRESHOLD_DP =
             5
 
-        private const val PREF_X =
-            "orb_x"
+        private const val TERMINAL_FLASH_MS =
+            1200L
 
-        private const val PREF_Y =
-            "orb_y"
-
-        private val overlayLock =
+        private val LOCK =
             Any()
 
         @Volatile
-        private var sharedOrbView:
+        private var sharedView:
             FloatingOrbView? = null
 
         @Volatile
-        private var sharedLayoutParams:
+        private var sharedParams:
             WindowManager.LayoutParams? = null
     }
 }
