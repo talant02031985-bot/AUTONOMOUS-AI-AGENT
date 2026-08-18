@@ -18,6 +18,8 @@ import android.media.AudioRecord
 import android.media.AudioManager
 import android.media.MediaPlayer
 import android.media.MediaRecorder
+import android.media.audiofx.AcousticEchoCanceler
+import android.media.audiofx.NoiseSuppressor
 import android.media.ToneGenerator
 import android.net.Uri
 import android.os.BatteryManager
@@ -89,6 +91,12 @@ class AyanaVoiceService : Service() {
 
     private var mediaPlayer:
         MediaPlayer? = null
+
+    private var cancelEchoCanceler:
+        AcousticEchoCanceler? = null
+
+    private var cancelNoiseSuppressor:
+        NoiseSuppressor? = null
 
     private var audioToken:
         Long = 0L
@@ -931,11 +939,27 @@ class AyanaVoiceService : Service() {
         var recorder: AudioRecord? =
             null
 
+        val cancelDuringSpeech =
+            listenMode ==
+                ListenMode.CANCEL &&
+                currentStatusState ==
+                STATE_SPEAKING
+
         val audioSources =
-            intArrayOf(
-                MediaRecorder.AudioSource.VOICE_RECOGNITION,
-                MediaRecorder.AudioSource.MIC
-            )
+            if (
+                cancelDuringSpeech
+            ) {
+                intArrayOf(
+                    MediaRecorder.AudioSource.VOICE_COMMUNICATION,
+                    MediaRecorder.AudioSource.VOICE_RECOGNITION,
+                    MediaRecorder.AudioSource.MIC
+                )
+            } else {
+                intArrayOf(
+                    MediaRecorder.AudioSource.VOICE_RECOGNITION,
+                    MediaRecorder.AudioSource.MIC
+                )
+            }
 
         for (source in audioSources) {
 
@@ -993,6 +1017,12 @@ class AyanaVoiceService : Service() {
         audioRecord =
             activeRecorder
 
+        configureCancelAudioEffects(
+            activeRecorder,
+            enabled =
+                cancelDuringSpeech
+        )
+
         try {
 
             activeRecorder.startRecording()
@@ -1009,6 +1039,8 @@ class AyanaVoiceService : Service() {
 
             audioRecord =
                 null
+
+            releaseCancelAudioEffects()
 
             isRecording =
                 false
@@ -1134,30 +1166,60 @@ class AyanaVoiceService : Service() {
                 // speech more consistently. This improves distant/soft «Аяна»
                 // without changing the recognizer model or microphone source.
                 val inputGain =
-                    when {
-                        peak < 0.00035f ->
-                            1.0f
+                    if (
+                        listenMode ==
+                        ListenMode.CANCEL &&
+                        currentStatusState ==
+                        STATE_SPEAKING
+                    ) {
 
-                        peak < 0.0040f ->
-                            5.5f
+                        when {
+                            peak < 0.00035f ->
+                                1.0f
 
-                        peak < 0.012f ->
-                            4.8f
+                            peak < 0.008f ->
+                                5.8f
 
-                        peak < 0.030f ->
-                            3.5f
+                            peak < 0.025f ->
+                                4.4f
 
-                        peak < 0.060f ->
-                            2.4f
+                            peak < 0.060f ->
+                                3.0f
 
-                        peak < 0.100f ->
-                            1.7f
+                            peak < 0.120f ->
+                                1.9f
 
-                        peak < 0.150f ->
-                            1.25f
+                            else ->
+                                1.25f
+                        }
 
-                        else ->
-                            1.0f
+                    } else {
+
+                        when {
+                            peak < 0.00035f ->
+                                1.0f
+
+                            peak < 0.0040f ->
+                                5.5f
+
+                            peak < 0.012f ->
+                                4.8f
+
+                            peak < 0.030f ->
+                                3.5f
+
+                            peak < 0.060f ->
+                                2.4f
+
+                            peak < 0.100f ->
+                                1.7f
+
+                            peak < 0.150f ->
+                                1.25f
+
+                            else ->
+                                1.0f
+                        }
                     }
 
                 val samples =
@@ -1729,6 +1791,9 @@ class AyanaVoiceService : Service() {
         if (
             audioRecord === recorder
         ) {
+
+            releaseCancelAudioEffects()
+
             audioRecord =
                 null
         }
@@ -1743,6 +1808,85 @@ class AyanaVoiceService : Service() {
             recordingThread =
                 null
         }
+    }
+
+    private fun configureCancelAudioEffects(
+        recorder: AudioRecord,
+        enabled: Boolean
+    ) {
+
+        releaseCancelAudioEffects()
+
+        if (
+            !enabled
+        ) {
+            return
+        }
+
+        try {
+
+            if (
+                AcousticEchoCanceler.isAvailable()
+            ) {
+
+                cancelEchoCanceler =
+                    AcousticEchoCanceler.create(
+                        recorder.audioSessionId
+                    )
+                        ?.apply {
+                            this.enabled =
+                                true
+                        }
+            }
+
+        } catch (_: Exception) {
+
+            cancelEchoCanceler =
+                null
+        }
+
+        try {
+
+            if (
+                NoiseSuppressor.isAvailable()
+            ) {
+
+                cancelNoiseSuppressor =
+                    NoiseSuppressor.create(
+                        recorder.audioSessionId
+                    )
+                        ?.apply {
+                            this.enabled =
+                                true
+                        }
+            }
+
+        } catch (_: Exception) {
+
+            cancelNoiseSuppressor =
+                null
+        }
+    }
+
+    private fun releaseCancelAudioEffects() {
+
+        try {
+            cancelEchoCanceler
+                ?.release()
+        } catch (_: Exception) {
+        }
+
+        try {
+            cancelNoiseSuppressor
+                ?.release()
+        } catch (_: Exception) {
+        }
+
+        cancelEchoCanceler =
+            null
+
+        cancelNoiseSuppressor =
+            null
     }
 
     private fun stopSherpaListening() {
@@ -8728,6 +8872,17 @@ class AyanaVoiceService : Service() {
 
                 try {
 
+                    if (
+                        currentStatusState ==
+                        STATE_SPEAKING
+                    ) {
+
+                        prepared.setVolume(
+                            BARGE_IN_TTS_VOLUME,
+                            BARGE_IN_TTS_VOLUME
+                        )
+                    }
+
                     prepared.start()
 
                 } catch (_: Exception) {
@@ -9517,6 +9672,9 @@ class AyanaVoiceService : Service() {
 
         private const val MAX_CANCEL_PHRASE_WORDS =
             5
+
+        private const val BARGE_IN_TTS_VOLUME =
+            0.72f
 
         private const val CHANNEL_ID =
             "ayana_voice_service"
