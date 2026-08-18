@@ -1,3 +1,4 @@
+// AYANA Worker v7.4 — final response router + capability awareness
 const ANDROID_GOAL_TOOL = {
   type: "function",
   name: "execute_android_goal",
@@ -537,6 +538,51 @@ Screen Intelligence v2:
 Ответы предназначены для озвучивания голосом Marin, поэтому говори естественно и обычно кратко. Не повторяй постоянно своё имя. Не используй Markdown без необходимости.
 `.trim();
 
+const AYANA_CURRENT_CAPABILITIES = `
+ТЕКУЩИЕ ВОЗМОЖНОСТИ ПРИЛОЖЕНИЯ AYANA — ЭТО ФАКТЫ О ТЕКУЩЕЙ СБОРКЕ:
+- голосовая активация по имени «Аяна» и локальное распознавание команд;
+- фирменный голос Marin и голосовой ответ;
+- тихий текстовый режим без обязательной озвучки;
+- состояния «слушаю / распознаю / думаю / выполняю / говорю / ошибка / остановлено»;
+- один глобальный плавающий Orb поверх приложений;
+- локальные быстрые команды Android: запуск приложений, системные настройки, громкость, назад/домой, поиск;
+- Goal Compiler + Android Task Engine + Accessibility/Screen Intelligence для проверяемой навигации;
+- остановка текущей команды кнопкой и голосовой STOP-механизм во время THINKING/EXECUTING/SPEAKING;
+- журнал команд с SUCCESS/ERROR/CANCELLED, техническими событиями, временем этапов и копированием отдельной записи;
+- локальная долговременная память: запомнить, вспомнить, забыть;
+- напоминания и повторяющиеся задачи: создание, просмотр, удаление, восстановление после перезагрузки;
+- экран диагностики основных разрешений и служб;
+- рабочий язык текущей версии — только русский.
+
+ПОКА НЕ РЕАЛИЗОВАНО КАК ГОТОВАЯ ФУНКЦИЯ:
+- полноценный офлайн-ИИ для произвольных вопросов;
+- облачное резервное копирование памяти/задач/настроек;
+- полноценная обработка камеры, фото и документов внутри Android-приложения;
+- пользовательские темы и выбор другого фирменного голоса;
+- универсальная безопасная отмена уже совершённого Android-действия;
+- конструктор сложных пользовательских сценариев/рутин.
+`.trim();
+
+const AYANA_SELF_REVIEW_INSTRUCTIONS = `
+Если пользователь спрашивает, что улучшить, исправить или развивать в самой AYANA:
+1. Сначала сверяй предложение с ТЕКУЩИМИ ВОЗМОЖНОСТЯМИ ПРИЛОЖЕНИЯ AYANA.
+2. Не предлагай как новую функцию то, что уже реализовано. Если существующая функция требует улучшения, так и скажи: «улучшить существующую ...», а не «добавить ...».
+3. Приоритеты: надёжность голосового STOP, задержка до действия/ответа, качество распознавания, проверяемость Android-действий, понятная диагностика, управление уже существующими памятью и задачами.
+4. По умолчанию дай 3–6 наиболее полезных пунктов, а не длинный список из 10–15 общих идей.
+5. Разделяй «сейчас имеет смысл» и «позже», только если это действительно помогает ответу.
+`.trim();
+
+const AYANA_VOICE_STYLE = `
+РЕЖИМ ОТВЕТА: ГОЛОС.
+Говори разговорно, коротко и без Markdown-разметки. Не произноси заголовки со звёздочками, решётками или служебными символами.
+По умолчанию 2–5 коротких предложений или максимум 5 коротких пунктов. Если пользователь явно просит подробно/глубоко/тщательно — можно отвечать подробнее.
+`.trim();
+
+const AYANA_TEXT_STYLE = `
+РЕЖИМ ОТВЕТА: ТЕКСТ.
+По умолчанию отвечай компактно: обычно до 6 пунктов. Не раздувай простой вопрос в длинный обзор. Если пользователь явно просит подробно/глубоко/тщательно — дай полный ответ.
+`.trim();
+
 const ANDROID_GOAL_V7_INSTRUCTIONS = `
 ANDROID GOAL v7 — CLASSIFY FINAL STATE, NEVER PLAN THE ROUTE:
 
@@ -570,6 +616,33 @@ function isLikelyAndroidNavigation(message = "") {
   if (!navigationVerb) return false;
 
   return /(настрой|прилож|экран|уведом|разреш|специальн|accessibility|служб|youtube|ютуб|telegram|телеграм|chrome|хром|галере|wifi|wi-fi|вайфай|bluetooth|блютуз|батар|хранилищ|мобильн.*данн|vpn|nfc|клавиатур|язык|разработчик|устройств|конфиденц|геолокац|безопасн|браузер|по умолчанию|домой|назад)/.test(normalized);
+}
+
+function normalizeIntentText(message = "") {
+  return String(message || "")
+    .toLowerCase()
+    .replace(/ё/g, "е")
+    .trim();
+}
+
+function isDeepRequest(message = "") {
+  const n = normalizeIntentText(message);
+  return /(подробн|глубок|тщательн|детальн|развернут|полный анализ|проанализируй|сравни|исследуй|пошагов)/.test(n);
+}
+
+function isAyanaSelfReviewRequest(message = "") {
+  const n = normalizeIntentText(message);
+  const mentionsProduct = /(аяна|ayana|приложени|интерфейс|агент|проект)/.test(n);
+  const asksImprovement = /(улучш|исправ|доработ|развит|что добавить|что изменить|глобальн)/.test(n);
+  return mentionsProduct && asksImprovement;
+}
+
+function isFastEverydayRequest(message = "") {
+  const n = normalizeIntentText(message);
+  if (!n || isDeepRequest(n)) return false;
+
+  return /^(кто такой|кто такая|что такое|что значит|сколько будет|посчитай|вычисли|привет|здравствуй|спасибо|благодарю)(?:\s|$)/.test(n)
+    || /^(предложи|посоветуй)(?:\s|$)/.test(n);
 }
 
 function getDeviceStateTool() {
@@ -628,6 +701,7 @@ async function handleAgent(request, env) {
   const memoryContext = body.memory_context?.trim();
   const deviceLocalDatetime = body.device_local_datetime?.trim();
   const deviceTimezone = body.device_timezone?.trim();
+  const source = body.source === "voice" ? "voice" : "text";
   const toolResults = Array.isArray(body.tool_results)
     ? body.tool_results
     : [];
@@ -680,6 +754,10 @@ ${memoryContext}
     }
 
     contextParts.push(
+      `ИСТОЧНИК КОМАНДЫ: ${source === "voice" ? "голос" : "текст"}`
+    );
+
+    contextParts.push(
       `Текущий запрос пользователя:\n${message}`
     );
 
@@ -687,28 +765,69 @@ ${memoryContext}
   }
 
   const androidNavigationMode = isLikelyAndroidNavigation(message || "");
+  const improvementFollowUpMode = Boolean(previousResponseId)
+    && String(message || "").length <= 140
+    && /(улучш|исправ|доработ|глобальн)/.test(normalizeIntentText(message || ""));
+  const selfReviewMode = isAyanaSelfReviewRequest(message || "")
+    || improvementFollowUpMode;
+  const deepRequest = isDeepRequest(message || "");
+  const fastEverydayMode = !androidNavigationMode
+    && !deepRequest
+    && (selfReviewMode || isFastEverydayRequest(message || ""));
+
+  const styleInstructions = source === "voice"
+    ? AYANA_VOICE_STYLE
+    : AYANA_TEXT_STYLE;
+
+  const productInstructions = selfReviewMode
+    ? `
+
+${AYANA_CURRENT_CAPABILITIES}
+
+${AYANA_SELF_REVIEW_INSTRUCTIONS}`
+    : "";
 
   const payload = {
-    model: "gpt-5.6",
-    reasoning: { effort: "low" },
+    model: androidNavigationMode || fastEverydayMode
+      ? "gpt-5.6-luna"
+      : "gpt-5.6",
+    reasoning: {
+      effort: androidNavigationMode || fastEverydayMode
+        ? "none"
+        : "low"
+    },
     instructions: androidNavigationMode
-      ? `${AGENT_INSTRUCTIONS}\n\n${ANDROID_GOAL_V7_INSTRUCTIONS}`
-      : AGENT_INSTRUCTIONS,
+      ? `${AGENT_INSTRUCTIONS}
+
+${ANDROID_GOAL_V7_INSTRUCTIONS}`
+      : `${AGENT_INSTRUCTIONS}
+
+${styleInstructions}${productInstructions}`,
     input,
-    tools: androidNavigationMode
-      ? [ANDROID_GOAL_TOOL]
-      : [
-          { type: "web_search" },
-          ...DEVICE_TOOLS
-        ],
-    tool_choice: androidNavigationMode
-      ? { type: "function", name: "execute_android_goal" }
-      : "auto",
-    max_output_tokens: androidNavigationMode ? 260 : 1200,
-    store: true
+    max_output_tokens: androidNavigationMode
+      ? 260
+      : deepRequest
+        ? 1600
+        : source === "voice"
+          ? 650
+          : fastEverydayMode
+            ? 700
+            : 1000,
+    store: !androidNavigationMode
   };
 
-  if (previousResponseId) {
+  if (androidNavigationMode) {
+    payload.tools = [ANDROID_GOAL_TOOL];
+    payload.tool_choice = { type: "function", name: "execute_android_goal" };
+  } else if (!fastEverydayMode) {
+    payload.tools = [
+      { type: "web_search" },
+      ...DEVICE_TOOLS
+    ];
+    payload.tool_choice = "auto";
+  }
+
+  if (previousResponseId && !androidNavigationMode) {
     payload.previous_response_id = previousResponseId;
   }
 
