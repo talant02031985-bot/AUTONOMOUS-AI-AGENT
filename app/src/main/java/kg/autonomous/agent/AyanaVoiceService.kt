@@ -98,6 +98,10 @@ class AyanaVoiceService : Service() {
         false
 
     @Volatile
+    private var micGeneration =
+        0L
+
+    @Volatile
     private var commandGeneration =
         0L
 
@@ -112,6 +116,32 @@ class AyanaVoiceService : Service() {
     @Volatile
     private var currentAgentConnection:
         HttpsURLConnection? = null
+
+    private val cancelListenerWatchdog =
+        object : Runnable {
+
+            override fun run() {
+
+                if (
+                    shouldKeepCancelListener()
+                ) {
+
+                    listenMode =
+                        ListenMode.CANCEL
+
+                    if (
+                        !isRecording
+                    ) {
+                        startSherpaListening()
+                    }
+
+                    mainHandler.postDelayed(
+                        this,
+                        CANCEL_LISTENER_WATCHDOG_MS
+                    )
+                }
+            }
+        }
 
     private val conversationHistory =
         mutableListOf<Pair<String, String>>()
@@ -698,18 +728,35 @@ class AyanaVoiceService : Service() {
 
     private fun startFollowUpOrWake() {
 
-        val audioManager =
-            getSystemService(
-                Context.AUDIO_SERVICE
-            ) as? AudioManager
+        // A CANCEL listener may still own the microphone while AYANA is
+        // speaking. End that stream first so the next wake/follow-up mode starts
+        // with a clean recognizer stream rather than inheriting TTS audio.
+        stopCancelListenerWatchdog()
+        stopSherpaListening()
 
-        if (
-            audioManager?.isMusicActive == true
-        ) {
-            startWakeListening()
-        } else {
-            startFollowUpListening()
-        }
+        mainHandler.postDelayed(
+            {
+                if (
+                    !shuttingDown &&
+                    isRunning
+                ) {
+
+                    val audioManager =
+                        getSystemService(
+                            Context.AUDIO_SERVICE
+                        ) as? AudioManager
+
+                    if (
+                        audioManager?.isMusicActive == true
+                    ) {
+                        startWakeListening()
+                    } else {
+                        startFollowUpListening()
+                    }
+                }
+            },
+            CANCEL_MODE_TRANSITION_MS
+        )
     }
 
     private fun startFollowUpListening() {
@@ -749,9 +796,47 @@ class AyanaVoiceService : Service() {
         listenMode =
             ListenMode.CANCEL
 
-        // Do not overwrite THINKING / EXECUTING visual status. The microphone
-        // listens locally only for STOP / full AYANA shutdown phrases.
-        startSherpaListening()
+        // Do not overwrite THINKING / EXECUTING / SPEAKING visual status.
+        // Keep a tiny local listener alive only for STOP/full-shutdown phrases.
+        startCancelListenerWatchdog()
+
+        if (
+            !isRecording
+        ) {
+            startSherpaListening()
+        }
+    }
+
+    private fun startCancelListenerWatchdog() {
+
+        mainHandler.removeCallbacks(
+            cancelListenerWatchdog
+        )
+
+        mainHandler.post(
+            cancelListenerWatchdog
+        )
+    }
+
+    private fun stopCancelListenerWatchdog() {
+
+        mainHandler.removeCallbacks(
+            cancelListenerWatchdog
+        )
+    }
+
+    private fun shouldKeepCancelListener():
+        Boolean {
+
+        return !shuttingDown &&
+            isRunning &&
+            !cancelRequested &&
+            currentStatusState in
+            setOf(
+                STATE_THINKING,
+                STATE_EXECUTING,
+                STATE_SPEAKING
+            )
     }
 
     private fun startCommandListening() {
@@ -936,6 +1021,9 @@ class AyanaVoiceService : Service() {
             return
         }
 
+        val sessionGeneration =
+            ++micGeneration
+
         recordingThread =
             thread(
                 start = true,
@@ -943,13 +1031,15 @@ class AyanaVoiceService : Service() {
             ) {
 
                 processSherpaAudio(
-                    activeRecorder
+                    activeRecorder,
+                    sessionGeneration
                 )
             }
     }
 
     private fun processSherpaAudio(
-        recorder: AudioRecord
+        recorder: AudioRecord,
+        sessionGeneration: Long
     ) {
 
         val localRecognizer =
@@ -1491,7 +1581,11 @@ class AyanaVoiceService : Service() {
 
         } catch (_: Exception) {
 
-            if (!shuttingDown) {
+            if (
+                !shuttingDown &&
+                sessionGeneration ==
+                micGeneration
+            ) {
 
                 pendingAction =
                     when (listenMode) {
@@ -1599,7 +1693,9 @@ class AyanaVoiceService : Service() {
 
             if (
                 action != null &&
-                !shuttingDown
+                !shuttingDown &&
+                sessionGeneration ==
+                micGeneration
             ) {
 
                 mainHandler.post(
@@ -1650,6 +1746,11 @@ class AyanaVoiceService : Service() {
     }
 
     private fun stopSherpaListening() {
+
+        // Invalidate the old recording loop before stopping AudioRecord. Any
+        // catch/finally from that obsolete loop must NOT restart WAKE and steal
+        // the microphone from the dedicated CANCEL listener.
+        micGeneration++
 
         isRecording =
             false
@@ -8417,6 +8518,11 @@ class AyanaVoiceService : Service() {
             "AYANA отвечает"
         )
 
+        // Voice STOP must remain available while TTS is downloading and while
+        // Marin is speaking. The exact/short stop-phrase filter below avoids
+        // treating ordinary speech as cancellation.
+        startCancelListening()
+
         val token =
             ++audioToken
 
@@ -8827,8 +8933,15 @@ class AyanaVoiceService : Service() {
             removeLeadingWakeWord(
                 normalized
             )
+                .trim()
 
-        return withoutWake in
+        if (
+            withoutWake.isBlank()
+        ) {
+            return false
+        }
+
+        val exact =
             setOf(
                 "стоп",
                 "отмена",
@@ -8838,7 +8951,52 @@ class AyanaVoiceService : Service() {
                 "останови",
                 "останови команду",
                 "останови выполнение",
+                "хватит",
+                "все хватит",
+                "всё хватит"
+            )
+
+        if (
+            withoutWake in
+            exact
+        ) {
+            return true
+        }
+
+        val words =
+            withoutWake
+                .split(
+                    " "
+                )
+                .filter {
+                    it.isNotBlank()
+                }
+
+        if (
+            words.size >
+            MAX_CANCEL_PHRASE_WORDS
+        ) {
+            return false
+        }
+
+        return words.any {
+            it ==
+                "стоп" ||
+                it ==
+                "отмена" ||
+                it ==
+                "отмени" ||
+                it ==
                 "хватит"
+        } ||
+            withoutWake.startsWith(
+                "прекрати"
+            ) ||
+            withoutWake.startsWith(
+                "останови команд"
+            ) ||
+            withoutWake.startsWith(
+                "останови выполн"
             )
     }
 
@@ -8956,6 +9114,7 @@ class AyanaVoiceService : Service() {
         } catch (_: Exception) {
         }
 
+        stopCancelListenerWatchdog()
         stopCurrentAudio()
         stopSherpaListening()
 
@@ -9160,6 +9319,7 @@ class AyanaVoiceService : Service() {
         } catch (_: Exception) {
         }
 
+        stopCancelListenerWatchdog()
         miniOrbController.hide()
 
         val historyId =
@@ -9259,6 +9419,7 @@ class AyanaVoiceService : Service() {
         listenMode =
             ListenMode.BUSY
 
+        stopCancelListenerWatchdog()
         stopSherpaListening()
         stopCurrentAudio()
 
@@ -9347,6 +9508,15 @@ class AyanaVoiceService : Service() {
 
         private const val CANCEL_THREAD_WAIT_STEP_MS =
             100L
+
+        private const val CANCEL_LISTENER_WATCHDOG_MS =
+            220L
+
+        private const val CANCEL_MODE_TRANSITION_MS =
+            140L
+
+        private const val MAX_CANCEL_PHRASE_WORDS =
+            5
 
         private const val CHANNEL_ID =
             "ayana_voice_service"
