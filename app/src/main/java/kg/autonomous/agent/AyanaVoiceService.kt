@@ -55,6 +55,7 @@ class AyanaVoiceService : Service() {
         QUICK_COMMAND,
         COMMAND,
         FOLLOW_UP,
+        CANCEL,
         BUSY
     }
 
@@ -91,6 +92,26 @@ class AyanaVoiceService : Service() {
 
     private var audioToken:
         Long = 0L
+
+    @Volatile
+    private var cancelRequested =
+        false
+
+    @Volatile
+    private var commandGeneration =
+        0L
+
+    @Volatile
+    private var activeCommandToken =
+        0L
+
+    @Volatile
+    private var currentAgentThread:
+        Thread? = null
+
+    @Volatile
+    private var currentAgentConnection:
+        HttpsURLConnection? = null
 
     private val conversationHistory =
         mutableListOf<Pair<String, String>>()
@@ -197,7 +218,11 @@ class AyanaVoiceService : Service() {
                             .agentChangeVolume(
                                 action
                             )
-                }
+                },
+            shouldCancel = {
+                cancelRequested ||
+                    shuttingDown
+            }
         )
     }
 
@@ -228,7 +253,7 @@ class AyanaVoiceService : Service() {
     override fun onCreate() {
         super.onCreate()
 
-        isRunning = true
+        isRunning = false
         shuttingDown = false
 
         createNotificationChannel()
@@ -237,21 +262,16 @@ class AyanaVoiceService : Service() {
             "AYANA запускает локальное распознавание"
         )
 
-        // V8.1 GLOBAL ORB:
-        // The user explicitly wants one persistent draggable Orb above all apps.
-        // Keep the preference enabled whenever the foreground AYANA service runs.
+        // IMPORTANT: onCreate() may be called for ACTION_STOP or another
+        // service intent. Never create the overlay here. The single Orb is
+        // created only after a real ACTION_START / active text command.
         ayanaPreferences.miniOrbEnabled = true
 
-        miniOrbController.refresh(
-            enabled = true,
-            state =
-                currentStatusState
-        )
+        currentStatusText =
+            "AYANA запускается"
 
-        broadcastStatus(
-            "Загружаю русскую модель…",
+        currentStatusState =
             STATE_THINKING
-        )
 
         prefetchReadyVoice()
 
@@ -266,7 +286,10 @@ class AyanaVoiceService : Service() {
                 modelReady = true
 
                 mainHandler.post {
-                    if (!shuttingDown) {
+                    if (
+                        !shuttingDown &&
+                        isRunning
+                    ) {
                         startWakeListening()
                     }
                 }
@@ -302,12 +325,40 @@ class AyanaVoiceService : Service() {
                 return START_NOT_STICKY
             }
 
+            ACTION_CANCEL_COMMAND -> {
+                cancelCurrentCommand(
+                    source = "button"
+                )
+                return START_STICKY
+            }
+
             ACTION_START -> {
+
+                isRunning =
+                    true
+
+                ayanaPreferences.miniOrbEnabled =
+                    true
+
+                miniOrbController.refresh(
+                    enabled = true,
+                    state =
+                        if (
+                            currentStatusState ==
+                            STATE_STOPPED
+                        ) {
+                            STATE_LISTENING
+                        } else {
+                            currentStatusState
+                        }
+                )
+
                 if (
                     !shuttingDown &&
                     modelReady &&
                     !isRecording &&
-                    listenMode != ListenMode.BUSY
+                    listenMode != ListenMode.BUSY &&
+                    listenMode != ListenMode.CANCEL
                 ) {
                     startWakeListening()
                 }
@@ -315,13 +366,22 @@ class AyanaVoiceService : Service() {
 
             ACTION_REFRESH_OVERLAY -> {
 
-                ayanaPreferences.miniOrbEnabled = true
+                if (
+                    isRunning &&
+                    !shuttingDown &&
+                    currentStatusState !=
+                    STATE_STOPPED
+                ) {
 
-                miniOrbController.refresh(
-                    enabled = true,
-                    state =
-                        currentStatusState
-                )
+                    ayanaPreferences.miniOrbEnabled =
+                        true
+
+                    miniOrbController.refresh(
+                        enabled = true,
+                        state =
+                            currentStatusState
+                    )
+                }
             }
 
             ACTION_TEXT_COMMAND -> {
@@ -334,6 +394,18 @@ class AyanaVoiceService : Service() {
                         .orEmpty()
 
                 if (command.isNotBlank()) {
+
+                    isRunning =
+                        true
+
+                    ayanaPreferences.miniOrbEnabled =
+                        true
+
+                    miniOrbController.refresh(
+                        enabled = true,
+                        state =
+                            currentStatusState
+                    )
 
                     stopSherpaListening()
 
@@ -410,6 +482,24 @@ class AyanaVoiceService : Service() {
                     PendingIntent.FLAG_IMMUTABLE
             )
 
+        val cancelIntent =
+            Intent(
+                this,
+                AyanaVoiceService::class.java
+            ).apply {
+                action =
+                    ACTION_CANCEL_COMMAND
+            }
+
+        val cancelPendingIntent =
+            PendingIntent.getService(
+                this,
+                101,
+                cancelIntent,
+                PendingIntent.FLAG_UPDATE_CURRENT or
+                    PendingIntent.FLAG_IMMUTABLE
+            )
+
         val stopIntent =
             Intent(
                 this,
@@ -421,7 +511,7 @@ class AyanaVoiceService : Service() {
         val stopPendingIntent =
             PendingIntent.getService(
                 this,
-                101,
+                102,
                 stopIntent,
                 PendingIntent.FLAG_UPDATE_CURRENT or
                     PendingIntent.FLAG_IMMUTABLE
@@ -455,7 +545,12 @@ class AyanaVoiceService : Service() {
             .setContentIntent(openPendingIntent)
             .addAction(
                 android.R.drawable.ic_media_pause,
-                "Остановить",
+                "Стоп команды",
+                cancelPendingIntent
+            )
+            .addAction(
+                android.R.drawable.ic_delete,
+                "Остановить AYANA",
                 stopPendingIntent
             )
             .build()
@@ -638,6 +733,24 @@ class AyanaVoiceService : Service() {
             "Слушаю продолжение"
         )
 
+        startSherpaListening()
+    }
+
+    private fun startCancelListening() {
+
+        if (
+            shuttingDown ||
+            !modelReady ||
+            !isRunning
+        ) {
+            return
+        }
+
+        listenMode =
+            ListenMode.CANCEL
+
+        // Do not overwrite THINKING / EXECUTING visual status. The microphone
+        // listens locally only for STOP / full AYANA shutdown phrases.
         startSherpaListening()
     }
 
@@ -1316,6 +1429,56 @@ class AyanaVoiceService : Service() {
                         }
                     }
 
+                    ListenMode.CANCEL -> {
+
+                        if (
+                            text.isNotBlank() &&
+                            isShutdownAyanaPhrase(
+                                text
+                            )
+                        ) {
+
+                            isRecording =
+                                false
+
+                            pendingAction =
+                                {
+                                    shutdownAyana()
+                                }
+
+                            break
+                        }
+
+                        if (
+                            text.isNotBlank() &&
+                            isCancelCommandPhrase(
+                                text
+                            )
+                        ) {
+
+                            isRecording =
+                                false
+
+                            pendingAction =
+                                {
+                                    cancelCurrentCommand(
+                                        source = "voice"
+                                    )
+                                }
+
+                            break
+                        }
+
+                        if (
+                            isEndpoint
+                        ) {
+
+                            localRecognizer.reset(
+                                stream
+                            )
+                        }
+                    }
+
                     ListenMode.BUSY -> {
 
                         isRecording =
@@ -1392,6 +1555,26 @@ class AyanaVoiceService : Service() {
                                     },
                                     500L
                                 )
+                            }
+                        }
+
+                        ListenMode.CANCEL -> {
+
+                            if (
+                                activeCommandHistoryId !=
+                                null &&
+                                !cancelRequested
+                            ) {
+                                {
+                                    mainHandler.postDelayed(
+                                        {
+                                            startCancelListening()
+                                        },
+                                        250L
+                                    )
+                                }
+                            } else {
+                                null
                             }
                         }
 
@@ -1512,6 +1695,9 @@ class AyanaVoiceService : Service() {
 
             ListenMode.FOLLOW_UP ->
                 startFollowUpListening()
+
+            ListenMode.CANCEL ->
+                startCancelListening()
 
             ListenMode.BUSY ->
                 Unit
@@ -1917,6 +2103,109 @@ class AyanaVoiceService : Service() {
             return
         }
 
+        if (
+            isShutdownAyanaPhrase(
+                normalized
+            )
+        ) {
+            shutdownAyana()
+            return
+        }
+
+        if (
+            isCancelCommandPhrase(
+                normalized
+            )
+        ) {
+
+            if (
+                activeCommandHistoryId !=
+                null
+            ) {
+                cancelCurrentCommand(
+                    source =
+                        if (
+                            silent
+                        ) {
+                            "text"
+                        } else {
+                            "voice"
+                        }
+                )
+            } else {
+                startWakeListening()
+            }
+
+            return
+        }
+
+        if (
+            isLocalOrbControlCommand(
+                normalized
+            )
+        ) {
+
+            cancelRequested =
+                false
+
+            activeCommandToken =
+                ++commandGeneration
+
+            activeCommandHistoryId =
+                commandHistoryStore.begin(
+                    command =
+                        originalCommand,
+                    source =
+                        if (
+                            silent
+                        ) {
+                            "text"
+                        } else {
+                            "voice"
+                        }
+                )
+
+            broadcastStatus(
+                "Настраиваю Orb AYANA…",
+                STATE_EXECUTING
+            )
+
+            ayanaPreferences.miniOrbEnabled =
+                true
+
+            if (
+                miniOrbController.canDrawOverlays()
+            ) {
+
+                miniOrbController.refresh(
+                    enabled = true,
+                    state =
+                        STATE_LISTENING
+                )
+
+                finishLocalCommand(
+                    "Orb AYANA активен поверх всех окон",
+                    silent
+                )
+
+            } else {
+
+                respondAndResume(
+                    "Для Orb нужно разрешение «Поверх других приложений».",
+                    silent,
+                    success = false
+                )
+            }
+
+            return
+        }
+
+        cancelRequested =
+            false
+
+        activeCommandToken =
+            ++commandGeneration
+
         activeCommandHistoryId =
             commandHistoryStore.begin(
                 command = originalCommand,
@@ -1996,7 +2285,8 @@ class AyanaVoiceService : Service() {
             } else {
                 respondAndResume(
                     resultMessage,
-                    silent
+                    silent,
+                    success = false
                 )
             }
 
@@ -2142,7 +2432,8 @@ class AyanaVoiceService : Service() {
             } else {
                 respondAndResume(
                     resultMessage,
-                    silent
+                    silent,
+                    success = false
                 )
             }
 
@@ -2237,7 +2528,8 @@ class AyanaVoiceService : Service() {
             } else {
                 respondAndResume(
                     resultMessage,
-                    silent
+                    silent,
+                    success = false
                 )
             }
 
@@ -2264,7 +2556,8 @@ class AyanaVoiceService : Service() {
                 } else {
                     respondAndResume(
                         "Включите мой доступ в специальных возможностях.",
-                        silent
+                        silent,
+                        success = false
                     )
                 }
 
@@ -2291,7 +2584,8 @@ class AyanaVoiceService : Service() {
                 } else {
                     respondAndResume(
                         "Включите мой доступ в специальных возможностях.",
-                        silent
+                        silent,
+                        success = false
                     )
                 }
 
@@ -3858,7 +4152,8 @@ class AyanaVoiceService : Service() {
 
             respondAndResume(
                 "Не поняла, какое приложение открыть.",
-                silent
+                silent,
+                success = false
             )
 
             return
@@ -3940,7 +4235,8 @@ class AyanaVoiceService : Service() {
 
             respondAndResume(
                 "Не нашла приложение $requestedName.",
-                silent
+                silent,
+                success = false
             )
 
             return
@@ -3994,7 +4290,8 @@ class AyanaVoiceService : Service() {
 
             respondAndResume(
                 "Не удалось открыть приложение $label.",
-                silent
+                silent,
+                success = false
             )
         }
     }
@@ -4350,7 +4647,8 @@ class AyanaVoiceService : Service() {
 
             respondAndResume(
                 "Скажите, что именно нажать.",
-                silent
+                silent,
+                success = false
             )
 
             return
@@ -4364,7 +4662,8 @@ class AyanaVoiceService : Service() {
 
             respondAndResume(
                 "Включите мой доступ в специальных возможностях.",
-                silent
+                silent,
+                success = false
             )
 
             return
@@ -4386,7 +4685,8 @@ class AyanaVoiceService : Service() {
 
             respondAndResume(
                 "Я не нашла на экране элемент $target.",
-                silent
+                silent,
+                success = false
             )
         }
     }
@@ -4457,7 +4757,8 @@ class AyanaVoiceService : Service() {
 
         respondAndResume(
             "Приложение $displayName не найдено.",
-            silent
+            silent,
+            success = false
         )
     }
 
@@ -4489,7 +4790,8 @@ class AyanaVoiceService : Service() {
 
             respondAndResume(
                 "Не удалось открыть $displayName.",
-                silent
+                silent,
+                success = false
             )
         }
     }
@@ -4558,7 +4860,8 @@ class AyanaVoiceService : Service() {
 
                 respondAndResume(
                     "Не удалось открыть YouTube.",
-                    silent
+                    silent,
+                    success = false
                 )
             }
         }
@@ -4600,7 +4903,8 @@ class AyanaVoiceService : Service() {
 
             respondAndResume(
                 "Не удалось открыть поиск.",
-                silent
+                silent,
+                success = false
             )
         }
     }
@@ -4668,7 +4972,8 @@ class AyanaVoiceService : Service() {
 
                 respondAndResume(
                     "Не удалось открыть карты.",
-                    silent
+                    silent,
+                    success = false
                 )
             }
         }
@@ -4715,11 +5020,12 @@ class AyanaVoiceService : Service() {
 
     private fun respondAndResume(
         text: String,
-        silent: Boolean
+        silent: Boolean,
+        success: Boolean = true
     ) {
 
         finishActiveCommandHistory(
-            success = !looksLikeCommandFailure(text),
+            success = success,
             result = text
         )
 
@@ -4733,6 +5039,11 @@ class AyanaVoiceService : Service() {
     private fun showTextAndResume(
         text: String
     ) {
+
+        stopSherpaListening()
+
+        listenMode =
+            ListenMode.BUSY
 
         broadcastStatus(
             text,
@@ -4774,10 +5085,16 @@ class AyanaVoiceService : Service() {
             "AYANA Agent Core думает…"
         )
 
-        thread(
-            start = true,
-            name = "AyanaAgentCore"
-        ) {
+        val commandToken =
+            activeCommandToken
+
+        startCancelListening()
+
+        val worker =
+            thread(
+                start = true,
+                name = "AyanaAgentCore"
+            ) {
 
             try {
 
@@ -4823,12 +5140,18 @@ class AyanaVoiceService : Service() {
                 var finalAnswer:
                     String? = null
 
+                var finalSuccess =
+                    true
+
                 var step = 0
 
                 while (
                     step <
                     MAX_AGENT_STEPS &&
-                    !shuttingDown
+                    !shuttingDown &&
+                    !isCommandCancelled(
+                        commandToken
+                    )
                 ) {
 
                     step++
@@ -4906,6 +5229,9 @@ class AyanaVoiceService : Service() {
                                 finalAnswer =
                                     "Я не получила действие для выполнения."
 
+                                finalSuccess =
+                                    false
+
                                 break
                             }
 
@@ -4923,6 +5249,9 @@ class AyanaVoiceService : Service() {
 
                                 finalAnswer =
                                     "Я не смогла прочитать следующий шаг задачи."
+
+                                finalSuccess =
+                                    false
 
                                 break
                             }
@@ -4948,6 +5277,9 @@ class AyanaVoiceService : Service() {
 
                                 finalAnswer =
                                     "Я не смогла определить следующее действие."
+
+                                finalSuccess =
+                                    false
 
                                 break
                             }
@@ -4992,14 +5324,31 @@ class AyanaVoiceService : Service() {
                                 agentPreviousResponseId =
                                     null
 
+                                val goalStatus =
+                                    result.optString(
+                                        "status"
+                                    )
+
+                                if (
+                                    goalStatus ==
+                                    "cancelled" ||
+                                    isCommandCancelled(
+                                        commandToken
+                                    )
+                                ) {
+                                    return@thread
+                                }
+
                                 val goalSucceeded =
                                     result.optBoolean(
                                         "success",
                                         false
                                     ) ||
-                                        result.optString(
-                                            "status"
-                                        ) == "success"
+                                        goalStatus ==
+                                        "success"
+
+                                finalSuccess =
+                                    goalSucceeded
 
                                 broadcastStatus(
                                     result.optString(
@@ -5247,9 +5596,20 @@ class AyanaVoiceService : Service() {
                             finalAnswer =
                                 "Не удалось продолжить выполнение задачи."
 
+                            finalSuccess =
+                                false
+
                             break
                         }
                     }
+                }
+
+                if (
+                    isCommandCancelled(
+                        commandToken
+                    )
+                ) {
+                    return@thread
                 }
 
                 if (
@@ -5259,6 +5619,9 @@ class AyanaVoiceService : Service() {
 
                     finalAnswer =
                         "Я остановила задачу: слишком много последовательных действий."
+
+                    finalSuccess =
+                        false
                 }
 
                 val answer =
@@ -5285,10 +5648,20 @@ class AyanaVoiceService : Service() {
 
                 mainHandler.post {
 
-                    respondAndResume(
-                        answer,
-                        silent
-                    )
+                    if (
+                        !shuttingDown &&
+                        !isCommandCancelled(
+                            commandToken
+                        )
+                    ) {
+
+                        respondAndResume(
+                            answer,
+                            silent,
+                            success =
+                                finalSuccess
+                        )
+                    }
                 }
 
             } catch (error: Exception) {
@@ -5304,6 +5677,15 @@ class AyanaVoiceService : Service() {
                         .take(
                             260
                         )
+
+                if (
+                    isCommandCancelled(
+                        commandToken
+                    ) ||
+                    shuttingDown
+                ) {
+                    return@thread
+                }
 
                 mainHandler.post {
 
@@ -5327,11 +5709,24 @@ class AyanaVoiceService : Service() {
 
                     respondAndResume(
                         "Ошибка Agent Core: $spokenTechnical",
-                        silent
+                        silent,
+                        success = false
                     )
+                }
+            } finally {
+
+                if (
+                    Thread.currentThread() ===
+                    currentAgentThread
+                ) {
+                    currentAgentThread =
+                        null
                 }
             }
         }
+
+        currentAgentThread =
+            worker
     }
 
     private fun callAgentCore(
@@ -5354,6 +5749,9 @@ class AyanaVoiceService : Service() {
             connection =
                 url.openConnection()
                     as HttpsURLConnection
+
+            currentAgentConnection =
+                connection
 
             connection.requestMethod =
                 "POST"
@@ -5497,6 +5895,14 @@ class AyanaVoiceService : Service() {
             )
 
         } finally {
+
+            if (
+                currentAgentConnection ===
+                connection
+            ) {
+                currentAgentConnection =
+                    null
+            }
 
             connection
                 ?.disconnect()
@@ -6031,8 +6437,66 @@ class AyanaVoiceService : Service() {
             STATE_EXECUTING
         )
 
+        val goalCommandToken =
+            activeCommandToken
+
         val result =
-            androidTaskEngine
+            AyanaAndroidTaskEngine(
+                screenIntelligence = screenIntelligence,
+                gateway =
+                    object : AyanaAndroidTaskEngine.ActionGateway {
+
+                        override fun openSettings(
+                            section: String
+                        ): JSONObject =
+                            this@AyanaVoiceService
+                                .agentOpenSettings(
+                                    section
+                                )
+
+                        override fun openApp(
+                            name: String
+                        ): JSONObject =
+                            this@AyanaVoiceService
+                                .agentOpenApp(
+                                    name
+                                )
+
+                        override fun openAppInfo(
+                            name: String
+                        ): JSONObject =
+                            this@AyanaVoiceService
+                                .agentOpenAppInfo(
+                                    name
+                                )
+
+                        override fun openAppSettings(
+                            name: String,
+                            section: String
+                        ): JSONObject =
+                            this@AyanaVoiceService
+                                .agentOpenAppSettings(
+                                    requestedName =
+                                        name,
+                                    section =
+                                        section
+                                )
+
+                        override fun changeVolume(
+                            action: String
+                        ): JSONObject =
+                            this@AyanaVoiceService
+                                .agentChangeVolume(
+                                    action
+                                )
+                    },
+                shouldCancel = {
+                    cancelRequested ||
+                        shuttingDown ||
+                        goalCommandToken !=
+                        activeCommandToken
+                }
+            )
                 .execute(
                     plan = plan,
                     confirmed = false
@@ -8295,27 +8759,289 @@ class AyanaVoiceService : Service() {
         activeCommandHistoryId = null
     }
 
-    private fun looksLikeCommandFailure(
+    private fun isCommandCancelled(
+        token: Long
+    ): Boolean {
+
+        return cancelRequested ||
+            shuttingDown ||
+            token !=
+            activeCommandToken
+    }
+
+    private fun isLocalOrbControlCommand(
         value: String
     ): Boolean {
+
         val normalized =
             value
                 .lowercase(
                     Locale.ROOT
                 )
-                .replace('ё', 'е')
+                .replace(
+                    'ё',
+                    'е'
+                )
+
+        val mentionsOrb =
+            normalized.contains(
+                "orb"
+            ) ||
+                normalized.contains(
+                    "орб"
+                )
+
+        if (
+            !mentionsOrb
+        ) {
+            return false
+        }
 
         return listOf(
-            "ошибка",
-            "не удалось",
-            "не найден",
-            "не найдена",
-            "не найдено",
-            "не могу",
-            "не смог",
-            "остановила задачу",
-            "требует подтверждения"
-        ).any { normalized.contains(it) }
+            "остав",
+            "покаж",
+            "включ",
+            "верни",
+            "поверх",
+            "не скры",
+            "один знач",
+            "одну кноп"
+        ).any {
+            normalized.contains(
+                it
+            )
+        }
+    }
+
+    private fun isCancelCommandPhrase(
+        value: String
+    ): Boolean {
+
+        val normalized =
+            normalizeRecognitionText(
+                value
+            )
+                .trim()
+
+        val withoutWake =
+            removeLeadingWakeWord(
+                normalized
+            )
+
+        return withoutWake in
+            setOf(
+                "стоп",
+                "отмена",
+                "отмени",
+                "прекрати",
+                "прекрати выполнение",
+                "останови",
+                "останови команду",
+                "останови выполнение",
+                "хватит"
+            )
+    }
+
+    private fun isShutdownAyanaPhrase(
+        value: String
+    ): Boolean {
+
+        val normalized =
+            normalizeRecognitionText(
+                value
+            )
+                .trim()
+
+        val withoutWake =
+            removeLeadingWakeWord(
+                normalized
+            )
+
+        return withoutWake in
+            setOf(
+                "отключись",
+                "выключись",
+                "останови аяну",
+                "останови айану",
+                "выключи аяну",
+                "выключи айану",
+                "отключи аяну",
+                "отключи айану"
+            )
+    }
+
+    private fun removeLeadingWakeWord(
+        value: String
+    ): String {
+
+        var result =
+            value.trim()
+
+        for (
+            wake in
+            WAKE_VARIANTS
+        ) {
+
+            if (
+                result ==
+                wake
+            ) {
+                return ""
+            }
+
+            if (
+                result.startsWith(
+                    "$wake "
+                )
+            ) {
+
+                result =
+                    result
+                        .removePrefix(
+                            "$wake "
+                        )
+                        .trim()
+
+                break
+            }
+        }
+
+        return result
+    }
+
+    private fun cancelCurrentCommand(
+        source: String
+    ) {
+
+        if (
+            shuttingDown ||
+            !isRunning
+        ) {
+            return
+        }
+
+        val hadActiveCommand =
+            activeCommandHistoryId !=
+                null ||
+                currentAgentThread?.isAlive ==
+                true ||
+                currentStatusState in
+                setOf(
+                    STATE_THINKING,
+                    STATE_EXECUTING,
+                    STATE_SPEAKING,
+                    STATE_COMMAND
+                )
+
+        if (
+            !hadActiveCommand
+        ) {
+            return
+        }
+
+        cancelRequested =
+            true
+
+        commandGeneration++
+
+        try {
+            currentAgentConnection
+                ?.disconnect()
+        } catch (_: Exception) {
+        }
+
+        try {
+            currentAgentThread
+                ?.interrupt()
+        } catch (_: Exception) {
+        }
+
+        stopCurrentAudio()
+        stopSherpaListening()
+
+        val historyId =
+            activeCommandHistoryId
+
+        if (
+            historyId !=
+            null
+        ) {
+
+            commandHistoryStore.finishCancelled(
+                id =
+                    historyId,
+                result =
+                    "Команда остановлена пользователем",
+                source =
+                    source
+            )
+
+            activeCommandHistoryId =
+                null
+        }
+
+        agentPreviousResponseId =
+            null
+
+        broadcastStatus(
+            "Команда остановлена",
+            STATE_CANCELLED
+        )
+
+        updateNotification(
+            "Команда остановлена • AYANA остаётся активной"
+        )
+
+        resumeAfterCancellation(
+            attempt = 0
+        )
+    }
+
+    private fun resumeAfterCancellation(
+        attempt: Int
+    ) {
+
+        if (
+            shuttingDown ||
+            !isRunning
+        ) {
+            return
+        }
+
+        if (
+            currentAgentThread?.isAlive ==
+            true &&
+            attempt <
+            CANCEL_THREAD_WAIT_ATTEMPTS
+        ) {
+
+            mainHandler.postDelayed(
+                {
+                    resumeAfterCancellation(
+                        attempt +
+                            1
+                    )
+                },
+                CANCEL_THREAD_WAIT_STEP_MS
+            )
+
+            return
+        }
+
+        cancelRequested =
+            false
+
+        mainHandler.postDelayed(
+            {
+                if (
+                    !shuttingDown &&
+                    isRunning
+                ) {
+                    startWakeListening()
+                }
+            },
+            180L
+        )
     }
 
     // =========================================================
@@ -8339,25 +9065,20 @@ class AyanaVoiceService : Service() {
             message = text
         )
 
-        // Mini orb owns Android Views/WindowManager and must only be
-        // touched from the main UI thread. Agent Core runs on its own
-        // worker thread, so marshal overlay updates to main.
-        if (
-            Looper.myLooper() ==
-            Looper.getMainLooper()
-        ) {
+        // STOPPED must never create/refresh an overlay. This is the critical
+        // guard that prevents repeated STOP actions from multiplying Orbs.
+        val updateOrb =
+            {
+                if (
+                    state ==
+                    STATE_STOPPED ||
+                    !isRunning ||
+                    shuttingDown
+                ) {
 
-            miniOrbController.refresh(
-                enabled = true,
-                state =
-                    state
-            )
+                    miniOrbController.hide()
 
-        } else {
-
-            mainHandler.post {
-
-                if (!shuttingDown) {
+                } else {
 
                     miniOrbController.refresh(
                         enabled = true,
@@ -8365,6 +9086,19 @@ class AyanaVoiceService : Service() {
                             state
                     )
                 }
+            }
+
+        if (
+            Looper.myLooper() ==
+            Looper.getMainLooper()
+        ) {
+
+            updateOrb()
+
+        } else {
+
+            mainHandler.post {
+                updateOrb()
             }
         }
 
@@ -8406,8 +9140,48 @@ class AyanaVoiceService : Service() {
         isRunning =
             false
 
+        cancelRequested =
+            true
+
+        commandGeneration++
+
         listenMode =
             ListenMode.BUSY
+
+        try {
+            currentAgentConnection
+                ?.disconnect()
+        } catch (_: Exception) {
+        }
+
+        try {
+            currentAgentThread
+                ?.interrupt()
+        } catch (_: Exception) {
+        }
+
+        miniOrbController.hide()
+
+        val historyId =
+            activeCommandHistoryId
+
+        if (
+            historyId !=
+            null
+        ) {
+
+            commandHistoryStore.finishCancelled(
+                id =
+                    historyId,
+                result =
+                    "AYANA полностью остановлена пользователем",
+                source =
+                    "stop_ayana"
+            )
+
+            activeCommandHistoryId =
+                null
+        }
 
         broadcastStatus(
             "AYANA остановлена",
@@ -8477,6 +9251,11 @@ class AyanaVoiceService : Service() {
         isRunning =
             false
 
+        cancelRequested =
+            true
+
+        commandGeneration++
+
         listenMode =
             ListenMode.BUSY
 
@@ -8531,6 +9310,9 @@ class AyanaVoiceService : Service() {
         const val ACTION_STOP =
             "kg.autonomous.agent.action.STOP_AYANA"
 
+        const val ACTION_CANCEL_COMMAND =
+            "kg.autonomous.agent.action.CANCEL_COMMAND"
+
         const val ACTION_TEXT_COMMAND =
             "kg.autonomous.agent.action.TEXT_COMMAND"
 
@@ -8559,6 +9341,12 @@ class AyanaVoiceService : Service() {
 
         private const val UI_SETTLE_DELAY_MS =
             650L
+
+        private const val CANCEL_THREAD_WAIT_ATTEMPTS =
+            15
+
+        private const val CANCEL_THREAD_WAIT_STEP_MS =
+            100L
 
         private const val CHANNEL_ID =
             "ayana_voice_service"
@@ -8629,6 +9417,9 @@ class AyanaVoiceService : Service() {
 
         const val STATE_ERROR =
             "error"
+
+        const val STATE_CANCELLED =
+            "cancelled"
 
         const val STATE_STOPPED =
             "stopped"
