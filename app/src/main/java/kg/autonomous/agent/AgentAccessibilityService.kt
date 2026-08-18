@@ -1,6 +1,7 @@
 package kg.autonomous.agent
 
 import android.accessibilityservice.AccessibilityService
+import android.accessibilityservice.AccessibilityServiceInfo
 import android.accessibilityservice.GestureDescription
 import android.graphics.Path
 import android.graphics.Rect
@@ -22,6 +23,24 @@ class AgentAccessibilityService :
 
     override fun onServiceConnected() {
         super.onServiceConnected()
+
+        // Samsung One UI may temporarily return rootInActiveWindow == null
+        // during Settings transitions / multi-window. Ask Android for the full
+        // interactive-window list so we can safely fall back to the real app.
+        try {
+
+            val info =
+                serviceInfo
+
+            info.flags =
+                info.flags or
+                    AccessibilityServiceInfo.FLAG_RETRIEVE_INTERACTIVE_WINDOWS
+
+            serviceInfo =
+                info
+
+        } catch (_: Exception) {
+        }
 
         instance =
             this
@@ -102,7 +121,7 @@ class AgentAccessibilityService :
     ): Boolean {
 
         val root =
-            rootInActiveWindow
+            resolveRoot()
                 ?: return false
 
         val match =
@@ -153,7 +172,7 @@ class AgentAccessibilityService :
     ): Boolean {
 
         val root =
-            rootInActiveWindow
+            resolveRoot()
                 ?: return false
 
         val node =
@@ -218,7 +237,7 @@ class AgentAccessibilityService :
     ): Boolean {
 
         val root =
-            rootInActiveWindow
+            resolveRoot()
                 ?: return false
 
         val scrollable =
@@ -342,7 +361,7 @@ class AgentAccessibilityService :
     ): JSONObject {
 
         val root =
-            rootInActiveWindow
+            resolveRoot()
 
         if (
             root == null
@@ -356,6 +375,10 @@ class AgentAccessibilityService :
                 .put(
                     "message",
                     "Активное окно недоступно"
+                )
+                .put(
+                    "window_count",
+                    safeWindowCount()
                 )
         }
 
@@ -496,6 +519,14 @@ class AgentAccessibilityService :
                     )
             )
             .put(
+                "root_source",
+                lastRootSource
+            )
+            .put(
+                "window_count",
+                safeWindowCount()
+            )
+            .put(
                 "node_count",
                 nodes.length()
             )
@@ -552,6 +583,154 @@ class AgentAccessibilityService :
             )
             .hashCode()
             .toString()
+    }
+
+    /**
+     * Prefer rootInActiveWindow. If One UI temporarily returns null, choose the
+     * best root from AccessibilityService.windows. The last AccessibilityEvent
+     * package gets the strongest preference, then active/focused application
+     * windows. This avoids selecting AYANA's overlay instead of Settings.
+     */
+    private fun resolveRoot():
+        AccessibilityNodeInfo? {
+
+        try {
+
+            val active =
+                rootInActiveWindow
+
+            if (
+                active != null
+            ) {
+
+                lastRootSource =
+                    "active"
+
+                return active
+            }
+
+        } catch (_: Exception) {
+        }
+
+        val snapshotWindows =
+            try {
+                windows
+            } catch (_: Exception) {
+                emptyList()
+            }
+
+        var bestRoot:
+            AccessibilityNodeInfo? = null
+
+        var bestScore =
+            Int.MIN_VALUE
+
+        val expectedPackage =
+            lastEventPackage
+                .trim()
+
+        for (
+            window in
+            snapshotWindows
+        ) {
+
+            val root =
+                try {
+                    window.root
+                } catch (_: Exception) {
+                    null
+                }
+                    ?: continue
+
+            val rootPackage =
+                root.packageName
+                    ?.toString()
+                    .orEmpty()
+
+            var score =
+                0
+
+            if (
+                window.isActive
+            ) {
+                score +=
+                    140
+            }
+
+            if (
+                window.isFocused
+            ) {
+                score +=
+                    120
+            }
+
+            if (
+                window.type ==
+                android.view.accessibility.AccessibilityWindowInfo.TYPE_APPLICATION
+            ) {
+                score +=
+                    70
+            }
+
+            if (
+                expectedPackage.isNotBlank() &&
+                rootPackage ==
+                expectedPackage
+            ) {
+                score +=
+                    180
+            }
+
+            if (
+                rootPackage.isNotBlank() &&
+                rootPackage !=
+                packageName
+            ) {
+                score +=
+                    25
+            }
+
+            score +=
+                minOf(
+                    root.childCount,
+                    20
+                ) *
+                    3
+
+            if (
+                score >
+                bestScore
+            ) {
+
+                bestScore =
+                    score
+
+                bestRoot =
+                    root
+            }
+        }
+
+        if (
+            bestRoot != null
+        ) {
+            lastRootSource =
+                "windows_fallback"
+        } else {
+            lastRootSource =
+                "unavailable"
+        }
+
+        return bestRoot
+    }
+
+    private fun safeWindowCount():
+        Int {
+
+        return try {
+            windows.size
+        } catch (_: Exception) {
+            0
+        }
     }
 
     private fun nodeToJson(
@@ -1268,6 +1447,11 @@ class AgentAccessibilityService :
                 280
             )
     }
+
+    @Volatile
+    private var lastRootSource:
+        String =
+        "unavailable"
 
     companion object {
 
