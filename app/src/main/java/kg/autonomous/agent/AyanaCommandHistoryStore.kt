@@ -737,20 +737,45 @@ class AyanaCommandHistoryStore(
                             )
                         }
 
-            events.put(
-                eventJson(
-                    state =
-                        status,
-                    message =
-                        result.take(
-                            600
-                        ),
-                    details =
-                        technical.take(
-                            MAX_DETAILS_CHARS
-                        )
+            val terminalMessage =
+                result.take(
+                    600
                 )
-            )
+
+            val lastEvent =
+                events.optJSONObject(
+                    events.length() -
+                        1
+                )
+
+            val terminalAlreadyLogged =
+                lastEvent != null &&
+                    lastEvent.optString(
+                        "state"
+                    ) ==
+                    status &&
+                    lastEvent.optString(
+                        "message"
+                    ) ==
+                    terminalMessage
+
+            if (
+                !terminalAlreadyLogged
+            ) {
+
+                events.put(
+                    eventJson(
+                        state =
+                            status,
+                        message =
+                            terminalMessage,
+                        details =
+                            technical.take(
+                                MAX_DETAILS_CHARS
+                            )
+                    )
+                )
+            }
 
             saveUnsafe(
                 records
@@ -873,6 +898,33 @@ class AyanaCommandHistoryStore(
                     "screen_message",
                     screen.optString(
                         "message"
+                    )
+                )
+            }
+
+            if (
+                screen.has(
+                    "root_source"
+                )
+            ) {
+                out.put(
+                    "root_source",
+                    screen.optString(
+                        "root_source"
+                    )
+                )
+            }
+
+            if (
+                screen.has(
+                    "window_count"
+                )
+            ) {
+                out.put(
+                    "window_count",
+                    screen.optInt(
+                        "window_count",
+                        0
                     )
                 )
             }
