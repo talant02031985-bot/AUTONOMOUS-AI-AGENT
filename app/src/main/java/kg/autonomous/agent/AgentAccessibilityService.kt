@@ -5,24 +5,76 @@ import android.accessibilityservice.AccessibilityServiceInfo
 import android.accessibilityservice.GestureDescription
 import android.graphics.Path
 import android.graphics.Rect
+import android.os.Build
 import android.os.Bundle
 import android.view.accessibility.AccessibilityEvent
 import android.view.accessibility.AccessibilityNodeInfo
+import android.view.accessibility.AccessibilityWindowInfo
 import org.json.JSONArray
 import org.json.JSONObject
+import java.util.ArrayDeque
 import java.util.Locale
 import kotlin.math.max
 
 class AgentAccessibilityService :
     AccessibilityService() {
 
-    // AYANA Accessibility v3.4 — Samsung multi-window integrity.
-    // Screen snapshots and semantic actions inspect all relevant interactive roots.
+    // AYANA Accessibility v3.6 — Window Context Manager.
+    // Every visible Android window is treated as an independent context. Live
+    // AccessibilityWindowInfo roots are primary; fresh AccessibilityEvent source
+    // evidence is merged only into the matching window context (or kept as its own
+    // bounded evidence context). This prevents cross-window false verification and
+    // unsafe background clicks in split-screen, freeform, PiP and popup scenarios.
 
     data class NodeMatch(
         val node: AccessibilityNodeInfo,
         val score: Int
     )
+
+    private data class WindowContext(
+        val contextId: String,
+        val windowId: Int,
+        val packageName: String,
+        val className: String,
+        val type: Int,
+        val layer: Int,
+        val active: Boolean,
+        val focused: Boolean,
+        val pictureInPicture: Boolean,
+        val bounds: Rect,
+        val root: AccessibilityNodeInfo?,
+        val source: String,
+        val rank: Int
+    )
+
+    private data class ContextNodeMatch(
+        val context: WindowContext,
+        val match: NodeMatch,
+        val totalScore: Int
+    )
+
+    private data class EventTapTarget(
+        val bounds: Rect,
+        val windowId: Int,
+        val packageName: String
+    )
+
+    private data class EventEvidence(
+        val at: Long,
+        val windowId: Int,
+        val packageName: String,
+        val className: String,
+        val eventType: Int,
+        val bounds: Rect,
+        val nodes: JSONArray,
+        val visibleText: List<String>
+    )
+
+    private val eventEvidenceLock =
+        Any()
+
+    private val recentEventEvidence =
+        ArrayDeque<EventEvidence>()
 
     override fun onServiceConnected() {
         super.onServiceConnected()
@@ -57,10 +109,22 @@ class AgentAccessibilityService :
             return
         }
 
-        lastEventPackage =
+        val eventPackage =
             event.packageName
                 ?.toString()
                 .orEmpty()
+
+        // AYANA's own floating Orb is a TYPE_APPLICATION_OVERLAY surface. Its
+        // visual/state updates must never steal foreground-window recency from
+        // the app the user is actually controlling. MainActivity still remains
+        // fully readable/actionable through the live focused window root.
+        if (eventPackage == packageName) {
+            pruneEventEvidence()
+            return
+        }
+
+        lastEventPackage =
+            eventPackage
 
         lastEventClass =
             event.className
@@ -69,6 +133,17 @@ class AgentAccessibilityService :
 
         lastEventTime =
             System.currentTimeMillis()
+
+        lastEventWindowId =
+            try {
+                event.windowId
+            } catch (_: Exception) {
+                -1
+            }
+
+        captureEventEvidence(
+            event
+        )
     }
 
     override fun onInterrupt() {
@@ -123,117 +198,177 @@ class AgentAccessibilityService :
         target: String
     ): Boolean {
 
-        val roots =
-            resolveRoots()
+        val allContexts =
+            resolveWindowContexts()
+
+        val interactionContexts =
+            interactionWindowContexts(
+                allContexts
+            )
 
         if (
-            roots.isEmpty()
+            interactionContexts.isEmpty()
         ) {
             return false
         }
 
-        var match:
-            NodeMatch? = null
+        var best: ContextNodeMatch? = null
 
-        for (
-            root in
-            roots
-        ) {
+        for (context in interactionContexts) {
+            val root =
+                context.root
+                    ?: continue
 
             val candidate =
                 findBestNode(
-                    root =
-                        root,
-                    target =
-                        target,
-                    requireEditable =
-                        false,
-                    requireClickable =
-                        false
+                    root = root,
+                    target = target,
+                    requireEditable = false,
+                    requireClickable = false
                 )
                     ?: continue
 
+            val totalScore =
+                candidate.score * 1000 +
+                    context.rank
+
             if (
-                match == null ||
-                candidate.score >
-                match.score
+                best == null ||
+                totalScore > best.totalScore
             ) {
-                match =
-                    candidate
+                best =
+                    ContextNodeMatch(
+                        context = context,
+                        match = candidate,
+                        totalScore = totalScore
+                    )
             }
         }
 
-        val resolvedMatch =
-            match
-                ?: return false
-
-        // One UI can expose the Settings navigation pane and the detail pane as
-        // different interactive roots. Search all roots first, then verify that
-        // the resulting action actually changed the combined screen signature.
         val before =
             screenSignature()
 
-        val actionable =
-            findActionableParent(
-                resolvedMatch.node,
-                AccessibilityNodeInfo
-                    .ACTION_CLICK
-            )
+        if (best != null) {
+            val match =
+                best.match
 
-        if (
-            actionable != null
-        ) {
+            val center =
+                nodeCenter(
+                    match.node
+                )
 
-            val accepted =
-                try {
-                    actionable.performAction(
-                        AccessibilityNodeInfo
-                            .ACTION_CLICK
+            val safeAtPoint =
+                center == null ||
+                    !isPointOccludedForContext(
+                        x = center.first,
+                        y = center.second,
+                        target = best.context,
+                        allContexts = allContexts
                     )
-                } catch (_: Exception) {
-                    false
+
+            if (safeAtPoint) {
+                val actionable =
+                    findActionableParent(
+                        match.node,
+                        AccessibilityNodeInfo.ACTION_CLICK
+                    )
+
+                if (actionable != null) {
+                    val accepted =
+                        try {
+                            actionable.performAction(
+                                AccessibilityNodeInfo.ACTION_CLICK
+                            )
+                        } catch (_: Exception) {
+                            false
+                        }
+
+                    if (
+                        accepted &&
+                        waitForScreenChange(before)
+                    ) {
+                        return true
+                    }
                 }
 
-            if (
-                accepted &&
-                waitForScreenChange(
-                    before
-                )
-            ) {
-                return true
+                val semanticTapAccepted =
+                    tapNodeCenter(
+                        match.node
+                    )
+
+                if (
+                    semanticTapAccepted &&
+                    waitForScreenChange(before)
+                ) {
+                    return true
+                }
+
+                if (
+                    actionable != null &&
+                    actionable !== match.node
+                ) {
+                    val rowCenter =
+                        nodeCenter(
+                            actionable
+                        )
+
+                    if (
+                        rowCenter != null &&
+                        !isPointOccludedForContext(
+                            x = rowCenter.first,
+                            y = rowCenter.second,
+                            target = best.context,
+                            allContexts = allContexts
+                        )
+                    ) {
+                        val rowTapAccepted =
+                            tapNodeCenter(
+                                actionable
+                            )
+
+                        if (
+                            rowTapAccepted &&
+                            waitForScreenChange(before)
+                        ) {
+                            return true
+                        }
+                    }
+                }
             }
         }
 
-        val semanticTapAccepted =
-            tapNodeCenter(
-                resolvedMatch.node
+        // Event-source fallback is allowed only inside the current interaction
+        // package/window group. Never use stale evidence from a background app.
+        val eventTarget =
+            findRecentEventTapTarget(
+                target = target,
+                interactionContexts = interactionContexts
             )
 
-        if (
-            semanticTapAccepted &&
-            waitForScreenChange(
-                before
-            )
-        ) {
-            return true
-        }
-
-        if (
-            actionable != null &&
-            actionable !==
-            resolvedMatch.node
-        ) {
-
-            val rowTapAccepted =
-                tapNodeCenter(
-                    actionable
+        if (eventTarget != null) {
+            val targetContext =
+                contextForEventTarget(
+                    eventTarget,
+                    interactionContexts
                 )
+
+            val centerX =
+                eventTarget.bounds.centerX()
+            val centerY =
+                eventTarget.bounds.centerY()
 
             if (
-                rowTapAccepted &&
-                waitForScreenChange(
-                    before
-                )
+                targetContext != null &&
+                !isPointOccludedForContext(
+                    x = centerX,
+                    y = centerY,
+                    target = targetContext,
+                    allContexts = allContexts
+                ) &&
+                tapBoundsCenter(
+                    eventTarget.bounds
+                ) &&
+                waitForScreenChange(before)
             ) {
                 return true
             }
@@ -285,187 +420,176 @@ class AgentAccessibilityService :
         text: String
     ): Boolean {
 
-        val roots =
-            resolveRoots()
+        val contexts =
+            interactionWindowContexts(
+                resolveWindowContexts()
+            )
 
-        if (
-            roots.isEmpty()
-        ) {
+        if (contexts.isEmpty()) {
             return false
         }
 
         val node =
-            if (
-                target.isNullOrBlank()
-            ) {
-
-                roots
+            if (target.isNullOrBlank()) {
+                contexts
                     .asSequence()
-                    .mapNotNull {
-                        root ->
-                        findFocusedEditable(
-                            root
-                        )
+                    .mapNotNull { context ->
+                        context.root
+                            ?.let { root ->
+                                findFocusedEditable(root)
+                            }
                     }
                     .firstOrNull()
-                    ?:
-                    roots
+                    ?: contexts
                         .asSequence()
-                        .mapNotNull {
-                            root ->
-                            findFirstEditable(
-                                root
-                            )
+                        .mapNotNull { context ->
+                            context.root
+                                ?.let { root ->
+                                    findFirstEditable(root)
+                                }
                         }
                         .firstOrNull()
-
             } else {
+                var best: ContextNodeMatch? = null
 
-                var best:
-                    NodeMatch? = null
-
-                for (
-                    root in
-                    roots
-                ) {
-
+                for (context in contexts) {
+                    val root = context.root ?: continue
                     val candidate =
                         findBestNode(
-                            root =
-                                root,
-                            target =
-                                target,
-                            requireEditable =
-                                true,
-                            requireClickable =
-                                false
-                        )
-                            ?: continue
+                            root = root,
+                            target = target,
+                            requireEditable = true,
+                            requireClickable = false
+                        ) ?: continue
 
-                    if (
-                        best == null ||
-                        candidate.score >
-                        best.score
-                    ) {
-                        best =
-                            candidate
+                    val totalScore =
+                        candidate.score * 1000 +
+                            context.rank
+
+                    if (best == null || totalScore > best.totalScore) {
+                        best = ContextNodeMatch(context, candidate, totalScore)
                     }
                 }
 
-                best
-                    ?.node
+                best?.match?.node
             }
                 ?: return false
 
-        if (
-            node.isPassword
-        ) {
+        if (node.isPassword) {
             return false
         }
 
         node.performAction(
-            AccessibilityNodeInfo
-                .ACTION_FOCUS
+            AccessibilityNodeInfo.ACTION_FOCUS
         )
 
         val arguments =
             Bundle().apply {
-
                 putCharSequence(
-                    AccessibilityNodeInfo
-                        .ACTION_ARGUMENT_SET_TEXT_CHARSEQUENCE,
+                    AccessibilityNodeInfo.ACTION_ARGUMENT_SET_TEXT_CHARSEQUENCE,
                     text
                 )
             }
 
-        return node
-            .performAction(
-                AccessibilityNodeInfo
-                    .ACTION_SET_TEXT,
-                arguments
-            )
+        return node.performAction(
+            AccessibilityNodeInfo.ACTION_SET_TEXT,
+            arguments
+        )
     }
 
     fun scroll(
         direction: String
     ): Boolean {
 
-        val roots =
-            resolveRoots()
+        val allContexts =
+            resolveWindowContexts()
 
-        if (
-            roots.isEmpty()
-        ) {
+        val contexts =
+            interactionWindowContexts(
+                allContexts
+            )
+
+        if (contexts.isEmpty()) {
             return false
         }
 
         val normalized =
-            normalize(
-                direction
-            )
+            normalize(direction)
 
         val preferredAction =
             when {
-
-                normalized.contains(
-                    "вверх"
-                ) ||
-                    normalized.contains(
-                        "up"
-                    ) ->
-                    AccessibilityNodeInfo
-                        .ACTION_SCROLL_BACKWARD
-
-                normalized.contains(
-                    "назад"
-                ) ||
-                    normalized.contains(
-                        "back"
-                    ) ->
-                    AccessibilityNodeInfo
-                        .ACTION_SCROLL_BACKWARD
+                normalized.contains("вверх") ||
+                    normalized.contains("up") ||
+                    normalized.contains("назад") ||
+                    normalized.contains("back") ->
+                    AccessibilityNodeInfo.ACTION_SCROLL_BACKWARD
 
                 else ->
-                    AccessibilityNodeInfo
-                        .ACTION_SCROLL_FORWARD
+                    AccessibilityNodeInfo.ACTION_SCROLL_FORWARD
             }
+
+        data class ScrollCandidate(
+            val context: WindowContext,
+            val node: AccessibilityNodeInfo,
+            val score: Long
+        )
+
+        var best: ScrollCandidate? = null
+
+        for (context in contexts) {
+            val root = context.root ?: continue
+            val scrollable =
+                findBestScrollable(root)
+                    ?: continue
+
+            val bounds = Rect()
+            scrollable.getBoundsInScreen(bounds)
+
+            val area =
+                bounds.width().coerceAtLeast(0).toLong() *
+                    bounds.height().coerceAtLeast(0).toLong()
+
+            val score =
+                area + context.rank.toLong() * 100L
+
+            if (best == null || score > best.score) {
+                best = ScrollCandidate(context, scrollable, score)
+            }
+        }
+
+        val candidate =
+            best
+                ?: return false
+
+        val center =
+            nodeCenter(candidate.node)
+
+        if (
+            center != null &&
+            isPointOccludedForContext(
+                x = center.first,
+                y = center.second,
+                target = candidate.context,
+                allContexts = allContexts
+            )
+        ) {
+            return false
+        }
 
         val before =
             screenSignature()
 
-        // Try every visible scroll container because Samsung tablet Settings may
-        // expose the navigation list and the detail list as separate roots.
-        for (
-            root in
-            roots
-        ) {
-
-            val scrollable =
-                findBestScrollable(
-                    root
+        val accepted =
+            try {
+                candidate.node.performAction(
+                    preferredAction
                 )
-                    ?: continue
-
-            val accepted =
-                try {
-                    scrollable.performAction(
-                        preferredAction
-                    )
-                } catch (_: Exception) {
-                    false
-                }
-
-            if (
-                accepted &&
-                waitForScreenChange(
-                    before
-                )
-            ) {
-                return true
+            } catch (_: Exception) {
+                false
             }
-        }
 
-        return false
+        return accepted &&
+            waitForScreenChange(before)
     }
 
     private fun tapNodeCenter(
@@ -545,261 +669,384 @@ class AgentAccessibilityService :
         maxChars: Int = 14000
     ): JSONObject {
 
-        val roots =
-            resolveRoots()
+        val liveContexts =
+            resolveWindowContexts()
+
+        val evidence =
+            currentEventEvidenceBurst(
+                liveContexts
+            )
 
         if (
-            roots.isEmpty()
+            liveContexts.isEmpty() &&
+            evidence.isEmpty()
         ) {
-
             return JSONObject()
-                .put(
-                    "success",
-                    false
-                )
-                .put(
-                    "message",
-                    "Активное окно недоступно"
-                )
-                .put(
-                    "window_count",
-                    safeWindowCount()
-                )
+                .put("success", false)
+                .put("message", "Активное окно недоступно")
+                .put("window_count", 0)
+                .put("raw_window_count", safeWindowCount())
         }
 
-        data class SnapshotQueueItem(
-            val node: AccessibilityNodeInfo,
-            val depth: Int,
-            val rootSlot: Int
+        data class WindowAccumulator(
+            val context: WindowContext,
+            val nodes: JSONArray = JSONArray(),
+            val texts: LinkedHashSet<String> = linkedSetOf(),
+            val liveTexts: LinkedHashSet<String> = linkedSetOf(),
+            val evidenceTexts: LinkedHashSet<String> = linkedSetOf(),
+            var evidenceAgeMs: Long = -1L
         )
 
-        val result =
-            JSONObject()
+        val accumulators =
+            linkedMapOf<String, WindowAccumulator>()
 
-        val nodes =
-            JSONArray()
-
-        val packages =
-            JSONArray()
-
-        val rootClasses =
-            JSONArray()
-
-        val primaryRoot =
-            roots.first()
-
-        val packageName =
-            primaryRoot.packageName
-                ?.toString()
-                .orEmpty()
-
-        val rootClass =
-            primaryRoot.className
-                ?.toString()
-                .orEmpty()
-
-        val seenPackages =
-            linkedSetOf<String>()
-
-        val queue =
-            ArrayDeque<
-                SnapshotQueueItem
-            >()
-
-        for (
-            rootIndex in
-            roots.indices
-        ) {
-
-            val root =
-                roots[
-                    rootIndex
-                ]
-
-            val rootPackage =
-                root.packageName
-                    ?.toString()
-                    .orEmpty()
-
-            if (
-                rootPackage.isNotBlank() &&
-                seenPackages.add(
-                    rootPackage
-                )
-            ) {
-                packages.put(
-                    rootPackage
-                )
-            }
-
-            rootClasses.put(
-                root.className
-                    ?.toString()
-                    .orEmpty()
-            )
-
-            // Seed every root before walking children. This round-robin-style
-            // breadth-first snapshot prevents a large navigation pane from
-            // consuming the node budget before the sibling detail pane is seen.
-            queue.add(
-                SnapshotQueueItem(
-                    node =
-                        root,
-                    depth =
-                        0,
-                    rootSlot =
-                        rootIndex
-                )
-            )
+        for (context in liveContexts) {
+            accumulators[context.contextId] =
+                WindowAccumulator(context)
         }
 
-        var charCount =
-            0
+        val liveNodeBudget =
+            if (evidence.isNotEmpty()) {
+                maxOf(40, maxNodes * 2 / 3)
+            } else {
+                maxNodes
+            }
 
-        var visited =
-            0
+        val liveCharBudget =
+            if (evidence.isNotEmpty()) {
+                maxOf(4000, maxChars * 2 / 3)
+            } else {
+                maxChars
+            }
+
+        data class QueueItem(
+            val context: WindowContext,
+            val node: AccessibilityNodeInfo,
+            val depth: Int
+        )
+
+        val queue =
+            ArrayDeque<QueueItem>()
+
+        for (context in liveContexts) {
+            context.root?.let { root ->
+                queue.add(
+                    QueueItem(context, root, 0)
+                )
+            }
+        }
+
+        var visited = 0
+        var charCount = 0
 
         while (
             queue.isNotEmpty() &&
-            visited < maxNodes &&
-            charCount < maxChars
+            visited < liveNodeBudget &&
+            charCount < liveCharBudget
         ) {
-
-            val current =
-                queue.removeFirst()
-
-            val node =
-                current.node
-
+            val current = queue.removeFirst()
             visited++
 
             val item =
-                nodeToJson(
-                    node =
-                        node,
-                    depth =
-                        current.depth,
-                    index =
-                        visited
-                )
-                    .put(
-                        "root_slot",
-                        current.rootSlot
+                try {
+                    nodeToJson(
+                        node = current.node,
+                        depth = current.depth,
+                        index = visited
                     )
+                        .put("context_id", current.context.contextId)
+                        .put("window_id", current.context.windowId)
+                        .put("window_type", current.context.type)
+                        .put("window_layer", current.context.layer)
+                        .put("window_active", current.context.active)
+                        .put("window_focused", current.context.focused)
+                        .put("node_source", "live")
+                } catch (_: Exception) {
+                    null
+                }
 
-            val serialized =
-                item.toString()
-
-            if (
-                charCount +
-                    serialized.length >
-                maxChars
-            ) {
-                break
+            if (item != null) {
+                val serialized = item.toString()
+                if (charCount + serialized.length <= liveCharBudget) {
+                    accumulators[current.context.contextId]
+                        ?.nodes
+                        ?.put(item)
+                    appendNodeTexts(
+                        accumulators[current.context.contextId]?.texts,
+                        item
+                    )
+                    appendNodeTexts(
+                        accumulators[current.context.contextId]?.liveTexts,
+                        item
+                    )
+                    charCount += serialized.length
+                }
             }
 
-            nodes.put(
-                item
-            )
-
-            charCount +=
-                serialized.length
-
             val childCount =
-                node.childCount
+                try {
+                    current.node.childCount
+                } catch (_: Exception) {
+                    0
+                }
 
-            for (
-                index in
-                0 until childCount
-            ) {
-
+            for (index in 0 until childCount) {
                 val child =
-                    node.getChild(
-                        index
-                    )
-                        ?: continue
+                    try {
+                        current.node.getChild(index)
+                    } catch (_: Exception) {
+                        null
+                    } ?: continue
 
                 queue.add(
-                    SnapshotQueueItem(
-                        node =
-                            child,
-                        depth =
-                            current.depth +
-                                1,
-                        rootSlot =
-                            current.rootSlot
+                    QueueItem(
+                        context = current.context,
+                        node = child,
+                        depth = current.depth + 1
                     )
                 )
             }
         }
 
-        val visibleTexts =
-            collectVisibleTexts(
-                nodes
+        val now =
+            System.currentTimeMillis()
+
+        var evidenceContextCount = 0
+
+        for (item in evidence) {
+            val matched =
+                accumulators.values.firstOrNull { accumulator ->
+                    item.windowId >= 0 &&
+                        accumulator.context.windowId == item.windowId
+                } ?: run {
+                    if (item.windowId >= 0) {
+                        null
+                    } else {
+                        accumulators.values
+                            .filter { accumulator ->
+                                accumulator.context.packageName == item.packageName
+                            }
+                            .maxByOrNull { accumulator ->
+                                overlapRatio(
+                                    accumulator.context.bounds,
+                                    item.bounds
+                                )
+                            }
+                            ?.takeIf { accumulator ->
+                                overlapRatio(
+                                    accumulator.context.bounds,
+                                    item.bounds
+                                ) >= 0.25
+                            }
+                    }
+                }
+
+            val accumulator =
+                matched
+                    ?: run {
+                        val synthetic =
+                            syntheticContextForEvidence(
+                                evidence = item,
+                                liveContexts = liveContexts
+                            )
+                        evidenceContextCount++
+                        WindowAccumulator(synthetic).also { created ->
+                            accumulators[synthetic.contextId] = created
+                        }
+                    }
+
+            val age =
+                (now - item.at).coerceAtLeast(0L)
+
+            if (
+                accumulator.evidenceAgeMs < 0L ||
+                age < accumulator.evidenceAgeMs
+            ) {
+                accumulator.evidenceAgeMs = age
+            }
+
+            for (text in item.visibleText) {
+                val clipped = safeText(text)
+                if (clipped.isNotBlank()) {
+                    accumulator.texts.add(clipped)
+                    accumulator.evidenceTexts.add(clipped)
+                }
+            }
+
+            for (index in 0 until item.nodes.length()) {
+                if (visited >= maxNodes || charCount >= maxChars) {
+                    break
+                }
+
+                val original =
+                    item.nodes.optJSONObject(index)
+                        ?: continue
+
+                val node =
+                    JSONObject(original.toString())
+                        .put("context_id", accumulator.context.contextId)
+                        .put("window_id", accumulator.context.windowId)
+                        .put("window_type", accumulator.context.type)
+                        .put("window_layer", accumulator.context.layer)
+                        .put("window_active", accumulator.context.active)
+                        .put("window_focused", accumulator.context.focused)
+                        .put("node_source", "event")
+
+                val serialized = node.toString()
+                if (charCount + serialized.length > maxChars) {
+                    break
+                }
+
+                accumulator.nodes.put(node)
+                appendNodeTexts(accumulator.texts, node)
+                appendNodeTexts(accumulator.evidenceTexts, node)
+                visited++
+                charCount += serialized.length
+            }
+        }
+
+        val allContexts =
+            accumulators.values
+                .map { it.context }
+                .sortedByDescending { it.rank }
+
+        val interactionContexts =
+            interactionWindowContexts(
+                allContexts
             )
 
-        return result
-            .put(
-                "success",
-                true
+        val interactionIds =
+            interactionContexts
+                .map { it.contextId }
+                .toSet()
+
+        val primary =
+            primaryWindowContext(
+                allContexts
             )
-            .put(
-                "package",
-                packageName
+
+        val windowsJson = JSONArray()
+        val topNodes = JSONArray()
+        val topVisible = linkedSetOf<String>()
+        val verificationVisible = linkedSetOf<String>()
+        val allVisible = linkedSetOf<String>()
+        val packages = linkedSetOf<String>()
+
+        val sortedAccumulators =
+            accumulators.values
+                .sortedByDescending { it.context.rank }
+
+        for (accumulator in sortedAccumulators) {
+            val context = accumulator.context
+            if (context.packageName.isNotBlank()) {
+                packages.add(context.packageName)
+            }
+
+            val visibleArray = JSONArray()
+            for (text in accumulator.texts) {
+                if (visibleArray.length() < WINDOW_VISIBLE_TEXT_LIMIT) {
+                    visibleArray.put(text)
+                }
+
+                if (allVisible.size < ALL_VISIBLE_TEXT_LIMIT) {
+                    allVisible.add(text)
+                }
+
+                if (context.contextId in interactionIds && topVisible.size < TOP_VISIBLE_TEXT_LIMIT) {
+                    topVisible.add(text)
+                }
+            }
+
+            val contextVerificationTexts =
+                linkedSetOf<String>()
+                    .apply {
+                        addAll(accumulator.liveTexts)
+                        if (
+                            accumulator.evidenceAgeMs >= 0L &&
+                            accumulator.evidenceAgeMs <= EVENT_VERIFICATION_TTL_MS
+                        ) {
+                            addAll(accumulator.evidenceTexts)
+                        }
+                    }
+
+            val contextVerificationText =
+                contextVerificationTexts
+                    .joinToString(" | ")
+                    .take(VERIFICATION_TEXT_MAX_CHARS)
+
+            if (context.contextId in interactionIds) {
+                verificationVisible.addAll(contextVerificationTexts)
+            }
+
+            windowsJson.put(
+                JSONObject()
+                    .put("context_id", context.contextId)
+                    .put("window_id", context.windowId)
+                    .put("package", context.packageName)
+                    .put("root_class", context.className)
+                    .put("type", context.type)
+                    .put("type_name", windowTypeName(context.type))
+                    .put("layer", context.layer)
+                    .put("active", context.active)
+                    .put("focused", context.focused)
+                    .put("picture_in_picture", context.pictureInPicture)
+                    .put("source", context.source)
+                    .put("interaction_rank", context.rank)
+                    .put("interaction_context", context.contextId in interactionIds)
+                    .put("occlusion_ratio", contextOcclusionRatio(context, allContexts))
+                    .put("bounds", rectToJson(context.bounds))
+                    .put("evidence_age_ms", accumulator.evidenceAgeMs)
+                    .put("verification_text", contextVerificationText)
+                    .put("visible_text", visibleArray)
             )
-            .put(
-                "root_class",
-                rootClass
-            )
-            .put(
-                "packages",
-                packages
-            )
-            .put(
-                "root_classes",
-                rootClasses
-            )
-            .put(
-                "event_package",
-                lastEventPackage
-            )
-            .put(
-                "event_class",
-                lastEventClass
-            )
+
+            if (context.contextId in interactionIds) {
+                for (index in 0 until accumulator.nodes.length()) {
+                    topNodes.put(
+                        accumulator.nodes.optJSONObject(index)
+                    )
+                }
+            }
+        }
+
+        val visibleText = JSONArray()
+        for (text in topVisible) visibleText.put(text)
+
+        val allVisibleText = JSONArray()
+        for (text in allVisible) allVisibleText.put(text)
+
+        val packageArray = JSONArray()
+        for (pkg in packages) packageArray.put(pkg)
+
+        val verificationText =
+            verificationVisible
+                .joinToString(" | ")
+                .take(VERIFICATION_TEXT_MAX_CHARS)
+
+        return JSONObject()
+            .put("success", true)
+            .put("package", primary?.packageName.orEmpty())
+            .put("root_class", primary?.className.orEmpty())
+            .put("primary_context_id", primary?.contextId.orEmpty())
+            .put("interaction_package", primary?.packageName.orEmpty())
+            .put("window_context_mode", "v1")
+            .put("window_count", allContexts.size)
+            .put("raw_window_count", safeWindowCount())
+            .put("evidence_context_count", evidenceContextCount)
+            .put("packages", packageArray)
+            .put("visible_text", visibleText)
+            .put("all_visible_text", allVisibleText)
+            .put("verification_text", verificationText)
+            .put("node_count", topNodes.length())
+            .put("nodes", topNodes)
+            .put("windows", windowsJson)
+            .put("event_package", lastEventPackage)
+            .put("event_class", lastEventClass)
+            .put("event_window_id", lastEventWindowId)
             .put(
                 "event_age_ms",
-                (
-                    System.currentTimeMillis() -
-                        lastEventTime
-                    )
-                    .coerceAtLeast(
-                        0L
-                    )
-            )
-            .put(
-                "root_source",
-                lastRootSource
-            )
-            .put(
-                "root_count",
-                roots.size
-            )
-            .put(
-                "window_count",
-                safeWindowCount()
-            )
-            .put(
-                "node_count",
-                nodes.length()
-            )
-            .put(
-                "visible_text",
-                visibleTexts
-            )
-            .put(
-                "nodes",
-                nodes
+                (System.currentTimeMillis() - lastEventTime)
+                    .coerceAtLeast(0L)
             )
     }
 
@@ -808,44 +1055,496 @@ class AgentAccessibilityService :
 
         val snapshot =
             buildScreenSnapshot(
-                maxNodes =
-                    80,
-                maxChars =
-                    6000
+                maxNodes = 80,
+                maxChars = 6000
             )
 
-        if (
-            !snapshot.optBoolean(
-                "success",
-                false
-            )
-        ) {
+        if (!snapshot.optBoolean("success", false)) {
             return "unavailable"
         }
 
-        val packageName =
-            snapshot.optString(
-                "package"
+        return (
+            snapshot.optString("primary_context_id") +
+                "|" +
+                snapshot.optString("package") +
+                "|" +
+                snapshot.optString("verification_text")
             )
+            .take(7000)
+            .hashCode()
+            .toString()
+    }
 
-        val visibleText =
-            snapshot
-                .optJSONArray(
-                    "visible_text"
-                )
+    private fun captureEventEvidence(
+        event: AccessibilityEvent
+    ) {
+
+        val now =
+            System.currentTimeMillis()
+
+        val eventPackage =
+            event.packageName
                 ?.toString()
                 .orEmpty()
 
-        return (
-            packageName +
-                "|" +
-                visibleText
+        if (
+            eventPackage.isBlank() ||
+            eventPackage ==
+                packageName
+        ) {
+            pruneEventEvidence(
+                now
             )
-            .take(
-                7000
+            return
+        }
+
+        val source =
+            try {
+                event.source
+            } catch (_: Exception) {
+                null
+            }
+
+        val evidenceRoot =
+            source
+                ?.let {
+                    highestUsableEventRoot(
+                        it
+                    )
+                }
+
+        val nodes =
+            if (
+                evidenceRoot !=
+                null
+            ) {
+                snapshotEventTree(
+                    root =
+                        evidenceRoot,
+                    maxNodes =
+                        EVENT_EVIDENCE_NODE_LIMIT,
+                    maxChars =
+                        EVENT_EVIDENCE_CHAR_LIMIT
+                )
+            } else {
+                JSONArray()
+            }
+
+        val texts =
+            linkedSetOf<String>()
+
+        try {
+            for (
+                item in
+                event.text
+            ) {
+
+                val value =
+                    safeText(
+                        item
+                            ?.toString()
+                            .orEmpty()
+                    )
+
+                if (
+                    value.isNotBlank()
+                ) {
+                    texts.add(
+                        value
+                    )
+                }
+            }
+        } catch (_: Exception) {
+        }
+
+        val eventDescription =
+            try {
+                safeText(
+                    event.contentDescription
+                        ?.toString()
+                        .orEmpty()
+                )
+            } catch (_: Exception) {
+                ""
+            }
+
+        if (
+            eventDescription.isNotBlank()
+        ) {
+            texts.add(
+                eventDescription
             )
-            .hashCode()
-            .toString()
+        }
+
+        val nodeTexts =
+            collectVisibleTexts(
+                nodes
+            )
+
+        for (
+            index in
+            0 until nodeTexts.length()
+        ) {
+
+            val value =
+                nodeTexts
+                    .optString(
+                        index
+                    )
+                    .trim()
+
+            if (
+                value.isNotBlank()
+            ) {
+                texts.add(
+                    value
+                )
+            }
+
+            if (
+                texts.size >=
+                EVENT_EVIDENCE_TEXT_LIMIT
+            ) {
+                break
+            }
+        }
+
+        if (
+            texts.isEmpty() &&
+            nodes.length() ==
+                0
+        ) {
+            pruneEventEvidence(
+                now
+            )
+            return
+        }
+
+        val eventWindowId =
+            try {
+                event.windowId
+            } catch (_: Exception) {
+                -1
+            }
+
+        val evidenceBounds =
+            Rect().apply {
+                if (evidenceRoot != null) {
+                    try {
+                        evidenceRoot.getBoundsInScreen(this)
+                    } catch (_: Exception) {
+                    }
+                }
+            }
+
+        val evidence =
+            EventEvidence(
+                at = now,
+                windowId = eventWindowId,
+                packageName =
+                    eventPackage,
+                className =
+                    event.className
+                        ?.toString()
+                        .orEmpty(),
+                eventType =
+                    event.eventType,
+                bounds = evidenceBounds,
+                nodes =
+                    nodes,
+                visibleText =
+                    texts
+                        .take(
+                            EVENT_EVIDENCE_TEXT_LIMIT
+                        )
+            )
+
+        synchronized(
+            eventEvidenceLock
+        ) {
+
+            pruneEventEvidenceLocked(
+                now
+            )
+
+            recentEventEvidence.addFirst(
+                evidence
+            )
+
+            while (
+                recentEventEvidence.size >
+                EVENT_EVIDENCE_MAX_RECORDS
+            ) {
+                recentEventEvidence.removeLast()
+            }
+        }
+    }
+
+    private fun highestUsableEventRoot(
+        source: AccessibilityNodeInfo
+    ): AccessibilityNodeInfo {
+
+        var current =
+            source
+
+        var best =
+            source
+
+        val sourceWindowId =
+            try {
+                source.windowId
+            } catch (_: Exception) {
+                -1
+            }
+
+        var depth =
+            0
+
+        while (
+            depth <
+            EVENT_EVIDENCE_PARENT_LIMIT
+        ) {
+
+            val parent =
+                try {
+                    current.parent
+                } catch (_: Exception) {
+                    null
+                }
+                    ?: break
+
+            val parentWindowId =
+                try {
+                    parent.windowId
+                } catch (_: Exception) {
+                    sourceWindowId
+                }
+
+            if (
+                sourceWindowId >=
+                0 &&
+                parentWindowId >=
+                0 &&
+                parentWindowId !=
+                sourceWindowId
+            ) {
+                break
+            }
+
+            best =
+                parent
+
+            current =
+                parent
+
+            depth++
+        }
+
+        return best
+    }
+
+    private fun snapshotEventTree(
+        root: AccessibilityNodeInfo,
+        maxNodes: Int,
+        maxChars: Int
+    ): JSONArray {
+
+        val nodes =
+            JSONArray()
+
+        val queue =
+            ArrayDeque<
+                Pair<
+                    AccessibilityNodeInfo,
+                    Int
+                >
+            >()
+
+        queue.add(
+            root to
+                0
+        )
+
+        var visited =
+            0
+
+        var charCount =
+            0
+
+        while (
+            queue.isNotEmpty() &&
+            visited <
+            maxNodes &&
+            charCount <
+            maxChars
+        ) {
+
+            val (
+                node,
+                depth
+            ) =
+                queue.removeFirst()
+
+            visited++
+
+            val item =
+                try {
+                    nodeToJson(
+                        node =
+                            node,
+                        depth =
+                            depth,
+                        index =
+                            visited
+                    )
+                        .put(
+                            "evidence_source",
+                            "accessibility_event"
+                        )
+                } catch (_: Exception) {
+                    null
+                }
+
+            if (
+                item !=
+                null
+            ) {
+
+                val serialized =
+                    item.toString()
+
+                if (
+                    charCount +
+                    serialized.length <=
+                    maxChars
+                ) {
+                    nodes.put(
+                        item
+                    )
+
+                    charCount +=
+                        serialized.length
+                }
+            }
+
+            val childCount =
+                try {
+                    node.childCount
+                } catch (_: Exception) {
+                    0
+                }
+
+            for (
+                index in
+                0 until childCount
+            ) {
+
+                val child =
+                    try {
+                        node.getChild(
+                            index
+                        )
+                    } catch (_: Exception) {
+                        null
+                    }
+                        ?: continue
+
+                queue.add(
+                    child to
+                        (
+                            depth +
+                                1
+                            )
+                )
+            }
+        }
+
+        return nodes
+    }
+
+    private fun tapBoundsCenter(
+        bounds: Rect
+    ): Boolean {
+
+        if (
+            bounds.width() <=
+            0 ||
+            bounds.height() <=
+            0
+        ) {
+            return false
+        }
+
+        val x =
+            bounds.centerX()
+
+        val y =
+            bounds.centerY()
+
+        val path =
+            Path()
+                .apply {
+                    moveTo(
+                        x.toFloat(),
+                        y.toFloat()
+                    )
+                }
+
+        val gesture =
+            GestureDescription
+                .Builder()
+                .addStroke(
+                    GestureDescription
+                        .StrokeDescription(
+                            path,
+                            0,
+                            80
+                        )
+                )
+                .build()
+
+        return dispatchGesture(
+            gesture,
+            null,
+            null
+        )
+    }
+
+    private fun pruneEventEvidence(
+        now: Long =
+            System.currentTimeMillis()
+    ) {
+
+        synchronized(
+            eventEvidenceLock
+        ) {
+            pruneEventEvidenceLocked(
+                now
+            )
+        }
+    }
+
+    private fun pruneEventEvidenceLocked(
+        now: Long
+    ) {
+
+        while (
+            recentEventEvidence.isNotEmpty()
+        ) {
+
+            val oldest =
+                recentEventEvidence.last()
+
+            if (
+                now -
+                oldest.at <=
+                EVENT_EVIDENCE_TTL_MS
+            ) {
+                break
+            }
+
+            recentEventEvidence.removeLast()
+        }
     }
 
     /**
@@ -856,115 +1555,14 @@ class AgentAccessibilityService :
      * rootInActiveWindow alone and prevents false verification failures when the
      * requested detail page is visible in a sibling Settings root.
      */
-    private fun resolveRoots():
-        List<AccessibilityNodeInfo> {
+    private fun resolveWindowContexts():
+        List<WindowContext> {
 
-        data class RootCandidate(
-            val root: AccessibilityNodeInfo,
-            val score: Int,
-            val key: String
-        )
+        val contexts =
+            mutableListOf<WindowContext>()
 
-        val candidates =
-            mutableListOf<RootCandidate>()
-
-        val expectedPackage =
-            lastEventPackage
-                .trim()
-
-        fun addCandidate(
-            root: AccessibilityNodeInfo?,
-            score: Int
-        ) {
-
-            if (
-                root == null
-            ) {
-                return
-            }
-
-            val rootPackage =
-                root.packageName
-                    ?.toString()
-                    .orEmpty()
-
-            val key =
-                rootPackage +
-                    "|" +
-                    root.windowId +
-                    "|" +
-                    root.hashCode()
-
-            if (
-                candidates.any {
-                    it.key ==
-                    key
-                }
-            ) {
-                return
-            }
-
-            candidates.add(
-                RootCandidate(
-                    root =
-                        root,
-                    score =
-                        score +
-                            minOf(
-                                root.childCount,
-                                20
-                            ) *
-                                3,
-                    key =
-                        key
-                )
-            )
-        }
-
-        try {
-
-            val active =
-                rootInActiveWindow
-
-            if (
-                active != null
-            ) {
-
-                var score =
-                    500
-
-                val activePackage =
-                    active.packageName
-                        ?.toString()
-                        .orEmpty()
-
-                if (
-                    expectedPackage.isNotBlank() &&
-                    activePackage ==
-                    expectedPackage
-                ) {
-                    score +=
-                        180
-                }
-
-                if (
-                    activePackage ==
-                    packageName
-                ) {
-                    score -=
-                        220
-                }
-
-                addCandidate(
-                    root =
-                        active,
-                    score =
-                        score
-                )
-            }
-
-        } catch (_: Exception) {
-        }
+        val seen =
+            linkedSetOf<String>()
 
         val snapshotWindows =
             try {
@@ -973,10 +1571,14 @@ class AgentAccessibilityService :
                 emptyList()
             }
 
-        for (
-            window in
-            snapshotWindows
-        ) {
+        var maxLayer = 0
+
+        for (window in snapshotWindows) {
+            val bounds = Rect()
+            try {
+                window.getBoundsInScreen(bounds)
+            } catch (_: Exception) {
+            }
 
             val root =
                 try {
@@ -984,103 +1586,695 @@ class AgentAccessibilityService :
                 } catch (_: Exception) {
                     null
                 }
-                    ?: continue
 
             val rootPackage =
-                root.packageName
+                root?.packageName
                     ?.toString()
                     .orEmpty()
 
-            var score =
-                0
+            val rootClass =
+                root?.className
+                    ?.toString()
+                    .orEmpty()
+
+            val windowId =
+                try { window.id } catch (_: Exception) { -1 }
+
+            val type =
+                try { window.type } catch (_: Exception) { -1 }
+
+            val layer =
+                try { window.layer } catch (_: Exception) { 0 }
+
+            maxLayer = maxOf(maxLayer, layer)
+
+            val active =
+                try { window.isActive } catch (_: Exception) { false }
+
+            val focused =
+                try { window.isFocused } catch (_: Exception) { false }
+
+            val pip =
+                if (Build.VERSION.SDK_INT >= 26) {
+                    try {
+                        window.isInPictureInPictureMode
+                    } catch (_: Exception) {
+                        false
+                    }
+                } else {
+                    false
+                }
 
             if (
-                window.isActive
+                isLikelyOwnOverlayWindow(
+                    packageName = rootPackage,
+                    bounds = bounds,
+                    active = active,
+                    focused = focused,
+                    type = type
+                )
             ) {
-                score +=
-                    180
+                continue
             }
 
-            if (
-                window.isFocused
-            ) {
-                score +=
-                    160
+            val contextId =
+                liveContextId(
+                    windowId = windowId,
+                    packageName = rootPackage,
+                    bounds = bounds
+                )
+
+            if (!seen.add(contextId)) {
+                continue
             }
 
-            if (
-                window.type ==
-                android.view.accessibility.AccessibilityWindowInfo.TYPE_APPLICATION
-            ) {
-                score +=
-                    120
-            }
-
-            if (
-                expectedPackage.isNotBlank() &&
-                rootPackage ==
-                expectedPackage
-            ) {
-                score +=
-                    220
-            }
-
-            if (
-                rootPackage.isNotBlank() &&
-                rootPackage !=
-                packageName
-            ) {
-                score +=
-                    40
-            }
-
-            if (
-                rootPackage ==
-                packageName
-            ) {
-                score -=
-                    220
-            }
-
-            addCandidate(
-                root =
-                    root,
-                score =
-                    score
+            contexts.add(
+                WindowContext(
+                    contextId = contextId,
+                    windowId = windowId,
+                    packageName = rootPackage,
+                    className = rootClass,
+                    type = type,
+                    layer = layer,
+                    active = active,
+                    focused = focused,
+                    pictureInPicture = pip,
+                    bounds = Rect(bounds),
+                    root = root,
+                    source = "windows",
+                    rank = windowInteractionRank(
+                        windowId = windowId,
+                        packageName = rootPackage,
+                        type = type,
+                        layer = layer,
+                        active = active,
+                        focused = focused,
+                        pictureInPicture = pip
+                    )
+                )
             )
         }
 
-        val sorted =
-            candidates
-                .sortedByDescending {
-                    it.score
+        val activeRoot =
+            try {
+                rootInActiveWindow
+            } catch (_: Exception) {
+                null
+            }
+
+        if (activeRoot != null) {
+            val activeWindowId =
+                try { activeRoot.windowId } catch (_: Exception) { -1 }
+
+            val activePackage =
+                activeRoot.packageName
+                    ?.toString()
+                    .orEmpty()
+
+            val alreadyPresent =
+                contexts.any { context ->
+                    (
+                        activeWindowId >= 0 &&
+                        context.windowId == activeWindowId
+                    ) ||
+                        context.root === activeRoot
                 }
-                .map {
-                    it.root
+
+            if (!alreadyPresent) {
+                val bounds = Rect()
+                try { activeRoot.getBoundsInScreen(bounds) } catch (_: Exception) { }
+
+                if (
+                    !isLikelyOwnOverlayWindow(
+                        packageName = activePackage,
+                        bounds = bounds,
+                        active = true,
+                        focused = true,
+                        type = AccessibilityWindowInfo.TYPE_APPLICATION
+                    )
+                ) {
+                    val contextId =
+                        liveContextId(
+                            windowId = activeWindowId,
+                            packageName = activePackage,
+                            bounds = bounds
+                        )
+
+                    contexts.add(
+                        WindowContext(
+                            contextId = contextId,
+                            windowId = activeWindowId,
+                            packageName = activePackage,
+                            className = activeRoot.className
+                                ?.toString()
+                                .orEmpty(),
+                            type = AccessibilityWindowInfo.TYPE_APPLICATION,
+                            layer = maxLayer + 1,
+                            active = true,
+                            focused = true,
+                            pictureInPicture = false,
+                            bounds = Rect(bounds),
+                            root = activeRoot,
+                            source = "active_root",
+                            rank = windowInteractionRank(
+                                windowId = activeWindowId,
+                                packageName = activePackage,
+                                type = AccessibilityWindowInfo.TYPE_APPLICATION,
+                                layer = maxLayer + 1,
+                                active = true,
+                                focused = true,
+                                pictureInPicture = false
+                            )
+                        )
+                    )
                 }
+            }
+        }
 
         lastRootSource =
             when {
-
-                sorted.isEmpty() ->
-                    "unavailable"
-
-                sorted.size ==
-                1 ->
-                    "single_root"
-
-                else ->
-                    "multi_window"
+                contexts.isEmpty() -> "unavailable"
+                contexts.size == 1 -> "single_window_context"
+                else -> "multi_window_context"
             }
 
-        return sorted
+        return contexts
+            .sortedByDescending { it.rank }
     }
 
-    private fun resolveRoot():
-        AccessibilityNodeInfo? {
+    private fun primaryWindowContext(
+        contexts: List<WindowContext>
+    ): WindowContext? {
 
-        return resolveRoots()
-            .firstOrNull()
+        if (contexts.isEmpty()) {
+            return null
+        }
+
+        // A focused modal/system window must outrank the application behind it.
+        // Otherwise AYANA could click through a permission dialog, popup or
+        // system sheet. The IME is intentionally not selected as the primary
+        // interaction surface; text entry remains scoped to the focused app.
+        return contexts
+            .filter {
+                it.focused &&
+                    it.type != AccessibilityWindowInfo.TYPE_INPUT_METHOD
+            }
+            .maxByOrNull { it.rank }
+            ?: contexts
+                .filter {
+                    it.active &&
+                        it.type != AccessibilityWindowInfo.TYPE_INPUT_METHOD
+                }
+                .maxByOrNull { it.rank }
+            ?: contexts
+                .filter { it.type == AccessibilityWindowInfo.TYPE_APPLICATION }
+                .maxByOrNull { it.rank }
+            ?: contexts
+                .filter { it.type != AccessibilityWindowInfo.TYPE_INPUT_METHOD }
+                .maxByOrNull { it.rank }
+            ?: contexts.maxByOrNull { it.rank }
+    }
+
+    private fun interactionWindowContexts(
+        contexts: List<WindowContext>
+    ): List<WindowContext> {
+
+        val primary =
+            primaryWindowContext(contexts)
+                ?: return emptyList()
+
+        val primaryPackage =
+            primary.packageName
+
+        val result =
+            contexts
+                .filter { context ->
+                    if (context.contextId == primary.contextId) {
+                        return@filter true
+                    }
+
+                    if (primaryPackage.isBlank() || context.packageName != primaryPackage) {
+                        return@filter false
+                    }
+
+                    if (context.type == AccessibilityWindowInfo.TYPE_INPUT_METHOD) {
+                        return@filter false
+                    }
+
+                    // Fail closed for multiple independent windows that happen
+                    // to belong to the same package (for example two Chrome
+                    // freeform windows). A sibling joins the interaction group only
+                    // when Android marks it active/focused or a fresh Accessibility
+                    // event identifies that exact window as the current interaction
+                    // surface. This still admits Samsung Settings detail panes via
+                    // their event evidence without making every same-package window
+                    // actionable.
+                    val currentInteractionEvidence =
+                        context.active ||
+                            context.focused ||
+                            context.source == "event_evidence" ||
+                            (
+                                context.windowId >= 0 &&
+                                    context.windowId == lastEventWindowId &&
+                                    System.currentTimeMillis() - lastEventTime <=
+                                    EVENT_INTERACTION_FRESH_MS
+                                )
+
+                    if (!currentInteractionEvidence) {
+                        return@filter false
+                    }
+
+                    val overlap =
+                        overlapRatio(
+                            context.bounds,
+                            primary.bounds
+                        )
+
+                    // A lower-layer overlapping window is obscured background,
+                    // even if it emitted a recent event. Adjacent/non-overlapping
+                    // sibling panes may coexist in the current interaction group.
+                    if (
+                        overlap > 0.20 &&
+                        context.layer < primary.layer
+                    ) {
+                        return@filter false
+                    }
+
+                    contextOcclusionRatio(
+                        context,
+                        contexts
+                    ) < 0.80
+                }
+                .sortedByDescending { it.rank }
+
+        return if (result.isNotEmpty()) {
+            result
+        } else {
+            listOf(primary)
+        }
+    }
+
+    private fun windowInteractionRank(
+        windowId: Int,
+        packageName: String,
+        type: Int,
+        layer: Int,
+        active: Boolean,
+        focused: Boolean,
+        pictureInPicture: Boolean
+    ): Int {
+
+        var score =
+            layer.coerceIn(-1000, 1000) * 10
+
+        if (focused) score += 10000
+        if (active) score += 7000
+        if (type == AccessibilityWindowInfo.TYPE_APPLICATION) score += 2500
+        if (type == AccessibilityWindowInfo.TYPE_INPUT_METHOD) score -= 1800
+        if (pictureInPicture) score -= 400
+        if (windowId >= 0 && windowId == lastEventWindowId) score += 1800
+        if (packageName.isNotBlank() && packageName == lastEventPackage) score += 600
+
+        return score
+    }
+
+    private fun liveContextId(
+        windowId: Int,
+        packageName: String,
+        bounds: Rect
+    ): String {
+
+        return if (windowId >= 0) {
+            "w:$windowId:$packageName"
+        } else {
+            "w:x:$packageName:${bounds.left}:${bounds.top}:${bounds.right}:${bounds.bottom}"
+        }
+    }
+
+    private fun isLikelyOwnOverlayWindow(
+        packageName: String,
+        bounds: Rect,
+        active: Boolean,
+        focused: Boolean,
+        type: Int
+    ): Boolean {
+
+        if (packageName != this.packageName) {
+            return false
+        }
+
+        if (active || focused) {
+            return false
+        }
+
+        if (type == AccessibilityWindowInfo.TYPE_ACCESSIBILITY_OVERLAY) {
+            return true
+        }
+
+        val screenArea =
+            resources.displayMetrics.widthPixels
+                .coerceAtLeast(1)
+                .toLong() *
+                resources.displayMetrics.heightPixels
+                    .coerceAtLeast(1)
+                    .toLong()
+
+        val area =
+            bounds.width().coerceAtLeast(0).toLong() *
+                bounds.height().coerceAtLeast(0).toLong()
+
+        return area > 0L &&
+            area.toDouble() / screenArea.toDouble() <= OWN_OVERLAY_MAX_AREA_RATIO
+    }
+
+    private fun currentEventEvidenceBurst(
+        liveContexts: List<WindowContext>
+    ): List<EventEvidence> {
+
+        val now = System.currentTimeMillis()
+        val liveIds = liveContexts.map { it.windowId }.filter { it >= 0 }.toSet()
+        val livePackages = liveContexts.map { it.packageName }.filter { it.isNotBlank() }.toSet()
+
+        synchronized(eventEvidenceLock) {
+            pruneEventEvidenceLocked(now)
+
+            val eligible =
+                recentEventEvidence
+                    .filter { evidence ->
+                        val age = now - evidence.at
+                        age <= EVENT_EVIDENCE_TTL_MS &&
+                            evidence.packageName != packageName &&
+                            (
+                                (evidence.windowId >= 0 && evidence.windowId in liveIds) ||
+                                    evidence.packageName in livePackages ||
+                                    (
+                                        liveContexts.isEmpty() &&
+                                        evidence.packageName == lastEventPackage &&
+                                        age <= EVENT_EVIDENCE_ORPHAN_TTL_MS
+                                    )
+                                )
+                    }
+
+            val newestByKey = mutableMapOf<String, Long>()
+            val newestStructuralByKey = mutableMapOf<String, Long>()
+
+            for (evidence in eligible) {
+                val key = evidenceContextKey(evidence)
+                val current = newestByKey[key] ?: Long.MIN_VALUE
+                if (evidence.at > current) newestByKey[key] = evidence.at
+
+                if (isStructuralEvidence(evidence.eventType)) {
+                    val structural = newestStructuralByKey[key] ?: Long.MIN_VALUE
+                    if (evidence.at > structural) newestStructuralByKey[key] = evidence.at
+                }
+            }
+
+            return eligible
+                .filter { evidence ->
+                    val key = evidenceContextKey(evidence)
+                    val newest = newestByKey[key] ?: evidence.at
+                    val newestStructural = newestStructuralByKey[key]
+
+                    val burstOk =
+                        newest - evidence.at <= EVENT_EVIDENCE_BURST_MS
+
+                    val structuralCutoffOk =
+                        newestStructural == null ||
+                            evidence.at >= newestStructural - EVENT_EVIDENCE_STRUCTURAL_LEEWAY_MS
+
+                    burstOk && structuralCutoffOk
+                }
+                .sortedByDescending { it.at }
+        }
+    }
+
+    private fun isStructuralEvidence(
+        eventType: Int
+    ): Boolean {
+
+        return eventType == AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED ||
+            eventType == AccessibilityEvent.TYPE_WINDOW_CONTENT_CHANGED ||
+            eventType == AccessibilityEvent.TYPE_WINDOWS_CHANGED ||
+            eventType == AccessibilityEvent.TYPE_VIEW_SCROLLED ||
+            eventType == AccessibilityEvent.TYPE_VIEW_TEXT_CHANGED
+    }
+
+    private fun evidenceContextKey(
+        evidence: EventEvidence
+    ): String {
+
+        return if (evidence.windowId >= 0) {
+            "${evidence.packageName}|${evidence.windowId}"
+        } else {
+            "${evidence.packageName}|${evidence.className}|${evidence.bounds.left / 80}|${evidence.bounds.top / 80}"
+        }
+    }
+
+    private fun syntheticContextForEvidence(
+        evidence: EventEvidence,
+        liveContexts: List<WindowContext>
+    ): WindowContext {
+
+        val samePackageLayer =
+            liveContexts
+                .filter { it.packageName == evidence.packageName }
+                .maxOfOrNull { it.layer }
+                ?: 0
+
+        val rank =
+            windowInteractionRank(
+                windowId = evidence.windowId,
+                packageName = evidence.packageName,
+                type = EVIDENCE_WINDOW_TYPE,
+                layer = samePackageLayer,
+                active = evidence.windowId >= 0 && evidence.windowId == lastEventWindowId,
+                focused = false,
+                pictureInPicture = false
+            ) - EVIDENCE_CONTEXT_RANK_PENALTY
+
+        return WindowContext(
+            contextId = "e:${evidenceContextKey(evidence)}",
+            windowId = evidence.windowId,
+            packageName = evidence.packageName,
+            className = evidence.className,
+            type = EVIDENCE_WINDOW_TYPE,
+            layer = samePackageLayer,
+            active = evidence.windowId >= 0 && evidence.windowId == lastEventWindowId,
+            focused = false,
+            pictureInPicture = false,
+            bounds = Rect(evidence.bounds),
+            root = null,
+            source = "event_evidence",
+            rank = rank
+        )
+    }
+
+    private fun windowTypeName(
+        type: Int
+    ): String {
+
+        return when (type) {
+            AccessibilityWindowInfo.TYPE_APPLICATION -> "application"
+            AccessibilityWindowInfo.TYPE_INPUT_METHOD -> "input_method"
+            AccessibilityWindowInfo.TYPE_SYSTEM -> "system"
+            AccessibilityWindowInfo.TYPE_ACCESSIBILITY_OVERLAY -> "accessibility_overlay"
+            AccessibilityWindowInfo.TYPE_SPLIT_SCREEN_DIVIDER -> "split_screen_divider"
+            EVIDENCE_WINDOW_TYPE -> "event_evidence"
+            else -> "other_$type"
+        }
+    }
+
+    private fun overlapRatio(
+        first: Rect,
+        second: Rect
+    ): Double {
+
+        val left = maxOf(first.left, second.left)
+        val top = maxOf(first.top, second.top)
+        val right = minOf(first.right, second.right)
+        val bottom = minOf(first.bottom, second.bottom)
+
+        if (right <= left || bottom <= top) return 0.0
+
+        val intersection =
+            (right - left).toLong() * (bottom - top).toLong()
+
+        val base =
+            minOf(
+                first.width().coerceAtLeast(0).toLong() * first.height().coerceAtLeast(0).toLong(),
+                second.width().coerceAtLeast(0).toLong() * second.height().coerceAtLeast(0).toLong()
+            )
+
+        if (base <= 0L) return 0.0
+
+        return (intersection.toDouble() / base.toDouble()).coerceIn(0.0, 1.0)
+    }
+
+    private fun contextOcclusionRatio(
+        target: WindowContext,
+        contexts: List<WindowContext>
+    ): Double {
+
+        val targetArea =
+            target.bounds.width().coerceAtLeast(0).toLong() *
+                target.bounds.height().coerceAtLeast(0).toLong()
+
+        if (targetArea <= 0L) return 0.0
+
+        var covered = 0L
+
+        for (other in contexts) {
+            if (other.contextId == target.contextId || other.layer <= target.layer) continue
+
+            val left = maxOf(target.bounds.left, other.bounds.left)
+            val top = maxOf(target.bounds.top, other.bounds.top)
+            val right = minOf(target.bounds.right, other.bounds.right)
+            val bottom = minOf(target.bounds.bottom, other.bounds.bottom)
+
+            if (right > left && bottom > top) {
+                covered += (right - left).toLong() * (bottom - top).toLong()
+            }
+        }
+
+        return (covered.toDouble() / targetArea.toDouble())
+            .coerceIn(0.0, 1.0)
+    }
+
+    private fun isPointOccludedForContext(
+        x: Int,
+        y: Int,
+        target: WindowContext,
+        allContexts: List<WindowContext>
+    ): Boolean {
+
+        return allContexts.any { other ->
+            other.contextId != target.contextId &&
+                other.layer > target.layer &&
+                other.bounds.contains(x, y)
+        }
+    }
+
+    private fun nodeCenter(
+        node: AccessibilityNodeInfo
+    ): Pair<Int, Int>? {
+
+        val bounds = Rect()
+        return try {
+            node.getBoundsInScreen(bounds)
+            if (bounds.width() <= 1 || bounds.height() <= 1) null
+            else bounds.centerX() to bounds.centerY()
+        } catch (_: Exception) {
+            null
+        }
+    }
+
+    private fun rectToJson(
+        bounds: Rect
+    ): JSONObject {
+
+        return JSONObject()
+            .put("left", bounds.left)
+            .put("top", bounds.top)
+            .put("right", bounds.right)
+            .put("bottom", bounds.bottom)
+    }
+
+    private fun appendNodeTexts(
+        target: MutableSet<String>?,
+        node: JSONObject
+    ) {
+
+        if (target == null) return
+
+        listOf(
+            node.optString("text"),
+            node.optString("description")
+        )
+            .map { safeText(it) }
+            .filter { it.isNotBlank() && it != "[PASSWORD_HIDDEN]" }
+            .forEach { target.add(it) }
+    }
+
+    private fun contextForEventTarget(
+        target: EventTapTarget,
+        contexts: List<WindowContext>
+    ): WindowContext? {
+
+        return contexts.firstOrNull { context ->
+            target.windowId >= 0 && context.windowId == target.windowId
+        } ?: contexts.firstOrNull { context ->
+            context.packageName == target.packageName &&
+                overlapRatio(context.bounds, target.bounds) > 0.10
+        } ?: contexts.firstOrNull { it.packageName == target.packageName }
+    }
+
+    private fun findRecentEventTapTarget(
+        target: String,
+        interactionContexts: List<WindowContext>
+    ): EventTapTarget? {
+
+        val normalizedTarget = normalize(target)
+        if (normalizedTarget.isBlank()) return null
+
+        val allowedPackages =
+            interactionContexts
+                .map { it.packageName }
+                .filter { it.isNotBlank() }
+                .toSet()
+
+        val allowedWindowIds =
+            interactionContexts
+                .map { it.windowId }
+                .filter { it >= 0 }
+                .toSet()
+
+        var bestScore = 0
+        var best: EventTapTarget? = null
+        val now = System.currentTimeMillis()
+
+        for (evidence in currentEventEvidenceBurst(interactionContexts)) {
+            if (now - evidence.at > EVENT_ACTION_TTL_MS) {
+                continue
+            }
+
+            val allowed =
+                (evidence.windowId >= 0 && evidence.windowId in allowedWindowIds) ||
+                    evidence.packageName in allowedPackages
+
+            if (!allowed) continue
+
+            for (index in 0 until evidence.nodes.length()) {
+                val node = evidence.nodes.optJSONObject(index) ?: continue
+                if (!node.optBoolean("visible", false) || !node.optBoolean("enabled", true)) continue
+
+                val text = normalize(node.optString("text"))
+                val description = normalize(node.optString("description"))
+                val viewId = normalize(node.optString("view_id"))
+
+                var score = 0
+                score = max(score, scoreValue(text, normalizedTarget, 100))
+                score = max(score, scoreValue(description, normalizedTarget, 95))
+                score = max(score, scoreValue(viewId, normalizedTarget, 80))
+                if (score > 0 && node.optBoolean("clickable", false)) score += 8
+
+                if (score < MIN_MATCH_SCORE || score <= bestScore) continue
+
+                val b = node.optJSONObject("bounds") ?: continue
+                val rect = Rect(
+                    b.optInt("left", -1),
+                    b.optInt("top", -1),
+                    b.optInt("right", -1),
+                    b.optInt("bottom", -1)
+                )
+
+                if (rect.left < 0 || rect.top < 0 || rect.width() <= 1 || rect.height() <= 1) continue
+
+                bestScore = score
+                best = EventTapTarget(rect, evidence.windowId, evidence.packageName)
+            }
+        }
+
+        return best
     }
 
     private fun safeWindowCount():
@@ -1824,6 +3018,63 @@ class AgentAccessibilityService :
         private const val MIN_MATCH_SCORE =
             55
 
+        private const val EVENT_EVIDENCE_TTL_MS =
+            12000L
+
+        private const val EVENT_VERIFICATION_TTL_MS =
+            4500L
+
+        private const val EVENT_ACTION_TTL_MS =
+            4500L
+
+        private const val EVENT_EVIDENCE_ORPHAN_TTL_MS =
+            3500L
+
+        private const val EVENT_EVIDENCE_BURST_MS =
+            1600L
+
+        private const val EVENT_EVIDENCE_STRUCTURAL_LEEWAY_MS =
+            450L
+
+        private const val EVENT_INTERACTION_FRESH_MS =
+            3500L
+
+        private const val WINDOW_VISIBLE_TEXT_LIMIT =
+            36
+
+        private const val TOP_VISIBLE_TEXT_LIMIT =
+            96
+
+        private const val ALL_VISIBLE_TEXT_LIMIT =
+            144
+
+        private const val VERIFICATION_TEXT_MAX_CHARS =
+            7000
+
+        private const val OWN_OVERLAY_MAX_AREA_RATIO =
+            0.20
+
+        private const val EVIDENCE_WINDOW_TYPE =
+            -100
+
+        private const val EVIDENCE_CONTEXT_RANK_PENALTY =
+            350
+
+        private const val EVENT_EVIDENCE_MAX_RECORDS =
+            12
+
+        private const val EVENT_EVIDENCE_NODE_LIMIT =
+            90
+
+        private const val EVENT_EVIDENCE_CHAR_LIMIT =
+            9000
+
+        private const val EVENT_EVIDENCE_TEXT_LIMIT =
+            80
+
+        private const val EVENT_EVIDENCE_PARENT_LIMIT =
+            12
+
         @Volatile
         var instance:
             AgentAccessibilityService? =
@@ -1836,6 +3087,10 @@ class AgentAccessibilityService :
         @Volatile
         var lastEventClass:
             String = ""
+
+        @Volatile
+        var lastEventWindowId:
+            Int = -1
 
         @Volatile
         var lastEventTime:
