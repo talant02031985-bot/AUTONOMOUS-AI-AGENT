@@ -5,7 +5,7 @@ import org.json.JSONObject
 import java.util.Locale
 
 /**
- * AYANA Android Goal Compiler v2.
+ * AYANA Android Goal Compiler v2.1 — deterministic goal integrity + strict screen expectations.
  *
  * Agent Core classifies a natural-language request into ONE structured goal.
  * This compiler deterministically turns that goal into a short local plan for
@@ -16,36 +16,108 @@ class AyanaAndroidGoalCompiler {
 
     fun compile(goal: JSONObject): JSONObject {
 
-        val goalType = normalize(goal.optString("goal_type"))
-        val app = goal.optString("app").trim()
-        val section = normalize(goal.optString("section"))
-        val settingsSection = normalize(goal.optString("settings_section"))
-        val category = normalize(goal.optString("category"))
-        val target = goal.optString("target").trim()
+        val rawGoalType = normalize(goal.optString("goal_type"))
+        val rawApp = goal.optString("app").trim()
+        val rawSection = normalize(goal.optString("section"))
+        val rawSettingsSection = normalize(goal.optString("settings_section"))
+        val rawCategory = normalize(goal.optString("category"))
+        val rawTarget = goal.optString("target").trim()
         val stopIfMissing = goal.optBoolean("stop_if_missing", false)
+
+        // v2.1 GOAL INTEGRITY: Agent Core is a classifier, not a source of truth.
+        // If its enum conflicts with populated structured fields, promote the
+        // request to the more specific deterministic goal instead of silently
+        // discarding the user's final target.
+        val settingsSection =
+            canonicalSettingsSection(rawSettingsSection)
+                ?: canonicalSettingsSection(rawSection)
+                ?: rawSettingsSection
+
+        val goalType = when {
+            rawApp.isNotBlank() &&
+                rawTarget.isNotBlank() &&
+                rawGoalType in setOf("app_info", "app_settings_item") ->
+                "app_settings_item"
+
+            rawTarget.isNotBlank() &&
+                canonicalSettingsSection(settingsSection) != null &&
+                rawGoalType in setOf("open_settings_section", "settings_item") ->
+                "settings_item"
+
+            else -> rawGoalType
+        }
+
+        val app =
+            if (goalType in setOf("open_app", "app_info", "app_detail_section", "app_settings_item", "accessibility_service_page")) {
+                rawApp
+            } else {
+                ""
+            }
+
+        val section =
+            if (goalType == "app_detail_section") {
+                canonicalSectionKey(rawSection)
+            } else {
+                ""
+            }
+
+        val category =
+            if (goalType == "default_app_category") {
+                canonicalCategory(rawCategory)
+            } else {
+                ""
+            }
+
+        val target =
+            if (goalType in setOf("settings_item", "app_settings_item")) {
+                rawTarget
+            } else {
+                ""
+            }
+
+        val normalizedSettingsSection =
+            if (goalType in setOf("open_settings_section", "settings_item")) {
+                canonicalSettingsSection(settingsSection).orEmpty()
+            } else {
+                ""
+            }
+
+        val normalizedGoal =
+            JSONObject()
+                .put("goal_type", goalType)
+                .put("app", app)
+                .put("section", section)
+                .put("settings_section", normalizedSettingsSection)
+                .put("category", category)
+                .put("target", target)
+                .put("stop_if_missing", stopIfMissing)
 
         val plan = when (goalType) {
             "open_app" -> compileOpenApp(app)
-            "open_settings_section" -> compileOpenSettingsSection(settingsSection)
+            "open_settings_section" -> compileOpenSettingsSection(normalizedSettingsSection)
             "app_info" -> compileAppInfo(app)
             "app_detail_section" -> compileAppDetailSection(app, section)
             "app_settings_item" -> compileAppSettingsItem(app, target)
             "accessibility_service_page" -> compileAccessibilityServicePage(app)
             "default_app_category" -> compileDefaultAppCategory(category)
-            "settings_item" -> compileSettingsItem(settingsSection, target)
+            "settings_item" -> compileSettingsItem(normalizedSettingsSection, target)
             else -> null
         }
 
         if (plan == null) {
             return failure("Неподдерживаемая или неполная Android-цель: $goalType")
+                .put("normalized_goal", normalizedGoal)
         }
 
         return JSONObject()
             .put("success", true)
             .put("status", "compiled")
             .put("goal_type", goalType)
+            .put("goal_repaired", goalType != rawGoalType)
+            .put("original_goal_type", rawGoalType)
             .put("stop_if_missing", stopIfMissing)
             .put("target", target)
+            .put("normalized_goal", normalizedGoal)
             .put("plan", plan)
     }
 
@@ -79,7 +151,8 @@ class AyanaAndroidGoalCompiler {
                     action = "open_settings",
                     section = canonical,
                     terminal = true,
-                    requireScreenChange = true
+                    requireScreenChange = true,
+                    expectAny = settingsSectionMarkers(canonical)
                 )
             )
         )
@@ -125,7 +198,9 @@ class AyanaAndroidGoalCompiler {
                         name = app,
                         section = direct,
                         terminal = true,
-                        requireScreenChange = true
+                        requireScreenChange = true,
+                        expectAny = terminalMarkersForAppDetail(key),
+                        expectAll = listOf(app)
                     )
                 )
             )
@@ -185,7 +260,8 @@ class AyanaAndroidGoalCompiler {
                     scrollIfMissing = true,
                     maxScrolls = 2,
                     terminal = true,
-                    requireScreenChange = true
+                    requireScreenChange = true,
+                    expectAny = listOf(target)
                 )
             )
         )
@@ -217,7 +293,14 @@ class AyanaAndroidGoalCompiler {
                     ),
                     scrollIfMissing = true,
                     maxScrolls = 1,
-                    requireScreenChange = true
+                    requireScreenChange = true,
+                    expectAny = listOf(
+                        "Установленные приложения",
+                        "Установленные службы",
+                        "Установленные сервисы",
+                        "Installed apps",
+                        "Installed services"
+                    )
                 ),
                 step(
                     id = "open_accessibility_service",
@@ -256,7 +339,8 @@ class AyanaAndroidGoalCompiler {
                     scrollIfMissing = true,
                     maxScrolls = 1,
                     terminal = true,
-                    requireScreenChange = true
+                    requireScreenChange = true,
+                    expectAny = targets
                 )
             )
         )
@@ -277,7 +361,8 @@ class AyanaAndroidGoalCompiler {
                     id = "open_parent_settings",
                     action = "open_settings",
                     section = canonical,
-                    requireScreenChange = true
+                    requireScreenChange = true,
+                    expectAny = settingsSectionMarkers(canonical)
                 ),
                 step(
                     id = "open_target_item",
@@ -286,11 +371,43 @@ class AyanaAndroidGoalCompiler {
                     scrollIfMissing = true,
                     maxScrolls = 2,
                     terminal = true,
-                    requireScreenChange = true
+                    requireScreenChange = true,
+                    expectAny = listOf(target)
                 )
             )
         )
     }
+
+
+    private fun settingsSectionMarkers(key: String): List<String> =
+        when (key) {
+            "accessibility" -> listOf("Специальные возможности", "Accessibility")
+            "apps" -> listOf("Приложения", "Apps")
+            "wifi" -> listOf("Wi-Fi", "WiFi", "Вайфай")
+            "bluetooth" -> listOf("Bluetooth", "Блютуз")
+            "sound" -> listOf("Звуки", "Звук", "Sound")
+            "display" -> listOf("Дисплей", "Экран", "Display")
+            "location" -> listOf("Местоположение", "Геолокация", "Location")
+            "security" -> listOf("Безопасность", "Security")
+            "date_time" -> listOf("Дата и время", "Date and time")
+            "battery" -> listOf("Батарея", "Аккумулятор", "Battery")
+            "storage" -> listOf("Хранилище", "Память", "Storage")
+            "notifications" -> listOf("Уведомления", "Notifications")
+            "data_usage" -> listOf("Использование данных", "Data usage")
+            "vpn" -> listOf("VPN")
+            "nfc" -> listOf("NFC")
+            "language" -> listOf("Язык", "Languages", "Language")
+            "keyboard" -> listOf("Клавиатура", "Keyboard")
+            "default_apps" -> listOf("Приложения по умолчанию", "Default apps")
+            "developer_options" -> listOf("Параметры разработчика", "Для разработчиков", "Developer options")
+            "device_info" -> listOf("Сведения о планшете", "Об устройстве", "About tablet", "About device")
+            "privacy" -> listOf("Конфиденциальность", "Privacy")
+            "battery_optimization" -> listOf("Оптимизация батареи", "Battery optimization")
+            // Some sections have OEM-specific titles. Returning an empty list
+            // keeps legacy screen-change verification rather than inventing a
+            // marker that could produce false negatives.
+            else -> emptyList()
+        }
 
     private fun appDetailTargets(key: String): List<String> =
         when (key) {
@@ -314,6 +431,10 @@ class AyanaAndroidGoalCompiler {
             "battery" -> listOf("Батарея", "Battery")
             "storage" -> listOf("Хранилище", "Storage", "Память")
             "mobile_data" -> listOf("Мобильные данные", "Mobile data", "Использование данных", "Data usage")
+            "notifications" -> listOf("Уведомления", "Notifications")
+            "open_by_default" -> listOf("По умолчанию", "Открытие ссылок", "Open by default", "Opening links")
+            "language" -> listOf("Язык", "Language")
+            "info" -> listOf("Информация о приложении", "App info")
             else -> emptyList()
         }
 
