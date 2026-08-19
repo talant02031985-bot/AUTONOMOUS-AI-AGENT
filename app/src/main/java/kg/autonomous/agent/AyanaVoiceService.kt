@@ -56,7 +56,7 @@ class AyanaVoiceService : Service() {
     // Built on the confirmed v9.1 baseline. The v9.0/v9.1 audio, STOP and local
     // fast-routing stack is intentionally frozen: streamed 24 kHz Marin PCM,
     // VOICE_COMMUNICATION/AEC/NS, barge-in STOP and Russian local arithmetic
-    // remain unchanged. v10.1 keeps durable goals/checkpoints/recovery, bounded
+    // remain unchanged. v10.2 keeps durable goals/checkpoints/recovery, bounded
     // replanning and a local fail-closed Safety Engine around device actions.
 
     private enum class ListenMode {
@@ -2726,7 +2726,7 @@ class AyanaVoiceService : Service() {
             return
         }
 
-        // AUTONOMOUS CORE v10.1 — command-level local Safety gate.
+        // AUTONOMOUS CORE v10.2 — command-level local Safety gate.
         // Explicit attempts to type credentials are rejected BEFORE Agent Core,
         // so the protection remains effective even if Worker/model routing changes.
         val commandSafetyDecision =
@@ -7043,14 +7043,6 @@ class AyanaVoiceService : Service() {
                                 finalSuccess =
                                     goalSucceeded
 
-                                broadcastStatus(
-                                    result.optString(
-                                        "local_reply",
-                                        if (goalSucceeded) "Готово." else "Не удалось завершить задачу."
-                                    ),
-                                    if (goalSucceeded) STATE_SUCCESS else STATE_ERROR
-                                )
-
                                 finalAnswer =
                                     result
                                         .optString(
@@ -7065,6 +7057,16 @@ class AyanaVoiceService : Service() {
                                         }
 
                                 if (goalSucceeded) {
+                                    commandHistoryStore.addEvent(
+                                        activeCommandHistoryId,
+                                        state = "goal_verified",
+                                        message = "Конечное состояние Android-цели подтверждено локально",
+                                        details =
+                                            "goal_type=${result.optString("goal_type")}; " +
+                                                "target=${result.optString("compiled_target")}; " +
+                                                "screen=${extractResultScreenPackage(result)}"
+                                    )
+
                                     completeCurrentDurableGoal(
                                         finalAnswer.orEmpty()
                                     )
@@ -10856,6 +10858,31 @@ class AyanaVoiceService : Service() {
                         "Не удалось подготовить Android-задачу."
                     )
 
+        val normalizedArguments =
+            compiled.optJSONObject(
+                "normalized_goal"
+            )
+                ?: JSONObject(
+                    arguments.toString()
+                )
+
+        if (
+            compiled.optBoolean(
+                "goal_repaired",
+                false
+            )
+        ) {
+            commandHistoryStore.addEvent(
+                activeCommandHistoryId,
+                state = "goal_integrity_repair",
+                message = "Классификация Android-цели уточнена локально",
+                details =
+                    "original=${compiled.optString("original_goal_type")}; " +
+                        "effective=${compiled.optString("goal_type")}; " +
+                        "target=${compiled.optString("target")}"
+            )
+        }
+
         commandHistoryStore.addEvent(
             activeCommandHistoryId,
             state = "compiled_plan",
@@ -10883,7 +10910,7 @@ class AyanaVoiceService : Service() {
                     durableGoalStore
                         .attachAndroidPlan(
                             id = durableId,
-                            arguments = arguments,
+                            arguments = normalizedArguments,
                             plan = plan
                         ) !=
                         null
@@ -11026,9 +11053,13 @@ class AyanaVoiceService : Service() {
                 )
             )
             .put(
+                "normalized_goal",
+                normalizedArguments
+            )
+            .put(
                 "local_reply",
                 localAndroidGoalReply(
-                    arguments = arguments,
+                    arguments = normalizedArguments,
                     result = result
                 )
             )
