@@ -52,8 +52,10 @@ import kotlin.math.abs
 
 class AyanaVoiceService : Service() {
 
-    // AYANA v11.1.1 COMMAND & APP INTELLIGENCE FINAL.
-    // Built on the confirmed v9.1 baseline. The v9.0/v9.1 audio, STOP and local
+    // AYANA v11.1.2 APP SETTINGS INTEGRITY FINAL.
+    // Built on the device-confirmed v11.1.1 command/app baseline. v11.1.2 adds
+    // routing-envelope cleanup plus strict app-settings terminal verification
+    // with an OEM-safe App Info + Accessibility fallback. The v9.0/v9.1 audio, STOP and local
     // fast-routing stack is intentionally frozen: streamed 24 kHz Marin PCM,
     // VOICE_COMMUNICATION/AEC/NS, barge-in STOP and Russian local arithmetic
     // remain unchanged. v10.2 keeps durable goals/checkpoints/recovery, bounded
@@ -2563,18 +2565,20 @@ class AyanaVoiceService : Service() {
             ListenMode.BUSY
 
         val normalized =
-            normalizeRecognitionText(
-                originalCommand
+            sanitizeRoutingEnvelope(
+                normalizeRecognitionText(
+                    originalCommand
+                )
+                    .replace(
+                        "пожалуйста",
+                        ""
+                    )
+                    .replace(
+                        Regex("\\s+"),
+                        " "
+                    )
+                    .trim()
             )
-                .replace(
-                    "пожалуйста",
-                    ""
-                )
-                .replace(
-                    Regex("\\s+"),
-                    " "
-                )
-                .trim()
 
         if (normalized.isBlank()) {
 
@@ -2594,8 +2598,10 @@ class AyanaVoiceService : Service() {
         // local router receives a conservative repaired form for known Sherpa
         // distortions observed on the target tablet.
         val routingNormalized =
-            repairCommonRecognitionForRouting(
-                normalized
+            sanitizeRoutingEnvelope(
+                repairCommonRecognitionForRouting(
+                    normalized
+                )
             )
 
         if (
@@ -3046,7 +3052,12 @@ class AyanaVoiceService : Service() {
 
                 val subpageResult =
                     tryOpenAppInfoSubpageLocally(
-                        subpage
+                        subpage = subpage,
+                        appTarget =
+                            openResult.optString(
+                                "label",
+                                appTarget
+                            )
                     )
 
                 if (
@@ -4055,87 +4066,207 @@ class AyanaVoiceService : Service() {
         command: String
     ): Pair<String, String>? {
 
-        // Only navigation/view verbs are accepted here. Commands such as
-        // «отключи уведомления» must continue to the safe Agent Core path.
-        val appPattern =
-            Regex(
-                """(?:(?:открой|покажи)\s+)?(?:настройк\p{L}*\s+)?приложени\p{L}*\s+(.+?)(?:\s+и\s+(?:перейди|зайди|открой|покажи)\s+|\s+(?:потом|затем)\s+(?:перейди|зайди|открой|покажи)\s+)"""
-            )
-
-        val match =
-            appPattern.find(
+        val section =
+            detectAppDetailSection(
                 command
             )
                 ?: return null
 
-        val appTarget =
-            match.groupValues
-                .getOrNull(1)
-                .orEmpty()
-                .trim()
+        // Goal-integrity guard: this fast path is ONLY for navigation to a
+        // read-only app-details destination. If anything actionable follows the
+        // requested section (for example «...в разрешения и нажми Камера» or
+        // «...в уведомления и выключи их»), the complete command must go to
+        // Planner/Task Engine instead of returning a partial local SUCCESS.
+        val sectionPattern =
+            appDetailSectionRegex(
+                section
+            )
+                ?: return null
+
+        val lastSectionMatch =
+            Regex(
+                "(?:" +
+                    sectionPattern +
+                    ")"
+            )
+                .findAll(
+                    command
+                )
+                .lastOrNull()
+                ?: return null
+
+        val trailingAfterSection =
+            command
+                .substring(
+                    lastSectionMatch
+                        .range
+                        .last +
+                        1
+                )
                 .trim(
-                    '"',
-                    '\'',
-                    '«',
-                    '»',
+                    ' ',
                     '.',
                     ',',
                     '!',
-                    '?'
+                    '?',
+                    ':',
+                    ';',
+                    '«',
+                    '»',
+                    '"',
+                    '\''
                 )
 
         if (
-            appTarget.isBlank()
+            trailingAfterSection
+                .isNotBlank()
         ) {
             return null
         }
 
-        val section =
-            when {
-                command.contains(
-                    "уведомлен"
-                ) ->
-                    "notifications"
+        // Strongest multi-step form:
+        // «открой информацию о приложении Chrome и зайди в разрешения».
+        // Reuse the app-info extractor because it already removes the trailing
+        // navigation clause and preserves the app name exactly.
+        val appFromInfo =
+            extractDirectAppInfoTarget(
+                command
+            )
 
-                command.contains(
-                    "по умолчани"
-                ) ->
-                    "open_by_default"
+        if (
+            !appFromInfo
+                .isNullOrBlank()
+        ) {
+            return appFromInfo to section
+        }
 
-                command.contains(
-                    "язык"
-                ) ->
-                    "language"
+        // «открой настройки приложения Chrome и перейди в уведомления»
+        // «покажи параметры приложения Gmail, затем открой разрешения»
+        val settingsPattern =
+            Regex(
+                """(?:(?:открой|покажи|зайди\s+в|перейди\s+в)\s+)?(?:настройк\p{L}*|параметр\p{L}*)\s+приложени\p{L}*\s+(.+?)(?:\s+и\s+|\s+(?:потом|затем|после\s+этого)\s+)(?:перейди|зайди|открой|покажи)?\s*(?:в\s+)?"""
+            )
 
-                else ->
-                    null
-            }
-                ?: return null
+        val settingsMatch =
+            settingsPattern.find(
+                command
+            )
 
-        return appTarget to section
+        val appFromSettings =
+            settingsMatch
+                ?.groupValues
+                ?.getOrNull(1)
+                .orEmpty()
+                .let(
+                    ::cleanExtractedAppTarget
+                )
+
+        if (
+            appFromSettings
+                .isNotBlank()
+        ) {
+            return appFromSettings to section
+        }
+
+        // Natural two-step shorthand:
+        // «открой Chrome и зайди в разрешения».
+        val launchThenDetail =
+            Regex(
+                """^(?:(?:открой|запусти|включи|покажи)(?:\s+мне)?\s+)(?:приложени\p{L}*\s+|программ\p{L}*\s+)?(.+?)(?:\s+и\s+|\s+(?:потом|затем|после\s+этого)\s+)(?:перейди|зайди|открой|покажи)\s+(?:в\s+)?"""
+            )
+                .find(
+                    command
+                )
+
+        val appFromLaunch =
+            launchThenDetail
+                ?.groupValues
+                ?.getOrNull(1)
+                .orEmpty()
+                .let(
+                    ::cleanExtractedAppTarget
+                )
+
+        if (
+            appFromLaunch
+                .isNotBlank()
+        ) {
+            return appFromLaunch to section
+        }
+
+        return null
     }
 
     private fun extractDirectAppSettingsTarget(
         command: String
     ): Pair<String, String>? {
 
+        val section =
+            detectAppDetailSection(
+                command
+            )
+                ?: return null
+
+        val sectionPattern =
+            appDetailSectionRegex(
+                section
+            )
+                ?: return null
+
+        val actionPrefix =
+            """(?:(?:(?:открой|покажи)(?:\s+мне)?|зайди\s+в|перейди\s+в)\s+)?"""
+
+        val settingsPrefix =
+            """(?:(?:настройк\p{L}*|параметр\p{L}*)\s+)?"""
+
         val patterns =
             listOf(
-                "notifications" to
-                    Regex(
-                        """^(?:(?:(?:открой|покажи)(?:\s+мне)?|зайди\s+в|перейди\s+в)\s+)?(?:настройк\p{L}*\s+)?уведомлен\p{L}*(?:\s+(?:для|у|в|во))?(?:\s+приложени\p{L}*)?\s+(.+)$"""
-                    ),
-                "open_by_default" to
-                    Regex(
-                        """^(?:(?:(?:открой|покажи)(?:\s+мне)?|зайди\s+в|перейди\s+в)\s+)?(?:настройк\p{L}*\s+)?(?:открыти\p{L}*\s+по\s+умолчани\p{L}*|по\s+умолчани\p{L}*)(?:\s+(?:для|у|в|во))?(?:\s+приложени\p{L}*)?\s+(.+)$"""
-                    ),
-                "language" to
-                    Regex(
-                        """^(?:(?:(?:открой|покажи)(?:\s+мне)?|зайди\s+в|перейди\s+в)\s+)?(?:настройк\p{L}*\s+)?язык\p{L}*(?:\s+(?:для|у|в|во))?(?:\s+приложени\p{L}*)?\s+(.+)$"""
-                    )
+                // «открой разрешения Chrome»
+                // «открой язык приложения Chrome»
+                Regex(
+                    "^" +
+                        actionPrefix +
+                        settingsPrefix +
+                        "(?:" +
+                        sectionPattern +
+                        ")" +
+                        """(?:\s+(?:для|у|в|во))?(?:\s+приложени\p{L}*)?\s+(.+)$"""
+                ),
+
+                // «открой разрешения для приложения Chrome»
+                Regex(
+                    "^" +
+                        actionPrefix +
+                        settingsPrefix +
+                        "(?:" +
+                        sectionPattern +
+                        ")" +
+                        """\s+(?:для|у|в|во)\s+приложени\p{L}*\s+(.+)$"""
+                ),
+
+                // «открой у Chrome разрешения»
+                // «перейди в Chrome в разрешения»
+                Regex(
+                    "^" +
+                        actionPrefix +
+                        settingsPrefix +
+                        """(?:для|у|в|во)\s+(.+?)\s+(?:в\s+)?(?:""" +
+                        sectionPattern +
+                        ")$"
+                ),
+
+                // «открой настройки приложения Chrome разрешения»
+                Regex(
+                    "^" +
+                        actionPrefix +
+                        settingsPrefix +
+                        """приложени\p{L}*\s+(.+?)\s+(?:""" +
+                        sectionPattern +
+                        ")$"
+                )
             )
 
-        for ((section, pattern) in patterns) {
+        for (pattern in patterns) {
 
             val match =
                 pattern.find(
@@ -4148,26 +4279,14 @@ class AyanaVoiceService : Service() {
                     .groupValues
                     .getOrNull(1)
                     .orEmpty()
-                    .trim()
-                    .removePrefix(
-                        "приложения "
-                    )
-                    .removePrefix(
-                        "приложение "
-                    )
-                    .trim()
-                    .trim(
-                        '"',
-                        '\'',
-                        '«',
-                        '»',
-                        '.',
-                        ',',
-                        '!',
-                        '?'
+                    .let(
+                        ::cleanExtractedAppTarget
                     )
 
-            if (target.isNotBlank()) {
+            if (
+                target
+                    .isNotBlank()
+            ) {
                 return section to target
             }
         }
@@ -4175,19 +4294,233 @@ class AyanaVoiceService : Service() {
         return null
     }
 
+    private fun detectAppDetailSection(
+        command: String
+    ): String? {
+
+        val c =
+            command
+                .lowercase(
+                    Locale.ROOT
+                )
+                .replace('ё', 'е')
+                .replace(
+                    Regex("\\s+"),
+                    " "
+                )
+                .trim()
+
+        return when {
+
+            c.contains(
+                "разрешен"
+            ) ->
+                "permissions"
+
+            c.contains(
+                "мобильные дан"
+            ) ||
+                c.contains(
+                    "мобильный трафик"
+                ) ||
+                c.contains(
+                    "использование дан"
+                ) ||
+                c.contains(
+                    "расход трафика"
+                ) ->
+                "mobile_data"
+
+            c.contains(
+                "батаре"
+            ) ||
+                c.contains(
+                    "аккумулятор"
+                ) ||
+                c.contains(
+                    "энергопотреб"
+                ) ->
+                "battery"
+
+            c.contains(
+                "хранилищ"
+            ) ||
+                c.contains(
+                    "памят"
+                ) ||
+                c.contains(
+                    "кэш"
+                ) ||
+                c.contains(
+                    "кеш"
+                ) ->
+                "storage"
+
+            c.contains(
+                "уведомлен"
+            ) ->
+                "notifications"
+
+            c.contains(
+                "по умолчани"
+            ) ||
+                c.contains(
+                    "открытие ссыл"
+                ) ||
+                c.contains(
+                    "открывать ссыл"
+                ) ->
+                "open_by_default"
+
+            c.contains(
+                "язык"
+            ) ||
+                c.contains(
+                    "локаль прилож"
+                ) ->
+                "language"
+
+            else ->
+                null
+        }
+    }
+
+    private fun appDetailSectionRegex(
+        section: String
+    ): String? {
+
+        return when (
+            section
+        ) {
+
+            "permissions" ->
+                """разрешен\p{L}*"""
+
+            "battery" ->
+                """(?:(?:(?:использовани|расход)\p{L}*\s+)?батаре\p{L}*|аккумулятор\p{L}*|энергопотреблени\p{L}*)"""
+
+            "storage" ->
+                """(?:хранилищ\p{L}*|памят\p{L}*|кэш\p{L}*|кеш\p{L}*)"""
+
+            "mobile_data" ->
+                """(?:мобильн\p{L}*\s+данн\p{L}*|мобильн\p{L}*\s+трафик\p{L}*|использовани\p{L}*\s+данн\p{L}*|расход\p{L}*\s+трафик\p{L}*)"""
+
+            "notifications" ->
+                """уведомлен\p{L}*"""
+
+            "open_by_default" ->
+                """(?:(?:открыти\p{L}*\s+)?по\s+умолчани\p{L}*|открывать\s+по\s+умолчани\p{L}*|открыти\p{L}*\s+ссыл\p{L}*|открывать\s+ссыл\p{L}*)"""
+
+            "language" ->
+                """(?:язык\p{L}*|локал\p{L}*)"""
+
+            else ->
+                null
+        }
+    }
+
+    private fun cleanExtractedAppTarget(
+        value: String
+    ): String {
+
+        var result =
+            value
+                .trim()
+                .removePrefix(
+                    "приложения "
+                )
+                .removePrefix(
+                    "приложение "
+                )
+                .removePrefix(
+                    "для "
+                )
+                .removePrefix(
+                    "про "
+                )
+                .trim()
+
+        val tailMarkers =
+            listOf(
+                " и зайди ",
+                " и перейди ",
+                " и открой ",
+                " и покажи ",
+                " потом ",
+                " затем ",
+                " после этого ",
+                " открой раздел ",
+                " перейди в раздел ",
+                " зайди в раздел "
+            )
+
+        val tailIndex =
+            tailMarkers
+                .map { marker ->
+                    result.indexOf(
+                        marker
+                    )
+                }
+                .filter { index ->
+                    index > 0
+                }
+                .minOrNull()
+
+        if (
+            tailIndex !=
+            null
+        ) {
+            result =
+                result
+                    .substring(
+                        0,
+                        tailIndex
+                    )
+                    .trim()
+        }
+
+        return result
+            .trim(
+                '"',
+                '\'',
+                '«',
+                '»',
+                '“',
+                '”',
+                '.',
+                ',',
+                '!',
+                '?',
+                ':',
+                ';'
+            )
+            .trim()
+    }
+
     private fun extractDirectAppInfoTarget(
         command: String
     ): String? {
 
-        val pattern =
-            Regex(
-                """(?:информац\p{L}*|сведени\p{L}*|инфо)\s+(?:(?:о|об|про|и)\s+)?приложени\p{L}*\s+(.+)"""
+        val patterns =
+            listOf(
+                Regex(
+                    """(?:информац\p{L}*|сведени\p{L}*|инфо)\s+(?:(?:о|об|про|и)\s+)?приложени\p{L}*\s+(.+)"""
+                ),
+                // Natural explicit app-settings form. Requiring the word
+                // «приложение» keeps this separate from global settings such as
+                // «настройки Wi-Fi» or «параметры батареи».
+                Regex(
+                    """^(?:(?:открой|покажи)(?:\s+мне)?\s+)?(?:настройк\p{L}*|параметр\p{L}*)\s+приложени\p{L}*\s+(.+)"""
+                )
             )
 
         val match =
-            pattern.find(
-                command
-            )
+            patterns
+                .firstNotNullOfOrNull { pattern ->
+                    pattern.find(
+                        command
+                    )
+                }
                 ?: return null
 
         var target =
@@ -4270,77 +4603,28 @@ class AyanaVoiceService : Service() {
             )
                 ?: return null
 
-        val c =
-            command
-                .lowercase(
-                    Locale.getDefault()
-                )
-                .replace('ё', 'е')
-
         val subpage =
-            when {
-
-                c.contains(
-                    "разрешен"
-                ) ->
-                    "permissions"
-
-                c.contains(
-                    "батаре"
-                ) ||
-                    c.contains(
-                        "аккумулятор"
-                    ) ||
-                    c.contains(
-                        "энергопотреб"
-                    ) ->
-                    "battery"
-
-                c.contains(
-                    "хранилищ"
-                ) ||
-                    c.contains(
-                        "память приложения"
-                    ) ->
-                    "storage"
-
-                else ->
-                    return null
-            }
+            detectAppDetailSection(
+                command
+            )
+                ?: return null
 
         return appTarget to subpage
     }
 
     private fun tryOpenAppInfoSubpageLocally(
-        subpage: String
+        subpage: String,
+        appTarget: String
     ): JSONObject {
 
         val targets =
-            when (subpage) {
+            appDetailClickTargets(
+                subpage
+            )
 
-                "permissions" ->
-                    listOf(
-                        "Разрешения"
-                    )
-
-                "battery" ->
-                    listOf(
-                        "Батарея",
-                        "Использование батареи",
-                        "Аккумулятор"
-                    )
-
-                "storage" ->
-                    listOf(
-                        "Хранилище",
-                        "Память"
-                    )
-
-                else ->
-                    emptyList()
-            }
-
-        if (targets.isEmpty()) {
+        if (
+            targets.isEmpty()
+        ) {
             return JSONObject()
                 .put(
                     "success",
@@ -4360,69 +4644,9 @@ class AyanaVoiceService : Service() {
                 )
                 .put(
                     "message",
-                    "Подстраница пока не найдена"
+                    "Подстраница пока не подтверждена"
                 )
 
-        fun tryLocalTarget(
-            target: String
-        ): JSONObject? {
-
-            val clickResult =
-                screenIntelligence
-                    .click(
-                        target = target,
-                        confirmed = false
-                    )
-
-            lastResult =
-                clickResult
-
-            val clickAccepted =
-                clickResult.optBoolean(
-                    "success",
-                    false
-                )
-
-            val screenChanged =
-                clickResult.optBoolean(
-                    "screen_changed",
-                    false
-                )
-
-            if (
-                clickAccepted ||
-                screenChanged
-            ) {
-
-                return JSONObject(
-                    clickResult.toString()
-                ).apply {
-                    put(
-                        "success",
-                        true
-                    )
-                    put(
-                        "local_goal_reached",
-                        true
-                    )
-                    put(
-                        "message",
-                        "Локальная подстраница открыта: $target"
-                    )
-                }
-            }
-
-            return null
-        }
-
-        // ONE UI APP-SUBPAGE ROUTER v2.7.4.4
-        // 1) Prefer a label that is visible in the fresh Accessibility snapshot.
-        // 2) Lower cards such as Battery/Storage may appear only after scrolling.
-        //    One UI can visually scroll while Accessibility reports success=false
-        //    and screen_changed=false, so never stop only because of those flags.
-        // 3) After the first scroll, try the canonical row directly even if the
-        //    snapshot is briefly stale. This restores the reliable v2.7.4.2 path
-        //    without slowing the already-fast Permissions route.
         repeat(4) { attempt ->
 
             val screenBefore =
@@ -4434,69 +4658,134 @@ class AyanaVoiceService : Service() {
                 }
 
             val normalizedScreen =
-                screenBefore
-                    .toString()
-                    .lowercase(
-                        Locale.getDefault()
-                    )
-                    .replace('ё', 'е')
+                normalizeVerificationText(
+                    screenBefore
+                        .toString()
+                )
 
             val visibleTarget =
                 targets.firstOrNull { target ->
                     normalizedScreen.contains(
-                        target
-                            .lowercase(
-                                Locale.getDefault()
-                            )
-                            .replace('ё', 'е')
-                    )
-                }
-
-            if (visibleTarget != null) {
-                val reached =
-                    tryLocalTarget(
-                        visibleTarget
-                    )
-
-                if (reached != null) {
-                    return reached
-                }
-            }
-
-            // Battery/Storage on Samsung One UI are often below the initial fold.
-            // After a real scroll the Accessibility snapshot can lag behind what is
-            // already visible. Try the most likely row directly before scrolling
-            // again. On later passes try aliases as a compatibility fallback.
-            if (
-                attempt > 0 &&
-                (
-                    subpage == "battery" ||
-                    subpage == "storage"
-                )
-            ) {
-
-                val fallbackTargets =
-                    if (attempt == 1) {
-                        listOf(
-                            targets.first()
-                        )
-                    } else {
-                        targets
-                    }
-
-                for (target in fallbackTargets) {
-                    val reached =
-                        tryLocalTarget(
+                        normalizeVerificationText(
                             target
                         )
+                    )
+                }
 
-                    if (reached != null) {
-                        return reached
+            val candidates =
+                linkedSetOf<String>()
+                    .apply {
+                        if (
+                            visibleTarget !=
+                            null
+                        ) {
+                            add(
+                                visibleTarget
+                            )
+                        }
+
+                        // After at least one scroll the Accessibility snapshot can
+                        // lag behind the visible list on One UI. Trying canonical
+                        // row labels is safe because Screen Intelligence still
+                        // resolves them semantically against real visible nodes.
+                        if (
+                            attempt >
+                            0
+                        ) {
+                            addAll(
+                                targets
+                            )
+                        }
+                    }
+
+            for (
+                target in
+                candidates
+            ) {
+
+                val clickResult =
+                    screenIntelligence
+                        .click(
+                            target = target,
+                            confirmed = false
+                        )
+
+                lastResult =
+                    clickResult
+
+                if (
+                    clickResult.optBoolean(
+                        "requires_confirmation",
+                        false
+                    )
+                ) {
+                    return clickResult
+                }
+
+                val clickAccepted =
+                    clickResult.optBoolean(
+                        "success",
+                        false
+                    )
+
+                val screenChanged =
+                    clickResult.optBoolean(
+                        "screen_changed",
+                        false
+                    )
+
+                if (
+                    clickAccepted ||
+                    screenChanged
+                ) {
+
+                    val verification =
+                        awaitVerifiedAppDetailScreen(
+                            appTarget = appTarget,
+                            section = subpage,
+                            timeoutMs = APP_DETAIL_VERIFY_TIMEOUT_MS
+                        )
+
+                    if (
+                        verification.optBoolean(
+                            "success",
+                            false
+                        )
+                    ) {
+                        return JSONObject(
+                            clickResult.toString()
+                        ).apply {
+                            put(
+                                "success",
+                                true
+                            )
+                            put(
+                                "local_goal_reached",
+                                true
+                            )
+                            put(
+                                "verified",
+                                true
+                            )
+                            put(
+                                "screen",
+                                verification.optJSONObject(
+                                    "screen"
+                                )
+                            )
+                            put(
+                                "message",
+                                "Локальная подстраница подтверждена: $target"
+                            )
+                        }
                     }
                 }
             }
 
-            if (attempt < 3) {
+            if (
+                attempt <
+                3
+            ) {
 
                 val scrollResult =
                     screenIntelligence
@@ -4507,9 +4796,6 @@ class AyanaVoiceService : Service() {
                 lastResult =
                     scrollResult
 
-                // Do not abort on false Accessibility scroll flags. The user can
-                // already see the list move while the service snapshot is still
-                // catching up. The next loop always re-reads the actual screen.
                 try {
                     Thread.sleep(
                         120L
@@ -4519,7 +4805,372 @@ class AyanaVoiceService : Service() {
             }
         }
 
-        return lastResult
+        return JSONObject(
+            lastResult.toString()
+        ).apply {
+            put(
+                "success",
+                false
+            )
+            put(
+                "verified",
+                false
+            )
+            put(
+                "message",
+                "Нужная подстраница не подтверждена по фактическому экрану"
+            )
+        }
+    }
+
+    private fun appDetailClickTargets(
+        section: String
+    ): List<String> {
+
+        return when (
+            section
+        ) {
+
+            "permissions" ->
+                listOf(
+                    "Разрешения",
+                    "Permissions"
+                )
+
+            "battery" ->
+                listOf(
+                    "Батарея",
+                    "Использование батареи",
+                    "Аккумулятор",
+                    "Battery"
+                )
+
+            "storage" ->
+                listOf(
+                    "Хранилище",
+                    "Память",
+                    "Storage"
+                )
+
+            "mobile_data" ->
+                listOf(
+                    "Мобильные данные",
+                    "Использование мобильных данных",
+                    "Использование данных",
+                    "Мобильный трафик",
+                    "Mobile data",
+                    "Data usage"
+                )
+
+            "notifications" ->
+                listOf(
+                    "Уведомления",
+                    "Notifications"
+                )
+
+            "open_by_default" ->
+                listOf(
+                    "Использование по умолчанию",
+                    "По умолчанию",
+                    "Открытие ссылок",
+                    "Open by default",
+                    "Opening links"
+                )
+
+            "language" ->
+                listOf(
+                    "Язык",
+                    "Languages",
+                    "Language"
+                )
+
+            else ->
+                emptyList()
+        }
+    }
+
+    private fun appDetailVerificationMarkers(
+        section: String
+    ): List<String> {
+
+        return when (
+            section
+        ) {
+
+            "permissions" ->
+                listOf(
+                    "разрешен",
+                    "permission"
+                )
+
+            "battery" ->
+                listOf(
+                    "батаре",
+                    "аккумулятор",
+                    "battery"
+                )
+
+            "storage" ->
+                listOf(
+                    "хранилищ",
+                    "память",
+                    "storage"
+                )
+
+            "mobile_data" ->
+                listOf(
+                    "мобильн",
+                    "использование дан",
+                    "расход трафик",
+                    "mobile data",
+                    "data usage"
+                )
+
+            "notifications" ->
+                listOf(
+                    "уведомлен",
+                    "notification"
+                )
+
+            "open_by_default" ->
+                listOf(
+                    "по умолчани",
+                    "открытие ссыл",
+                    "поддерживаем",
+                    "open by default",
+                    "opening links",
+                    "supported links"
+                )
+
+            "language" ->
+                listOf(
+                    "язык",
+                    "языки прилож",
+                    "language",
+                    "app languages"
+                )
+
+            "info" ->
+                listOf(
+                    "информация о приложении",
+                    "сведения о приложении",
+                    "app info"
+                )
+
+            else ->
+                emptyList()
+        }
+    }
+
+    private fun normalizeVerificationText(
+        value: String
+    ): String {
+
+        return value
+            .lowercase(
+                Locale.ROOT
+            )
+            .replace('ё', 'е')
+            .replace(
+                Regex("[^a-zа-я0-9\\s]"),
+                " "
+            )
+            .replace(
+                Regex("\\s+"),
+                " "
+            )
+            .trim()
+    }
+
+    private fun isVerifiedAppDetailScreen(
+        screen: JSONObject,
+        appTarget: String,
+        section: String
+    ): Boolean {
+
+        if (
+            !screen.optBoolean(
+                "success",
+                false
+            )
+        ) {
+            return false
+        }
+
+        val normalizedScreen =
+            normalizeVerificationText(
+                screen.toString()
+            )
+
+        if (
+            normalizedScreen
+                .isBlank()
+        ) {
+            return false
+        }
+
+        val markers =
+            appDetailVerificationMarkers(
+                section
+            )
+
+        if (
+            markers.isEmpty()
+        ) {
+            return false
+        }
+
+        val markerFound =
+            markers.any { marker ->
+                normalizedScreen.contains(
+                    normalizeVerificationText(
+                        marker
+                    )
+                )
+            }
+
+        if (
+            !markerFound
+        ) {
+            return false
+        }
+
+        val normalizedApp =
+            normalizeVerificationText(
+                appTarget
+            )
+
+        val appFound =
+            normalizedApp.isBlank() ||
+                normalizedScreen.contains(
+                    normalizedApp
+                )
+
+        if (
+            !appFound
+        ) {
+            return false
+        }
+
+        // App Info itself contains rows named «Уведомления», «Разрешения»,
+        // «Хранилище», etc. Merely seeing such a row is NOT proof that the
+        // requested child screen was opened.
+        if (
+            section !=
+            "info"
+        ) {
+            val stillOnAppInfo =
+                normalizedScreen.contains(
+                    "информация о приложении"
+                ) ||
+                    normalizedScreen.contains(
+                        "сведения о приложении"
+                    ) ||
+                    normalizedScreen.contains(
+                        "app info"
+                    )
+
+            if (
+                stillOnAppInfo
+            ) {
+                return false
+            }
+        }
+
+        return true
+    }
+
+    private fun awaitVerifiedAppDetailScreen(
+        appTarget: String,
+        section: String,
+        timeoutMs: Long
+    ): JSONObject {
+
+        val deadline =
+            System.currentTimeMillis() +
+                timeoutMs
+                    .coerceAtLeast(
+                        0L
+                    )
+
+        var latest =
+            JSONObject()
+                .put(
+                    "success",
+                    false
+                )
+
+        do {
+
+            latest =
+                try {
+                    screenIntelligence
+                        .getScreenState()
+                } catch (_: Exception) {
+                    JSONObject()
+                        .put(
+                            "success",
+                            false
+                        )
+                }
+
+            if (
+                isVerifiedAppDetailScreen(
+                    screen = latest,
+                    appTarget = appTarget,
+                    section = section
+                )
+            ) {
+                return JSONObject()
+                    .put(
+                        "success",
+                        true
+                    )
+                    .put(
+                        "verified",
+                        true
+                    )
+                    .put(
+                        "screen",
+                        latest
+                    )
+            }
+
+            if (
+                System.currentTimeMillis() >=
+                deadline
+            ) {
+                break
+            }
+
+            try {
+                Thread.sleep(
+                    APP_DETAIL_VERIFY_POLL_MS
+                )
+            } catch (_: InterruptedException) {
+                Thread.currentThread()
+                    .interrupt()
+                break
+            }
+
+        } while (
+            !cancelRequested &&
+            !shuttingDown
+        )
+
+        return JSONObject()
+            .put(
+                "success",
+                false
+            )
+            .put(
+                "verified",
+                false
+            )
+            .put(
+                "screen",
+                latest
+            )
     }
 
     private fun extractSettingsAppSearchTarget(
@@ -5840,6 +6491,70 @@ class AyanaVoiceService : Service() {
                 )
             }
         }
+    }
+
+    /**
+     * v11.1.2 ROUTING ENVELOPE SANITIZER.
+     *
+     * Text-mode copy/paste and some keyboards can wrap a complete command in
+     * typographic quotes or brackets. Those characters must not change the route
+     * (for example «открой Gmail» must remain a local app-launch command).
+     *
+     * Only leading/trailing envelope punctuation is removed. Internal punctuation
+     * is preserved so search queries and user text are not rewritten globally.
+     */
+    private fun sanitizeRoutingEnvelope(
+        value: String
+    ): String {
+
+        var result =
+            value
+                .trim()
+
+        val wrapperPairs =
+            listOf(
+                '«' to '»',
+                '“' to '”',
+                '„' to '“',
+                '"' to '"',
+                '\'' to '\'',
+                '`' to '`',
+                '(' to ')',
+                '[' to ']',
+                '{' to '}'
+            )
+
+        var changed: Boolean
+
+        do {
+            changed = false
+
+            for ((opening, closing) in wrapperPairs) {
+                if (
+                    result.length >= 2 &&
+                    result.first() == opening &&
+                    result.last() == closing
+                ) {
+                    result =
+                        result
+                            .substring(
+                                1,
+                                result.length - 1
+                            )
+                            .trim()
+
+                    changed = true
+                    break
+                }
+            }
+        } while (changed)
+
+        return result
+            .replace(
+                Regex("\\s+"),
+                " "
+            )
+            .trim()
     }
 
     private fun repairCommonRecognitionForRouting(
@@ -12850,7 +13565,9 @@ class AyanaVoiceService : Service() {
                     requestedName
                 )
 
-        if (!resolved.success) {
+        if (
+            !resolved.success
+        ) {
             return resolved.toJson()
                 .put(
                     "message",
@@ -12867,32 +13584,83 @@ class AyanaVoiceService : Service() {
         )
 
         return try {
-            startActivity(
-                Intent(
-                    Settings.ACTION_APPLICATION_DETAILS_SETTINGS,
-                    Uri.parse(
-                        "package:${resolved.packageName}"
-                    )
-                ).apply {
-                    addFlags(
-                        Intent.FLAG_ACTIVITY_NEW_TASK
-                    )
-                }
+
+            startAppInfoIntent(
+                resolved.packageName
             )
+
+            val verification =
+                awaitVerifiedAppDetailScreen(
+                    appTarget = resolved.label,
+                    section = "info",
+                    timeoutMs = APP_DETAIL_VERIFY_TIMEOUT_MS
+                )
+
+            if (
+                verification.optBoolean(
+                    "success",
+                    false
+                )
+            ) {
+
+                commandHistoryStore.addEvent(
+                    activeCommandHistoryId,
+                    state = "app_info_verified",
+                    message = "Экран App Info подтверждён",
+                    details =
+                        "package=${resolved.packageName}; label=${resolved.label}".take(420)
+                )
+
+                resolved.toJson()
+                    .put(
+                        "success",
+                        true
+                    )
+                    .put(
+                        "verified",
+                        true
+                    )
+                    .put(
+                        "message",
+                        "Открыта информация о приложении ${resolved.label}"
+                    )
+
+            } else {
+
+                commandHistoryStore.addEvent(
+                    activeCommandHistoryId,
+                    state = "app_info_verify_failed",
+                    message = "App Info не подтверждён по экрану",
+                    details =
+                        "package=${resolved.packageName}; label=${resolved.label}".take(420)
+                )
+
+                resolved.toJson()
+                    .put(
+                        "success",
+                        false
+                    )
+                    .put(
+                        "verified",
+                        false
+                    )
+                    .put(
+                        "message",
+                        "Android принял переход, но экран информации о приложении ${resolved.label} не подтверждён"
+                    )
+            }
+
+        } catch (
+            error: Exception
+        ) {
 
             resolved.toJson()
                 .put(
                     "success",
-                    true
+                    false
                 )
                 .put(
-                    "message",
-                    "Открыта информация о приложении ${resolved.label}"
-                )
-        } catch (error: Exception) {
-            resolved.toJson()
-                .put(
-                    "success",
+                    "verified",
                     false
                 )
                 .put(
@@ -12900,6 +13668,24 @@ class AyanaVoiceService : Service() {
                     "Не удалось открыть информацию о приложении ${resolved.label}: ${error.message ?: "неизвестная ошибка"}"
                 )
         }
+    }
+
+    private fun startAppInfoIntent(
+        packageName: String
+    ) {
+
+        startActivity(
+            Intent(
+                Settings.ACTION_APPLICATION_DETAILS_SETTINGS,
+                Uri.parse(
+                    "package:$packageName"
+                )
+            ).apply {
+                addFlags(
+                    Intent.FLAG_ACTIVITY_NEW_TASK
+                )
+            }
+        )
     }
 
     private fun agentOpenSettings(
@@ -13124,127 +13910,306 @@ class AyanaVoiceService : Service() {
             resolved.second
 
         val normalizedSection =
-            section
-                .lowercase(
-                    Locale.getDefault()
+            canonicalAppDetailSection(
+                section
+            )
+                ?: return toolResult(
+                    false,
+                    "Неподдерживаемый раздел приложения: $section"
                 )
-                .trim()
 
-        val intent =
-            when (
+        val sectionDisplayName =
+            appDetailSectionDisplayName(
                 normalizedSection
-            ) {
-
-                "notifications" ->
-                    Intent(
-                        Settings.ACTION_APP_NOTIFICATION_SETTINGS
-                    ).apply {
-
-                        putExtra(
-                            Settings.EXTRA_APP_PACKAGE,
-                            packageName
-                        )
-                    }
-
-                "open_by_default" ->
-                    if (
-                        Build.VERSION.SDK_INT >=
-                        Build.VERSION_CODES.S
-                    ) {
-                        Intent(
-                            Settings.ACTION_APP_OPEN_BY_DEFAULT_SETTINGS,
-                            Uri.parse(
-                                "package:$packageName"
-                            )
-                        )
-                    } else {
-                        Intent(
-                            Settings.ACTION_APPLICATION_DETAILS_SETTINGS,
-                            Uri.parse(
-                                "package:$packageName"
-                            )
-                        )
-                    }
-
-                "language" ->
-                    if (
-                        Build.VERSION.SDK_INT >=
-                        Build.VERSION_CODES.TIRAMISU
-                    ) {
-                        Intent(
-                            Settings.ACTION_APP_LOCALE_SETTINGS,
-                            Uri.parse(
-                                "package:$packageName"
-                            )
-                        )
-                    } else {
-                        Intent(
-                            Settings.ACTION_APPLICATION_DETAILS_SETTINGS,
-                            Uri.parse(
-                                "package:$packageName"
-                            )
-                        )
-                    }
-
-                else ->
-                    Intent(
-                        Settings.ACTION_APPLICATION_DETAILS_SETTINGS,
-                        Uri.parse(
-                            "package:$packageName"
-                        )
-                    )
-            }
-                .apply {
-
-                    addFlags(
-                        Intent.FLAG_ACTIVITY_NEW_TASK
-                    )
-                }
-
-        return try {
-
-            startActivity(
-                intent
             )
 
-            toolResult(
-                true,
-                "Открыт раздел $normalizedSection для приложения $label"
-            )
-
-        } catch (
-            error: Exception
+        if (
+            normalizedSection ==
+            "info"
         ) {
 
-            if (
-                normalizedSection !=
-                "info"
+            return try {
+
+                startAppInfoIntent(
+                    packageName
+                )
+
+                val verification =
+                    awaitVerifiedAppDetailScreen(
+                        appTarget = label,
+                        section = "info",
+                        timeoutMs = APP_DETAIL_VERIFY_TIMEOUT_MS
+                    )
+
+                if (
+                    verification.optBoolean(
+                        "success",
+                        false
+                    )
+                ) {
+                    commandHistoryStore.addEvent(
+                        activeCommandHistoryId,
+                        state = "app_settings_verified",
+                        message = "App Info подтверждён",
+                        details =
+                            "package=$packageName; section=info; path=direct_intent".take(520)
+                    )
+
+                    toolResult(
+                        true,
+                        "Открыта информация о приложении $label"
+                    )
+                        .put(
+                            "verified",
+                            true
+                        )
+                        .put(
+                            "package",
+                            packageName
+                        )
+                        .put(
+                            "label",
+                            label
+                        )
+                } else {
+                    toolResult(
+                        false,
+                        "Экран информации о приложении $label не подтверждён"
+                    )
+                        .put(
+                            "verified",
+                            false
+                        )
+                }
+
+            } catch (
+                error: Exception
             ) {
-
-                try {
-
-                    startActivity(
-                        Intent(
-                            Settings.ACTION_APPLICATION_DETAILS_SETTINGS,
-                            Uri.parse(
-                                "package:$packageName"
+                toolResult(
+                    false,
+                    "Не удалось открыть информацию о приложении $label: " +
+                        (
+                            error.message
+                                ?: "неизвестная ошибка"
                             )
-                        ).apply {
+                )
+            }
+        }
 
-                            addFlags(
-                                Intent.FLAG_ACTIVITY_NEW_TASK
-                            )
-                        }
+        val directIntent =
+            buildDirectAppSettingsIntent(
+                packageName = packageName,
+                section = normalizedSection
+            )
+
+        if (
+            directIntent !=
+            null
+        ) {
+
+            try {
+
+                startActivity(
+                    directIntent.apply {
+                        addFlags(
+                            Intent.FLAG_ACTIVITY_NEW_TASK
+                        )
+                    }
+                )
+
+                val directVerification =
+                    awaitVerifiedAppDetailScreen(
+                        appTarget = label,
+                        section = normalizedSection,
+                        timeoutMs = APP_DETAIL_VERIFY_TIMEOUT_MS
+                    )
+
+                if (
+                    directVerification.optBoolean(
+                        "success",
+                        false
+                    )
+                ) {
+
+                    commandHistoryStore.addEvent(
+                        activeCommandHistoryId,
+                        state = "app_settings_verified",
+                        message = "Раздел приложения подтверждён",
+                        details =
+                            "package=$packageName; section=$normalizedSection; path=direct_intent".take(520)
                     )
 
                     return toolResult(
                         true,
-                        "Точный раздел недоступен; открыта информация о приложении $label"
+                        "Открыт раздел «$sectionDisplayName» для приложения $label"
+                    )
+                        .put(
+                            "verified",
+                            true
+                        )
+                        .put(
+                            "package",
+                            packageName
+                        )
+                        .put(
+                            "label",
+                            label
+                        )
+                        .put(
+                            "section",
+                            normalizedSection
+                        )
+                        .put(
+                            "path",
+                            "direct_intent"
+                        )
+                }
+
+                commandHistoryStore.addEvent(
+                    activeCommandHistoryId,
+                    state = "app_settings_fallback",
+                    message = "Прямой Android Intent не подтвердил конечный экран",
+                    details =
+                        "package=$packageName; section=$normalizedSection; fallback=app_info_click".take(520)
+                )
+
+            } catch (
+                error: Exception
+            ) {
+
+                commandHistoryStore.addEvent(
+                    activeCommandHistoryId,
+                    state = "app_settings_fallback",
+                    message = "Прямой Android Intent недоступен",
+                    details =
+                        "package=$packageName; section=$normalizedSection; error=${error.message ?: "unknown"}".take(520)
+                )
+            }
+        }
+
+        // OEM-safe deterministic fallback. Samsung One UI can accept a documented
+        // Settings Intent without actually replacing the current detail fragment.
+        // In that case open the real App Info page, click the requested row through
+        // Accessibility, and only return SUCCESS after the final screen is observed.
+        return try {
+
+            startAppInfoIntent(
+                packageName
+            )
+
+            val appInfoVerification =
+                awaitVerifiedAppDetailScreen(
+                    appTarget = label,
+                    section = "info",
+                    timeoutMs = APP_DETAIL_VERIFY_TIMEOUT_MS
+                )
+
+            if (
+                !appInfoVerification.optBoolean(
+                    "success",
+                    false
+                )
+            ) {
+
+                commandHistoryStore.addEvent(
+                    activeCommandHistoryId,
+                    state = "app_settings_verify_failed",
+                    message = "Не удалось подтвердить App Info перед fallback",
+                    details =
+                        "package=$packageName; section=$normalizedSection".take(520)
+                )
+
+                return toolResult(
+                    false,
+                    "Не удалось подтвердить экран приложения $label перед переходом в «$sectionDisplayName»"
+                )
+                    .put(
+                        "verified",
+                        false
+                    )
+            }
+
+            val subpageResult =
+                tryOpenAppInfoSubpageLocally(
+                    subpage = normalizedSection,
+                    appTarget = label
+                )
+
+            if (
+                subpageResult.optBoolean(
+                    "success",
+                    false
+                )
+            ) {
+
+                commandHistoryStore.addEvent(
+                    activeCommandHistoryId,
+                    state = "app_settings_verified",
+                    message = "Раздел приложения подтверждён",
+                    details =
+                        "package=$packageName; section=$normalizedSection; path=app_info_click".take(520)
+                )
+
+                toolResult(
+                    true,
+                    "Открыт раздел «$sectionDisplayName» для приложения $label"
+                )
+                    .put(
+                        "verified",
+                        true
+                    )
+                    .put(
+                        "package",
+                        packageName
+                    )
+                    .put(
+                        "label",
+                        label
+                    )
+                    .put(
+                        "section",
+                        normalizedSection
+                    )
+                    .put(
+                        "path",
+                        "app_info_click"
                     )
 
-                } catch (_: Exception) {
-                }
+            } else {
+
+                commandHistoryStore.addEvent(
+                    activeCommandHistoryId,
+                    state = "app_settings_verify_failed",
+                    message = "Конечный экран приложения не подтверждён",
+                    details =
+                        "package=$packageName; section=$normalizedSection".take(520)
+                )
+
+                toolResult(
+                    false,
+                    "Не удалось подтвердить раздел «$sectionDisplayName» для приложения $label"
+                )
+                    .put(
+                        "verified",
+                        false
+                    )
+                    .put(
+                        "package",
+                        packageName
+                    )
+                    .put(
+                        "label",
+                        label
+                    )
+                    .put(
+                        "section",
+                        normalizedSection
+                    )
             }
+
+        } catch (
+            error: Exception
+        ) {
 
             toolResult(
                 false,
@@ -13254,6 +14219,181 @@ class AyanaVoiceService : Service() {
                             ?: "неизвестная ошибка"
                         )
             )
+                .put(
+                    "verified",
+                    false
+                )
+        }
+    }
+
+    private fun canonicalAppDetailSection(
+        value: String
+    ): String? {
+
+        val normalized =
+            value
+                .lowercase(
+                    Locale.ROOT
+                )
+                .replace('ё', 'е')
+                .trim()
+
+        return when (
+            normalized
+        ) {
+
+            "permissions",
+            "permission",
+            "разрешения",
+            "разрешение" ->
+                "permissions"
+
+            "battery",
+            "батарея",
+            "аккумулятор" ->
+                "battery"
+
+            "storage",
+            "хранилище",
+            "память" ->
+                "storage"
+
+            "mobile_data",
+            "mobile data",
+            "data_usage",
+            "data usage",
+            "мобильные данные",
+            "использование данных" ->
+                "mobile_data"
+
+            "notifications",
+            "notification",
+            "уведомления",
+            "уведомление" ->
+                "notifications"
+
+            "open_by_default",
+            "open by default",
+            "по умолчанию",
+            "открытие по умолчанию",
+            "открытие ссылок" ->
+                "open_by_default"
+
+            "language",
+            "languages",
+            "язык",
+            "языки" ->
+                "language"
+
+            "info",
+            "app_info",
+            "app info",
+            "информация",
+            "информация о приложении" ->
+                "info"
+
+            else ->
+                detectAppDetailSection(
+                    normalized
+                )
+        }
+    }
+
+    private fun appDetailSectionDisplayName(
+        section: String
+    ): String {
+
+        return when (
+            section
+        ) {
+
+            "permissions" ->
+                "Разрешения"
+
+            "battery" ->
+                "Батарея"
+
+            "storage" ->
+                "Хранилище"
+
+            "mobile_data" ->
+                "Мобильные данные"
+
+            "notifications" ->
+                "Уведомления"
+
+            "open_by_default" ->
+                "Использование по умолчанию"
+
+            "language" ->
+                "Язык"
+
+            "info" ->
+                "Информация о приложении"
+
+            else ->
+                section
+        }
+    }
+
+    private fun buildDirectAppSettingsIntent(
+        packageName: String,
+        section: String
+    ): Intent? {
+
+        return when (
+            section
+        ) {
+
+            "notifications" ->
+                if (
+                    Build.VERSION.SDK_INT >=
+                    Build.VERSION_CODES.O
+                ) {
+                    Intent(
+                        Settings.ACTION_APP_NOTIFICATION_SETTINGS
+                    ).apply {
+                        putExtra(
+                            Settings.EXTRA_APP_PACKAGE,
+                            packageName
+                        )
+                    }
+                } else {
+                    null
+                }
+
+            "open_by_default" ->
+                if (
+                    Build.VERSION.SDK_INT >=
+                    Build.VERSION_CODES.S
+                ) {
+                    Intent(
+                        Settings.ACTION_APP_OPEN_BY_DEFAULT_SETTINGS,
+                        Uri.parse(
+                            "package:$packageName"
+                        )
+                    )
+                } else {
+                    null
+                }
+
+            "language" ->
+                if (
+                    Build.VERSION.SDK_INT >=
+                    Build.VERSION_CODES.TIRAMISU
+                ) {
+                    Intent(
+                        Settings.ACTION_APP_LOCALE_SETTINGS,
+                        Uri.parse(
+                            "package:$packageName"
+                        )
+                    )
+                } else {
+                    null
+                }
+
+            else ->
+                null
         }
     }
 
@@ -15774,6 +16914,15 @@ class AyanaVoiceService : Service() {
                 "а я на",
                 "ayana"
             )
+
+        // Strict local verification for app-specific Settings destinations.
+        // One UI can accept a Settings Intent while keeping the previous fragment,
+        // so success is never inferred from startActivity() alone.
+        private const val APP_DETAIL_VERIFY_TIMEOUT_MS =
+            1600L
+
+        private const val APP_DETAIL_VERIFY_POLL_MS =
+            80L
 
         // For complete local settings phrases, commit a stable Sherpa partial
         // before the endpoint detector times out. Long enough to tolerate normal
