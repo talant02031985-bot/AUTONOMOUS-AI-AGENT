@@ -2849,6 +2849,23 @@ class AyanaVoiceService : Service() {
             return
         }
 
+        // LOCAL CONVERSATION FAST-PATH v11.2
+        // Trivial acknowledgements should not spend a network round-trip.
+        // Durable-goal confirmation phrases were handled above, so «ок» here
+        // cannot accidentally approve a waiting sensitive action.
+        localAcknowledgementReply(
+            routingNormalized
+        )
+            ?.let {
+                reply ->
+                respondAndResume(
+                    reply,
+                    silent,
+                    success = true
+                )
+                return
+            }
+
         // BASIC LOCAL CALCULATOR v8.9
         // Simple two-number arithmetic must not spend a network round-trip.
         val localCalculation =
@@ -6744,6 +6761,10 @@ class AyanaVoiceService : Service() {
                     Regex("^то будет\\s+"),
                     "сколько будет "
                 )
+                .replace(
+                    Regex("^(?:тон|то)\\s+на\\s+экране(?:\\s+сейчас)?$"),
+                    "что на экране"
+                )
 
         // LOCAL ROUTING v9.1:
         // Sherpa can lose the first syllable of «открой» (observed: «трой ютуб»).
@@ -6776,6 +6797,36 @@ class AyanaVoiceService : Service() {
         }
 
         return repaired
+    }
+
+    private fun localAcknowledgementReply(
+        command: String
+    ): String? {
+
+        return when (
+            command
+                .lowercase(
+                    Locale.ROOT
+                )
+                .trim()
+        ) {
+            "спасибо",
+            "спасибо тебе",
+            "благодарю",
+            "благодарю тебя" ->
+                "Пожалуйста."
+
+            "ок",
+            "окей",
+            "хорошо",
+            "понял",
+            "поняла",
+            "ясно" ->
+                "Хорошо."
+
+            else ->
+                null
+        }
     }
 
     private fun evaluateSimpleCalculation(
@@ -7239,6 +7290,17 @@ class AyanaVoiceService : Service() {
                             "\n"
                         )
 
+                        append(
+                            commandHistoryStore
+                                .contextForAgent(
+                                    8
+                                )
+                        )
+
+                        append(
+                            "\n"
+                        )
+
                         if (
                             resumeGoal ==
                             null
@@ -7283,7 +7345,7 @@ class AyanaVoiceService : Service() {
                         }
                     }
                         .take(
-                            4600
+                            6200
                         )
 
                 // previous_response_id is useful for ordinary conversation,
@@ -11743,9 +11805,25 @@ class AyanaVoiceService : Service() {
                 "list_installed_apps" -> {
 
                     agentListInstalledApps(
-                        arguments.optString(
-                            "query"
-                        )
+                        query =
+                            arguments.optString(
+                                "query"
+                            ),
+                        offset =
+                            arguments.optInt(
+                                "offset",
+                                0
+                            ),
+                        limit =
+                            arguments.optInt(
+                                "limit",
+                                80
+                            ),
+                        namesOnly =
+                            arguments.optBoolean(
+                                "names_only",
+                                true
+                            )
                     )
                 }
 
@@ -13070,7 +13148,10 @@ class AyanaVoiceService : Service() {
             )
 
     private fun agentListInstalledApps(
-        query: String
+        query: String,
+        offset: Int = 0,
+        limit: Int = 80,
+        namesOnly: Boolean = true
     ): JSONObject {
 
         val clean =
@@ -13081,8 +13162,20 @@ class AyanaVoiceService : Service() {
         ) {
             return appResolver
                 .listAsJson(
-                    limit = 120,
-                    forceRefresh = true
+                    limit =
+                        limit.coerceIn(
+                            1,
+                            150
+                        ),
+                    offset =
+                        offset.coerceAtLeast(
+                            0
+                        ),
+                    namesOnly =
+                        namesOnly,
+                    forceRefresh =
+                        offset <=
+                            0
                 )
         }
 
@@ -13975,8 +14068,16 @@ class AyanaVoiceService : Service() {
 
             toolResult(
                 true,
-                "Открыт раздел настроек: $section"
+                "Открыт раздел настроек: ${
+                    settingsSectionDisplayName(
+                        section
+                    )
+                }"
             )
+                .put(
+                    "section",
+                    section
+                )
 
         } catch (
             error: Exception
@@ -14011,6 +14112,88 @@ class AyanaVoiceService : Service() {
                             )
                 )
             }
+        }
+    }
+
+    private fun settingsSectionDisplayName(
+        section: String
+    ): String {
+
+        return when (
+            section
+                .lowercase(
+                    Locale.ROOT
+                )
+                .trim()
+        ) {
+            "wifi" ->
+                "Wi‑Fi"
+
+            "bluetooth" ->
+                "Bluetooth"
+
+            "sound" ->
+                "Звук"
+
+            "display" ->
+                "Экран"
+
+            "apps" ->
+                "Приложения"
+
+            "accessibility" ->
+                "Специальные возможности"
+
+            "location" ->
+                "Местоположение"
+
+            "security" ->
+                "Безопасность"
+
+            "date_time" ->
+                "Дата и время"
+
+            "battery" ->
+                "Батарея"
+
+            "storage" ->
+                "Хранилище"
+
+            "notifications" ->
+                "Уведомления"
+
+            "data_usage" ->
+                "Использование данных"
+
+            "vpn" ->
+                "VPN"
+
+            "nfc" ->
+                "NFC"
+
+            "language" ->
+                "Язык"
+
+            "keyboard" ->
+                "Клавиатура"
+
+            "default_apps" ->
+                "Приложения по умолчанию"
+
+            "developer_options" ->
+                "Параметры разработчика"
+
+            "device_info" ->
+                "Сведения об устройстве"
+
+            "privacy" ->
+                "Конфиденциальность"
+
+            "battery_optimization" ->
+                "Оптимизация батареи"
+
+            else ->
+                "Общие настройки"
         }
     }
 
@@ -17095,7 +17278,7 @@ class AyanaVoiceService : Service() {
         // One UI can accept a Settings Intent while keeping the previous fragment,
         // so success is never inferred from startActivity() alone.
         private const val APP_DETAIL_VERIFY_TIMEOUT_MS =
-            1600L
+            3200L
 
         private const val APP_DETAIL_VERIFY_POLL_MS =
             80L
