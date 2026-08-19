@@ -10,7 +10,7 @@ import java.io.File
 import java.util.Locale
 
 /**
- * AYANA App Resolver v2.2 — COMMAND & APP INTELLIGENCE.
+ * AYANA App Resolver v2.3 — PAGINATED APP INTELLIGENCE.
  *
  * Dynamic source of truth for launchable apps on THIS Android device.
  * v2.2 expands Russian/English/transliterated aliases and common Android app names,
@@ -402,25 +402,85 @@ class AyanaAppResolver(
 
     fun listAsJson(
         limit: Int = 120,
+        offset: Int = 0,
+        namesOnly: Boolean = false,
         forceRefresh: Boolean = false
     ): JSONObject {
         val apps = listLaunchableApps(forceRefresh)
-        val array = JSONArray()
-        apps.take(limit.coerceIn(1, 300)).forEach { app ->
-            array.put(
-                JSONObject()
-                    .put("label", app.label)
-                    .put("package", app.packageName)
-                    .put("activity", app.activityName)
+
+        val safeOffset =
+            offset
+                .coerceAtLeast(
+                    0
+                )
+                .coerceAtMost(
+                    apps.size
+                )
+
+        val safeLimit =
+            limit.coerceIn(
+                1,
+                300
             )
+
+        val page =
+            apps
+                .drop(
+                    safeOffset
+                )
+                .take(
+                    safeLimit
+                )
+
+        val array =
+            JSONArray()
+
+        page.forEach { app ->
+            if (namesOnly) {
+                array.put(
+                    app.label
+                )
+            } else {
+                array.put(
+                    JSONObject()
+                        .put("label", app.label)
+                        .put("package", app.packageName)
+                        .put("activity", app.activityName)
+                )
+            }
         }
+
+        val nextOffset =
+            safeOffset +
+                page.size
 
         return JSONObject()
             .put("success", true)
             .put("count", apps.size)
+            .put("offset", safeOffset)
+            .put("limit", safeLimit)
             .put("returned", array.length())
+            .put("has_more", nextOffset < apps.size)
+            .put(
+                "next_offset",
+                if (nextOffset < apps.size) {
+                    nextOffset
+                } else {
+                    JSONObject.NULL
+                }
+            )
+            .put("names_only", namesOnly)
             .put("apps", array)
-            .put("scan_age_ms", (System.currentTimeMillis() - cachedScanAt).coerceAtLeast(0L))
+            .put(
+                "scan_age_ms",
+                (
+                    System.currentTimeMillis() -
+                        cachedScanAt
+                    )
+                    .coerceAtLeast(
+                        0L
+                    )
+            )
     }
 
     fun compactSummary(
