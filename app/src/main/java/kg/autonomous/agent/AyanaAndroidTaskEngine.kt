@@ -5,7 +5,7 @@ import org.json.JSONObject
 import java.util.Locale
 
 /**
- * AYANA Android Task Engine v4.0 — resumable deterministic executor with durable checkpoints, strict terminal verification and text-first semantic clicks.
+ * AYANA Android Task Engine v4.1 — resumable deterministic executor with goal-integrity verification, durable checkpoints and text-first semantic clicks.
  *
  * IMPORTANT ARCHITECTURE RULE:
  * The LLM understands the user's intent and produces ONE short structured plan.
@@ -117,6 +117,41 @@ class AyanaAndroidTaskEngine(
             return engineFailure(
                 goal = goal,
                 reason = "План пуст"
+            )
+        }
+
+        var terminalCount = 0
+        var terminalIndex = -1
+
+        for (index in 0 until steps.length()) {
+            val step =
+                steps.optJSONObject(
+                    index
+                )
+                    ?: return engineFailure(
+                        goal = goal,
+                        reason = "План содержит повреждённый шаг #${index + 1}"
+                    )
+
+            if (
+                step.optBoolean(
+                    "terminal",
+                    false
+                )
+            ) {
+                terminalCount++
+                terminalIndex = index
+            }
+        }
+
+        if (
+            terminalCount != 1 ||
+            terminalIndex !=
+            steps.length() - 1
+        ) {
+            return engineFailure(
+                goal = goal,
+                reason = "План должен содержать ровно один финальный проверяемый шаг в конце"
             )
         }
 
@@ -529,12 +564,16 @@ class AyanaAndroidTaskEngine(
             }
         }
 
-        return engineSuccess(
+        // A linear navigation plan is successful only through its explicitly
+        // verified terminal step above. Falling out of the loop without that
+        // proof is never SUCCESS.
+        return engineBlocked(
             goal = goal,
-            message = "Все шаги локального плана выполнены",
+            reason = "План завершился без подтверждённого конечного состояния",
             trace = trace,
             screen = currentScreen,
-            actionsUsed = actionsUsed
+            actionsUsed = actionsUsed,
+            replanRecommended = true
         )
     }
 
@@ -625,6 +664,7 @@ class AyanaAndroidTaskEngine(
 
             "open_settings" ->
                 executeDirectAction(
+                    step = step,
                     screenBefore = screenBefore,
                     actionName = action,
                     call = {
@@ -638,6 +678,7 @@ class AyanaAndroidTaskEngine(
 
             "open_app" ->
                 executeDirectAction(
+                    step = step,
                     screenBefore = screenBefore,
                     actionName = action,
                     call = {
@@ -651,6 +692,7 @@ class AyanaAndroidTaskEngine(
 
             "open_app_info" ->
                 executeDirectAction(
+                    step = step,
                     screenBefore = screenBefore,
                     actionName = action,
                     call = {
@@ -664,6 +706,7 @@ class AyanaAndroidTaskEngine(
 
             "open_app_settings" ->
                 executeDirectAction(
+                    step = step,
                     screenBefore = screenBefore,
                     actionName = action,
                     call = {
@@ -681,6 +724,7 @@ class AyanaAndroidTaskEngine(
 
             "change_volume" ->
                 executeDirectAction(
+                    step = step,
                     screenBefore = screenBefore,
                     actionName = action,
                     call = {
@@ -760,6 +804,7 @@ class AyanaAndroidTaskEngine(
     }
 
     private fun executeDirectAction(
+        step: JSONObject,
         screenBefore: JSONObject,
         actionName: String,
         call: () -> JSONObject,
@@ -828,7 +873,8 @@ class AyanaAndroidTaskEngine(
         val screenAfter =
             awaitReadyScreen(
                 screenBefore = screenBefore,
-                screenChangeRequired = screenChangeRequired
+                screenChangeRequired = screenChangeRequired,
+                expectedStep = step
             )
 
         if (
@@ -851,12 +897,28 @@ class AyanaAndroidTaskEngine(
                 false
             )
 
+        val expectedVerified =
+            verifyExpectedScreen(
+                step = step,
+                screen = screenAfter
+            )
+
         val success =
             accepted &&
-                (
-                    !screenChangeRequired ||
-                    changed
-                )
+                when {
+                    expectedVerified != null &&
+                        screenChangeRequired ->
+                        expectedVerified && changed
+
+                    expectedVerified != null ->
+                        expectedVerified
+
+                    screenChangeRequired ->
+                        changed
+
+                    else ->
+                        true
+                }
 
         return JSONObject(
             raw.toString()
@@ -1059,12 +1121,38 @@ class AyanaAndroidTaskEngine(
 
                 actionsUsed++
 
-                val screenAfter =
+                val requireScreenChange =
+                    step.optBoolean(
+                        "require_screen_change",
+                        false
+                    )
+
+                val immediateScreenAfter =
                     clickResult
                         .optJSONObject(
                             "screen"
                         )
                         ?: safeScreenState()
+
+                // UI may briefly expose Launcher/transition windows before the
+                // real Settings page is ready. If this step carries explicit
+                // expectations, wait for the expected state instead of accepting
+                // the first merely-different screen.
+                val screenAfter =
+                    if (
+                        verifyExpectedScreen(
+                            step = step,
+                            screen = immediateScreenAfter
+                        ) == false
+                    ) {
+                        awaitReadyScreen(
+                            screenBefore = currentScreen,
+                            screenChangeRequired = requireScreenChange,
+                            expectedStep = step
+                        )
+                    } else {
+                        immediateScreenAfter
+                    }
 
                 val changed =
                     clickResult.optBoolean(
@@ -1079,12 +1167,6 @@ class AyanaAndroidTaskEngine(
                 val accepted =
                     clickResult.optBoolean(
                         "success",
-                        false
-                    )
-
-                val requireScreenChange =
-                    step.optBoolean(
-                        "require_screen_change",
                         false
                     )
 
@@ -2193,7 +2275,8 @@ class AyanaAndroidTaskEngine(
      */
     private fun awaitReadyScreen(
         screenBefore: JSONObject,
-        screenChangeRequired: Boolean
+        screenChangeRequired: Boolean,
+        expectedStep: JSONObject? = null
     ): JSONObject {
 
         val deadline =
@@ -2232,8 +2315,25 @@ class AyanaAndroidTaskEngine(
                     latest
                 )
 
+            val expected =
+                expectedStep
+                    ?.let { step ->
+                        verifyExpectedScreen(
+                            step = step,
+                            screen = latest
+                        )
+                    }
+
+            val expectationReady =
+                when (expected) {
+                    true -> true
+                    false -> false
+                    null -> true
+                }
+
             if (
                 ready &&
+                expectationReady &&
                 (
                     !screenChangeRequired ||
                     changed
