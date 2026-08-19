@@ -21,7 +21,7 @@ import kotlin.math.abs
 import kotlin.math.sin
 
 /**
- * AYANA Floating Orb v3 — SINGLE INSTANCE.
+ * AYANA Floating Orb v3.1 — SINGLE INSTANCE + BRANDED LOGO.
  *
  * Rules:
  * 1) exactly one overlay View per app process;
@@ -29,6 +29,7 @@ import kotlin.math.sin
  * 3) repeated refresh() only updates the existing View;
  * 4) drag position is persisted;
  * 5) tapping the Orb opens AYANA.
+ * 6) the center uses the installed AYANA application logo; the old letter A is only a fail-safe fallback.
  *
  * The service owns WHEN the Orb exists. This controller only owns HOW it is
  * rendered. It never starts/stops AyanaVoiceService itself.
@@ -632,6 +633,21 @@ class AyanaMiniOrbController(
                     android.graphics.Typeface.DEFAULT_BOLD
             }
 
+        // Use the real installed AYANA icon instead of a synthetic letter.
+        // Resolving through PackageManager keeps the Orb automatically in sync
+        // with the app branding if the launcher icon resource changes later.
+        private val logoDrawable:
+            android.graphics.drawable.Drawable? =
+            try {
+                context.packageManager
+                    .getApplicationIcon(
+                        context.packageName
+                    )
+                    .mutate()
+            } catch (_: Exception) {
+                null
+            }
+
         private var ayanaState =
             AyanaVoiceService.STATE_LISTENING
 
@@ -892,18 +908,77 @@ class AyanaMiniOrbController(
                 )
             }
 
-            labelPaint.textSize =
-                radius *
-                    0.76f
+            val logo =
+                logoDrawable
 
-            canvas.drawText(
-                "A",
-                cx,
-                cy +
-                    labelPaint.textSize *
-                        0.34f,
-                labelPaint
-            )
+            if (logo != null) {
+
+                val logoRadius =
+                    radius *
+                        0.82f
+
+                val left =
+                    (cx - logoRadius)
+                        .toInt()
+
+                val top =
+                    (cy - logoRadius)
+                        .toInt()
+
+                val right =
+                    (cx + logoRadius)
+                        .toInt()
+
+                val bottom =
+                    (cy + logoRadius)
+                        .toInt()
+
+                val saveCount =
+                    canvas.save()
+
+                // A circular clip keeps adaptive/square launcher artwork clean
+                // inside the Orb while the animated state ring remains visible.
+                canvas.clipCircle(
+                    cx,
+                    cy,
+                    logoRadius
+                )
+
+                logo.setBounds(
+                    left,
+                    top,
+                    right,
+                    bottom
+                )
+
+                logo.alpha =
+                    245
+
+                logo.draw(
+                    canvas
+                )
+
+                canvas.restoreToCount(
+                    saveCount
+                )
+
+            } else {
+
+                // Fail safe only: branding resource failure must never make
+                // the global control disappear or crash the voice service.
+                labelPaint.textSize =
+                    radius *
+                        0.76f
+
+                canvas.drawText(
+                    "A",
+                    cx,
+                    cy +
+                        labelPaint.textSize *
+                            0.34f,
+                    labelPaint
+                )
+            }
 
             if (
                 shouldAnimate(
