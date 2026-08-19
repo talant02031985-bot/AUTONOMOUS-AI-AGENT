@@ -10,7 +10,7 @@ import java.util.UUID
  * Persistent execution state for AYANA long-running goals.
  *
  * Design rules:
- * - one resumable goal at a time;
+ * - multiple recoverable goals may coexist; exactly one may be selected/current;
  * - every write is atomic via temp-file replacement;
  * - only bounded diagnostic/execution context is persisted;
  * - sensitive confirmation is never persisted as an approval;
@@ -38,7 +38,10 @@ class AyanaDurableGoalStore(
         val requiresConfirmation: Boolean,
         val lastCheckpoint: String,
         val lastError: String,
-        val recoveryReason: String
+        val recoveryReason: String,
+        val isCurrent: Boolean,
+        val plannerDomain: String,
+        val plannerSubgoalCount: Int
     )
 
     private val appContext =
@@ -90,9 +93,11 @@ class AyanaDurableGoalStore(
             val goals =
                 loadUnsafe()
 
-            // AYANA intentionally keeps one resumable goal. Starting another
-            // device goal explicitly supersedes an older unfinished one so a
-            // later "продолжи" can never revive the wrong task.
+            // v11 Multi-Goal: starting a new goal no longer destroys a paused
+            // or recoverable older goal. Only the selected/current flag moves.
+            // A goal that was actively executing is safely paused before the new
+            // one becomes current; WAITING_CONFIRMATION/RECOVERY_PENDING keep
+            // their status but are no longer selected automatically.
             val now =
                 System.currentTimeMillis()
 
@@ -108,21 +113,37 @@ class AyanaDurableGoalStore(
                     )
                 ) {
                     old.put(
-                        "status",
-                        STATUS_CANCELLED
+                        "is_current",
+                        false
                     )
-                    old.put(
-                        "updated_at",
-                        now
-                    )
-                    old.put(
-                        "last_error",
-                        "Заменена новой задачей"
-                    )
-                    old.put(
-                        "last_checkpoint",
-                        "superseded"
-                    )
+
+                    if (
+                        normalizeStatus(
+                            old.optString("status")
+                        ) ==
+                        STATUS_ACTIVE
+                    ) {
+                        old.put(
+                            "status",
+                            STATUS_PAUSED
+                        )
+                        old.put(
+                            "last_error",
+                            "Приостановлена новой задачей"
+                        )
+                        old.put(
+                            "recovery_reason",
+                            "Новая задача получила фокус; эта цель сохранена"
+                        )
+                        old.put(
+                            "last_checkpoint",
+                            "paused_for_new_goal"
+                        )
+                        old.put(
+                            "updated_at",
+                            now
+                        )
+                    }
                 }
             }
 
@@ -152,6 +173,14 @@ class AyanaDurableGoalStore(
                     .put(
                         "status",
                         STATUS_ACTIVE
+                    )
+                    .put(
+                        "is_current",
+                        true
+                    )
+                    .put(
+                        "planner_envelope",
+                        JSONObject()
                     )
                     .put(
                         "created_at",
@@ -329,6 +358,27 @@ class AyanaDurableGoalStore(
                 item.put(
                     key,
                     value
+                )
+            }
+
+            val patchedStatus =
+                normalizeStatus(
+                    item.optString(
+                        "status"
+                    )
+                )
+
+            if (
+                patchedStatus in
+                setOf(
+                    STATUS_SUCCESS,
+                    STATUS_CANCELLED,
+                    STATUS_FAILED
+                )
+            ) {
+                item.put(
+                    "is_current",
+                    false
                 )
             }
 
@@ -785,12 +835,374 @@ class AyanaDurableGoalStore(
                 )
         )
 
+    fun attachPlannerEnvelope(
+        id: String?,
+        envelope: JSONObject
+    ): JSONObject? =
+        checkpoint(
+            id,
+            JSONObject()
+                .put(
+                    "planner_envelope",
+                    JSONObject(
+                        envelope.toString()
+                    )
+                )
+                .put(
+                    "last_checkpoint",
+                    "planner_v2_ready"
+                )
+        )
+
+    fun recoverableCount(): Int =
+        getRecoverableViews(
+            MAX_GOALS
+        ).size
+
+    fun getRecoverableViews(
+        limit: Int = MAX_GOALS
+    ): List<GoalView> {
+
+        synchronized(lock) {
+
+            val goals =
+                loadUnsafe()
+
+            val selected =
+                mutableListOf<
+                    JSONObject
+                >()
+
+            for (index in 0 until goals.length()) {
+                val item =
+                    goals.optJSONObject(index)
+                        ?: continue
+
+                if (
+                    isRecoverableStatus(
+                        item.optString(
+                            "status"
+                        )
+                    )
+                ) {
+                    selected.add(
+                        JSONObject(
+                            item.toString()
+                        )
+                    )
+                }
+            }
+
+            return selected
+                .sortedWith(
+                    compareByDescending<JSONObject> {
+                        it.optBoolean(
+                            "is_current",
+                            false
+                        )
+                    }.thenByDescending {
+                        it.optLong(
+                            "updated_at",
+                            0L
+                        )
+                    }
+                )
+                .take(
+                    limit.coerceIn(
+                        1,
+                        MAX_GOALS
+                    )
+                )
+                .map {
+                    goalViewFromJson(
+                        it
+                    )
+                }
+        }
+    }
+
+    fun getRecoverableJson(
+        limit: Int = MAX_GOALS
+    ): JSONArray {
+
+        synchronized(lock) {
+
+            val goals =
+                loadUnsafe()
+
+            val selected =
+                mutableListOf<
+                    JSONObject
+                >()
+
+            for (index in 0 until goals.length()) {
+                val item =
+                    goals.optJSONObject(index)
+                        ?: continue
+
+                if (
+                    isRecoverableStatus(
+                        item.optString(
+                            "status"
+                        )
+                    )
+                ) {
+                    selected.add(
+                        JSONObject(
+                            item.toString()
+                        )
+                    )
+                }
+            }
+
+            val result =
+                JSONArray()
+
+            selected
+                .sortedWith(
+                    compareByDescending<JSONObject> {
+                        it.optBoolean(
+                            "is_current",
+                            false
+                        )
+                    }.thenByDescending {
+                        it.optLong(
+                            "updated_at",
+                            0L
+                        )
+                    }
+                )
+                .take(
+                    limit.coerceIn(
+                        1,
+                        MAX_GOALS
+                    )
+                )
+                .forEach {
+                    result.put(
+                        it
+                    )
+                }
+
+            return result
+        }
+    }
+
+    fun selectRecoverable(
+        id: String?
+    ): JSONObject? {
+
+        if (
+            id.isNullOrBlank()
+        ) {
+            return null
+        }
+
+        synchronized(lock) {
+
+            val goals =
+                loadUnsafe()
+
+            val selected =
+                findById(
+                    goals,
+                    id
+                )
+                    ?: return null
+
+            if (
+                !isRecoverableStatus(
+                    selected.optString(
+                        "status"
+                    )
+                )
+            ) {
+                return null
+            }
+
+            val now =
+                System.currentTimeMillis()
+
+            for (index in 0 until goals.length()) {
+                val item =
+                    goals.optJSONObject(index)
+                        ?: continue
+
+                item.put(
+                    "is_current",
+                    item.optString(
+                        "id"
+                    ) ==
+                        id
+                )
+            }
+
+            selected.put(
+                "updated_at",
+                now
+            )
+            selected.put(
+                "last_checkpoint",
+                "selected_for_resume"
+            )
+
+            saveUnsafe(
+                goals
+            )
+
+            return JSONObject(
+                selected.toString()
+            )
+        }
+    }
+
+    fun selectRecoverableByQuery(
+        query: String
+    ): JSONObject? {
+
+        val normalizedQuery =
+            normalizeCommandQuery(
+                query
+            )
+
+        if (
+            normalizedQuery.isBlank()
+        ) {
+            return null
+        }
+
+        synchronized(lock) {
+
+            val goals =
+                loadUnsafe()
+
+            var best:
+                JSONObject? =
+                null
+
+            var bestScore =
+                0
+
+            for (index in 0 until goals.length()) {
+                val item =
+                    goals.optJSONObject(index)
+                        ?: continue
+
+                if (
+                    !isRecoverableStatus(
+                        item.optString(
+                            "status"
+                        )
+                    )
+                ) {
+                    continue
+                }
+
+                val command =
+                    normalizeCommandQuery(
+                        item.optString(
+                            "command"
+                        )
+                    )
+
+                val score =
+                    goalQueryScore(
+                        normalizedQuery,
+                        command
+                    )
+
+                if (
+                    score >
+                    bestScore
+                ) {
+                    best =
+                        item
+                    bestScore =
+                        score
+                }
+            }
+
+            if (
+                best == null ||
+                bestScore <
+                55
+            ) {
+                return null
+            }
+
+            return selectRecoverable(
+                best.optString(
+                    "id"
+                )
+            )
+        }
+    }
+
+    fun selectPreviousRecoverable(): JSONObject? {
+
+        synchronized(lock) {
+
+            val goals =
+                loadUnsafe()
+
+            val candidates =
+                mutableListOf<
+                    JSONObject
+                >()
+
+            for (index in 0 until goals.length()) {
+                val item =
+                    goals.optJSONObject(index)
+                        ?: continue
+
+                if (
+                    isRecoverableStatus(
+                        item.optString(
+                            "status"
+                        )
+                    ) &&
+                    !item.optBoolean(
+                        "is_current",
+                        false
+                    )
+                ) {
+                    candidates.add(
+                        item
+                    )
+                }
+            }
+
+            val previous =
+                candidates
+                    .maxByOrNull {
+                        it.optLong(
+                            "updated_at",
+                            0L
+                        )
+                    }
+                    ?: return null
+
+            return selectRecoverable(
+                previous.optString(
+                    "id"
+                )
+            )
+        }
+    }
+
     fun getRecoverable(): JSONObject? {
 
         synchronized(lock) {
 
             val goals =
                 loadUnsafe()
+
+            var fallback:
+                JSONObject? =
+                null
+
+            var fallbackUpdatedAt =
+                Long.MIN_VALUE
 
             for (index in 0 until goals.length()) {
 
@@ -799,17 +1211,50 @@ class AyanaDurableGoalStore(
                         ?: continue
 
                 if (
-                    isRecoverableStatus(
-                        item.optString("status")
+                    !isRecoverableStatus(
+                        item.optString(
+                            "status"
+                        )
+                    )
+                ) {
+                    continue
+                }
+
+                if (
+                    item.optBoolean(
+                        "is_current",
+                        false
                     )
                 ) {
                     return JSONObject(
                         item.toString()
                     )
                 }
+
+                val updatedAt =
+                    item.optLong(
+                        "updated_at",
+                        0L
+                    )
+
+                if (
+                    fallback == null ||
+                    updatedAt >
+                    fallbackUpdatedAt
+                ) {
+                    fallback =
+                        item
+                    fallbackUpdatedAt =
+                        updatedAt
+                }
             }
 
-            return null
+            return fallback
+                ?.let {
+                    JSONObject(
+                        it.toString()
+                    )
+                }
         }
     }
 
@@ -844,41 +1289,8 @@ class AyanaDurableGoalStore(
             getRecoverable()
                 ?: return null
 
-        return GoalView(
-            id = item.optString("id"),
-            command = item.optString("command"),
-            source = item.optString("source"),
-            mode = item.optString("mode"),
-            status = normalizeStatus(
-                item.optString("status")
-            ),
-            createdAt = item.optLong("created_at"),
-            updatedAt = item.optLong("updated_at"),
-            agentSteps = item.optInt("agent_steps"),
-            totalActions = maxOf(
-                item.optInt("total_actions"),
-                item.optInt("actions_used")
-            ),
-            nextPlanStep = item.optInt("next_plan_step"),
-            planSize = item.optInt("plan_size"),
-            recoveryCount = item.optInt("recovery_count"),
-            safeAutoResume = item.optBoolean(
-                "safe_auto_resume",
-                false
-            ),
-            requiresConfirmation = item.optBoolean(
-                "requires_confirmation",
-                false
-            ),
-            lastCheckpoint = item.optString(
-                "last_checkpoint"
-            ),
-            lastError = item.optString(
-                "last_error"
-            ),
-            recoveryReason = item.optString(
-                "recovery_reason"
-            )
+        return goalViewFromJson(
+            item
         )
     }
 
@@ -1347,6 +1759,158 @@ class AyanaDurableGoalStore(
         return null
     }
 
+    private fun goalViewFromJson(
+        item: JSONObject
+    ): GoalView {
+
+        val planner =
+            item.optJSONObject(
+                "planner_envelope"
+            )
+                ?: JSONObject()
+
+        return GoalView(
+            id = item.optString("id"),
+            command = item.optString("command"),
+            source = item.optString("source"),
+            mode = item.optString("mode"),
+            status = normalizeStatus(
+                item.optString("status")
+            ),
+            createdAt = item.optLong("created_at"),
+            updatedAt = item.optLong("updated_at"),
+            agentSteps = item.optInt("agent_steps"),
+            totalActions = maxOf(
+                item.optInt("total_actions"),
+                item.optInt("actions_used")
+            ),
+            nextPlanStep = item.optInt("next_plan_step"),
+            planSize = item.optInt("plan_size"),
+            recoveryCount = item.optInt("recovery_count"),
+            safeAutoResume = item.optBoolean(
+                "safe_auto_resume",
+                false
+            ),
+            requiresConfirmation = item.optBoolean(
+                "requires_confirmation",
+                false
+            ),
+            lastCheckpoint = item.optString(
+                "last_checkpoint"
+            ),
+            lastError = item.optString(
+                "last_error"
+            ),
+            recoveryReason = item.optString(
+                "recovery_reason"
+            ),
+            isCurrent = item.optBoolean(
+                "is_current",
+                false
+            ),
+            plannerDomain = planner.optString(
+                "domain"
+            ),
+            plannerSubgoalCount = planner.optJSONArray(
+                "subgoals"
+            )
+                ?.length()
+                ?: 0
+        )
+    }
+
+    private fun normalizeCommandQuery(
+        value: String
+    ): String =
+        value
+            .lowercase()
+            .replace(
+                'ё',
+                'е'
+            )
+            .replace(
+                Regex(
+                    "[^\\p{L}\\p{N}\\s]"
+                ),
+                " "
+            )
+            .replace(
+                Regex(
+                    "\\s+"
+                ),
+                " "
+            )
+            .trim()
+
+    private fun goalQueryScore(
+        query: String,
+        command: String
+    ): Int {
+
+        if (
+            query.isBlank() ||
+            command.isBlank()
+        ) {
+            return 0
+        }
+
+        if (
+            query ==
+            command
+        ) {
+            return 100
+        }
+
+        if (
+            command.contains(
+                query
+            ) ||
+            query.contains(
+                command
+            )
+        ) {
+            return 92
+        }
+
+        val qTokens =
+            query.split(" ")
+                .filter {
+                    it.length >=
+                    3
+                }
+                .toSet()
+
+        val cTokens =
+            command.split(" ")
+                .filter {
+                    it.length >=
+                    3
+                }
+                .toSet()
+
+        if (
+            qTokens.isEmpty() ||
+            cTokens.isEmpty()
+        ) {
+            return 0
+        }
+
+        val overlap =
+            qTokens.intersect(
+                cTokens
+            )
+                .size
+
+        return (
+            overlap *
+                100 /
+                qTokens.size
+            )
+                .coerceAtMost(
+                    88
+                )
+    }
+
     private fun normalizeMode(
         value: String
     ): String {
@@ -1477,7 +2041,7 @@ class AyanaDurableGoalStore(
             2
 
         private const val SCHEMA_VERSION =
-            1
+            2
 
         private const val FILE_NAME =
             "ayana_durable_goals.json"
