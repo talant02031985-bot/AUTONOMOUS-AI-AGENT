@@ -10,12 +10,13 @@ import java.io.File
 import java.util.Locale
 
 /**
- * AYANA App Resolver v2.1 — APP RESOLVER INTEGRATION.
+ * AYANA App Resolver v2.2 — COMMAND & APP INTELLIGENCE.
  *
  * Dynamic source of truth for launchable apps on THIS Android device.
- * Hard-coded aliases and legacy package lists are only hints; every package must
- * be validated against the launcher map observed on THIS device before it can be
- * launched. Successful mappings are cached and validated again before use.
+ * v2.2 expands Russian/English/transliterated aliases and common Android app names,
+ * but every package is still only a hint and MUST be validated against the launcher
+ * map observed on THIS device before launch. Successful mappings are cached and
+ * validated again before use.
  * Package visibility is provided by the existing AndroidManifest <queries>
  * launcher intent.
  */
@@ -520,16 +521,138 @@ class AyanaAppResolver(
         normalizedQuery: String
     ): List<String> {
         return when (normalizedQuery) {
-            "youtube", "ютуб" -> listOf("com.google.android.youtube")
-            "галерея", "галерею", "фото", "фотографии" ->
+            // Google / core Android apps
+            "youtube", "ютуб", "ютуба", "ютубе", "ютьюб", "ютюб" ->
+                listOf("com.google.android.youtube")
+
+            "chrome", "google chrome", "хром", "хрома", "гугл хром" ->
+                listOf("com.android.chrome")
+
+            "браузер", "интернет", "samsung internet", "самсунг интернет", "браузер самсунг" ->
+                listOf("com.sec.android.app.sbrowser", "com.android.chrome")
+
+            "gmail", "джимейл", "джимэйл", "гмейл", "почта", "электронная почта" ->
+                listOf("com.google.android.gm", "com.samsung.android.email.provider")
+
+            "карты", "карта", "google maps", "maps", "гугл карты", "гугл мапс" ->
+                listOf("com.google.android.apps.maps")
+
+            "play market", "play store", "google play", "плей маркет", "плей стор",
+            "гугл плей", "магазин приложений" ->
+                listOf("com.android.vending")
+
+            "галерея", "галерею", "gallery", "фото", "фотографии", "фотки" ->
                 listOf("com.sec.android.gallery3d", "com.google.android.apps.photos")
-            "камера", "камеру" -> listOf("com.sec.android.app.camera")
-            "калькулятор", "калькулятора" -> listOf("com.sec.android.app.popupcalculator")
-            "файлы", "мои файлы" -> listOf("com.sec.android.app.myfiles")
-            "переводчик", "переводчика", "гугл переводчик", "google translate", "translate" ->
+
+            "google фото", "google photos", "гугл фото", "гугл фотографии" ->
+                listOf("com.google.android.apps.photos", "com.sec.android.gallery3d")
+
+            "камера", "камеру", "camera" ->
+                listOf("com.sec.android.app.camera")
+
+            "калькулятор", "калькулятора", "calculator" ->
+                listOf("com.sec.android.app.popupcalculator")
+
+            "файлы", "мои файлы", "files", "my files", "проводник" ->
+                listOf("com.sec.android.app.myfiles")
+
+            "переводчик", "переводчика", "гугл переводчик", "google переводчик",
+            "google translate", "translate" ->
                 listOf("com.google.android.apps.translate")
-            "telegram", "телеграм", "телеграмм" -> listOf("org.telegram.messenger")
-            "whatsapp", "ватсап", "вотсап" -> listOf("com.whatsapp")
+
+            "календарь", "календаря", "calendar" ->
+                listOf("com.samsung.android.calendar", "com.google.android.calendar")
+
+            "часы", "clock", "будильник" ->
+                listOf("com.sec.android.app.clockpackage")
+
+            "сообщения", "messages", "смс", "sms" ->
+                listOf("com.samsung.android.messaging", "com.google.android.apps.messaging")
+
+            "контакты", "contacts" ->
+                listOf("com.samsung.android.app.contacts", "com.google.android.contacts")
+
+            "google", "гугл", "google app" ->
+                listOf("com.google.android.googlequicksearchbox")
+
+            "диск", "drive", "google drive", "google диск", "гугл диск" ->
+                listOf("com.google.android.apps.docs")
+
+            "заметки", "samsung notes", "самсунг ноутс", "самсунг заметки", "ноутс" ->
+                listOf("com.samsung.android.app.notes")
+
+            // AI / messengers
+            "chatgpt", "chat gpt", "чат gpt", "чат гпт", "чат жпт", "чатгпт",
+            "чатжпт", "чат джипити", "чат жипити", "чат джи пи ти", "джипити" ->
+                listOf("com.openai.chatgpt")
+
+            "telegram", "телеграм", "телеграмм", "телега", "телегу", "телеги" ->
+                listOf("org.telegram.messenger")
+
+            "whatsapp", "whats app", "ватсап", "вотсап", "вацап", "ватс апп", "вотс апп" ->
+                listOf("com.whatsapp")
+
+            "viber", "вайбер" ->
+                listOf("com.viber.voip")
+
+            // Common media / social apps. Packages are hints only and are validated
+            // against the real launcher map before they can ever be launched.
+            "instagram", "инстаграм" ->
+                listOf("com.instagram.android")
+
+            "facebook", "фейсбук" ->
+                listOf("com.facebook.katana")
+
+            "tiktok", "tik tok", "тикток", "тик ток" ->
+                listOf("com.zhiliaoapp.musically")
+
+            "spotify", "спотифай" ->
+                listOf("com.spotify.music")
+
+            "netflix", "нетфликс" ->
+                listOf("com.netflix.mediaclient")
+
+            "vk", "вк", "вконтакте" ->
+                listOf("com.vkontakte.android")
+
+            // Work / meetings
+            "zoom", "зум" ->
+                listOf("us.zoom.videomeetings")
+
+            "teams", "microsoft teams", "майкрософт тимс", "тимс" ->
+                listOf("com.microsoft.teams", "com.microsoft.teams2")
+
+            "outlook", "аутлук" ->
+                listOf("com.microsoft.office.outlook")
+
+            "word", "ворд", "microsoft word" ->
+                listOf("com.microsoft.office.word")
+
+            "excel", "эксель", "microsoft excel" ->
+                listOf("com.microsoft.office.excel")
+
+            "powerpoint", "power point", "пауэрпоинт", "паверпоинт", "microsoft powerpoint" ->
+                listOf("com.microsoft.office.powerpoint")
+
+            "onedrive", "one drive", "ван драйв" ->
+                listOf("com.microsoft.skydrive")
+
+            "onenote", "one note", "ван ноут" ->
+                listOf("com.microsoft.office.onenote")
+
+            "google meet", "meet", "гугл мит", "мит" ->
+                listOf("com.google.android.apps.tachyon")
+
+            // Regional / navigation apps
+            "2gis", "2 gis", "два гис", "тугис" ->
+                listOf("ru.dublgis.dgismobile")
+
+            "яндекс карты", "yandex maps", "yandex карты" ->
+                listOf("ru.yandex.yandexmaps")
+
+            "яндекс браузер", "yandex browser" ->
+                listOf("com.yandex.browser")
+
             else -> emptyList()
         }
     }
@@ -608,28 +731,72 @@ class AyanaAppResolver(
     ): List<String> {
         val q = normalizeQuery(value)
         val variants = linkedSetOf(q)
-        when (q) {
-            "калькулятор", "калькулятора", "calculator" -> {
-                variants.add("калькулятор")
-                variants.add("calculator")
-            }
-            "галерея", "галерею", "gallery" -> {
-                variants.add("галерея")
-                variants.add("gallery")
-            }
-            "фото", "фотографии", "photos" -> {
-                variants.add("фото")
-                variants.add("photos")
-            }
-            "камера", "камеру", "camera" -> {
-                variants.add("камера")
-                variants.add("camera")
-            }
-            "файлы", "мои файлы", "files" -> {
-                variants.add("файлы")
-                variants.add("files")
-            }
+
+        fun addAll(vararg values: String) {
+            values
+                .map(::normalizeQuery)
+                .filter { it.isNotBlank() }
+                .forEach(variants::add)
         }
+
+        when (q) {
+            "калькулятор", "калькулятора", "calculator" ->
+                addAll("калькулятор", "calculator")
+
+            "галерея", "галерею", "gallery" ->
+                addAll("галерея", "gallery")
+
+            "фото", "фотографии", "фотки", "photos" ->
+                addAll("фото", "photos", "gallery")
+
+            "камера", "камеру", "camera" ->
+                addAll("камера", "camera")
+
+            "файлы", "мои файлы", "files", "my files", "проводник" ->
+                addAll("файлы", "files", "my files")
+
+            "хром", "гугл хром", "chrome", "google chrome" ->
+                addAll("chrome", "google chrome")
+
+            "джимейл", "джимэйл", "гмейл", "gmail" ->
+                addAll("gmail")
+
+            "карты", "карта", "гугл карты", "гугл мапс", "google maps", "maps" ->
+                addAll("google maps", "maps", "карты")
+
+            "переводчик", "гугл переводчик", "google translate", "translate" ->
+                addAll("google translate", "translate", "переводчик")
+
+            "телеграм", "телеграмм", "telegram" ->
+                addAll("telegram")
+
+            "ватсап", "вотсап", "вацап", "whatsapp", "whats app" ->
+                addAll("whatsapp")
+
+            "чат gpt", "чат гпт", "чат жпт", "чатгпт", "чатжпт",
+            "чат джипити", "чат жипити", "чат джи пи ти", "джипити",
+            "chatgpt", "chat gpt" ->
+                addAll("chatgpt", "chat gpt")
+
+            "спотифай", "spotify" ->
+                addAll("spotify")
+
+            "нетфликс", "netflix" ->
+                addAll("netflix")
+
+            "инстаграм", "instagram" ->
+                addAll("instagram")
+
+            "тикток", "тик ток", "tiktok", "tik tok" ->
+                addAll("tiktok", "tik tok")
+
+            "зум", "zoom" ->
+                addAll("zoom")
+
+            "тимс", "майкрософт тимс", "teams", "microsoft teams" ->
+                addAll("teams", "microsoft teams")
+        }
+
         return variants.toList()
     }
 
