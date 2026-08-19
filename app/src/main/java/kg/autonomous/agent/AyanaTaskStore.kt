@@ -6,6 +6,11 @@ import org.json.JSONObject
 import java.io.File
 import java.util.UUID
 
+/**
+ * AYANA Tasks / Routines Store v2.0.
+ * Backward-compatible with existing reminder data; adds deterministic search,
+ * edit and enable/disable operations used by Agent Intelligence Core.
+ */
 class AyanaTaskStore(
     context: Context
 ) {
@@ -285,6 +290,232 @@ class AyanaTaskStore(
         }
     }
 
+    fun findByQuery(
+        query: String,
+        limit: Int = 12
+    ): List<TaskItem> {
+
+        val cleanQuery =
+            normalize(
+                query
+            )
+
+        if (
+            cleanQuery.isBlank()
+        ) {
+            return getAll(
+                includeDisabled = true
+            ).take(
+                limit.coerceIn(1, 50)
+            )
+        }
+
+        val queryTokens =
+            cleanQuery.split(" ")
+                .filter {
+                    it.length >=
+                    3
+                }
+                .toSet()
+
+        return getAll(
+            includeDisabled = true
+        )
+            .map { task ->
+
+                val combined =
+                    normalize(
+                        task.title +
+                            " " +
+                            task.message
+                    )
+
+                val tokens =
+                    combined.split(" ")
+                        .filter {
+                            it.length >=
+                            3
+                        }
+                        .toSet()
+
+                val overlap =
+                    queryTokens
+                        .intersect(
+                            tokens
+                        )
+                        .size
+
+                val exactBonus =
+                    if (
+                        combined.contains(
+                            cleanQuery
+                        )
+                    ) {
+                        30
+                    } else {
+                        0
+                    }
+
+                task to
+                    (
+                        overlap *
+                            12 +
+                            exactBonus
+                        )
+            }
+            .filter {
+                it.second >
+                0
+            }
+            .sortedWith(
+                compareByDescending<
+                    Pair<TaskItem, Int>
+                > {
+                    it.second
+                }.thenBy {
+                    it.first.triggerAtMillis
+                }
+            )
+            .map {
+                it.first
+            }
+            .take(
+                limit.coerceIn(
+                    1,
+                    50
+                )
+            )
+    }
+
+    fun updateByQuery(
+        query: String,
+        title: String? = null,
+        message: String? = null,
+        triggerAtMillis: Long? = null,
+        recurrence: String? = null,
+        enabled: Boolean? = null
+    ): TaskItem? {
+
+        val matches =
+            findByQuery(
+                query,
+                2
+            )
+
+        if (
+            matches.size !=
+            1
+        ) {
+            return null
+        }
+
+        return updateTask(
+            id = matches.first().id,
+            title = title,
+            message = message,
+            triggerAtMillis = triggerAtMillis,
+            recurrence = recurrence,
+            enabled = enabled
+        )
+    }
+
+    fun setEnabledByQuery(
+        query: String,
+        enabled: Boolean
+    ): TaskItem? =
+        updateByQuery(
+            query = query,
+            enabled = enabled
+        )
+
+    fun asJson(
+        query: String = "",
+        includePast: Boolean = false,
+        limit: Int = 50
+    ): JSONObject {
+
+        val items =
+            if (
+                query.isBlank()
+            ) {
+                if (includePast) {
+                    getAll(
+                        includeDisabled = true
+                    ).take(
+                        limit.coerceIn(1, 100)
+                    )
+                } else {
+                    getFutureTasks()
+                        .take(
+                            limit.coerceIn(
+                                1,
+                                100
+                            )
+                        )
+                }
+            } else {
+                findByQuery(
+                    query,
+                    limit
+                )
+            }
+
+        val array =
+            JSONArray()
+
+        items.forEach { item ->
+            array.put(
+                JSONObject()
+                    .put(
+                        "id",
+                        item.id
+                    )
+                    .put(
+                        "title",
+                        item.title
+                    )
+                    .put(
+                        "message",
+                        item.message
+                    )
+                    .put(
+                        "trigger_at_millis",
+                        item.triggerAtMillis
+                    )
+                    .put(
+                        "recurrence",
+                        item.recurrence
+                    )
+                    .put(
+                        "enabled",
+                        item.enabled
+                    )
+                    .put(
+                        "created_at",
+                        item.createdAt
+                    )
+                    .put(
+                        "updated_at",
+                        item.updatedAt
+                    )
+            )
+        }
+
+        return JSONObject()
+            .put(
+                "success",
+                true
+            )
+            .put(
+                "count",
+                items.size
+            )
+            .put(
+                "tasks",
+                array
+            )
+    }
+
     fun getTask(
         id: String
     ): TaskItem? {
@@ -533,7 +764,7 @@ class AyanaTaskStore(
             JSONObject()
                 .put(
                     "version",
-                    1
+                    2
                 )
                 .put(
                     "tasks",
