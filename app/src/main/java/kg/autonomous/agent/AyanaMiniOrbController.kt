@@ -5,6 +5,7 @@ import android.content.Intent
 import android.graphics.Canvas
 import android.graphics.Color
 import android.graphics.Paint
+import android.graphics.Path
 import android.graphics.PixelFormat
 import android.graphics.RadialGradient
 import android.graphics.Shader
@@ -21,7 +22,7 @@ import kotlin.math.abs
 import kotlin.math.sin
 
 /**
- * AYANA Floating Orb v3.1 — SINGLE INSTANCE + BRANDED LOGO.
+ * AYANA Floating Orb v3.1.1 — SINGLE INSTANCE + BRANDED LOGO + COMPILE FIX.
  *
  * Rules:
  * 1) exactly one overlay View per app process;
@@ -648,6 +649,11 @@ class AyanaMiniOrbController(
                 null
             }
 
+        // Reused clipping path: Canvas has clipPath(), not clipCircle().
+        // Reusing the Path avoids allocating a new object on every animation frame.
+        private val logoClipPath =
+            Path()
+
         private var ayanaState =
             AyanaVoiceService.STATE_LISTENING
 
@@ -938,10 +944,15 @@ class AyanaMiniOrbController(
 
                 // A circular clip keeps adaptive/square launcher artwork clean
                 // inside the Orb while the animated state ring remains visible.
-                canvas.clipCircle(
+                logoClipPath.reset()
+                logoClipPath.addCircle(
                     cx,
                     cy,
-                    logoRadius
+                    logoRadius,
+                    Path.Direction.CW
+                )
+                canvas.clipPath(
+                    logoClipPath
                 )
 
                 logo.setBounds(
