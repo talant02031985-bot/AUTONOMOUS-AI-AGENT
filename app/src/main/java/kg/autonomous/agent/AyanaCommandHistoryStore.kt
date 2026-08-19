@@ -11,7 +11,7 @@ import java.util.UUID
 
 /**
  * Persistent command/event history for AYANA diagnostics.
- * v2.3 final: per-event relative timing retained for whole-history and single-record diagnostics.
+ * v2.4: per-record delete, compact terminal events, and agent-facing last-issue context.
  *
  * v2:
  * - SUCCESS / ERROR / CANCELLED are explicit statuses;
@@ -384,6 +384,188 @@ class AyanaCommandHistoryStore(
                 .length()
         }
 
+    fun delete(
+        id: String
+    ): Boolean {
+
+        if (
+            id.isBlank()
+        ) {
+            return false
+        }
+
+        synchronized(
+            lock
+        ) {
+            val records =
+                loadUnsafe()
+
+            val next =
+                JSONArray()
+
+            var removed =
+                false
+
+            for (
+                index in
+                0 until records.length()
+            ) {
+                val record =
+                    records.optJSONObject(
+                        index
+                    )
+                        ?: continue
+
+                if (
+                    record.optString(
+                        "id"
+                    ) ==
+                    id
+                ) {
+                    removed =
+                        true
+                    continue
+                }
+
+                next.put(
+                    record
+                )
+            }
+
+            if (
+                removed
+            ) {
+                saveUnsafe(
+                    next
+                )
+            }
+
+            return removed
+        }
+    }
+
+    /**
+     * Small structured continuity context for Agent Core. This survives a
+     * dropped previous_response_id and lets phrases such as «исправь эту ошибку»
+     * resolve to the actual latest command failure/result instead of guessing.
+     */
+    fun contextForAgent(
+        limit: Int = 8
+    ): String {
+
+        val rows =
+            recent(
+                limit.coerceIn(
+                    1,
+                    20
+                )
+            )
+
+        if (
+            rows.isEmpty()
+        ) {
+            return "AYANA recent command context: empty"
+        }
+
+        val latest =
+            rows.firstOrNull {
+                it.optString(
+                    "status"
+                ) !=
+                    STATUS_RUNNING
+            }
+                ?: rows.first()
+
+        val latestError =
+            rows.firstOrNull {
+                it.optString(
+                    "status"
+                ) ==
+                    STATUS_ERROR
+            }
+
+        return buildString {
+            append(
+                "AYANA recent command context: "
+            )
+
+            append(
+                "last_status="
+            )
+            append(
+                latest.optString(
+                    "status"
+                )
+            )
+            append(
+                "; last_command="
+            )
+            append(
+                latest.optString(
+                    "command"
+                )
+                    .replace(
+                        Regex("\\s+"),
+                        " "
+                    )
+                    .take(
+                        260
+                    )
+            )
+            append(
+                "; last_result="
+            )
+            append(
+                latest.optString(
+                    "result"
+                )
+                    .replace(
+                        Regex("\\s+"),
+                        " "
+                    )
+                    .take(
+                        420
+                    )
+            )
+
+            if (
+                latestError !=
+                null
+            ) {
+                append(
+                    "; last_error_command="
+                )
+                append(
+                    latestError.optString(
+                        "command"
+                    )
+                        .replace(
+                            Regex("\\s+"),
+                            " "
+                        )
+                        .take(
+                            260
+                        )
+                )
+                append(
+                    "; last_error_result="
+                )
+                append(
+                    latestError.optString(
+                        "result"
+                    )
+                        .replace(
+                            Regex("\\s+"),
+                            " "
+                        )
+                        .take(
+                            520
+                        )
+                )
+            }
+        }
+    }
+
     fun clear() {
 
         synchronized(
@@ -629,13 +811,18 @@ class AyanaCommandHistoryStore(
                         ": "
                     )
 
-                    append(
-                        event.optString(
-                            "message"
+                    val exportedMessage =
+                        compactEventMessageForExport(
+                            record =
+                                record,
+                            event =
+                                event
                         )
-                            .take(
-                                MAX_EXPORT_MESSAGE_CHARS
-                            )
+
+                    append(
+                        exportedMessage.take(
+                            MAX_EXPORT_MESSAGE_CHARS
+                        )
                     )
 
                     val details =
@@ -773,9 +960,21 @@ class AyanaCommandHistoryStore(
                         }
 
             val terminalMessage =
-                result.take(
-                    600
-                )
+                when (
+                    status
+                ) {
+                    STATUS_SUCCESS ->
+                        "Команда завершена"
+
+                    STATUS_ERROR ->
+                        "Команда завершилась ошибкой"
+
+                    STATUS_CANCELLED ->
+                        "Команда остановлена"
+
+                    else ->
+                        "Команда завершена"
+                }
 
             val lastEvent =
                 events.optJSONObject(
@@ -788,11 +987,7 @@ class AyanaCommandHistoryStore(
                     lastEvent.optString(
                         "state"
                     ) ==
-                    status &&
-                    lastEvent.optString(
-                        "message"
-                    ) ==
-                    terminalMessage
+                    status
 
             if (
                 !terminalAlreadyLogged
@@ -816,6 +1011,68 @@ class AyanaCommandHistoryStore(
                 records
             )
         }
+    }
+
+    private fun compactEventMessageForExport(
+        record: JSONObject,
+        event: JSONObject
+    ): String {
+
+        val state =
+            event.optString(
+                "state"
+            )
+
+        val message =
+            event.optString(
+                "message"
+            )
+
+        val result =
+            record.optString(
+                "result"
+            )
+
+        val terminal =
+            state in
+                setOf(
+                    STATUS_SUCCESS,
+                    STATUS_ERROR,
+                    STATUS_CANCELLED
+                )
+
+        if (
+            terminal &&
+            result.isNotBlank() &&
+            (
+                message ==
+                    result ||
+                message.take(
+                    600
+                ) ==
+                    result.take(
+                        600
+                    )
+                )
+        ) {
+            return when (
+                state
+            ) {
+                STATUS_SUCCESS ->
+                    "Команда завершена"
+
+                STATUS_ERROR ->
+                    "Команда завершилась ошибкой"
+
+                STATUS_CANCELLED ->
+                    "Команда остановлена"
+
+                else ->
+                    message
+            }
+        }
+
+        return message
     }
 
     private fun compactDetailsForStorage(
