@@ -10,12 +10,14 @@ import java.io.File
 import java.util.Locale
 
 /**
- * AYANA App Resolver v2.0.
+ * AYANA App Resolver v2.1 — APP RESOLVER INTEGRATION.
  *
  * Dynamic source of truth for launchable apps on THIS Android device.
- * Hard-coded aliases are only hints; successful device-observed mappings are
- * cached and validated again before use. Package visibility is provided by the
- * existing AndroidManifest <queries> launcher intent.
+ * Hard-coded aliases and legacy package lists are only hints; every package must
+ * be validated against the launcher map observed on THIS device before it can be
+ * launched. Successful mappings are cached and validated again before use.
+ * Package visibility is provided by the existing AndroidManifest <queries>
+ * launcher intent.
  */
 class AyanaAppResolver(
     context: Context
@@ -262,13 +264,111 @@ class AyanaAppResolver(
         )
     }
 
+    /**
+     * Resolves a user-visible name using the normal resolver first. If that is not
+     * conclusive, legacy package candidates may be used only as hints and only
+     * after the package is observed in the current launcher map.
+     */
+    fun resolveWithHints(
+        requestedName: String,
+        preferredPackages: List<String>,
+        forceRefresh: Boolean = false
+    ): Resolution {
+        val primary =
+            resolve(
+                requestedName = requestedName,
+                forceRefresh = forceRefresh
+            )
+
+        if (primary.success) {
+            return primary
+        }
+
+        val clean = normalizeQuery(requestedName)
+        if (clean.isBlank()) {
+            return primary
+        }
+
+        val hints =
+            preferredPackages
+                .map { it.trim() }
+                .filter { it.isNotBlank() }
+                .distinct()
+
+        if (hints.isEmpty()) {
+            return primary
+        }
+
+        val apps = listLaunchableApps(forceRefresh)
+        for (packageName in hints) {
+            val entry =
+                apps.firstOrNull {
+                    it.packageName == packageName
+                }
+                    ?: continue
+
+            learnAlias(
+                clean,
+                entry.packageName
+            )
+
+            return Resolution(
+                success = true,
+                requestedName = requestedName,
+                label = entry.label,
+                packageName = entry.packageName,
+                activityName = entry.activityName,
+                confidence = 98,
+                source = "device_validated_legacy_hint",
+                reason = "Legacy package hint подтверждён фактической launcher-картой устройства",
+                alternatives = emptyList()
+            )
+        }
+
+        return Resolution(
+            success = false,
+            requestedName = requestedName,
+            label = primary.label,
+            packageName = primary.packageName,
+            activityName = primary.activityName,
+            confidence = primary.confidence,
+            source = primary.source,
+            reason =
+                primary.reason +
+                    "; ни один legacy package hint не подтверждён launcher-картой устройства",
+            alternatives = primary.alternatives
+        )
+    }
+
     fun launch(
         requestedName: String
+    ): JSONObject =
+        launchResolved(
+            resolve(
+                requestedName
+            )
+        )
+
+    fun launchWithHints(
+        requestedName: String,
+        preferredPackages: List<String>
+    ): JSONObject =
+        launchResolved(
+            resolveWithHints(
+                requestedName = requestedName,
+                preferredPackages = preferredPackages
+            )
+        )
+
+    private fun launchResolved(
+        resolution: Resolution
     ): JSONObject {
-        val resolution = resolve(requestedName)
         if (!resolution.success) {
             return resolution.toJson()
-                .put("message", "Приложение не найдено: $requestedName")
+                .put(
+                    "message",
+                    "Приложение не найдено: ${resolution.requestedName}"
+                )
         }
 
         return try {
