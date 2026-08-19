@@ -19,12 +19,12 @@ import kotlin.math.max
 class AgentAccessibilityService :
     AccessibilityService() {
 
-    // AYANA Accessibility v3.6 — Window Context Manager.
-    // Every visible Android window is treated as an independent context. Live
-    // AccessibilityWindowInfo roots are primary; fresh AccessibilityEvent source
-    // evidence is merged only into the matching window context (or kept as its own
-    // bounded evidence context). This prevents cross-window false verification and
-    // unsafe background clicks in split-screen, freeform, PiP and popup scenarios.
+    // AYANA Accessibility v4.0 — WINDOW CONTENT CORE.
+    // Every visible Android window is an independent context. Android 13+ roots
+    // are requested with descendant prefetch before falling back to legacy roots.
+    // Fresh AccessibilityEvent evidence is merged only into the matching window.
+    // Cross-window verification/clicking stays fail-closed in split-screen,
+    // freeform, PiP, popup/dialog, Recents and overlay scenarios.
 
     data class NodeMatch(
         val node: AccessibilityNodeInfo,
@@ -44,7 +44,8 @@ class AgentAccessibilityService :
         val bounds: Rect,
         val root: AccessibilityNodeInfo?,
         val source: String,
-        val rank: Int
+        val rank: Int,
+        val title: String = ""
     )
 
     private data class ContextNodeMatch(
@@ -89,7 +90,9 @@ class AgentAccessibilityService :
 
             info.flags =
                 info.flags or
-                    AccessibilityServiceInfo.FLAG_RETRIEVE_INTERACTIVE_WINDOWS
+                    AccessibilityServiceInfo.FLAG_RETRIEVE_INTERACTIVE_WINDOWS or
+                    AccessibilityServiceInfo.FLAG_INCLUDE_NOT_IMPORTANT_VIEWS or
+                    AccessibilityServiceInfo.FLAG_REPORT_VIEW_IDS
 
             serviceInfo =
                 info
@@ -701,8 +704,25 @@ class AgentAccessibilityService :
             linkedMapOf<String, WindowAccumulator>()
 
         for (context in liveContexts) {
-            accumulators[context.contextId] =
+            val accumulator =
                 WindowAccumulator(context)
+
+            // Window titles are Android-owned metadata and are useful when an
+            // OEM exposes a valid window but temporarily returns a sparse root.
+            // Keep the title inside the SAME context; never promote it across
+            // windows or use it as proof for another package.
+            val title =
+                safeText(
+                    context.title
+                )
+
+            if (title.isNotBlank()) {
+                accumulator.texts.add(title)
+                accumulator.liveTexts.add(title)
+            }
+
+            accumulators[context.contextId] =
+                accumulator
         }
 
         val liveNodeBudget =
@@ -792,11 +812,10 @@ class AgentAccessibilityService :
 
             for (index in 0 until childCount) {
                 val child =
-                    try {
-                        current.node.getChild(index)
-                    } catch (_: Exception) {
-                        null
-                    } ?: continue
+                    childWithPrefetch(
+                        current.node,
+                        index
+                    ) ?: continue
 
                 queue.add(
                     QueueItem(
@@ -984,6 +1003,7 @@ class AgentAccessibilityService :
                     .put("window_id", context.windowId)
                     .put("package", context.packageName)
                     .put("root_class", context.className)
+                    .put("title", context.title)
                     .put("type", context.type)
                     .put("type_name", windowTypeName(context.type))
                     .put("layer", context.layer)
@@ -1028,8 +1048,9 @@ class AgentAccessibilityService :
             .put("package", primary?.packageName.orEmpty())
             .put("root_class", primary?.className.orEmpty())
             .put("primary_context_id", primary?.contextId.orEmpty())
+            .put("primary_window_title", primary?.title.orEmpty())
             .put("interaction_package", primary?.packageName.orEmpty())
-            .put("window_context_mode", "v1")
+            .put("window_context_mode", "v2_prefetch")
             .put("window_count", allContexts.size)
             .put("raw_window_count", safeWindowCount())
             .put("evidence_context_count", evidenceContextCount)
@@ -1440,13 +1461,10 @@ class AgentAccessibilityService :
             ) {
 
                 val child =
-                    try {
-                        node.getChild(
-                            index
-                        )
-                    } catch (_: Exception) {
-                        null
-                    }
+                    childWithPrefetch(
+                        node,
+                        index
+                    )
                         ?: continue
 
                 queue.add(
@@ -1581,10 +1599,19 @@ class AgentAccessibilityService :
             }
 
             val root =
+                prefetchedWindowRoot(
+                    window
+                )
+
+            val windowTitle =
                 try {
-                    window.root
+                    safeText(
+                        window.title
+                            ?.toString()
+                            .orEmpty()
+                    )
                 } catch (_: Exception) {
-                    null
+                    ""
                 }
 
             val rootPackage =
@@ -1670,7 +1697,8 @@ class AgentAccessibilityService :
                         active = active,
                         focused = focused,
                         pictureInPicture = pip
-                    )
+                    ),
+                    title = windowTitle
                 )
             )
         }
@@ -1770,25 +1798,28 @@ class AgentAccessibilityService :
             return null
         }
 
-        // A focused modal/system window must outrank the application behind it.
-        // Otherwise AYANA could click through a permission dialog, popup or
-        // system sheet. The IME is intentionally not selected as the primary
-        // interaction surface; text entry remains scoped to the focused app.
-        return contexts
-            .filter {
-                it.focused &&
-                    it.type != AccessibilityWindowInfo.TYPE_INPUT_METHOD
-            }
-            .maxByOrNull { it.rank }
-            ?: contexts
+        // v4.0: a blank focused shell is not allowed to outrank a real app.
+        // Samsung/One UI can briefly expose an active/focused window with no
+        // package/root text during fragment and multi-window transitions.
+        // Prefer a package-bearing context first; fall back to a blank shell
+        // only when Android exposes nothing else.
+        val usable =
+            contexts
                 .filter {
-                    it.active &&
-                        it.type != AccessibilityWindowInfo.TYPE_INPUT_METHOD
+                    it.type != AccessibilityWindowInfo.TYPE_INPUT_METHOD &&
+                        it.packageName.isNotBlank()
                 }
+
+        return usable
+            .filter { it.focused }
+            .maxByOrNull { it.rank }
+            ?: usable
+                .filter { it.active }
                 .maxByOrNull { it.rank }
-            ?: contexts
+            ?: usable
                 .filter { it.type == AccessibilityWindowInfo.TYPE_APPLICATION }
                 .maxByOrNull { it.rank }
+            ?: usable.maxByOrNull { it.rank }
             ?: contexts
                 .filter { it.type != AccessibilityWindowInfo.TYPE_INPUT_METHOD }
                 .maxByOrNull { it.rank }
@@ -1890,6 +1921,7 @@ class AgentAccessibilityService :
         if (focused) score += 10000
         if (active) score += 7000
         if (type == AccessibilityWindowInfo.TYPE_APPLICATION) score += 2500
+        if (packageName.isBlank()) score -= 12000
         if (type == AccessibilityWindowInfo.TYPE_INPUT_METHOD) score -= 1800
         if (pictureInPicture) score -= 400
         if (windowId >= 0 && windowId == lastEventWindowId) score += 1800
@@ -2576,7 +2608,8 @@ class AgentAccessibilityService :
                 0 until node.childCount
             ) {
 
-                node.getChild(
+                childWithPrefetch(
+                    node,
                     index
                 )
                     ?.let {
@@ -2860,7 +2893,8 @@ class AgentAccessibilityService :
                 0 until node.childCount
             ) {
 
-                node.getChild(
+                childWithPrefetch(
+                    node,
                     index
                 )
                     ?.let {
@@ -2944,7 +2978,8 @@ class AgentAccessibilityService :
                 0 until node.childCount
             ) {
 
-                node.getChild(
+                childWithPrefetch(
+                    node,
                     index
                 )
                     ?.let {
@@ -2956,6 +2991,176 @@ class AgentAccessibilityService :
         }
 
         return best
+    }
+
+    /**
+     * Android 13+ can prefetch descendants when the window root is obtained.
+     * Samsung tablet multi-window/Settings was observed to expose the window
+     * identity while legacy root traversal returned an empty content tree.
+     * Try safe descendant prefetch strategies, then fall back to getRoot().
+     */
+    private fun prefetchedWindowRoot(
+        window: AccessibilityWindowInfo
+    ): AccessibilityNodeInfo? {
+
+        var sparseFallback:
+            AccessibilityNodeInfo? =
+            null
+
+        if (
+            Build.VERSION.SDK_INT >=
+            Build.VERSION_CODES.TIRAMISU
+        ) {
+            val strategies =
+                intArrayOf(
+                    AccessibilityNodeInfo.FLAG_PREFETCH_ANCESTORS or
+                        AccessibilityNodeInfo.FLAG_PREFETCH_SIBLINGS or
+                        AccessibilityNodeInfo.FLAG_PREFETCH_DESCENDANTS_HYBRID or
+                        AccessibilityNodeInfo.FLAG_PREFETCH_UNINTERRUPTIBLE,
+                    AccessibilityNodeInfo.FLAG_PREFETCH_DESCENDANTS_BREADTH_FIRST or
+                        AccessibilityNodeInfo.FLAG_PREFETCH_UNINTERRUPTIBLE,
+                    AccessibilityNodeInfo.FLAG_PREFETCH_DESCENDANTS_DEPTH_FIRST or
+                        AccessibilityNodeInfo.FLAG_PREFETCH_UNINTERRUPTIBLE
+                )
+
+            for (strategy in strategies) {
+                val root =
+                    try {
+                        window.getRoot(
+                            strategy
+                        )
+                    } catch (_: Exception) {
+                        null
+                    }
+                        ?: continue
+
+                if (
+                    sparseFallback ==
+                    null
+                ) {
+                    sparseFallback =
+                        root
+                }
+
+                if (
+                    rootLooksPopulated(
+                        root
+                    )
+                ) {
+                    return root
+                }
+            }
+        }
+
+        val legacy =
+            try {
+                window.root
+            } catch (_: Exception) {
+                null
+            }
+
+        if (
+            legacy !=
+            null &&
+            rootLooksPopulated(
+                legacy
+            )
+        ) {
+            return legacy
+        }
+
+        // Fail-soft extraction: keeping a sparse package-bearing root is still
+        // useful for window identity, bounds and event correlation, but it is
+        // NOT considered proof of screen content by verification code.
+        return legacy
+            ?: sparseFallback
+    }
+
+    private fun rootLooksPopulated(
+        root: AccessibilityNodeInfo
+    ): Boolean {
+
+        val childCount =
+            try {
+                root.childCount
+            } catch (_: Exception) {
+                0
+            }
+
+        if (
+            childCount >
+            0
+        ) {
+            return true
+        }
+
+        val text =
+            try {
+                safeText(
+                    root.text
+                        ?.toString()
+                        .orEmpty()
+                )
+            } catch (_: Exception) {
+                ""
+            }
+
+        if (
+            text.isNotBlank()
+        ) {
+            return true
+        }
+
+        val description =
+            try {
+                safeText(
+                    root.contentDescription
+                        ?.toString()
+                        .orEmpty()
+                )
+            } catch (_: Exception) {
+                ""
+            }
+
+        return description.isNotBlank()
+    }
+
+    /**
+     * Child traversal also asks Android 13+ to prefetch the descendant subtree.
+     * Normal getChild(index) remains the compatibility path on older Android.
+     */
+    private fun childWithPrefetch(
+        node: AccessibilityNodeInfo,
+        index: Int
+    ): AccessibilityNodeInfo? {
+
+        if (
+            Build.VERSION.SDK_INT >=
+            Build.VERSION_CODES.TIRAMISU
+        ) {
+            val prefetched =
+                try {
+                    node.getChild(
+                        index,
+                        AccessibilityNodeInfo.FLAG_PREFETCH_DESCENDANTS_HYBRID or
+                            AccessibilityNodeInfo.FLAG_PREFETCH_SIBLINGS
+                    )
+                } catch (_: Exception) {
+                    null
+                }
+
+            if (prefetched != null) {
+                return prefetched
+            }
+        }
+
+        return try {
+            node.getChild(
+                index
+            )
+        } catch (_: Exception) {
+            null
+        }
     }
 
     private fun normalize(
