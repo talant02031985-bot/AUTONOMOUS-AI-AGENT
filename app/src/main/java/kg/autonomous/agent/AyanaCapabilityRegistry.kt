@@ -10,7 +10,7 @@ import org.json.JSONArray
 import org.json.JSONObject
 
 /**
- * AYANA Device Capability Registry v1.0.
+ * AYANA Device Capability Registry v1.1 — SYSTEM AWARENESS.
  *
  * Machine-readable source of truth about what is implemented in this build and
  * what is actually available on the current device right now. This separates
@@ -115,6 +115,59 @@ class AyanaCapabilityRegistry(
 
         val accessibilityConnected = AgentAccessibilityService.instance != null
 
+        val screenSnapshot =
+            try {
+                AgentAccessibilityService
+                    .instance
+                    ?.buildScreenSnapshot(
+                        maxNodes = 36,
+                        maxChars = 4200
+                    )
+            } catch (_: Exception) {
+                null
+            }
+
+        val screenVisibleCount =
+            screenSnapshot
+                ?.optJSONArray(
+                    "visible_text"
+                )
+                ?.length()
+                ?: -1
+
+        val recentHistory =
+            try {
+                AyanaCommandHistoryStore(
+                    appContext
+                )
+                    .recent(
+                        12
+                    )
+            } catch (_: Exception) {
+                emptyList()
+            }
+
+        val lastRecord =
+            recentHistory
+                .firstOrNull()
+
+        val lastErrorRecord =
+            recentHistory
+                .firstOrNull {
+                    it.optString(
+                        "status"
+                    ) ==
+                        "error"
+                }
+
+        val recentErrorCount =
+            recentHistory.count {
+                it.optString(
+                    "status"
+                ) ==
+                    "error"
+            }
+
         val runtime = JSONObject()
             .put("microphone_permission", microphonePermission)
             .put("overlay_permission", overlayAllowed)
@@ -136,6 +189,18 @@ class AyanaCapabilityRegistry(
             .put("memory_count", memoryCount)
             .put("reminder_count", reminderCount)
             .put("recoverable_goal_count", goalViews.size)
+            .put("screen_snapshot_ok", screenSnapshot?.optBoolean("success", false) == true)
+            .put("screen_window_count", screenSnapshot?.optInt("window_count", -1) ?: -1)
+            .put("screen_visible_text_count", screenVisibleCount)
+            .put("screen_context_mode", screenSnapshot?.optString("window_context_mode").orEmpty())
+            .put("screen_primary_package", screenSnapshot?.optString("package").orEmpty())
+            .put("recent_command_count", recentHistory.size)
+            .put("recent_error_count", recentErrorCount)
+            .put("last_command_status", lastRecord?.optString("status").orEmpty())
+            .put("last_command", lastRecord?.optString("command").orEmpty().take(500))
+            .put("last_command_result", lastRecord?.optString("result").orEmpty().take(900))
+            .put("last_error_command", lastErrorRecord?.optString("command").orEmpty().take(500))
+            .put("last_error_result", lastErrorRecord?.optString("result").orEmpty().take(900))
 
         val capabilities = JSONArray()
         capability(
@@ -159,16 +224,24 @@ class AyanaCapabilityRegistry(
             "dynamic_app_resolver",
             implemented = true,
             available = appCount > 0,
-            deviceConfirmed = false,
-            note = "v11 App Resolver v2; device test required"
+            deviceConfirmed = true,
+            note = "App Resolver v2.x confirmed on-device with Chrome, ChatGPT, Play Store, Maps, Notes and other launch targets"
         )
         capability(
             capabilities,
             "screen_intelligence",
             implemented = true,
             available = accessibilityConnected,
+            deviceConfirmed = false,
+            note = "v11.2 Window Content Core uses Android 13+ root descendant prefetch; full content extraction requires device confirmation"
+        )
+        capability(
+            capabilities,
+            "multi_window_detection",
+            implemented = true,
+            available = accessibilityConnected,
             deviceConfirmed = true,
-            note = "Accessibility semantic screen model"
+            note = "v11.1.5 device test distinguished ChatGPT and Chrome in Samsung split-screen and detected Recents"
         )
         capability(
             capabilities,
@@ -228,11 +301,11 @@ class AyanaCapabilityRegistry(
         )
         capability(
             capabilities,
-            "self_diagnostics_v2",
+            "self_diagnostics_v3",
             implemented = true,
             available = true,
             deviceConfirmed = false,
-            note = "runtime capability and health registry"
+            note = "PASS/WARNING/UNKNOWN/FAIL health states + recent command/window awareness; device confirmation required"
         )
         capability(
             capabilities,
@@ -302,7 +375,21 @@ class AyanaCapabilityRegistry(
             append(runtime.optInt("memory_count", 0))
             append("; reminders=")
             append(runtime.optInt("reminder_count", 0))
-            append(". Implemented v11: dynamic_app_resolver, planner_v2, multi_goal_management, memory_v2, task_management_v2, self_diagnostics_v2. Not implemented yet: vision, external integrations, offline_llm, controlled_proactivity.")
+            append("; screen_windows=")
+            append(runtime.optInt("screen_window_count", -1))
+            append("; screen_text_items=")
+            append(runtime.optInt("screen_visible_text_count", -1))
+            append("; recent_errors=")
+            append(runtime.optInt("recent_error_count", 0))
+            append("; last_status=")
+            append(runtime.optString("last_command_status"))
+            if (runtime.optString("last_error_command").isNotBlank()) {
+                append("; last_error_command=")
+                append(runtime.optString("last_error_command").take(220))
+                append("; last_error_result=")
+                append(runtime.optString("last_error_result").take(320))
+            }
+            append(". Implemented v11.2: dynamic_app_resolver, window_context, strict_verification, planner_v2, multi_goal_management, memory_v2, task_management_v2, honest_self_diagnostics_v3. Not implemented yet: visual screenshot understanding, external mail/calendar/files integrations, offline_llm, controlled_proactivity.")
         }
     }
 
@@ -325,7 +412,7 @@ class AyanaCapabilityRegistry(
     }
 
     companion object {
-        const val BUILD_LABEL = "AYANA v11.0 AGENT INTELLIGENCE CORE"
+        const val BUILD_LABEL = "AYANA v11.2 SYSTEM INTEGRITY & AGENT MATURITY"
 
         private const val PREFS_NAME = "ayana_capability_runtime_v11"
         private const val KEY_AGENT_CORE_OK = "agent_core_ok"
