@@ -4,7 +4,7 @@ import org.json.JSONObject
 import java.util.Locale
 
 /**
- * AYANA Safety Policy v1.1.
+ * AYANA Safety Policy v1.2 — Agent Intelligence Core.
  *
  * Local fail-closed guard executed immediately before Agent Core device tools.
  * It is intentionally independent from model instructions: a model mistake must
@@ -95,7 +95,13 @@ class AyanaSafetyPolicy {
 
             "get_device_state",
             "get_screen_state",
+            "get_device_capabilities",
+            "run_self_diagnostics",
+            "list_installed_apps",
+            "resolve_app",
+            "list_goals",
             "recall_memory",
+            "list_memory",
             "list_reminders" ->
                 allow(
                     RISK_READ_ONLY,
@@ -169,9 +175,25 @@ class AyanaSafetyPolicy {
                 )
 
             "remember_memory",
+            "update_memory" ->
+                evaluateMemoryWrite(
+                    arguments.optString(
+                        "text"
+                    )
+                        .ifBlank {
+                            arguments.optString(
+                                "new_text"
+                            )
+                        }
+                )
+
             "forget_memory",
             "create_reminder",
-            "delete_reminder" ->
+            "delete_reminder",
+            "update_reminder",
+            "set_reminder_enabled",
+            "select_goal",
+            "cancel_goal" ->
                 allow(
                     RISK_SAFE_ACTION,
                     "local_user_data_action"
@@ -184,6 +206,29 @@ class AyanaSafetyPolicy {
                     "Инструмент не входит в разрешённую локальную политику AYANA."
                 )
         }
+    }
+
+    private fun evaluateMemoryWrite(
+        text: String
+    ): Decision {
+
+        if (
+            containsCredential(
+                text
+            ) ||
+            containsPaymentCard(
+                text
+            )
+        ) {
+            return prohibit(
+                "Safety Engine не сохраняет API-ключи, токены, пароли, OTP или платёжные данные в долговременную память."
+            )
+        }
+
+        return allow(
+            RISK_SAFE_ACTION,
+            "safe_memory_write"
+        )
     }
 
     private fun evaluateGenericTextClick(
