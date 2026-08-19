@@ -1,4 +1,4 @@
-// AYANA Worker v8.1 — Agent Loop Guard; durable goals/checkpoints/recovery; audio path unchanged
+// AYANA Worker v8.2 — Goal Integrity + Strict Verification; Agent Loop Guard retained; audio path unchanged
 const ANDROID_GOAL_TOOL = {
   type: "function",
   name: "execute_android_goal",
@@ -10,7 +10,7 @@ const ANDROID_GOAL_TOOL = {
       goal_type: {
         type: "string",
         enum: ["open_app", "open_settings_section", "app_info", "app_detail_section", "app_settings_item", "accessibility_service_page", "default_app_category", "settings_item"],
-        description: "The observable final Android goal type, never a route."
+        description: "The observable FINAL Android goal type, never a route. If a final target item is requested inside a known settings section, use settings_item, NOT open_settings_section."
       },
       app: {
         type: "string",
@@ -33,7 +33,7 @@ const ANDROID_GOAL_TOOL = {
       },
       target: {
         type: "string",
-        description: "Final visible item name only for generic settings_item/app_settings_item; never put a route here."
+        description: "Final visible item name for settings_item/app_settings_item. If this is non-empty for a known system settings section, goal_type must be settings_item. Never discard a requested final target."
       },
       stop_if_missing: {
         type: "boolean",
@@ -551,7 +551,9 @@ const AYANA_CURRENT_CAPABILITIES = `
 - тихий текстовый режим;
 - один глобальный плавающий Orb;
 - прямые локальные Android-команды и системные настройки;
-- журнал команд SUCCESS / ERROR / CANCELLED с техническими событиями и таймингами.
+- журнал команд SUCCESS / ERROR / CANCELLED с техническими событиями и таймингами;
+- Durable Goal creation/checkpoints/replan реально отработали на планшете в v10;
+- локальный Safety Engine v1.1 реально заблокировал ввод тестового API-ключа за 2 мс ДО Agent Core (safety_gate + safety_blocked, без agent_request).
 
 СТАТУС «РЕАЛИЗОВАНО В ТЕКУЩЕЙ АРХИТЕКТУРЕ»:
 - Goal Compiler + Android Task Engine + Accessibility + Screen Intelligence для многошаговой навигации и проверки прогресса;
@@ -566,6 +568,9 @@ const AYANA_CURRENT_CAPABILITIES = `
 - старое подтверждение чувствительного действия не переносится через восстановление: требуется новое явное подтверждение;
 - пользователь может посмотреть активную цель, продолжить/подтвердить её или отменить из раздела задач и голосовой/текстовой командой;
 - recovery-финал имеет машинный статус complete/pause: неоднозначный текст никогда не превращается в ложный SUCCESS;
+- Goal Integrity v2.1 локально повышает слишком общую классификацию до более конкретной, если Agent Core сохранил конечный target (например open_settings_section + target -> settings_item);
+- Task Engine v4.1 ждёт ожидаемое состояние экрана и не принимает первый временный Launcher/transition screen за доказательство достижения цели;
+- terminal settings/app-item шаги требуют наблюдаемого подтверждения конечного target; без подтверждения возможны BLOCKED/PAUSED/replan, но не SUCCESS;
 - явная смена темы после self-review (например, общее определение агента или улучшения внешнего приложения) разрывает старый Agent Core response-chain, чтобы контекст AYANA не протекал в новую тему;
 - локальная долговременная память: запомнить, вспомнить, забыть;
 - напоминания и повторяющиеся задачи: создание, просмотр, удаление, расписание и восстановление после перезагрузки;
@@ -577,8 +582,8 @@ const AYANA_CURRENT_CAPABILITIES = `
 - рабочий язык текущей версии — только русский.
 
 СТАТУС «ЧАСТИЧНО РЕАЛИЗОВАНО / НУЖНО УСИЛИТЬ»:
-- durable goal runner уже сохраняет и восстанавливает цель, но покрытие перепланирования после сильно изменившегося интерфейса можно расширять;
-- проверка результата Android-действий существует и строгая для Goal Compiler/Task Engine, но покрытие разных сторонних приложений можно расширять;
+- durable goal runner уже сохраняет и восстанавливает цель; anti-cycle guard v10.1 и Goal Integrity/strict verification v10.2 реализованы, но именно их совместное поведение ещё должно быть подтверждено повторным сложным device-тестом;
+- проверка результата Android-действий усилена строгой terminal verification, но покрытие OEM-вариантов и разных сторонних приложений можно расширять;
 - память существует, но пользовательскому интерфейсу нужны более удобные поиск, исправление, категории и точечное удаление;
 - задачи и напоминания существуют, но интерфейсу полезны редактирование, перенос, включение/выключение и отметка выполнения;
 - диагностика уже показывает Autonomous Core и Safety Engine, но можно развить единый health/status экран Agent Core / Android / TTS / STT / durable goals с измеримыми health-checks;
@@ -745,13 +750,17 @@ ANDROID GOAL v7 — CLASSIFY FINAL STATE, NEVER PLAN THE ROUTE:
    - named app + permissions/battery/storage/mobile data/notifications/open-by-default/language => app_detail_section;
    - named app + other App-info row => app_settings_item;
    - default browser/home/phone/SMS/assistant/links choice => default_app_category;
-   - known system settings section itself => open_settings_section;
-   - arbitrary item inside a known system settings section => settings_item;
+   - arbitrary FINAL item inside a known system settings section => settings_item;
+   - known system settings section itself, ONLY when there is no further requested target => open_settings_section;
    - general App info only => app_info;
    - launch app only => open_app.
-4. Use canonical enum values. Every unused string field must be empty.
-5. This tool navigates/views only. Do not encode state-changing clicks such as enabling a service or permission.
-6. stop_if_missing=true only when the user explicitly says to stop/abort if the item is absent.
+4. FINAL-TARGET INTEGRITY IS MANDATORY:
+   - Never classify as open_settings_section when the user also asks to find/open a specific item inside that section.
+   - Example: «открой специальные возможности и найди Установленные приложения» => settings_item, settings_section=accessibility, target=Установленные приложения.
+   - Do not fill unrelated fields. For settings_item: section="", app="", category="".
+5. Use canonical enum values. Every unused string field must be empty.
+6. This tool navigates/views only. Do not encode state-changing clicks such as enabling a service or permission.
+7. stop_if_missing=true only when the user explicitly says to stop/abort if the item is absent.
 `.trim();
 
 function isLikelyAndroidNavigation(message = "") {
@@ -759,9 +768,10 @@ function isLikelyAndroidNavigation(message = "") {
     .toLowerCase()
     .replace(/ё/g, "е")
     .trim()
-    // Text commands are often pasted with quotes/bullets/punctuation, for
-    // example: «Открой приложения по умолчанию...». Classification must not
-    // fall out of deterministic Android Goal mode because of a leading symbol.
+    // Text commands may include the spoken wake word as typed text. Strip it
+    // for routing only; the original user message remains unchanged.
+    .replace(/^(?:аяна|ayana)[\s,.:;!?—-]+/u, "")
+    // Text commands are often pasted with quotes/bullets/punctuation.
     .replace(/^[^\p{L}\p{N}]+/u, "");
 
   const navigationVerb = /^(открой|запусти|нажми|выбери|перейди|зайди|вернись|покажи|найди|найти|отыщи)(?:\s|$)/.test(normalized);
@@ -1268,7 +1278,7 @@ export default {
         ok: true,
         service: "AYANA AI",
         ai: "ready",
-        agent_core: "v8.0-autonomous-core",
+        agent_core: "v8.2-goal-integrity",
         voice: "marin"
       });
     }
