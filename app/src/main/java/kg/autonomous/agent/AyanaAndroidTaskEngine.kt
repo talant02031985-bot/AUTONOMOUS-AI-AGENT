@@ -5,7 +5,7 @@ import org.json.JSONObject
 import java.util.Locale
 
 /**
- * AYANA Android Task Engine v4.1 — resumable deterministic executor with goal-integrity verification, durable checkpoints and text-first semantic clicks.
+ * AYANA Android Task Engine v4.2 WINDOW CONTEXT — resumable deterministic executor with goal-integrity verification, durable checkpoints and text-first semantic clicks.
  *
  * IMPORTANT ARCHITECTURE RULE:
  * The LLM understands the user's intent and produces ONE short structured plan.
@@ -1555,23 +1555,17 @@ class AyanaAndroidTaskEngine(
 
         val expectAny =
             jsonStringList(
-                step.optJSONArray(
-                    "expect_any"
-                )
+                step.optJSONArray("expect_any")
             )
 
         val expectAll =
             jsonStringList(
-                step.optJSONArray(
-                    "expect_all"
-                )
+                step.optJSONArray("expect_all")
             )
 
         val expectNone =
             jsonStringList(
-                step.optJSONArray(
-                    "expect_none"
-                )
+                step.optJSONArray("expect_none")
             )
 
         if (
@@ -1582,42 +1576,102 @@ class AyanaAndroidTaskEngine(
             return null
         }
 
-        val normalized =
-            normalize(
-                screen.toString()
-            )
+        val contexts =
+            verificationWindowTexts(screen)
 
-        val anyOk =
-            expectAny.isEmpty() ||
-                expectAny.any { value ->
-                    normalized.contains(
-                        normalize(
-                            value
-                        )
-                    )
-                }
+        if (contexts.isEmpty()) {
+            return false
+        }
 
-        val allOk =
-            expectAll.all { value ->
-                normalized.contains(
-                    normalize(
-                        value
-                    )
-                )
+        val normalizedContexts =
+            contexts
+                .map { normalize(it) }
+                .filter { it.isNotBlank() }
+
+        if (normalizedContexts.isEmpty()) {
+            return false
+        }
+
+        // Positive expectations must coexist inside one window context. This
+        // prevents a terminal SUCCESS assembled from unrelated split/freeform
+        // windows. Negative expectations remain global across the interaction
+        // group: if a forbidden marker is still visible anywhere actionable, the
+        // final state is not proven.
+        val positiveOk =
+            normalizedContexts.any { context ->
+                val anyOk =
+                    expectAny.isEmpty() ||
+                        expectAny.any { value ->
+                            context.contains(normalize(value))
+                        }
+
+                val allOk =
+                    expectAll.all { value ->
+                        context.contains(normalize(value))
+                    }
+
+                anyOk && allOk
             }
+
+        val normalizedGroup =
+            normalizedContexts.joinToString(" | ")
 
         val noneOk =
             expectNone.none { value ->
-                normalized.contains(
-                    normalize(
-                        value
-                    )
+                normalizedGroup.contains(
+                    normalize(value)
                 )
             }
 
-        return anyOk &&
-            allOk &&
-            noneOk
+        return positiveOk && noneOk
+    }
+
+    private fun verificationWindowTexts(
+        screen: JSONObject
+    ): List<String> {
+
+        val result = mutableListOf<String>()
+        val windows = screen.optJSONArray("windows")
+
+        if (windows != null) {
+            for (index in 0 until windows.length()) {
+                val window = windows.optJSONObject(index) ?: continue
+
+                if (!window.optBoolean("interaction_context", false)) {
+                    continue
+                }
+
+                if (window.optString("type_name") == "input_method") {
+                    continue
+                }
+
+                val text =
+                    window.optString("verification_text").trim()
+
+                if (text.isNotBlank()) {
+                    result.add(text)
+                }
+            }
+        }
+
+        if (result.isNotEmpty()) {
+            return result
+        }
+
+        if (
+            windows != null &&
+            screen.optString("window_context_mode").isNotBlank()
+        ) {
+            return emptyList()
+        }
+
+        val fallback =
+            jsonStringList(
+                screen.optJSONArray("visible_text")
+            )
+                .joinToString(" | ")
+
+        return if (fallback.isBlank()) emptyList() else listOf(fallback)
     }
 
     /**
@@ -1815,7 +1869,8 @@ class AyanaAndroidTaskEngine(
         // only accept an exact visible-string match, never invent a fuzzy click.
         val normalizedScreen =
             normalize(
-                screen.toString()
+                verificationWindowTexts(screen)
+                    .joinToString(" | ")
             )
 
         val exact =
@@ -2124,19 +2179,31 @@ class AyanaAndroidTaskEngine(
                 )
             )
 
-        val visibleText =
-            jsonStringList(
-                screen.optJSONArray(
-                    "visible_text"
-                )
+        val verificationText =
+            screen.optString(
+                "verification_text"
             )
-                .joinToString(
-                    separator = "|"
-                ) {
-                    normalize(
-                        it
+                .trim()
+
+        val visibleText =
+            if (verificationText.isNotBlank()) {
+                normalize(
+                    verificationText
+                )
+            } else {
+                jsonStringList(
+                    screen.optJSONArray(
+                        "visible_text"
                     )
-                }
+                )
+                    .joinToString(
+                        separator = "|"
+                    ) {
+                        normalize(
+                            it
+                        )
+                    }
+            }
 
         // Do not compare event_age_ms, node bounds or other volatile metadata:
         // those values change even when the user is still on exactly the same
