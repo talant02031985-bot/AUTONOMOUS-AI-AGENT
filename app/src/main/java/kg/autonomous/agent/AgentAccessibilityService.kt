@@ -16,6 +16,9 @@ import kotlin.math.max
 class AgentAccessibilityService :
     AccessibilityService() {
 
+    // AYANA Accessibility v3.4 — Samsung multi-window integrity.
+    // Screen snapshots and semantic actions inspect all relevant interactive roots.
+
     data class NodeMatch(
         val node: AccessibilityNodeInfo,
         val score: Int
@@ -120,33 +123,59 @@ class AgentAccessibilityService :
         target: String
     ): Boolean {
 
-        val root =
-            resolveRoot()
+        val roots =
+            resolveRoots()
+
+        if (
+            roots.isEmpty()
+        ) {
+            return false
+        }
+
+        var match:
+            NodeMatch? = null
+
+        for (
+            root in
+            roots
+        ) {
+
+            val candidate =
+                findBestNode(
+                    root =
+                        root,
+                    target =
+                        target,
+                    requireEditable =
+                        false,
+                    requireClickable =
+                        false
+                )
+                    ?: continue
+
+            if (
+                match == null ||
+                candidate.score >
+                match.score
+            ) {
+                match =
+                    candidate
+            }
+        }
+
+        val resolvedMatch =
+            match
                 ?: return false
 
-        val match =
-            findBestNode(
-                root =
-                    root,
-                target =
-                    target,
-                requireEditable =
-                    false,
-                requireClickable =
-                    false
-            )
-                ?: return false
-
-        // One UI can return ACTION_CLICK=true while the UI does not actually
-        // navigate. A boolean acknowledgement is not enough. Verify a real
-        // screen-signature change before declaring success; if it does not
-        // change, fall back to a semantic tap on the already-resolved node.
+        // One UI can expose the Settings navigation pane and the detail pane as
+        // different interactive roots. Search all roots first, then verify that
+        // the resulting action actually changed the combined screen signature.
         val before =
             screenSignature()
 
         val actionable =
             findActionableParent(
-                match.node,
+                resolvedMatch.node,
                 AccessibilityNodeInfo
                     .ACTION_CLICK
             )
@@ -177,7 +206,7 @@ class AgentAccessibilityService :
 
         val semanticTapAccepted =
             tapNodeCenter(
-                match.node
+                resolvedMatch.node
             )
 
         if (
@@ -191,7 +220,8 @@ class AgentAccessibilityService :
 
         if (
             actionable != null &&
-            actionable !== match.node
+            actionable !==
+            resolvedMatch.node
         ) {
 
             val rowTapAccepted =
@@ -255,34 +285,74 @@ class AgentAccessibilityService :
         text: String
     ): Boolean {
 
-        val root =
-            resolveRoot()
-                ?: return false
+        val roots =
+            resolveRoots()
+
+        if (
+            roots.isEmpty()
+        ) {
+            return false
+        }
 
         val node =
             if (
                 target.isNullOrBlank()
             ) {
 
-                findFocusedEditable(
-                    root
-                )
-                    ?: findFirstEditable(
-                        root
-                    )
+                roots
+                    .asSequence()
+                    .mapNotNull {
+                        root ->
+                        findFocusedEditable(
+                            root
+                        )
+                    }
+                    .firstOrNull()
+                    ?:
+                    roots
+                        .asSequence()
+                        .mapNotNull {
+                            root ->
+                            findFirstEditable(
+                                root
+                            )
+                        }
+                        .firstOrNull()
 
             } else {
 
-                findBestNode(
-                    root =
-                        root,
-                    target =
-                        target,
-                    requireEditable =
-                        true,
-                    requireClickable =
-                        false
-                )
+                var best:
+                    NodeMatch? = null
+
+                for (
+                    root in
+                    roots
+                ) {
+
+                    val candidate =
+                        findBestNode(
+                            root =
+                                root,
+                            target =
+                                target,
+                            requireEditable =
+                                true,
+                            requireClickable =
+                                false
+                        )
+                            ?: continue
+
+                    if (
+                        best == null ||
+                        candidate.score >
+                        best.score
+                    ) {
+                        best =
+                            candidate
+                    }
+                }
+
+                best
                     ?.node
             }
                 ?: return false
@@ -320,15 +390,14 @@ class AgentAccessibilityService :
         direction: String
     ): Boolean {
 
-        val root =
-            resolveRoot()
-                ?: return false
+        val roots =
+            resolveRoots()
 
-        val scrollable =
-            findBestScrollable(
-                root
-            )
-                ?: return false
+        if (
+            roots.isEmpty()
+        ) {
+            return false
+        }
 
         val normalized =
             normalize(
@@ -361,10 +430,42 @@ class AgentAccessibilityService :
                         .ACTION_SCROLL_FORWARD
             }
 
-        return scrollable
-            .performAction(
-                preferredAction
-            )
+        val before =
+            screenSignature()
+
+        // Try every visible scroll container because Samsung tablet Settings may
+        // expose the navigation list and the detail list as separate roots.
+        for (
+            root in
+            roots
+        ) {
+
+            val scrollable =
+                findBestScrollable(
+                    root
+                )
+                    ?: continue
+
+            val accepted =
+                try {
+                    scrollable.performAction(
+                        preferredAction
+                    )
+                } catch (_: Exception) {
+                    false
+                }
+
+            if (
+                accepted &&
+                waitForScreenChange(
+                    before
+                )
+            ) {
+                return true
+            }
+        }
+
+        return false
     }
 
     private fun tapNodeCenter(
@@ -444,11 +545,11 @@ class AgentAccessibilityService :
         maxChars: Int = 14000
     ): JSONObject {
 
-        val root =
-            resolveRoot()
+        val roots =
+            resolveRoots()
 
         if (
-            root == null
+            roots.isEmpty()
         ) {
 
             return JSONObject()
@@ -466,21 +567,91 @@ class AgentAccessibilityService :
                 )
         }
 
+        data class SnapshotQueueItem(
+            val node: AccessibilityNodeInfo,
+            val depth: Int,
+            val rootSlot: Int
+        )
+
         val result =
             JSONObject()
 
         val nodes =
             JSONArray()
 
+        val packages =
+            JSONArray()
+
+        val rootClasses =
+            JSONArray()
+
+        val primaryRoot =
+            roots.first()
+
         val packageName =
-            root.packageName
+            primaryRoot.packageName
                 ?.toString()
                 .orEmpty()
 
         val rootClass =
-            root.className
+            primaryRoot.className
                 ?.toString()
                 .orEmpty()
+
+        val seenPackages =
+            linkedSetOf<String>()
+
+        val queue =
+            ArrayDeque<
+                SnapshotQueueItem
+            >()
+
+        for (
+            rootIndex in
+            roots.indices
+        ) {
+
+            val root =
+                roots[
+                    rootIndex
+                ]
+
+            val rootPackage =
+                root.packageName
+                    ?.toString()
+                    .orEmpty()
+
+            if (
+                rootPackage.isNotBlank() &&
+                seenPackages.add(
+                    rootPackage
+                )
+            ) {
+                packages.put(
+                    rootPackage
+                )
+            }
+
+            rootClasses.put(
+                root.className
+                    ?.toString()
+                    .orEmpty()
+            )
+
+            // Seed every root before walking children. This round-robin-style
+            // breadth-first snapshot prevents a large navigation pane from
+            // consuming the node budget before the sibling detail pane is seen.
+            queue.add(
+                SnapshotQueueItem(
+                    node =
+                        root,
+                    depth =
+                        0,
+                    rootSlot =
+                        rootIndex
+                )
+            )
+        }
 
         var charCount =
             0
@@ -488,29 +659,17 @@ class AgentAccessibilityService :
         var visited =
             0
 
-        val queue =
-            ArrayDeque<
-                Pair<
-                    AccessibilityNodeInfo,
-                    Int
-                >
-            >()
-
-        queue.add(
-            root to 0
-        )
-
         while (
             queue.isNotEmpty() &&
             visited < maxNodes &&
             charCount < maxChars
         ) {
 
-            val (
-                node,
-                depth
-            ) =
+            val current =
                 queue.removeFirst()
+
+            val node =
+                current.node
 
             visited++
 
@@ -519,10 +678,14 @@ class AgentAccessibilityService :
                     node =
                         node,
                     depth =
-                        depth,
+                        current.depth,
                     index =
                         visited
                 )
+                    .put(
+                        "root_slot",
+                        current.rootSlot
+                    )
 
             val serialized =
                 item.toString()
@@ -557,11 +720,15 @@ class AgentAccessibilityService :
                         ?: continue
 
                 queue.add(
-                    child to
-                        (
-                            depth +
-                                1
-                            )
+                    SnapshotQueueItem(
+                        node =
+                            child,
+                        depth =
+                            current.depth +
+                                1,
+                        rootSlot =
+                            current.rootSlot
+                    )
                 )
             }
         }
@@ -585,6 +752,14 @@ class AgentAccessibilityService :
                 rootClass
             )
             .put(
+                "packages",
+                packages
+            )
+            .put(
+                "root_classes",
+                rootClasses
+            )
+            .put(
                 "event_package",
                 lastEventPackage
             )
@@ -605,6 +780,10 @@ class AgentAccessibilityService :
             .put(
                 "root_source",
                 lastRootSource
+            )
+            .put(
+                "root_count",
+                roots.size
             )
             .put(
                 "window_count",
@@ -670,13 +849,77 @@ class AgentAccessibilityService :
     }
 
     /**
-     * Prefer rootInActiveWindow. If One UI temporarily returns null, choose the
-     * best root from AccessibilityService.windows. The last AccessibilityEvent
-     * package gets the strongest preference, then active/focused application
-     * windows. This avoids selecting AYANA's overlay instead of Settings.
+     * Samsung tablet Settings can expose the navigation pane and the detail pane
+     * through more than one interactive accessibility root. Keep every relevant
+     * application root, rank the most likely foreground roots first, and let
+     * snapshot/search logic inspect them together. This is stricter than using
+     * rootInActiveWindow alone and prevents false verification failures when the
+     * requested detail page is visible in a sibling Settings root.
      */
-    private fun resolveRoot():
-        AccessibilityNodeInfo? {
+    private fun resolveRoots():
+        List<AccessibilityNodeInfo> {
+
+        data class RootCandidate(
+            val root: AccessibilityNodeInfo,
+            val score: Int,
+            val key: String
+        )
+
+        val candidates =
+            mutableListOf<RootCandidate>()
+
+        val expectedPackage =
+            lastEventPackage
+                .trim()
+
+        fun addCandidate(
+            root: AccessibilityNodeInfo?,
+            score: Int
+        ) {
+
+            if (
+                root == null
+            ) {
+                return
+            }
+
+            val rootPackage =
+                root.packageName
+                    ?.toString()
+                    .orEmpty()
+
+            val key =
+                rootPackage +
+                    "|" +
+                    root.windowId +
+                    "|" +
+                    root.hashCode()
+
+            if (
+                candidates.any {
+                    it.key ==
+                    key
+                }
+            ) {
+                return
+            }
+
+            candidates.add(
+                RootCandidate(
+                    root =
+                        root,
+                    score =
+                        score +
+                            minOf(
+                                root.childCount,
+                                20
+                            ) *
+                                3,
+                    key =
+                        key
+                )
+            )
+        }
 
         try {
 
@@ -687,10 +930,37 @@ class AgentAccessibilityService :
                 active != null
             ) {
 
-                lastRootSource =
-                    "active"
+                var score =
+                    500
 
-                return active
+                val activePackage =
+                    active.packageName
+                        ?.toString()
+                        .orEmpty()
+
+                if (
+                    expectedPackage.isNotBlank() &&
+                    activePackage ==
+                    expectedPackage
+                ) {
+                    score +=
+                        180
+                }
+
+                if (
+                    activePackage ==
+                    packageName
+                ) {
+                    score -=
+                        220
+                }
+
+                addCandidate(
+                    root =
+                        active,
+                    score =
+                        score
+                )
             }
 
         } catch (_: Exception) {
@@ -702,16 +972,6 @@ class AgentAccessibilityService :
             } catch (_: Exception) {
                 emptyList()
             }
-
-        var bestRoot:
-            AccessibilityNodeInfo? = null
-
-        var bestScore =
-            Int.MIN_VALUE
-
-        val expectedPackage =
-            lastEventPackage
-                .trim()
 
         for (
             window in
@@ -738,14 +998,14 @@ class AgentAccessibilityService :
                 window.isActive
             ) {
                 score +=
-                    140
+                    180
             }
 
             if (
                 window.isFocused
             ) {
                 score +=
-                    120
+                    160
             }
 
             if (
@@ -753,7 +1013,7 @@ class AgentAccessibilityService :
                 android.view.accessibility.AccessibilityWindowInfo.TYPE_APPLICATION
             ) {
                 score +=
-                    70
+                    120
             }
 
             if (
@@ -762,7 +1022,7 @@ class AgentAccessibilityService :
                 expectedPackage
             ) {
                 score +=
-                    180
+                    220
             }
 
             if (
@@ -771,40 +1031,56 @@ class AgentAccessibilityService :
                 packageName
             ) {
                 score +=
-                    25
+                    40
             }
-
-            score +=
-                minOf(
-                    root.childCount,
-                    20
-                ) *
-                    3
 
             if (
-                score >
-                bestScore
+                rootPackage ==
+                packageName
             ) {
-
-                bestScore =
-                    score
-
-                bestRoot =
-                    root
+                score -=
+                    220
             }
+
+            addCandidate(
+                root =
+                    root,
+                score =
+                    score
+            )
         }
 
-        if (
-            bestRoot != null
-        ) {
-            lastRootSource =
-                "windows_fallback"
-        } else {
-            lastRootSource =
-                "unavailable"
-        }
+        val sorted =
+            candidates
+                .sortedByDescending {
+                    it.score
+                }
+                .map {
+                    it.root
+                }
 
-        return bestRoot
+        lastRootSource =
+            when {
+
+                sorted.isEmpty() ->
+                    "unavailable"
+
+                sorted.size ==
+                1 ->
+                    "single_root"
+
+                else ->
+                    "multi_window"
+            }
+
+        return sorted
+    }
+
+    private fun resolveRoot():
+        AccessibilityNodeInfo? {
+
+        return resolveRoots()
+            .firstOrNull()
     }
 
     private fun safeWindowCount():
