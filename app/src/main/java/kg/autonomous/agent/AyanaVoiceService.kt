@@ -204,6 +204,8 @@ class AyanaVoiceService : Service() {
         )
     }
 
+    // Device Intelligence v11.1: all direct/Agent/Goal app launches use the observed map
+    // through AyanaAppResolver; legacy package lists are validated hints only.
     // Device Intelligence v11: the installed-app map is observed dynamically
     // from this tablet. Static aliases are only hints and are device-validated.
     private val appResolver by lazy {
@@ -5431,59 +5433,76 @@ class AyanaVoiceService : Service() {
         )
     }
 
+    /**
+     * v11.1 APP RESOLVER INTEGRATION.
+     *
+     * Legacy fast local routes still provide their historical package list, but
+     * it is no longer trusted as a launch target. AyanaAppResolver validates every
+     * hint against the actual launcher map and launches the observed component.
+     * This keeps the v10.x fast path while making App Resolver the single source
+     * of truth for direct app launches as well as Agent/Goal Engine launches.
+     */
     private fun openApp(
         displayName: String,
         silent: Boolean,
         vararg packages: String
     ) {
 
-        for (
-            packageName in packages
-        ) {
-
-            try {
-
-                val intent =
-                    Intent(
-                        Intent.ACTION_MAIN
-                    ).apply {
-
-                        addCategory(
-                            Intent.CATEGORY_LAUNCHER
-                        )
-
-                        setPackage(
-                            packageName
-                        )
-
-                        addFlags(
-                            Intent.FLAG_ACTIVITY_NEW_TASK
-                        )
-                    }
-
-                startActivity(intent)
-
-                finishLocalCommand(
-                    "Открываю $displayName",
-                    silent
+        val result =
+            appResolver
+                .launchWithHints(
+                    requestedName = displayName,
+                    preferredPackages = packages.toList()
                 )
 
-                return
-
-            } catch (
-                _: ActivityNotFoundException
-            ) {
-            } catch (
-                _: SecurityException
-            ) {
-            }
-        }
-
-        respondAndResume(
-            "Приложение $displayName не найдено.",
-            silent,
-            success = false
+        commandHistoryStore.addEvent(
+            activeCommandHistoryId,
+            state =
+                if (
+                    result.optBoolean(
+                        "success",
+                        false
+                    )
+                ) {
+                    "app_resolved"
+                } else {
+                    "app_resolver_miss"
+                },
+            message =
+                result.optString(
+                    "message",
+                    "App Resolver v2.1"
+                ),
+            details =
+                "package=${result.optString("package")}; " +
+                    "confidence=${result.optInt("confidence", 0)}; " +
+                    "source=${result.optString("source")}; " +
+                    "reason=${result.optString("reason")}".take(620)
         )
+
+        if (
+            result.optBoolean(
+                "success",
+                false
+            )
+        ) {
+            finishLocalCommand(
+                result.optString(
+                    "message",
+                    "Открываю $displayName"
+                ),
+                silent
+            )
+        } else {
+            respondAndResume(
+                result.optString(
+                    "message",
+                    "Приложение $displayName не найдено."
+                ),
+                silent,
+                success = false
+            )
+        }
     }
 
     private fun openSystemScreen(
