@@ -52,7 +52,7 @@ import kotlin.math.abs
 
 class AyanaVoiceService : Service() {
 
-    // AYANA v10.0 AUTONOMOUS CORE FINAL.
+    // AYANA v11.0 AGENT INTELLIGENCE CORE FINAL.
     // Built on the confirmed v9.1 baseline. The v9.0/v9.1 audio, STOP and local
     // fast-routing stack is intentionally frozen: streamed 24 kHz Marin PCM,
     // VOICE_COMMUNICATION/AEC/NS, barge-in STOP and Russian local arithmetic
@@ -196,10 +196,41 @@ class AyanaVoiceService : Service() {
         String? = null
 
     // AUTONOMOUS CORE v10: persistent state of the currently executing
-    // multi-step device goal. Factual/chat requests never create a durable goal.
+    // multi-step device goal. v11 keeps multiple recoverable goals instead of
+    // destroying an older paused goal when a new goal starts.
     private val durableGoalStore by lazy {
         AyanaDurableGoalStore(
             applicationContext
+        )
+    }
+
+    // Device Intelligence v11: the installed-app map is observed dynamically
+    // from this tablet. Static aliases are only hints and are device-validated.
+    private val appResolver by lazy {
+        AyanaAppResolver(
+            applicationContext
+        )
+    }
+
+    private val capabilityRegistry by lazy {
+        AyanaCapabilityRegistry(
+            applicationContext,
+            appResolver
+        )
+    }
+
+    private val selfDiagnostics by lazy {
+        AyanaSelfDiagnostics(
+            applicationContext,
+            appResolver,
+            capabilityRegistry
+        )
+    }
+
+    private val agentPlannerV2 by lazy {
+        AyanaAgentPlanner(
+            appResolver,
+            capabilityRegistry
         )
     }
 
@@ -381,6 +412,10 @@ class AyanaVoiceService : Service() {
                 initSherpaModel()
 
                 modelReady = true
+                capabilityRegistry
+                    .recordRecognitionReady(
+                        true
+                    )
 
                 mainHandler.post {
                     if (
@@ -394,6 +429,10 @@ class AyanaVoiceService : Service() {
             } catch (_: Exception) {
 
                 modelReady = false
+                capabilityRegistry
+                    .recordRecognitionReady(
+                        false
+                    )
 
                 mainHandler.post {
                     broadcastStatus(
@@ -2714,6 +2753,36 @@ class AyanaVoiceService : Service() {
         }
 
         if (
+            isPreviousDurableGoalResumePhrase(
+                routingNormalized
+            )
+        ) {
+            val selected =
+                durableGoalStore
+                    .selectPreviousRecoverable()
+            if (selected == null) {
+                respondAndResume(
+                    "Предыдущей незавершённой цели нет.",
+                    silent,
+                    success = false
+                )
+            } else {
+                commandHistoryStore.addEvent(
+                    activeCommandHistoryId,
+                    state = "goal_selected",
+                    message = "Выбрана предыдущая сохранённая цель",
+                    details = selected.optString("command").take(500)
+                )
+                resumeDurableGoal(
+                    silent = silent,
+                    explicitConfirmation = false,
+                    allowAutoResume = false
+                )
+            }
+            return
+        }
+
+        if (
             isDurableGoalResumePhrase(
                 routingNormalized
             )
@@ -4840,148 +4909,67 @@ class AyanaVoiceService : Service() {
                 requestedName
             )
 
-        if (query.isBlank()) {
-
+        if (
+            query.isBlank()
+        ) {
             respondAndResume(
                 "Не поняла, какое приложение открыть.",
                 silent,
                 success = false
             )
-
             return
         }
 
-        val known =
-            knownAppForQuery(
-                query
-            )
-
-        if (known != null) {
-
-            openApp(
-                known.first,
-                silent,
-                *known.second.toTypedArray()
-            )
-
-            return
-        }
-
-        val launcherIntent =
-            Intent(
-                Intent.ACTION_MAIN
-            ).apply {
-                addCategory(
-                    Intent.CATEGORY_LAUNCHER
+        val result =
+            appResolver
+                .launch(
+                    requestedName
                 )
-            }
 
-        val activities =
-            try {
-                @Suppress("DEPRECATION")
-                packageManager
-                    .queryIntentActivities(
-                        launcherIntent,
-                        0
+        commandHistoryStore.addEvent(
+            activeCommandHistoryId,
+            state =
+                if (
+                    result.optBoolean(
+                        "success",
+                        false
                     )
-            } catch (_: Exception) {
-                emptyList()
-            }
-
-        val best =
-            activities
-                .map { info ->
-
-                    val label =
-                        try {
-                            info
-                                .loadLabel(
-                                    packageManager
-                                )
-                                ?.toString()
-                                .orEmpty()
-                        } catch (_: Exception) {
-                            ""
-                        }
-
-                    Triple(
-                        info,
-                        label,
-                        appNameScore(
-                            query,
-                            label
-                        )
-                    )
-                }
-                .filter {
-                    it.third > 0
-                }
-                .maxByOrNull {
-                    it.third
-                }
+                ) {
+                    "app_resolved"
+                } else {
+                    "app_resolver_miss"
+                },
+            message =
+                result.optString(
+                    "message",
+                    "App Resolver v2"
+                ),
+            details =
+                "package=${result.optString("package")}; " +
+                    "confidence=${result.optInt("confidence", 0)}; " +
+                    "source=${result.optString("source")}; " +
+                    "reason=${result.optString("reason")}".take(520)
+        )
 
         if (
-            best == null ||
-            best.third < 70
+            result.optBoolean(
+                "success",
+                false
+            )
         ) {
-
-            respondAndResume(
-                "Не нашла приложение $requestedName.",
-                silent,
-                success = false
-            )
-
-            return
-        }
-
-        val info =
-            best.first
-
-        val label =
-            best.second
-                .ifBlank {
-                    requestedName
-                }
-
-        val activityInfo =
-            info.activityInfo
-
-        try {
-
-            val intent =
-                Intent(
-                    Intent.ACTION_MAIN
-                ).apply {
-
-                    addCategory(
-                        Intent.CATEGORY_LAUNCHER
-                    )
-
-                    component =
-                        ComponentName(
-                            activityInfo.packageName,
-                            activityInfo.name
-                        )
-
-                    addFlags(
-                        Intent.FLAG_ACTIVITY_NEW_TASK or
-                            Intent.FLAG_ACTIVITY_RESET_TASK_IF_NEEDED
-                    )
-                }
-
-            startActivity(
-                intent
-            )
-
             finishLocalCommand(
-                "Открываю $label",
+                result.optString(
+                    "message",
+                    "Открываю ${result.optString("label", requestedName)}"
+                ),
                 silent
             )
-
-        } catch (_: Exception) {
-
+        } else {
             respondAndResume(
-                "Не удалось открыть приложение $label.",
+                result.optString(
+                    "message",
+                    "Приложение $requestedName не найдено."
+                ),
                 silent,
                 success = false
             )
@@ -6227,6 +6215,64 @@ class AyanaVoiceService : Service() {
                             message
                         )
 
+                val intelligenceContext =
+                    buildString {
+                        append(
+                            capabilityRegistry
+                                .compactContext()
+                        )
+
+                        append(
+                            "\n"
+                        )
+
+                        if (
+                            resumeGoal ==
+                            null
+                        ) {
+                            append(
+                                agentPlannerV2
+                                    .compactContext(
+                                        message
+                                    )
+                            )
+                        } else {
+                            val savedPlanner =
+                                resumeGoal
+                                    .optJSONObject(
+                                        "planner_envelope"
+                                    )
+
+                            if (
+                                savedPlanner !=
+                                null &&
+                                savedPlanner.length() >
+                                0
+                            ) {
+                                append(
+                                    "SAVED PLANNER v2: "
+                                )
+                                append(
+                                    savedPlanner
+                                        .toString()
+                                        .take(
+                                            2200
+                                        )
+                                )
+                            } else {
+                                append(
+                                    agentPlannerV2
+                                        .compactContext(
+                                            message
+                                        )
+                                )
+                            }
+                        }
+                    }
+                        .take(
+                            4600
+                        )
+
                 // previous_response_id is useful for ordinary conversation,
                 // but Android multi-step execution is continued statelessly
                 // after every device action. This avoids a fragile second
@@ -6428,6 +6474,12 @@ class AyanaVoiceService : Service() {
                             memoryContext =
                                 if (step == 1) {
                                     memoryContext
+                                } else {
+                                    null
+                                },
+                            intelligenceContext =
+                                if (step == 1) {
+                                    intelligenceContext
                                 } else {
                                     null
                                 },
@@ -9535,6 +9587,51 @@ class AyanaVoiceService : Service() {
                         it.isNotBlank()
                     }
 
+            if (id != null) {
+                try {
+                    val plannerEnvelope =
+                        agentPlannerV2
+                            .buildEnvelope(
+                                originalGoal
+                            )
+
+                    val plannerSaved =
+                        durableGoalStore
+                            .attachPlannerEnvelope(
+                                id,
+                                plannerEnvelope
+                            ) != null
+
+                    commandHistoryStore.addEvent(
+                        activeCommandHistoryId,
+                        state =
+                            if (plannerSaved) {
+                                "planner_v2"
+                            } else {
+                                "planner_v2_warning"
+                            },
+                        message =
+                            if (plannerSaved) {
+                                "Planner v2: цель и подцели сохранены"
+                            } else {
+                                "Planner v2: envelope не удалось сохранить"
+                            },
+                        details =
+                            "domain=${plannerEnvelope.optString("domain")}; " +
+                                "complexity=${plannerEnvelope.optString("complexity")}; " +
+                                "subgoals=${plannerEnvelope.optJSONArray("subgoals")?.length() ?: 0}; " +
+                                "terminal=${plannerEnvelope.optString("terminal_criterion")}".take(900)
+                    )
+                } catch (plannerError: Exception) {
+                    commandHistoryStore.addEvent(
+                        activeCommandHistoryId,
+                        state = "planner_v2_warning",
+                        message = "Planner v2 не смог подготовить envelope",
+                        details = plannerError.message.orEmpty().take(260)
+                    )
+                }
+            }
+
             commandHistoryStore.addEvent(
                 activeCommandHistoryId,
                 state = "goal_started",
@@ -9689,37 +9786,33 @@ class AyanaVoiceService : Service() {
         silent: Boolean
     ) {
 
-        val goal =
+        val goals =
             durableGoalStore
-                .getCurrentForUi()
+                .getRecoverableViews(6)
 
         val text =
-            if (goal == null) {
-                "Сейчас нет сохранённой активной цели."
+            if (goals.isEmpty()) {
+                "Сейчас нет сохранённых незавершённых целей."
             } else {
                 buildString {
-                    append(
-                        durableGoalStore
-                            .statusLabel(
-                                goal.status
-                            )
-                    )
-                    append(": ")
-                    append(goal.command)
-                    if (goal.planSize > 0) {
-                        append(". Сохранён шаг ")
-                        append(
-                            (goal.nextPlanStep + 1)
-                                .coerceAtMost(
-                                    goal.planSize
-                                )
-                        )
-                        append(" из ")
-                        append(goal.planSize)
-                    }
-                    if (goal.lastError.isNotBlank()) {
-                        append(". ")
-                        append(goal.lastError)
+                    append("Незавершённых целей: ")
+                    append(goals.size)
+                    append(". ")
+                    goals.forEachIndexed { index, goal ->
+                        if (index > 0) append(" ")
+                        append(index + 1)
+                        append(") ")
+                        if (goal.isCurrent) append("текущая — ")
+                        append(durableGoalStore.statusLabel(goal.status))
+                        append(": ")
+                        append(goal.command.take(180))
+                        if (goal.planSize > 0) {
+                            append("; шаг ")
+                            append((goal.nextPlanStep + 1).coerceAtMost(goal.planSize))
+                            append(" из ")
+                            append(goal.planSize)
+                        }
+                        append(".")
                     }
                 }
             }
@@ -9812,7 +9905,23 @@ class AyanaVoiceService : Service() {
                 "что с активной задачей",
                 "что с текущей целью",
                 "покажи активную цель",
-                "покажи текущую цель"
+                "покажи текущую цель",
+                "покажи цели",
+                "покажи незавершенные цели",
+                "покажи незавершенные задачи",
+                "какие у тебя незавершенные цели",
+                "какие незавершенные задачи"
+            )
+
+    private fun isPreviousDurableGoalResumePhrase(
+        normalized: String
+    ): Boolean =
+        normalized in
+            setOf(
+                "продолжи предыдущую задачу",
+                "продолжи предыдущую цель",
+                "возобнови предыдущую задачу",
+                "возобнови предыдущую цель"
             )
 
     private fun isDurableGoalResumePhrase(
@@ -10047,11 +10156,15 @@ class AyanaVoiceService : Service() {
         previousResponseId: String?,
         toolResults: JSONArray?,
         memoryContext: String?,
+        intelligenceContext: String?,
         source: String
     ): JSONObject {
 
         var connection:
             HttpsURLConnection? = null
+
+        val requestStartedAt =
+            SystemClock.elapsedRealtime()
 
         try {
 
@@ -10136,6 +10249,16 @@ class AyanaVoiceService : Service() {
             }
 
             if (
+                !intelligenceContext
+                    .isNullOrBlank()
+            ) {
+                requestJson.put(
+                    "agent_intelligence_context",
+                    intelligenceContext
+                )
+            }
+
+            if (
                 !previousResponseId
                     .isNullOrBlank()
             ) {
@@ -10209,9 +10332,35 @@ class AyanaVoiceService : Service() {
                 )
             }
 
-            return JSONObject(
-                responseText
-            )
+            val parsed =
+                JSONObject(
+                    responseText
+                )
+
+            capabilityRegistry
+                .recordAgentCoreResult(
+                    success = true,
+                    latencyMs =
+                        SystemClock.elapsedRealtime() -
+                            requestStartedAt
+                )
+
+            return parsed
+
+        } catch (error: Exception) {
+
+            capabilityRegistry
+                .recordAgentCoreResult(
+                    success = false,
+                    latencyMs =
+                        SystemClock.elapsedRealtime() -
+                            requestStartedAt,
+                    error =
+                        error.message
+                            ?: error.javaClass.simpleName
+                )
+
+            throw error
 
         } finally {
 
@@ -10296,6 +10445,39 @@ class AyanaVoiceService : Service() {
 
             "delete_reminder" ->
                 "Удаляю напоминание…"
+
+            "get_device_capabilities" ->
+                "Проверяю возможности устройства…"
+
+            "run_self_diagnostics" ->
+                "Проверяю своё состояние…"
+
+            "list_installed_apps" ->
+                "Проверяю установленные приложения…"
+
+            "resolve_app" ->
+                "Ищу приложение на устройстве…"
+
+            "list_goals" ->
+                "Проверяю незавершённые цели…"
+
+            "select_goal" ->
+                "Выбираю сохранённую цель…"
+
+            "cancel_goal" ->
+                "Отменяю сохранённую цель…"
+
+            "list_memory" ->
+                "Проверяю память…"
+
+            "update_memory" ->
+                "Обновляю память…"
+
+            "update_reminder" ->
+                "Изменяю напоминание…"
+
+            "set_reminder_enabled" ->
+                "Меняю состояние напоминания…"
 
             "execute_android_goal" ->
                 "Выполняю задачу на устройстве…"
@@ -10525,6 +10707,67 @@ class AyanaVoiceService : Service() {
                     agentGetDeviceState()
                 }
 
+                "get_device_capabilities" -> {
+
+                    agentGetDeviceCapabilities()
+                }
+
+                "run_self_diagnostics" -> {
+
+                    agentRunSelfDiagnostics(
+                        focus =
+                            arguments.optString(
+                                "focus",
+                                "all"
+                            ),
+                        appName =
+                            arguments.optString(
+                                "app"
+                            )
+                    )
+                }
+
+                "list_installed_apps" -> {
+
+                    agentListInstalledApps(
+                        arguments.optString(
+                            "query"
+                        )
+                    )
+                }
+
+                "resolve_app" -> {
+
+                    agentResolveApp(
+                        arguments.optString(
+                            "name"
+                        )
+                    )
+                }
+
+                "list_goals" -> {
+
+                    agentListGoals()
+                }
+
+                "select_goal" -> {
+
+                    agentSelectGoal(
+                        arguments.optString(
+                            "query"
+                        )
+                    )
+                }
+
+                "cancel_goal" -> {
+
+                    agentCancelGoal(
+                        arguments.optString(
+                            "query"
+                        )
+                    )
+                }
+
                 "press_back" -> {
 
                     val success =
@@ -10666,6 +10909,33 @@ class AyanaVoiceService : Service() {
                     )
                 }
 
+                "list_memory" -> {
+
+                    agentListMemory(
+                        arguments.optString(
+                            "query"
+                        )
+                    )
+                }
+
+                "update_memory" -> {
+
+                    agentUpdateMemory(
+                        query =
+                            arguments.optString(
+                                "query"
+                            ),
+                        newText =
+                            arguments.optString(
+                                "new_text"
+                            ),
+                        category =
+                            arguments.optString(
+                                "category"
+                            )
+                    )
+                }
+
                 "create_reminder" -> {
 
                     agentCreateReminder(
@@ -10705,6 +10975,52 @@ class AyanaVoiceService : Service() {
                         arguments
                             .optString(
                                 "query"
+                            )
+                    )
+                }
+
+                "update_reminder" -> {
+
+                    agentUpdateReminder(
+                        query =
+                            arguments.optString(
+                                "query"
+                            ),
+                        title =
+                            arguments.optString(
+                                "title"
+                            ),
+                        message =
+                            arguments.optString(
+                                "message"
+                            ),
+                        triggerAtLocal =
+                            arguments.optString(
+                                "trigger_at_local"
+                            ),
+                        recurrence =
+                            arguments.optString(
+                                "recurrence"
+                            ),
+                        enabledMode =
+                            arguments.optString(
+                                "enabled_mode",
+                                "keep"
+                            )
+                    )
+                }
+
+                "set_reminder_enabled" -> {
+
+                    agentSetReminderEnabled(
+                        query =
+                            arguments.optString(
+                                "query"
+                            ),
+                        enabled =
+                            arguments.optBoolean(
+                                "enabled",
+                                true
                             )
                     )
                 }
@@ -11174,13 +11490,48 @@ class AyanaVoiceService : Service() {
         category: String
     ): JSONObject {
 
+        val conflicts =
+            memoryStore
+                .findPotentialConflicts(
+                    text
+                )
+
         val item =
             memoryStore.remember(
                 text = text,
-                category = category
+                category = category,
+                source = "user",
+                provenance = "explicit",
+                confidence = 1.0
             )
 
         return if (item != null) {
+
+            val conflictArray =
+                JSONArray()
+
+            conflicts.forEach { conflict ->
+                if (
+                    conflict.id !=
+                    item.id
+                ) {
+                    conflictArray.put(
+                        JSONObject()
+                            .put(
+                                "id",
+                                conflict.id
+                            )
+                            .put(
+                                "text",
+                                conflict.text
+                            )
+                            .put(
+                                "category",
+                                conflict.category
+                            )
+                    )
+                }
+            }
 
             JSONObject()
                 .put(
@@ -11189,7 +11540,7 @@ class AyanaVoiceService : Service() {
                 )
                 .put(
                     "message",
-                    "Сохранено в долговременную память"
+                    "Сохранено в долговременную память v2"
                 )
                 .put(
                     "memory",
@@ -11206,6 +11557,22 @@ class AyanaVoiceService : Service() {
                             "category",
                             item.category
                         )
+                        .put(
+                            "source",
+                            item.source
+                        )
+                        .put(
+                            "provenance",
+                            item.provenance
+                        )
+                        .put(
+                            "confidence",
+                            item.confidence
+                        )
+                )
+                .put(
+                    "potential_conflicts",
+                    conflictArray
                 )
 
         } else {
@@ -11675,6 +12042,611 @@ class AyanaVoiceService : Service() {
             )
     }
 
+    private fun agentGetDeviceCapabilities(): JSONObject =
+        capabilityRegistry
+            .snapshot()
+
+    private fun agentRunSelfDiagnostics(
+        focus: String,
+        appName: String
+    ): JSONObject =
+        selfDiagnostics
+            .run(
+                focus = focus,
+                appName = appName
+            )
+
+    private fun agentListInstalledApps(
+        query: String
+    ): JSONObject {
+
+        val clean =
+            query.trim()
+
+        if (
+            clean.isBlank()
+        ) {
+            return appResolver
+                .listAsJson(
+                    limit = 120,
+                    forceRefresh = true
+                )
+        }
+
+        val resolution =
+            appResolver
+                .resolve(
+                    clean,
+                    forceRefresh = true
+                )
+
+        return JSONObject()
+            .put(
+                "success",
+                resolution.success
+            )
+            .put(
+                "query",
+                clean
+            )
+            .put(
+                "resolution",
+                resolution.toJson()
+            )
+            .put(
+                "message",
+                if (resolution.success) {
+                    "Найдено приложение ${resolution.label}"
+                } else {
+                    "Надёжное совпадение не найдено"
+                }
+            )
+    }
+
+    private fun agentResolveApp(
+        name: String
+    ): JSONObject =
+        appResolver
+            .resolve(
+                name,
+                forceRefresh = true
+            )
+            .toJson()
+
+    private fun agentListGoals(): JSONObject {
+
+        val goals =
+            durableGoalStore
+                .getRecoverableJson(
+                    20
+                )
+
+        val safeGoals =
+            JSONArray()
+
+        for (
+            i in
+            0 until goals.length()
+        ) {
+            val item =
+                goals.optJSONObject(i)
+                    ?: continue
+
+            val planner =
+                item.optJSONObject(
+                    "planner_envelope"
+                )
+                    ?: JSONObject()
+
+            safeGoals.put(
+                JSONObject()
+                    .put(
+                        "id",
+                        item.optString(
+                            "id"
+                        )
+                    )
+                    .put(
+                        "command",
+                        item.optString(
+                            "command"
+                        )
+                    )
+                    .put(
+                        "status",
+                        item.optString(
+                            "status"
+                        )
+                    )
+                    .put(
+                        "is_current",
+                        item.optBoolean(
+                            "is_current",
+                            false
+                        )
+                    )
+                    .put(
+                        "updated_at",
+                        item.optLong(
+                            "updated_at",
+                            0L
+                        )
+                    )
+                    .put(
+                        "next_plan_step",
+                        item.optInt(
+                            "next_plan_step",
+                            0
+                        )
+                    )
+                    .put(
+                        "plan_size",
+                        item.optInt(
+                            "plan_size",
+                            0
+                        )
+                    )
+                    .put(
+                        "last_checkpoint",
+                        item.optString(
+                            "last_checkpoint"
+                        )
+                    )
+                    .put(
+                        "last_error",
+                        item.optString(
+                            "last_error"
+                        )
+                    )
+                    .put(
+                        "planner_domain",
+                        planner.optString(
+                            "domain"
+                        )
+                    )
+                    .put(
+                        "planner_subgoals",
+                        planner.optJSONArray(
+                            "subgoals"
+                        )
+                            ?.length()
+                            ?: 0
+                    )
+            )
+        }
+
+        return JSONObject()
+            .put(
+                "success",
+                true
+            )
+            .put(
+                "count",
+                safeGoals.length()
+            )
+            .put(
+                "goals",
+                safeGoals
+            )
+    }
+
+    private fun agentSelectGoal(
+        query: String
+    ): JSONObject {
+
+        val selected =
+            durableGoalStore
+                .selectRecoverableByQuery(
+                    query
+                )
+                ?: return toolResult(
+                    false,
+                    "Незавершённая цель не найдена или запрос неоднозначен"
+                )
+
+        return JSONObject()
+            .put(
+                "success",
+                true
+            )
+            .put(
+                "goal_id",
+                selected.optString(
+                    "id"
+                )
+            )
+            .put(
+                "command",
+                selected.optString(
+                    "command"
+                )
+            )
+            .put(
+                "status",
+                selected.optString(
+                    "status"
+                )
+            )
+            .put(
+                "message",
+                "Цель выбрана. Для выполнения пользователь может явно сказать «продолжи задачу»."
+            )
+    }
+
+    private fun agentCancelGoal(
+        query: String
+    ): JSONObject {
+
+        val selected =
+            durableGoalStore
+                .selectRecoverableByQuery(
+                    query
+                )
+                ?: return toolResult(
+                    false,
+                    "Незавершённая цель не найдена или запрос неоднозначен"
+                )
+
+        val id =
+            selected.optString(
+                "id"
+            )
+
+        val cancelled =
+            durableGoalStore
+                .markCancelled(
+                    id,
+                    "Отменена пользователем"
+                )
+
+        return toolResult(
+            cancelled != null,
+            if (cancelled != null) {
+                "Цель отменена: ${selected.optString("command")}"
+            } else {
+                "Не удалось надёжно сохранить отмену цели"
+            }
+        )
+    }
+
+    private fun agentListMemory(
+        query: String
+    ): JSONObject =
+        memoryStore
+            .asJson(
+                query = query,
+                limit = 50
+            )
+
+    private fun agentUpdateMemory(
+        query: String,
+        newText: String,
+        category: String
+    ): JSONObject {
+
+        val conflicts =
+            memoryStore
+                .findPotentialConflicts(
+                    newText
+                )
+
+        val result =
+            memoryStore
+                .updateByQuery(
+                    query = query,
+                    newText = newText,
+                    newCategory = category
+                        .trim()
+                        .ifBlank {
+                            null
+                        },
+                    source = "user"
+                )
+
+        val conflictArray =
+            JSONArray()
+
+        conflicts.forEach { item ->
+            conflictArray.put(
+                JSONObject()
+                    .put(
+                        "id",
+                        item.id
+                    )
+                    .put(
+                        "text",
+                        item.text
+                    )
+                    .put(
+                        "category",
+                        item.category
+                    )
+            )
+        }
+
+        return JSONObject()
+            .put(
+                "success",
+                result.success
+            )
+            .put(
+                "message",
+                result.message
+            )
+            .put(
+                "matched",
+                result.matched
+            )
+            .put(
+                "updated_id",
+                result.item?.id.orEmpty()
+            )
+            .put(
+                "updated_text",
+                result.item?.text.orEmpty()
+            )
+            .put(
+                "potential_conflicts",
+                conflictArray
+            )
+    }
+
+    private fun parseLocalTaskTimeOrNull(
+        value: String
+    ): Long? {
+
+        val clean =
+            value.trim()
+
+        if (
+            clean.isBlank()
+        ) {
+            return null
+        }
+
+        return try {
+            LocalDateTime
+                .parse(
+                    clean,
+                    DateTimeFormatter
+                        .ofPattern(
+                            "yyyy-MM-dd'T'HH:mm:ss"
+                        )
+                )
+                .atZone(
+                    ZoneId.systemDefault()
+                )
+                .toInstant()
+                .toEpochMilli()
+        } catch (_: Exception) {
+            null
+        }
+    }
+
+    private fun agentUpdateReminder(
+        query: String,
+        title: String,
+        message: String,
+        triggerAtLocal: String,
+        recurrence: String,
+        enabledMode: String
+    ): JSONObject {
+
+        val matches =
+            taskStore
+                .findByQuery(
+                    query,
+                    3
+                )
+
+        if (
+            matches.size !=
+            1
+        ) {
+            val candidates =
+                JSONArray()
+
+            matches.forEach { task ->
+                candidates.put(
+                    JSONObject()
+                        .put(
+                            "id",
+                            task.id
+                        )
+                        .put(
+                            "title",
+                            task.title
+                        )
+                )
+            }
+
+            return JSONObject()
+                .put(
+                    "success",
+                    false
+                )
+                .put(
+                    "message",
+                    if (matches.isEmpty()) {
+                        "Напоминание не найдено"
+                    } else {
+                        "Найдено несколько похожих напоминаний; уточните"
+                    }
+                )
+                .put(
+                    "candidates",
+                    candidates
+                )
+        }
+
+        val old =
+            matches.first()
+
+        val parsedTrigger =
+            if (
+                triggerAtLocal.isBlank()
+            ) {
+                null
+            } else {
+                parseLocalTaskTimeOrNull(
+                    triggerAtLocal
+                )
+                    ?: return toolResult(
+                        false,
+                        "Неверный формат нового времени; нужен YYYY-MM-DDTHH:mm:ss"
+                    )
+            }
+
+        if (
+            parsedTrigger !=
+            null &&
+            parsedTrigger <=
+            System.currentTimeMillis()
+        ) {
+            return toolResult(
+                false,
+                "Новое время напоминания уже прошло"
+            )
+        }
+
+        val enabled =
+            when (
+                enabledMode
+                    .trim()
+                    .lowercase(
+                        Locale.ROOT
+                    )
+            ) {
+                "true",
+                "enable",
+                "enabled",
+                "включить" ->
+                    true
+                "false",
+                "disable",
+                "disabled",
+                "отключить" ->
+                    false
+                else ->
+                    null
+            }
+
+        val updated =
+            taskStore
+                .updateTask(
+                    id = old.id,
+                    title = title.trim()
+                        .ifBlank {
+                            null
+                        },
+                    message = message.trim()
+                        .ifBlank {
+                            null
+                        },
+                    triggerAtMillis = parsedTrigger,
+                    recurrence = recurrence.trim()
+                        .ifBlank {
+                            null
+                        },
+                    enabled = enabled
+                )
+                ?: return toolResult(
+                    false,
+                    "Не удалось изменить напоминание"
+                )
+
+        taskScheduler
+            .cancel(
+                old
+            )
+
+        if (
+            updated.enabled &&
+            updated.triggerAtMillis >
+            System.currentTimeMillis()
+        ) {
+            val schedule =
+                taskScheduler
+                    .schedule(
+                        updated
+                    )
+
+            if (!schedule.success) {
+                // Fail closed: restore the old task and schedule rather than
+                // silently leaving edited metadata without a real alarm.
+                taskStore.updateTask(
+                    id = old.id,
+                    title = old.title,
+                    message = old.message,
+                    triggerAtMillis = old.triggerAtMillis,
+                    recurrence = old.recurrence,
+                    enabled = old.enabled
+                )
+                if (
+                    old.enabled &&
+                    old.triggerAtMillis >
+                    System.currentTimeMillis()
+                ) {
+                    taskScheduler.schedule(
+                        old
+                    )
+                }
+                return toolResult(
+                    false,
+                    "Изменение отменено: Android не смог перепланировать напоминание"
+                )
+            }
+        }
+
+        return JSONObject()
+            .put(
+                "success",
+                true
+            )
+            .put(
+                "task_id",
+                updated.id
+            )
+            .put(
+                "title",
+                updated.title
+            )
+            .put(
+                "enabled",
+                updated.enabled
+            )
+            .put(
+                "recurrence",
+                updated.recurrence
+            )
+            .put(
+                "trigger_at_millis",
+                updated.triggerAtMillis
+            )
+            .put(
+                "message",
+                "Напоминание обновлено"
+            )
+    }
+
+    private fun agentSetReminderEnabled(
+        query: String,
+        enabled: Boolean
+    ): JSONObject =
+        agentUpdateReminder(
+            query = query,
+            title = "",
+            message = "",
+            triggerAtLocal = "",
+            recurrence = "",
+            enabledMode =
+                if (enabled) {
+                    "true"
+                } else {
+                    "false"
+                }
+        )
+
     private fun toolResult(
         success: Boolean,
         message: String
@@ -11695,383 +12667,99 @@ class AyanaVoiceService : Service() {
         requestedName: String
     ): JSONObject {
 
-        val query =
-            normalizeAppName(
-                requestedName
-            )
-
-        if (query.isBlank()) {
-
-            return toolResult(
-                false,
-                "Название приложения пустое"
-            )
-        }
-
-        val known =
-            knownAppForQuery(
-                query
-            )
-
-        if (known != null) {
-
-            for (
-                packageName in
-                known.second
-            ) {
-
-                try {
-
-                    val intent =
-                        Intent(
-                            Intent.ACTION_MAIN
-                        ).apply {
-
-                            addCategory(
-                                Intent.CATEGORY_LAUNCHER
-                            )
-
-                            setPackage(
-                                packageName
-                            )
-
-                            addFlags(
-                                Intent.FLAG_ACTIVITY_NEW_TASK or
-                                    Intent.FLAG_ACTIVITY_RESET_TASK_IF_NEEDED
-                            )
-                        }
-
-                    startActivity(
-                        intent
-                    )
-
-                    return toolResult(
-                        true,
-                        "Открыто приложение ${known.first}"
-                    )
-
-                } catch (_: Exception) {
-                }
-            }
-        }
-
-        val launcherIntent =
-            Intent(
-                Intent.ACTION_MAIN
-            ).apply {
-
-                addCategory(
-                    Intent.CATEGORY_LAUNCHER
+        val result =
+            appResolver
+                .launch(
+                    requestedName
                 )
-            }
 
-        val activities =
-            try {
-
-                @Suppress("DEPRECATION")
-                packageManager
-                    .queryIntentActivities(
-                        launcherIntent,
-                        0
+        commandHistoryStore.addEvent(
+            activeCommandHistoryId,
+            state =
+                if (
+                    result.optBoolean(
+                        "success",
+                        false
                     )
+                ) {
+                    "app_resolved"
+                } else {
+                    "app_resolver_miss"
+                },
+            message =
+                result.optString(
+                    "message",
+                    "App Resolver v2"
+                ),
+            details =
+                "package=${result.optString("package")}; " +
+                    "confidence=${result.optInt("confidence", 0)}; " +
+                    "source=${result.optString("source")}; " +
+                    "reason=${result.optString("reason")}".take(520)
+        )
 
-            } catch (_: Exception) {
-
-                emptyList()
-            }
-
-        val best =
-            activities
-                .map { info ->
-
-                    val label =
-                        try {
-
-                            info
-                                .loadLabel(
-                                    packageManager
-                                )
-                                ?.toString()
-                                .orEmpty()
-
-                        } catch (_: Exception) {
-
-                            ""
-                        }
-
-                    Triple(
-                        info,
-                        label,
-                        appNameScore(
-                            query,
-                            label
-                        )
-                    )
-                }
-                .filter {
-                    it.third > 0
-                }
-                .maxByOrNull {
-                    it.third
-                }
-
-        if (
-            best == null ||
-            best.third < 70
-        ) {
-
-            return toolResult(
-                false,
-                "Приложение не найдено: $requestedName"
-            )
-        }
-
-        return try {
-
-            val activityInfo =
-                best.first
-                    .activityInfo
-
-            val label =
-                best.second
-                    .ifBlank {
-                        requestedName
-                    }
-
-            val intent =
-                Intent(
-                    Intent.ACTION_MAIN
-                ).apply {
-
-                    addCategory(
-                        Intent.CATEGORY_LAUNCHER
-                    )
-
-                    component =
-                        ComponentName(
-                            activityInfo
-                                .packageName,
-                            activityInfo
-                                .name
-                        )
-
-                    addFlags(
-                        Intent.FLAG_ACTIVITY_NEW_TASK or
-                            Intent.FLAG_ACTIVITY_RESET_TASK_IF_NEEDED
-                    )
-                }
-
-            startActivity(
-                intent
-            )
-
-            toolResult(
-                true,
-                "Открыто приложение $label"
-            )
-
-        } catch (
-            error: Exception
-        ) {
-
-            toolResult(
-                false,
-                "Не удалось открыть $requestedName: " +
-                    (
-                        error.message
-                            ?: "неизвестная ошибка"
-                        )
-            )
-        }
+        return result
     }
 
     private fun agentOpenAppInfo(
         requestedName: String
     ): JSONObject {
 
-        val query =
-            normalizeAppName(
-                requestedName
-            )
-
-        if (query.isBlank()) {
-
-            return toolResult(
-                false,
-                "Название приложения пустое"
-            )
-        }
-
-        var resolvedPackage:
-            String? = null
-
-        var resolvedLabel =
-            requestedName
-
-        val known =
-            knownAppForQuery(
-                query
-            )
-
-        if (known != null) {
-
-            for (
-                candidate in
-                known.second
-            ) {
-
-                try {
-
-                    @Suppress("DEPRECATION")
-                    val appInfo =
-                        packageManager
-                            .getApplicationInfo(
-                                candidate,
-                                0
-                            )
-
-                    resolvedPackage =
-                        candidate
-
-                    resolvedLabel =
-                        try {
-                            appInfo
-                                .loadLabel(
-                                    packageManager
-                                )
-                                ?.toString()
-                                .orEmpty()
-                                .ifBlank {
-                                    known.first
-                                }
-                        } catch (_: Exception) {
-                            known.first
-                        }
-
-                    break
-
-                } catch (_: Exception) {
-                }
-            }
-        }
-
-        if (resolvedPackage == null) {
-
-            val launcherIntent =
-                Intent(
-                    Intent.ACTION_MAIN
-                ).apply {
-
-                    addCategory(
-                        Intent.CATEGORY_LAUNCHER
-                    )
-                }
-
-            val activities =
-                try {
-
-                    @Suppress("DEPRECATION")
-                    packageManager
-                        .queryIntentActivities(
-                            launcherIntent,
-                            0
-                        )
-
-                } catch (_: Exception) {
-
-                    emptyList()
-                }
-
-            val best =
-                activities
-                    .map { info ->
-
-                        val label =
-                            try {
-                                info
-                                    .loadLabel(
-                                        packageManager
-                                    )
-                                    ?.toString()
-                                    .orEmpty()
-                            } catch (_: Exception) {
-                                ""
-                            }
-
-                        Triple(
-                            info,
-                            label,
-                            appNameScore(
-                                query,
-                                label
-                            )
-                        )
-                    }
-                    .filter {
-                        it.third > 0
-                    }
-                    .maxByOrNull {
-                        it.third
-                    }
-
-            if (
-                best != null &&
-                best.third >= 70
-            ) {
-
-                resolvedPackage =
-                    best.first
-                        .activityInfo
-                        .packageName
-
-                resolvedLabel =
-                    best.second
-                        .ifBlank {
-                            requestedName
-                        }
-            }
-        }
-
-        val packageName =
-            resolvedPackage
-                ?: return toolResult(
-                    false,
-                    "Приложение не найдено: $requestedName"
+        val resolved =
+            appResolver
+                .resolve(
+                    requestedName
                 )
 
-        return try {
+        if (!resolved.success) {
+            return resolved.toJson()
+                .put(
+                    "message",
+                    "Приложение не найдено: $requestedName"
+                )
+        }
 
+        commandHistoryStore.addEvent(
+            activeCommandHistoryId,
+            state = "app_resolved",
+            message = "App Resolver v2: ${resolved.label}",
+            details =
+                "package=${resolved.packageName}; confidence=${resolved.confidence}; source=${resolved.source}"
+        )
+
+        return try {
             startActivity(
                 Intent(
                     Settings.ACTION_APPLICATION_DETAILS_SETTINGS,
                     Uri.parse(
-                        "package:$packageName"
+                        "package:${resolved.packageName}"
                     )
                 ).apply {
-
                     addFlags(
                         Intent.FLAG_ACTIVITY_NEW_TASK
                     )
                 }
             )
 
-            toolResult(
-                true,
-                "Открыта информация о приложении $resolvedLabel"
-            )
-
-        } catch (
-            error: Exception
-        ) {
-
-            toolResult(
-                false,
-                "Не удалось открыть информацию о приложении $resolvedLabel: " +
-                    (
-                        error.message
-                            ?: "неизвестная ошибка"
-                        )
-            )
+            resolved.toJson()
+                .put(
+                    "success",
+                    true
+                )
+                .put(
+                    "message",
+                    "Открыта информация о приложении ${resolved.label}"
+                )
+        } catch (error: Exception) {
+            resolved.toJson()
+                .put(
+                    "success",
+                    false
+                )
+                .put(
+                    "message",
+                    "Не удалось открыть информацию о приложении ${resolved.label}: ${error.message ?: "неизвестная ошибка"}"
+                )
         }
     }
 
@@ -12241,132 +12929,39 @@ class AyanaVoiceService : Service() {
         requestedName: String
     ): Pair<String, String>? {
 
-        val query =
-            normalizeAppName(
-                requestedName
-            )
-
-        if (query.isBlank()) {
-            return null
-        }
-
-        val known =
-            knownAppForQuery(
-                query
-            )
-
-        if (known != null) {
-
-            for (
-                candidate in
-                known.second
-            ) {
-
-                try {
-
-                    @Suppress("DEPRECATION")
-                    val appInfo =
-                        packageManager
-                            .getApplicationInfo(
-                                candidate,
-                                0
-                            )
-
-                    val label =
-                        try {
-                            appInfo
-                                .loadLabel(
-                                    packageManager
-                                )
-                                ?.toString()
-                                .orEmpty()
-                                .ifBlank {
-                                    known.first
-                                }
-                        } catch (_: Exception) {
-                            known.first
-                        }
-
-                    return candidate to label
-
-                } catch (_: Exception) {
-                }
-            }
-        }
-
-        val launcherIntent =
-            Intent(
-                Intent.ACTION_MAIN
-            ).apply {
-
-                addCategory(
-                    Intent.CATEGORY_LAUNCHER
-                )
-            }
-
-        val activities =
-            try {
-
-                @Suppress("DEPRECATION")
-                packageManager
-                    .queryIntentActivities(
-                        launcherIntent,
-                        0
-                    )
-
-            } catch (_: Exception) {
-
-                emptyList()
-            }
-
-        val best =
-            activities
-                .map { info ->
-
-                    val label =
-                        try {
-                            info
-                                .loadLabel(
-                                    packageManager
-                                )
-                                ?.toString()
-                                .orEmpty()
-                        } catch (_: Exception) {
-                            ""
-                        }
-
-                    Triple(
-                        info,
-                        label,
-                        appNameScore(
-                            query,
-                            label
-                        )
-                    )
-                }
-                .filter {
-                    it.third > 0
-                }
-                .maxByOrNull {
-                    it.third
-                }
-
-        if (
-            best == null ||
-            best.third < 70
-        ) {
-            return null
-        }
-
-        return (
-            best.first
-                .activityInfo
-                .packageName
-            ) to
-            best.second
-                .ifBlank {
+        val resolved =
+            appResolver
+                .resolve(
                     requestedName
-                }
+                )
+
+        commandHistoryStore.addEvent(
+            activeCommandHistoryId,
+            state =
+                if (resolved.success) {
+                    "app_resolved"
+                } else {
+                    "app_resolver_miss"
+                },
+            message =
+                if (resolved.success) {
+                    "App Resolver v2: ${resolved.label}"
+                } else {
+                    "App Resolver v2: приложение не разрешено"
+                },
+            details =
+                "requested=${requestedName.take(120)}; " +
+                    "package=${resolved.packageName}; " +
+                    "confidence=${resolved.confidence}; " +
+                    "source=${resolved.source}; " +
+                    "reason=${resolved.reason}".take(620)
+        )
+
+        if (!resolved.success) {
+            return null
+        }
+
+        return resolved.packageName to resolved.label
     }
 
     private fun agentOpenAppSettings(
@@ -14636,6 +15231,10 @@ class AyanaVoiceService : Service() {
 
         modelReady =
             false
+        capabilityRegistry
+            .recordRecognitionReady(
+                false
+            )
 
         if (
             Build.VERSION.SDK_INT >=
@@ -14708,6 +15307,10 @@ class AyanaVoiceService : Service() {
 
         modelReady =
             false
+        capabilityRegistry
+            .recordRecognitionReady(
+                false
+            )
 
         miniOrbController
             .hide()
