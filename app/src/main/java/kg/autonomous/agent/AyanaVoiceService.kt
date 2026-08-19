@@ -52,7 +52,7 @@ import kotlin.math.abs
 
 class AyanaVoiceService : Service() {
 
-    // AYANA v11.0 AGENT INTELLIGENCE CORE FINAL.
+    // AYANA v11.1.1 COMMAND & APP INTELLIGENCE FINAL.
     // Built on the confirmed v9.1 baseline. The v9.0/v9.1 audio, STOP and local
     // fast-routing stack is intentionally frozen: streamed 24 kHz Marin PCM,
     // VOICE_COMMUNICATION/AEC/NS, barge-in STOP and Russian local arithmetic
@@ -3527,6 +3527,14 @@ class AyanaVoiceService : Service() {
                     ) ||
                 normalized
                     .startsWith(
+                        "найди мне в google "
+                    ) ||
+                normalized
+                    .startsWith(
+                        "найди мне в гугле "
+                    ) ||
+                normalized
+                    .startsWith(
                         "поищи в google "
                     ) ||
                 normalized
@@ -3576,11 +3584,19 @@ class AyanaVoiceService : Service() {
                 ) ||
                 normalized
                     .startsWith(
+                        "найди мне на карте "
+                    ) ||
+                normalized
+                    .startsWith(
                         "найди в картах "
                     ) ||
                 normalized
                     .startsWith(
                         "покажи на карте "
+                    ) ||
+                normalized
+                    .startsWith(
+                        "покажи мне на карте "
                     ) -> {
 
                 val query =
@@ -3596,11 +3612,29 @@ class AyanaVoiceService : Service() {
                                 .trim()
 
                         normalized.startsWith(
+                            "найди мне на карте "
+                        ) ->
+                            normalized
+                                .removePrefix(
+                                    "найди мне на карте "
+                                )
+                                .trim()
+
+                        normalized.startsWith(
                             "найди в картах "
                         ) ->
                             normalized
                                 .removePrefix(
                                     "найди в картах "
+                                )
+                                .trim()
+
+                        normalized.startsWith(
+                            "покажи мне на карте "
+                        ) ->
+                            normalized
+                                .removePrefix(
+                                    "покажи мне на карте "
                                 )
                                 .trim()
 
@@ -3629,6 +3663,53 @@ class AyanaVoiceService : Service() {
 
         val target =
             routingNormalized
+                // Longest/natural launch phrases first. The resolver still validates
+                // the final app against the real launcher map before any launch.
+                .removePrefix(
+                    "открой мне приложение "
+                )
+                .removePrefix(
+                    "открой мне программу "
+                )
+                .removePrefix(
+                    "запусти мне приложение "
+                )
+                .removePrefix(
+                    "запусти мне программу "
+                )
+                .removePrefix(
+                    "зайди в приложение "
+                )
+                .removePrefix(
+                    "перейди в приложение "
+                )
+                .removePrefix(
+                    "покажи приложение "
+                )
+                .removePrefix(
+                    "открой приложение "
+                )
+                .removePrefix(
+                    "запусти приложение "
+                )
+                .removePrefix(
+                    "включи приложение "
+                )
+                .removePrefix(
+                    "открой программу "
+                )
+                .removePrefix(
+                    "запусти программу "
+                )
+                .removePrefix(
+                    "включи программу "
+                )
+                .removePrefix(
+                    "открой мне "
+                )
+                .removePrefix(
+                    "запусти мне "
+                )
                 .removePrefix(
                     "открой "
                 )
@@ -3788,9 +3869,16 @@ class AyanaVoiceService : Service() {
                 )
 
             "chatgpt",
+            "chat gpt",
             "чат gpt",
+            "чат гпт",
+            "чат жпт",
             "чатгпт",
-            "чат джипити" ->
+            "чатжпт",
+            "чат джипити",
+            "чат жипити",
+            "чат джи пи ти",
+            "джипити" ->
                 openApp(
                     "ChatGPT",
                     silent,
@@ -3798,7 +3886,11 @@ class AyanaVoiceService : Service() {
                 )
 
             "telegram",
-            "телеграм" ->
+            "телеграм",
+            "телеграмм",
+            "телега",
+            "телегу",
+            "телеги" ->
                 openApp(
                     "Telegram",
                     silent,
@@ -3806,8 +3898,12 @@ class AyanaVoiceService : Service() {
                 )
 
             "whatsapp",
+            "whats app",
             "ватсап",
-            "вотсап" ->
+            "вотсап",
+            "вацап",
+            "ватс апп",
+            "вотс апп" ->
                 openApp(
                     "WhatsApp",
                     silent,
@@ -3930,10 +4026,15 @@ class AyanaVoiceService : Service() {
 
                 } else if (
                     isAppLaunchCommand(
-                        normalized
-                    )
+                        routingNormalized
+                    ) ||
+                    target in
+                        KNOWN_LOCAL_LAUNCH_ALIASES
                 ) {
 
+                    // v11.1.1: known aliases may be spoken as a bare follow-up
+                    // («телеграм», «чат жпт», «спотифай»). Unknown phrases still
+                    // go to Agent Core; we never fuzzy-launch an arbitrary sentence.
                     openInstalledAppByName(
                         target,
                         silent
@@ -4022,15 +4123,15 @@ class AyanaVoiceService : Service() {
             listOf(
                 "notifications" to
                     Regex(
-                        """^(?:(?:открой|покажи)\s+)?(?:настройк\p{L}*\s+)?уведомлен\p{L}*(?:\s+(?:для|у))?(?:\s+приложени\p{L}*)?\s+(.+)$"""
+                        """^(?:(?:(?:открой|покажи)(?:\s+мне)?|зайди\s+в|перейди\s+в)\s+)?(?:настройк\p{L}*\s+)?уведомлен\p{L}*(?:\s+(?:для|у|в|во))?(?:\s+приложени\p{L}*)?\s+(.+)$"""
                     ),
                 "open_by_default" to
                     Regex(
-                        """^(?:(?:открой|покажи)\s+)?(?:настройк\p{L}*\s+)?(?:открыти\p{L}*\s+по\s+умолчани\p{L}*|по\s+умолчани\p{L}*)(?:\s+(?:для|у))?(?:\s+приложени\p{L}*)?\s+(.+)$"""
+                        """^(?:(?:(?:открой|покажи)(?:\s+мне)?|зайди\s+в|перейди\s+в)\s+)?(?:настройк\p{L}*\s+)?(?:открыти\p{L}*\s+по\s+умолчани\p{L}*|по\s+умолчани\p{L}*)(?:\s+(?:для|у|в|во))?(?:\s+приложени\p{L}*)?\s+(.+)$"""
                     ),
                 "language" to
                     Regex(
-                        """^(?:(?:открой|покажи)\s+)?(?:настройк\p{L}*\s+)?язык\p{L}*(?:\s+(?:для|у))?(?:\s+приложени\p{L}*)?\s+(.+)$"""
+                        """^(?:(?:(?:открой|покажи)(?:\s+мне)?|зайди\s+в|перейди\s+в)\s+)?(?:настройк\p{L}*\s+)?язык\p{L}*(?:\s+(?:для|у|в|во))?(?:\s+приложени\p{L}*)?\s+(.+)$"""
                     )
             )
 
@@ -4615,7 +4716,9 @@ class AyanaVoiceService : Service() {
 
         fun opensSettingsTopic(): Boolean =
             c.startsWith("открой ") ||
+                c.startsWith("открой мне ") ||
                 c.startsWith("покажи ") ||
+                c.startsWith("покажи мне ") ||
                 c.startsWith("зайди ") ||
                 c.startsWith("перейди ") ||
                 c.startsWith("настройки ") ||
@@ -4847,6 +4950,13 @@ class AyanaVoiceService : Service() {
         return command == "громче" ||
             command.contains("погромч") ||
             (
+                command.contains("прибав") &&
+                    (
+                        command.contains("громк") ||
+                            command.contains("звук")
+                        )
+                ) ||
+            (
                 command.contains("увелич") &&
                     (
                         command.contains("громк") ||
@@ -4865,6 +4975,13 @@ class AyanaVoiceService : Service() {
 
         return command == "тише" ||
             command.contains("потише") ||
+            (
+                command.contains("убав") &&
+                    (
+                        command.contains("громк") ||
+                            command.contains("звук")
+                        )
+                ) ||
             (
                 command.contains("уменьш") &&
                     (
@@ -5293,6 +5410,9 @@ class AyanaVoiceService : Service() {
 
                 query =
                     query
+                        .removePrefix(
+                            "мне "
+                        )
                         .removePrefix(
                             "в ютубе "
                         )
@@ -15452,12 +15572,24 @@ class AyanaVoiceService : Service() {
 
         private val APP_LAUNCH_PREFIXES =
             listOf(
+                "открой мне приложение ",
+                "открой мне программу ",
+                "запусти мне приложение ",
+                "запусти мне программу ",
+                "зайди в приложение ",
+                "перейди в приложение ",
+                "покажи приложение ",
+                "открой приложение ",
+                "запусти приложение ",
+                "включи приложение ",
+                "открой программу ",
+                "запусти программу ",
+                "включи программу ",
+                "открой мне ",
+                "запусти мне ",
                 "открой ",
                 "запусти ",
-                "включи ",
-                "включи приложение ",
-                "открой приложение ",
-                "запусти приложение "
+                "включи "
             )
 
         // Exact aliases already handled by the deterministic local `when (target)`
@@ -15466,63 +15598,170 @@ class AyanaVoiceService : Service() {
             setOf(
                 "youtube",
                 "ютуб",
+                "ютуба",
+                "ютубе",
+                "ютьюб",
+                "ютюб",
                 "chrome",
+                "google chrome",
                 "хром",
+                "хрома",
                 "гугл хром",
                 "браузер",
                 "интернет",
+                "samsung internet",
                 "самсунг интернет",
+                "браузер самсунг",
                 "gmail",
                 "джимейл",
+                "джимэйл",
+                "гмейл",
                 "почта",
                 "электронная почта",
                 "карты",
+                "карта",
                 "google maps",
+                "maps",
                 "гугл карты",
+                "гугл мапс",
                 "play market",
                 "play store",
+                "google play",
                 "плей маркет",
+                "плей стор",
                 "гугл плей",
+                "магазин приложений",
                 "камера",
                 "камеру",
+                "camera",
                 "галерея",
                 "галерею",
+                "gallery",
                 "фото",
                 "фотографии",
+                "фотки",
+                "google фото",
+                "google photos",
+                "гугл фото",
+                "гугл фотографии",
                 "переводчик",
                 "переводчика",
                 "google переводчик",
                 "гугл переводчик",
                 "translate",
                 "google translate",
-                "google фото",
-                "гугл фото",
                 "файлы",
                 "мои файлы",
+                "files",
+                "my files",
+                "проводник",
                 "калькулятор",
+                "калькулятора",
+                "calculator",
                 "календарь",
+                "календаря",
+                "calendar",
                 "часы",
+                "clock",
                 "будильник",
                 "сообщения",
+                "messages",
                 "смс",
+                "sms",
                 "контакты",
+                "contacts",
                 "chatgpt",
+                "chat gpt",
                 "чат gpt",
+                "чат гпт",
+                "чат жпт",
                 "чатгпт",
+                "чатжпт",
                 "чат джипити",
+                "чат жипити",
+                "чат джи пи ти",
+                "джипити",
                 "telegram",
                 "телеграм",
+                "телеграмм",
+                "телега",
+                "телегу",
+                "телеги",
                 "whatsapp",
+                "whats app",
                 "ватсап",
                 "вотсап",
+                "вацап",
+                "ватс апп",
+                "вотс апп",
+                "viber",
+                "вайбер",
+                "instagram",
+                "инстаграм",
+                "facebook",
+                "фейсбук",
+                "tiktok",
+                "tik tok",
+                "тикток",
+                "тик ток",
+                "spotify",
+                "спотифай",
+                "netflix",
+                "нетфликс",
+                "vk",
+                "вк",
+                "вконтакте",
                 "google",
                 "гугл",
+                "google app",
                 "диск",
+                "drive",
+                "google drive",
                 "google диск",
                 "гугл диск",
                 "заметки",
                 "samsung notes",
-                "самсунг ноутс"
+                "самсунг ноутс",
+                "самсунг заметки",
+                "ноутс",
+                "zoom",
+                "зум",
+                "teams",
+                "microsoft teams",
+                "майкрософт тимс",
+                "тимс",
+                "outlook",
+                "аутлук",
+                "word",
+                "ворд",
+                "microsoft word",
+                "excel",
+                "эксель",
+                "microsoft excel",
+                "powerpoint",
+                "power point",
+                "пауэрпоинт",
+                "паверпоинт",
+                "microsoft powerpoint",
+                "onedrive",
+                "one drive",
+                "ван драйв",
+                "onenote",
+                "one note",
+                "ван ноут",
+                "google meet",
+                "meet",
+                "гугл мит",
+                "мит",
+                "2gis",
+                "2 gis",
+                "два гис",
+                "тугис",
+                "яндекс карты",
+                "yandex maps",
+                "yandex карты",
+                "яндекс браузер",
+                "yandex browser"
             )
 
         private val WAKE_VARIANTS =
