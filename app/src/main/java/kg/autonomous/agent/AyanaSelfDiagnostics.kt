@@ -5,8 +5,15 @@ import org.json.JSONArray
 import org.json.JSONObject
 
 /**
- * AYANA Self-Diagnostics v2.0.
- * Converts raw capability/runtime state into actionable machine-readable checks.
+ * AYANA Self-Diagnostics v3.0 — HONEST HEALTH.
+ *
+ * Health states are explicit:
+ * PASS     = fresh/observable evidence is healthy;
+ * WARNING  = usable, but a degradation/regression is visible;
+ * UNKNOWN  = telemetry/evidence is absent or stale;
+ * FAIL     = a required component has a fresh confirmed failure.
+ *
+ * UNKNOWN is never silently converted to PASS.
  */
 class AyanaSelfDiagnostics(
     context: Context,
@@ -14,92 +21,249 @@ class AyanaSelfDiagnostics(
     private val capabilityRegistry: AyanaCapabilityRegistry
 ) {
 
-    private val appContext = context.applicationContext
+    private val appContext =
+        context.applicationContext
 
     fun run(
         focus: String = "all",
         appName: String = ""
     ): JSONObject {
-        val snapshot = capabilityRegistry.snapshot()
-        val runtime = snapshot.optJSONObject("runtime") ?: JSONObject()
-        val checks = JSONArray()
 
-        check(
+        val snapshot =
+            capabilityRegistry
+                .snapshot()
+
+        val runtime =
+            snapshot
+                .optJSONObject(
+                    "runtime"
+                )
+                ?: JSONObject()
+
+        val checks =
+            JSONArray()
+
+        addCheck(
             checks,
             "microphone",
-            runtime.optBoolean("microphone_permission", false),
+            if (
+                runtime.optBoolean(
+                    "microphone_permission",
+                    false
+                )
+            ) {
+                STATUS_PASS
+            } else {
+                STATUS_FAIL
+            },
             "Разрешение микрофона",
-            if (runtime.optBoolean("microphone_permission", false)) {
-                "Разрешено"
+            if (
+                runtime.optBoolean(
+                    "microphone_permission",
+                    false
+                )
+            ) {
+                "RECORD_AUDIO разрешён"
             } else {
                 "Нет разрешения RECORD_AUDIO"
             }
         )
-        val sttRecorded = runtime.optLong("stt_ready_at", 0L) > 0L
-        val sttReady = runtime.optBoolean("stt_ready_last", false)
-        check(
+
+        val sttAt =
+            runtime.optLong(
+                "stt_ready_at",
+                0L
+            )
+
+        val sttReady =
+            runtime.optBoolean(
+                "stt_ready_last",
+                false
+            )
+
+        addCheck(
             checks,
             "stt",
-            !sttRecorded || sttReady,
+            when {
+                sttAt <= 0L ->
+                    STATUS_UNKNOWN
+
+                sttReady ->
+                    STATUS_PASS
+
+                else ->
+                    STATUS_FAIL
+            },
             "Локальное распознавание речи",
             when {
-                !sttRecorded -> "Состояние STT ещё не записано в этой установке"
-                sttReady -> "Локальная модель распознавания загружена"
-                else -> "Локальная модель распознавания не готова"
+                sttAt <= 0L ->
+                    "Свежая STT-телеметрия ещё не записана"
+
+                sttReady ->
+                    "Локальная модель распознавания загружена"
+
+                else ->
+                    "Последняя записанная инициализация STT неуспешна"
             }
         )
 
-        check(
+        val accessibility =
+            runtime.optBoolean(
+                "accessibility_connected",
+                false
+            )
+
+        addCheck(
             checks,
             "accessibility",
-            runtime.optBoolean("accessibility_connected", false),
+            if (accessibility) {
+                STATUS_PASS
+            } else {
+                STATUS_FAIL
+            },
             "Accessibility AYANA",
-            if (runtime.optBoolean("accessibility_connected", false)) {
+            if (accessibility) {
                 "Сервис подключён"
             } else {
                 "Сервис специальных возможностей не подключён"
             }
         )
-        check(
+
+        val screenSnapshotOk =
+            runtime.optBoolean(
+                "screen_snapshot_ok",
+                false
+            )
+
+        val screenWindows =
+            runtime.optInt(
+                "screen_window_count",
+                -1
+            )
+
+        val screenText =
+            runtime.optInt(
+                "screen_visible_text_count",
+                -1
+            )
+
+        addCheck(
+            checks,
+            "screen_intelligence",
+            when {
+                !accessibility ->
+                    STATUS_UNKNOWN
+
+                !screenSnapshotOk ||
+                    screenWindows <= 0 ->
+                    STATUS_UNKNOWN
+
+                screenText <= 0 ->
+                    STATUS_WARNING
+
+                else ->
+                    STATUS_PASS
+            },
+            "Экран и окна",
+            when {
+                !accessibility ->
+                    "Нельзя проверить чтение экрана без Accessibility"
+
+                !screenSnapshotOk ->
+                    "В момент проверки Android не отдал пригодный snapshot экрана"
+
+                screenWindows <= 0 ->
+                    "Активные окна не обнаружены в момент проверки"
+
+                screenText <= 0 ->
+                    "Окна обнаружены ($screenWindows), но читаемый текст текущего контекста отсутствует"
+
+                else ->
+                    "Окна: $screenWindows; читаемых элементов: $screenText; режим=${runtime.optString("screen_context_mode")}"
+            }
+        )
+
+        val overlay =
+            runtime.optBoolean(
+                "overlay_permission",
+                false
+            )
+
+        addCheck(
             checks,
             "overlay",
-            runtime.optBoolean("overlay_permission", false),
+            if (overlay) {
+                STATUS_PASS
+            } else {
+                STATUS_WARNING
+            },
             "Плавающий Orb",
-            if (runtime.optBoolean("overlay_permission", false)) {
+            if (overlay) {
                 "Overlay разрешён"
             } else {
-                "SYSTEM_ALERT_WINDOW не разрешён"
+                "Overlay не разрешён; голосовой контур может работать, но глобальный Orb недоступен"
             }
         )
-        check(
+
+        val notifications =
+            runtime.optBoolean(
+                "notification_permission",
+                false
+            )
+
+        addCheck(
             checks,
             "notifications",
-            runtime.optBoolean("notification_permission", false),
+            if (notifications) {
+                STATUS_PASS
+            } else {
+                STATUS_WARNING
+            },
             "Уведомления",
-            if (runtime.optBoolean("notification_permission", false)) {
+            if (notifications) {
                 "Разрешены"
             } else {
-                "Нет разрешения уведомлений"
+                "Нет разрешения уведомлений; напоминания могут быть менее заметны"
             }
         )
-        check(
+
+        val exactAlarm =
+            runtime.optBoolean(
+                "exact_alarm_permission",
+                false
+            )
+
+        addCheck(
             checks,
             "exact_alarm",
-            runtime.optBoolean("exact_alarm_permission", false),
+            if (exactAlarm) {
+                STATUS_PASS
+            } else {
+                STATUS_WARNING
+            },
             "Точные напоминания",
-            if (runtime.optBoolean("exact_alarm_permission", false)) {
-                "Доступны"
+            if (exactAlarm) {
+                "Точное системное расписание доступно"
             } else {
                 "Android не разрешает точные будильники"
             }
         )
 
-        val appCount = runtime.optInt("launchable_app_count", -1)
-        check(
+        val appCount =
+            runtime.optInt(
+                "launchable_app_count",
+                -1
+            )
+
+        addCheck(
             checks,
             "app_resolver",
-            appCount > 0,
-            "App Resolver v2",
+            if (appCount > 0) {
+                STATUS_PASS
+            } else {
+                STATUS_FAIL
+            },
+            "App Resolver",
             if (appCount > 0) {
                 "Доступно запускаемых приложений: $appCount"
             } else {
@@ -107,178 +271,666 @@ class AyanaSelfDiagnostics(
             }
         )
 
-        val agentAt = runtime.optLong("agent_core_last_at", 0L)
-        val agentFresh = agentAt > 0L && System.currentTimeMillis() - agentAt < HEALTH_FRESH_MS
-        val agentOk = runtime.optBoolean("agent_core_last_ok", false)
-        check(
+        val agentAt =
+            runtime.optLong(
+                "agent_core_last_at",
+                0L
+            )
+
+        val agentFresh =
+            agentAt > 0L &&
+                System.currentTimeMillis() -
+                    agentAt <
+                HEALTH_FRESH_MS
+
+        val agentOk =
+            runtime.optBoolean(
+                "agent_core_last_ok",
+                false
+            )
+
+        val agentLatency =
+            runtime.optLong(
+                "agent_core_last_latency_ms",
+                -1L
+            )
+
+        addCheck(
             checks,
             "agent_core",
-            agentOk && agentFresh,
+            when {
+                agentAt <= 0L ||
+                    !agentFresh ->
+                    STATUS_UNKNOWN
+
+                !agentOk ->
+                    STATUS_FAIL
+
+                agentLatency >=
+                    AGENT_LATENCY_WARNING_MS ->
+                    STATUS_WARNING
+
+                else ->
+                    STATUS_PASS
+            },
             "Agent Core",
             when {
-                agentAt <= 0L -> "В этой установке ещё нет сохранённого результата обращения к Agent Core"
-                !agentFresh -> "Последняя проверка Agent Core устарела"
-                agentOk -> "Последний запрос успешен; ${runtime.optLong("agent_core_last_latency_ms", -1L)} мс"
-                else -> "Последний запрос завершился ошибкой: ${runtime.optString("agent_core_last_error")}".take(420)
+                agentAt <= 0L ->
+                    "В этой установке ещё нет сохранённого результата Agent Core"
+
+                !agentFresh ->
+                    "Последнее измерение Agent Core устарело; оно не считается PASS"
+
+                !agentOk ->
+                    "Последний свежий запрос завершился ошибкой: ${
+                        runtime.optString(
+                            "agent_core_last_error"
+                        )
+                    }".take(420)
+
+                agentLatency >=
+                    AGENT_LATENCY_WARNING_MS ->
+                    "Последний запрос успешен, но медленный: $agentLatency мс"
+
+                else ->
+                    "Последний запрос успешен: $agentLatency мс"
             }
         )
 
-        val ttsAt = runtime.optLong("tts_last_at", 0L)
-        val ttsFresh = ttsAt > 0L && System.currentTimeMillis() - ttsAt < HEALTH_FRESH_MS
-        val ttsOk = runtime.optBoolean("tts_last_ok", false)
-        // Audio/TTS path is a frozen, device-confirmed baseline. Absence of a
-        // fresh telemetry sample is therefore "unknown", not a synthetic failure.
-        // A fresh recorded failure still fails diagnostics.
-        val ttsHealthy =
-            ttsAt <= 0L ||
-                !ttsFresh ||
-                ttsOk
-        check(
+        val ttsAt =
+            runtime.optLong(
+                "tts_last_at",
+                0L
+            )
+
+        val ttsFresh =
+            ttsAt > 0L &&
+                System.currentTimeMillis() -
+                    ttsAt <
+                HEALTH_FRESH_MS
+
+        val ttsOk =
+            runtime.optBoolean(
+                "tts_last_ok",
+                false
+            )
+
+        val firstByte =
+            runtime.optLong(
+                "tts_first_byte_ms",
+                -1L
+            )
+
+        addCheck(
             checks,
             "tts",
-            ttsHealthy,
+            when {
+                ttsAt <= 0L ||
+                    !ttsFresh ->
+                    STATUS_UNKNOWN
+
+                !ttsOk ->
+                    STATUS_FAIL
+
+                firstByte >=
+                    TTS_FIRST_BYTE_WARNING_MS ->
+                    STATUS_WARNING
+
+                else ->
+                    STATUS_PASS
+            },
             "Marin TTS",
             when {
-                ttsAt <= 0L -> "Аудиоконтур подтверждён на устройстве; свежая TTS-телеметрия ещё не записана"
-                !ttsFresh -> "Аудиоконтур подтверждён; последнее TTS-измерение устарело"
-                ttsOk -> "Последний TTS успешен; first_byte=${runtime.optLong("tts_first_byte_ms", -1L)} мс"
-                else -> "Последний TTS завершился ошибкой: ${runtime.optString("tts_last_error")}".take(420)
+                ttsAt <= 0L ->
+                    "Нет свежей TTS-телеметрии; замороженная голосовая база не переопределяется как PASS"
+
+                !ttsFresh ->
+                    "Последнее TTS-измерение устарело"
+
+                !ttsOk ->
+                    "Последний свежий TTS завершился ошибкой: ${
+                        runtime.optString(
+                            "tts_last_error"
+                        )
+                    }".take(420)
+
+                firstByte >=
+                    TTS_FIRST_BYTE_WARNING_MS ->
+                    "Последний TTS успешен, но first_byte=$firstByte мс"
+
+                else ->
+                    "Последний TTS успешен; first_byte=$firstByte мс"
+            }
+        )
+
+        val memoryCount =
+            runtime.optInt(
+                "memory_count",
+                -1
+            )
+
+        addCheck(
+            checks,
+            "memory",
+            if (memoryCount >= 0) {
+                STATUS_PASS
+            } else {
+                STATUS_FAIL
+            },
+            "Долговременная память",
+            if (memoryCount >= 0) {
+                "Доступно записей памяти: $memoryCount"
+            } else {
+                "Хранилище памяти не удалось прочитать"
+            }
+        )
+
+        val taskCount =
+            runtime.optInt(
+                "reminder_count",
+                -1
+            )
+
+        addCheck(
+            checks,
+            "tasks",
+            if (taskCount >= 0) {
+                STATUS_PASS
+            } else {
+                STATUS_FAIL
+            },
+            "Задачи и напоминания",
+            if (taskCount >= 0) {
+                "Доступно задач/напоминаний: $taskCount"
+            } else {
+                "Хранилище задач не удалось прочитать"
+            }
+        )
+
+        val recentCount =
+            runtime.optInt(
+                "recent_command_count",
+                0
+            )
+
+        val recentErrors =
+            runtime.optInt(
+                "recent_error_count",
+                0
+            )
+
+        val lastErrorCommand =
+            runtime.optString(
+                "last_error_command"
+            )
+
+        val lastErrorResult =
+            runtime.optString(
+                "last_error_result"
+            )
+
+        addCheck(
+            checks,
+            "recent_command_health",
+            when {
+                recentCount <= 0 ->
+                    STATUS_UNKNOWN
+
+                recentErrors > 0 ->
+                    STATUS_WARNING
+
+                else ->
+                    STATUS_PASS
+            },
+            "Последние команды",
+            when {
+                recentCount <= 0 ->
+                    "Недостаточно истории для оценки последних команд"
+
+                recentErrors > 0 ->
+                    (
+                        "В последних $recentCount командах ошибок: $recentErrors. " +
+                            if (lastErrorCommand.isNotBlank()) {
+                                "Последняя ошибка: «${lastErrorCommand.take(160)}» — ${lastErrorResult.take(260)}"
+                            } else {
+                                ""
+                            }
+                        ).trim()
+
+                else ->
+                    "В последних $recentCount командах терминальных ERROR нет"
             }
         )
 
         val appDiagnostic =
-            if (appName.isNotBlank()) {
-                appResolver.resolve(appName, forceRefresh = true).toJson()
+            if (
+                appName.isNotBlank()
+            ) {
+                appResolver
+                    .resolve(
+                        appName,
+                        forceRefresh = true
+                    )
+                    .toJson()
             } else {
                 null
             }
 
+        val filter =
+            filterChecks(
+                checks,
+                focus
+            )
+
         val filteredChecks =
-            if (focus.isBlank() || focus.equals("all", ignoreCase = true)) {
-                checks
-            } else {
-                filterChecks(checks, focus)
-            }
+            filter.first
+
+        val focusSupported =
+            filter.second
 
         var passed = 0
+        var warnings = 0
+        var unknown = 0
         var failed = 0
-        for (i in 0 until filteredChecks.length()) {
-            val item = filteredChecks.optJSONObject(i) ?: continue
-            if (item.optBoolean("ok", false)) passed++ else failed++
-        }
 
-        val recommendations = JSONArray()
-        for (i in 0 until filteredChecks.length()) {
-            val item = filteredChecks.optJSONObject(i) ?: continue
-            if (!item.optBoolean("ok", false)) {
-                recommendationFor(item.optString("id"))
-                    ?.let { recommendations.put(it) }
+        for (
+            index in
+            0 until filteredChecks.length()
+        ) {
+            val item =
+                filteredChecks
+                    .optJSONObject(
+                        index
+                    )
+                    ?: continue
+
+            when (
+                item.optString(
+                    "status"
+                )
+            ) {
+                STATUS_PASS ->
+                    passed++
+
+                STATUS_WARNING ->
+                    warnings++
+
+                STATUS_UNKNOWN ->
+                    unknown++
+
+                STATUS_FAIL ->
+                    failed++
             }
         }
 
-        if (appDiagnostic != null && !appDiagnostic.optBoolean("success", false)) {
+        val recommendations =
+            JSONArray()
+
+        for (
+            index in
+            0 until filteredChecks.length()
+        ) {
+            val item =
+                filteredChecks
+                    .optJSONObject(
+                        index
+                    )
+                    ?: continue
+
+            if (
+                item.optString(
+                    "status"
+                ) in
+                setOf(
+                    STATUS_WARNING,
+                    STATUS_FAIL
+                )
+            ) {
+                recommendationFor(
+                    item.optString(
+                        "id"
+                    )
+                )
+                    ?.let {
+                        recommendations.put(
+                            it
+                        )
+                    }
+            }
+        }
+
+        if (
+            appDiagnostic != null &&
+            !appDiagnostic.optBoolean(
+                "success",
+                false
+            )
+        ) {
             recommendations.put(
-                "Для приложения «$appName» App Resolver не нашёл надёжного launcher-совпадения. Проверьте, установлено ли приложение и имеет ли оно запускаемую Activity."
+                "Для приложения «$appName» App Resolver не нашёл надёжного launcher-совпадения. Проверьте установку приложения и наличие запускаемой Activity."
             )
         }
 
+        val overallStatus =
+            when {
+                failed > 0 ->
+                    STATUS_FAIL
+
+                warnings > 0 ->
+                    STATUS_WARNING
+
+                unknown > 0 ->
+                    STATUS_UNKNOWN
+
+                else ->
+                    STATUS_PASS
+            }
+
         return JSONObject()
-            .put("success", failed == 0)
-            .put("focus", focus)
-            .put("passed", passed)
-            .put("failed", failed)
-            .put("checks", filteredChecks)
-            .put("app_diagnostic", appDiagnostic ?: JSONObject.NULL)
-            .put("recommendations", recommendations)
-            .put("capability_snapshot", snapshot)
-            .put("generated_at", System.currentTimeMillis())
+            .put(
+                "success",
+                failed == 0
+            )
+            .put(
+                "overall_status",
+                overallStatus
+            )
+            .put(
+                "focus",
+                focus
+            )
+            .put(
+                "focus_supported",
+                focusSupported
+            )
+            .put(
+                "passed",
+                passed
+            )
+            .put(
+                "warnings",
+                warnings
+            )
+            .put(
+                "unknown",
+                unknown
+            )
+            .put(
+                "failed",
+                failed
+            )
+            .put(
+                "checks",
+                filteredChecks
+            )
+            .put(
+                "app_diagnostic",
+                appDiagnostic
+                    ?: JSONObject.NULL
+            )
+            .put(
+                "recommendations",
+                recommendations
+            )
+            .put(
+                "capability_snapshot",
+                snapshot
+            )
+            .put(
+                "generated_at",
+                System.currentTimeMillis()
+            )
     }
 
     fun compactReport(
         focus: String = "all",
         appName: String = ""
     ): String {
-        val result = run(focus, appName)
-        val checks = result.optJSONArray("checks") ?: JSONArray()
-        val failedNames = mutableListOf<String>()
-        for (i in 0 until checks.length()) {
-            val item = checks.optJSONObject(i) ?: continue
-            if (!item.optBoolean("ok", false)) {
-                failedNames += item.optString("name")
-            }
-        }
 
-        val base = if (failedNames.isEmpty()) {
-            "Самодиагностика: основные локальные компоненты в норме."
-        } else {
-            "Самодиагностика: требуют внимания — ${failedNames.joinToString(", ")}."
-        }
+        val result =
+            run(
+                focus,
+                appName
+            )
 
-        val appPart = result.optJSONObject("app_diagnostic")
-            ?.takeIf { it.length() > 0 }
-            ?.let { app ->
-                if (app.optBoolean("success", false)) {
-                    " Приложение найдено: ${app.optString("label")} (${app.optString("package")}), confidence=${app.optInt("confidence")}%."
-                } else {
-                    " Приложение не разрешено однозначно: ${app.optString("reason")}."
+        val base =
+            "Самодиагностика: PASS=${result.optInt("passed")}, " +
+                "WARNING=${result.optInt("warnings")}, " +
+                "UNKNOWN=${result.optInt("unknown")}, " +
+                "FAIL=${result.optInt("failed")}."
+
+        val appPart =
+            result
+                .optJSONObject(
+                    "app_diagnostic"
+                )
+                ?.takeIf {
+                    it.length() >
+                        0
                 }
-            }
-            .orEmpty()
+                ?.let {
+                    app ->
+                    if (
+                        app.optBoolean(
+                            "success",
+                            false
+                        )
+                    ) {
+                        " Приложение найдено: ${app.optString("label")} (${app.optString("package")}), confidence=${app.optInt("confidence")}."
+                    } else {
+                        " Приложение не разрешено однозначно: ${app.optString("reason")}."
+                    }
+                }
+                .orEmpty()
 
-        return base + appPart
+        return base +
+            appPart
     }
 
     private fun filterChecks(
         checks: JSONArray,
         focus: String
-    ): JSONArray {
-        val normalized = focus.lowercase().trim()
-        val result = JSONArray()
-        for (i in 0 until checks.length()) {
-            val item = checks.optJSONObject(i) ?: continue
-            val id = item.optString("id").lowercase()
-            val name = item.optString("name").lowercase()
-            if (
-                id.contains(normalized) ||
-                name.contains(normalized) ||
-                normalized.contains(id)
+    ): Pair<JSONArray, Boolean> {
+
+        val normalized =
+            focus
+                .lowercase()
+                .trim()
+
+        if (
+            normalized.isBlank() ||
+            normalized ==
+            "all"
+        ) {
+            return checks to true
+        }
+
+        val acceptedIds =
+            when (
+                normalized
             ) {
-                result.put(item)
+                "android" ->
+                    setOf(
+                        "accessibility",
+                        "screen_intelligence",
+                        "overlay",
+                        "app_resolver",
+                        "recent_command_health"
+                    )
+
+                "audio" ->
+                    setOf(
+                        "microphone",
+                        "stt",
+                        "tts"
+                    )
+
+                "agent_core" ->
+                    setOf(
+                        "agent_core"
+                    )
+
+                "apps" ->
+                    setOf(
+                        "app_resolver",
+                        "screen_intelligence"
+                    )
+
+                "memory" ->
+                    setOf(
+                        "memory"
+                    )
+
+                "tasks" ->
+                    setOf(
+                        "tasks",
+                        "exact_alarm",
+                        "notifications"
+                    )
+
+                else ->
+                    emptySet()
+            }
+
+        if (
+            acceptedIds.isEmpty()
+        ) {
+            return checks to false
+        }
+
+        val result =
+            JSONArray()
+
+        for (
+            index in
+            0 until checks.length()
+        ) {
+            val item =
+                checks
+                    .optJSONObject(
+                        index
+                    )
+                    ?: continue
+
+            if (
+                item.optString(
+                    "id"
+                ) in
+                acceptedIds
+            ) {
+                result.put(
+                    item
+                )
             }
         }
-        return if (result.length() > 0) result else checks
+
+        return result to true
     }
 
-    private fun check(
+    private fun addCheck(
         array: JSONArray,
         id: String,
-        ok: Boolean,
+        status: String,
         name: String,
         details: String
     ) {
+
         array.put(
             JSONObject()
-                .put("id", id)
-                .put("ok", ok)
-                .put("name", name)
-                .put("details", details)
+                .put(
+                    "id",
+                    id
+                )
+                .put(
+                    "status",
+                    status
+                )
+                // Backward compatibility for older Worker/UI consumers.
+                // Only a confirmed FAIL maps to ok=false.
+                .put(
+                    "ok",
+                    status !=
+                        STATUS_FAIL
+                )
+                .put(
+                    "verified",
+                    status ==
+                        STATUS_PASS
+                )
+                .put(
+                    "name",
+                    name
+                )
+                .put(
+                    "details",
+                    details
+                )
         )
     }
 
-    private fun recommendationFor(id: String): String? =
-        when (id) {
-            "microphone" -> "Разрешите AYANA доступ к микрофону."
-            "accessibility" -> "Включите службу AYANA в специальных возможностях Android."
-            "overlay" -> "Разрешите AYANA отображение поверх других приложений."
-            "notifications" -> "Разрешите уведомления AYANA, чтобы напоминания были видимыми."
-            "exact_alarm" -> "Разрешите точные будильники AYANA для напоминаний в точное время."
-            "app_resolver" -> "Обновите карту приложений; если список остаётся пустым, проверьте launcher query/Android package visibility."
-            "agent_core" -> "Выполните обычный запрос к Agent Core и проверьте интернет/Worker, если ошибка повторится."
-            "tts" -> "Проверьте Worker TTS и сеть, если Marin снова не отвечает."
-            else -> null
+    private fun recommendationFor(
+        id: String
+    ): String? =
+        when (
+            id
+        ) {
+            "microphone" ->
+                "Разрешите AYANA доступ к микрофону."
+
+            "accessibility" ->
+                "Включите службу AYANA в специальных возможностях Android."
+
+            "screen_intelligence" ->
+                "Если окна определяются, но текст отсутствует, проверьте Window Content Core/Accessibility root extraction; не объявляйте экран подтверждённым."
+
+            "overlay" ->
+                "Разрешите AYANA отображение поверх других приложений, если нужен глобальный Orb."
+
+            "notifications" ->
+                "Разрешите уведомления AYANA, чтобы напоминания были видимыми."
+
+            "exact_alarm" ->
+                "Разрешите точные будильники AYANA для напоминаний в точное время."
+
+            "app_resolver" ->
+                "Обновите карту приложений; если список остаётся пустым, проверьте launcher query/Android package visibility."
+
+            "agent_core" ->
+                "Проверьте интернет/Worker или повторите обычный запрос; медленные свежие ответы помечаются WARNING, а не PASS."
+
+            "tts" ->
+                "Проверьте Worker TTS и сеть, если Marin снова отвечает медленно или с ошибкой."
+
+            "recent_command_health" ->
+                "Посмотрите последнюю ERROR в истории команд и исправляйте класс причины, а не только конкретную фразу."
+
+            else ->
+                null
         }
 
     companion object {
-        private const val HEALTH_FRESH_MS = 30L * 60L * 1000L
+
+        const val STATUS_PASS =
+            "PASS"
+
+        const val STATUS_WARNING =
+            "WARNING"
+
+        const val STATUS_UNKNOWN =
+            "UNKNOWN"
+
+        const val STATUS_FAIL =
+            "FAIL"
+
+        private const val HEALTH_FRESH_MS =
+            30L *
+                60L *
+                1000L
+
+        private const val AGENT_LATENCY_WARNING_MS =
+            6000L
+
+        private const val TTS_FIRST_BYTE_WARNING_MS =
+            2500L
     }
 }
