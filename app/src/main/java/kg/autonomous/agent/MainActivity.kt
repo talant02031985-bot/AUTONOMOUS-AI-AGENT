@@ -2,6 +2,7 @@ package kg.autonomous.agent
 
 import android.Manifest
 import android.app.NotificationManager
+import android.app.AlertDialog
 import android.content.BroadcastReceiver
 import android.content.ClipData
 import android.content.ClipboardManager
@@ -31,6 +32,7 @@ import android.widget.Button
 import android.widget.EditText
 import android.widget.FrameLayout
 import android.widget.HorizontalScrollView
+import android.widget.ImageView
 import android.widget.LinearLayout
 import android.widget.ScrollView
 import android.widget.Space
@@ -82,6 +84,9 @@ class MainActivity : AppCompatActivity() {
     private var textModeVisible =
         false
 
+    private var historyFilter =
+        "all"
+
     private val memoryStore by lazy {
         AyanaMemoryStore(
             applicationContext
@@ -106,6 +111,18 @@ class MainActivity : AppCompatActivity() {
         )
     }
 
+    private val ayanaPreferences by lazy {
+        AyanaPreferences(
+            applicationContext
+        )
+    }
+
+    private val commandHistoryStore by lazy {
+        AyanaCommandHistoryStore(
+            applicationContext
+        )
+    }
+
     private val appResolver by lazy {
         AyanaAppResolver(
             applicationContext
@@ -119,15 +136,11 @@ class MainActivity : AppCompatActivity() {
         )
     }
 
-    private val ayanaPreferences by lazy {
-        AyanaPreferences(
-            applicationContext
-        )
-    }
-
-    private val commandHistoryStore by lazy {
-        AyanaCommandHistoryStore(
-            applicationContext
+    private val selfDiagnostics by lazy {
+        AyanaSelfDiagnostics(
+            applicationContext,
+            appResolver,
+            capabilityRegistry
         )
     }
 
@@ -459,37 +472,21 @@ class MainActivity : AppCompatActivity() {
             }
 
         val mark =
-            TextView(this).apply {
-                text = "A"
-                textSize = 21f
-                gravity = Gravity.CENTER
-                setTextColor(Color.WHITE)
-                setTypeface(
-                    Typeface.DEFAULT,
-                    Typeface.BOLD
+            ImageView(this).apply {
+                setImageResource(
+                    R.mipmap.ayana_ai_icon_192
                 )
-                background =
-                    GradientDrawable(
-                        GradientDrawable.Orientation.TL_BR,
-                        intArrayOf(
-                            Color.parseColor("#4328A8"),
-                            Color.parseColor("#2458C7"),
-                            Color.parseColor("#087D9B")
-                        )
-                    ).apply {
-                        cornerRadius = dp(13).toFloat()
-                        setStroke(
-                            dp(1),
-                            Color.parseColor("#5DB9E8")
-                        )
-                    }
+                scaleType =
+                    ImageView.ScaleType.CENTER_CROP
+                contentDescription =
+                    "Логотип AYANA AI"
             }
 
         bar.addView(
             mark,
             LinearLayout.LayoutParams(
-                dp(44),
-                dp(44)
+                dp(48),
+                dp(48)
             ).apply {
                 marginEnd = dp(13)
             }
@@ -600,7 +597,7 @@ class MainActivity : AppCompatActivity() {
                     }
                 layoutParams =
                     LinearLayout.LayoutParams(
-                        dp(172),
+                        dp(158),
                         ViewGroup.LayoutParams.MATCH_PARENT
                     )
             }
@@ -1006,7 +1003,7 @@ class MainActivity : AppCompatActivity() {
             aiPresenceCard(),
             LinearLayout.LayoutParams(
                 0,
-                dp(310),
+                dp(346),
                 1.72f
             )
         )
@@ -1015,7 +1012,7 @@ class MainActivity : AppCompatActivity() {
             aiSystemCard(),
             LinearLayout.LayoutParams(
                 0,
-                dp(310),
+                dp(346),
                 0.88f
             ).apply {
                 marginStart = dp(12)
@@ -1023,16 +1020,6 @@ class MainActivity : AppCompatActivity() {
         )
 
         contentContainer.addView(primaryRow)
-
-        contentContainer.addView(
-            homeCommandBar(),
-            LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT,
-                dp(88)
-            ).apply {
-                topMargin = dp(12)
-            }
-        )
     }
 
     private fun aiPresenceCard(): View {
@@ -1215,9 +1202,90 @@ class MainActivity : AppCompatActivity() {
             dp(18)
         )
 
+        val runtime =
+            try {
+                capabilityRegistry
+                    .snapshot()
+                    .optJSONObject(
+                        "runtime"
+                    )
+                    ?: org.json.JSONObject()
+            } catch (_: Exception) {
+                org.json.JSONObject()
+            }
+
+        val microphoneStatus =
+            if (
+                checkSelfPermissionCompat(
+                    Manifest.permission.RECORD_AUDIO
+                )
+            ) {
+                AyanaSelfDiagnostics.STATUS_PASS
+            } else {
+                AyanaSelfDiagnostics.STATUS_FAIL
+            }
+
+        val screenStatus =
+            when {
+                !isAccessibilityEnabled() ->
+                    AyanaSelfDiagnostics.STATUS_FAIL
+
+                runtime.optBoolean(
+                    "screen_snapshot_ok",
+                    false
+                ) &&
+                    runtime.optInt(
+                        "screen_window_count",
+                        0
+                    ) > 0 ->
+                    AyanaSelfDiagnostics.STATUS_PASS
+
+                else ->
+                    AyanaSelfDiagnostics.STATUS_UNKNOWN
+            }
+
+        val agentAt =
+            runtime.optLong(
+                "agent_core_last_at",
+                0L
+            )
+
+        val agentFresh =
+            agentAt > 0L &&
+                System.currentTimeMillis() -
+                    agentAt <
+                30L * 60L * 1000L
+
+        val agentStatus =
+            when {
+                !agentFresh ->
+                    AyanaSelfDiagnostics.STATUS_UNKNOWN
+
+                runtime.optBoolean(
+                    "agent_core_last_ok",
+                    false
+                ) ->
+                    AyanaSelfDiagnostics.STATUS_PASS
+
+                else ->
+                    AyanaSelfDiagnostics.STATUS_FAIL
+            }
+
+        val memoryStatus =
+            if (
+                runtime.optInt(
+                    "memory_count",
+                    -1
+                ) >= 0
+            ) {
+                AyanaSelfDiagnostics.STATUS_PASS
+            } else {
+                AyanaSelfDiagnostics.STATUS_FAIL
+            }
+
         card.addView(
             TextView(this).apply {
-                text = "Система"
+                text = "Состояние AYANA"
                 textSize = 20f
                 setTextColor(Color.WHITE)
                 setTypeface(
@@ -1229,35 +1297,40 @@ class MainActivity : AppCompatActivity() {
 
         card.addView(
             TextView(this).apply {
-                text = "Готовность основных модулей"
+                text = "Ключевые модули прямо сейчас"
                 textSize = 15f
                 setTextColor(
                     Color.parseColor("#77879D")
                 )
-                setPadding(0, dp(4), 0, dp(14))
+                setPadding(0, dp(4), 0, dp(12))
             }
         )
 
         card.addView(
             primarySystemRow(
-                "Голос",
-                checkSelfPermissionCompat(
-                    Manifest.permission.RECORD_AUDIO
-                )
+                "Микрофон",
+                microphoneStatus
             )
         )
 
         card.addView(
             primarySystemRow(
                 "Экран",
-                isAccessibilityEnabled()
+                screenStatus
             )
         )
 
         card.addView(
             primarySystemRow(
                 "Agent Core",
-                AyanaVoiceService.isRunning
+                agentStatus
+            )
+        )
+
+        card.addView(
+            primarySystemRow(
+                "Память",
+                memoryStatus
             )
         )
 
@@ -1300,7 +1373,7 @@ class MainActivity : AppCompatActivity() {
 
     private fun primarySystemRow(
         label: String,
-        ok: Boolean
+        status: String
     ): View {
 
         val row =
@@ -1309,9 +1382,9 @@ class MainActivity : AppCompatActivity() {
                 gravity = Gravity.CENTER_VERTICAL
                 setPadding(
                     dp(2),
-                    dp(9),
+                    dp(8),
                     dp(2),
-                    dp(9)
+                    dp(8)
                 )
             }
 
@@ -1319,12 +1392,8 @@ class MainActivity : AppCompatActivity() {
             View(this).apply {
                 background =
                     circleDrawable(
-                        Color.parseColor(
-                            if (ok) {
-                                "#22C55E"
-                            } else {
-                                "#EF4444"
-                            }
+                        diagnosticStatusColor(
+                            status
                         )
                     )
             },
@@ -1339,7 +1408,7 @@ class MainActivity : AppCompatActivity() {
         row.addView(
             TextView(this).apply {
                 text = label
-                textSize = 17f
+                textSize = 16.5f
                 setTextColor(
                     Color.parseColor("#D5DEEA")
                 )
@@ -1354,19 +1423,23 @@ class MainActivity : AppCompatActivity() {
         row.addView(
             TextView(this).apply {
                 text =
-                    if (ok) {
-                        "Готово"
-                    } else {
-                        "Внимание"
+                    when (status) {
+                        AyanaSelfDiagnostics.STATUS_PASS ->
+                            "Готово"
+
+                        AyanaSelfDiagnostics.STATUS_WARNING ->
+                            "Внимание"
+
+                        AyanaSelfDiagnostics.STATUS_FAIL ->
+                            "Ошибка"
+
+                        else ->
+                            "Нет данных"
                     }
-                textSize = 15f
+                textSize = 14f
                 setTextColor(
-                    Color.parseColor(
-                        if (ok) {
-                            "#86EFAC"
-                        } else {
-                            "#FCA5A5"
-                        }
+                    diagnosticStatusColor(
+                        status
                     )
                 )
                 setTypeface(
@@ -2675,7 +2748,7 @@ class MainActivity : AppCompatActivity() {
                     AyanaVoiceService.STATE_THINKING
             "ВЫПОЛНЯЮ" ->
                 AyanaVoiceService.currentStatusState ==
-                    AyanaVoiceService.STATE_THINKING
+                    AyanaVoiceService.STATE_EXECUTING
             "ГОВОРЮ" ->
                 AyanaVoiceService.currentStatusState ==
                     AyanaVoiceService.STATE_SPEAKING
@@ -3236,23 +3309,14 @@ class MainActivity : AppCompatActivity() {
 
     private fun renderDurableGoalCard() {
 
-        val goals =
+        val goal =
             durableGoalStore
-                .getRecoverableViews(
-                    8
-                )
-
-        if (goals.isEmpty()) {
-            return
-        }
+                .getCurrentForUi()
+                ?: return
 
         contentContainer.addView(
             smallSectionTitle(
-                if (goals.size == 1) {
-                    "АКТИВНАЯ ЦЕЛЬ"
-                } else {
-                    "ЦЕЛИ • ${goals.size}"
-                }
+                "АКТИВНАЯ ЦЕЛЬ"
             ),
             LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT,
@@ -3263,207 +3327,247 @@ class MainActivity : AppCompatActivity() {
             }
         )
 
-        goals.forEachIndexed { index, goal ->
-            val card = panel(20)
-            val statusLabel = durableGoalStore.statusLabel(goal.status)
-            val currentPrefix = if (goal.isCurrent) "ТЕКУЩАЯ • " else ""
+        val card =
+            panel(
+                20
+            )
 
+        val statusLabel =
+            durableGoalStore
+                .statusLabel(
+                    goal.status
+                )
+
+        card.addView(
+            TextView(this).apply {
+                text = statusLabel
+                textSize = 13.5f
+                setTypeface(
+                    Typeface.DEFAULT,
+                    Typeface.BOLD
+                )
+                setTextColor(
+                    Color.parseColor(
+                        when (goal.status) {
+                            AyanaDurableGoalStore.STATUS_ACTIVE -> "#67E8F9"
+                            AyanaDurableGoalStore.STATUS_WAITING_CONFIRMATION -> "#FBBF24"
+                            AyanaDurableGoalStore.STATUS_PAUSED,
+                            AyanaDurableGoalStore.STATUS_RECOVERY_PENDING -> "#C4B5FD"
+                            else -> "#A8B5C7"
+                        }
+                    )
+                )
+            }
+        )
+
+        card.addView(
+            TextView(this).apply {
+                text = goal.command
+                textSize = 17f
+                setTypeface(
+                    Typeface.DEFAULT,
+                    Typeface.BOLD
+                )
+                setTextColor(Color.WHITE)
+                setPadding(
+                    0,
+                    dp(8),
+                    0,
+                    0
+                )
+            }
+        )
+
+        val progressText =
+            buildString {
+                if (goal.planSize > 0) {
+                    append("Шаг ")
+                    append(
+                        (goal.nextPlanStep + 1)
+                            .coerceAtMost(goal.planSize)
+                    )
+                    append(" из ")
+                    append(goal.planSize)
+                    append("  •  ")
+                }
+                append("действий: ")
+                append(goal.totalActions)
+                if (goal.recoveryCount > 0) {
+                    append("  •  восстановлений: ")
+                    append(goal.recoveryCount)
+                    append("/")
+                    append(AyanaDurableGoalStore.MAX_RECOVERIES)
+                }
+            }
+
+        card.addView(
+            TextView(this).apply {
+                text = progressText
+                textSize = 14f
+                setTextColor(
+                    Color.parseColor("#8FA0B7")
+                )
+                setPadding(
+                    0,
+                    dp(7),
+                    0,
+                    0
+                )
+            }
+        )
+
+        val diagnostic =
+            goal.lastError
+                .ifBlank {
+                    goal.recoveryReason
+                }
+                .ifBlank {
+                    goal.lastCheckpoint
+                }
+
+        if (diagnostic.isNotBlank()) {
             card.addView(
                 TextView(this).apply {
-                    text = currentPrefix + statusLabel
+                    text = diagnostic
                     textSize = 13.5f
-                    setTypeface(Typeface.DEFAULT, Typeface.BOLD)
                     setTextColor(
-                        Color.parseColor(
-                            when (goal.status) {
-                                AyanaDurableGoalStore.STATUS_ACTIVE -> "#67E8F9"
-                                AyanaDurableGoalStore.STATUS_WAITING_CONFIRMATION -> "#FBBF24"
-                                AyanaDurableGoalStore.STATUS_PAUSED,
-                                AyanaDurableGoalStore.STATUS_RECOVERY_PENDING -> "#C4B5FD"
-                                else -> "#A8B5C7"
-                            }
-                        )
+                        Color.parseColor("#75869F")
+                    )
+                    setPadding(
+                        0,
+                        dp(6),
+                        0,
+                        0
                     )
                 }
             )
+        }
 
-            card.addView(
-                TextView(this).apply {
-                    text = goal.command
-                    textSize = 17f
-                    setTypeface(Typeface.DEFAULT, Typeface.BOLD)
-                    setTextColor(Color.WHITE)
-                    setPadding(0, dp(8), 0, 0)
-                }
-            )
-
-            val progressText =
-                buildString {
-                    if (goal.planSize > 0) {
-                        append("Шаг ")
-                        append((goal.nextPlanStep + 1).coerceAtMost(goal.planSize))
-                        append(" из ")
-                        append(goal.planSize)
-                        append("  •  ")
-                    }
-                    append("действий: ")
-                    append(goal.totalActions)
-                    if (goal.plannerSubgoalCount > 0) {
-                        append("  •  подцелей: ")
-                        append(goal.plannerSubgoalCount)
-                    }
-                    if (goal.plannerDomain.isNotBlank()) {
-                        append("  •  ")
-                        append(goal.plannerDomain)
-                    }
-                    if (goal.recoveryCount > 0) {
-                        append("  •  восстановлений: ")
-                        append(goal.recoveryCount)
-                        append("/")
-                        append(AyanaDurableGoalStore.MAX_RECOVERIES)
-                    }
-                }
-
-            card.addView(
-                TextView(this).apply {
-                    text = progressText
-                    textSize = 14f
-                    setTextColor(Color.parseColor("#8FA0B7"))
-                    setPadding(0, dp(7), 0, 0)
-                }
-            )
-
-            val diagnostic =
-                goal.lastError
-                    .ifBlank { goal.recoveryReason }
-                    .ifBlank { goal.lastCheckpoint }
-
-            if (diagnostic.isNotBlank()) {
-                card.addView(
-                    TextView(this).apply {
-                        text = diagnostic
-                        textSize = 13.5f
-                        setTextColor(Color.parseColor("#75869F"))
-                        setPadding(0, dp(6), 0, 0)
-                    }
+        val actionsRow =
+            LinearLayout(this).apply {
+                orientation = LinearLayout.HORIZONTAL
+                gravity = Gravity.CENTER_VERTICAL
+                setPadding(
+                    0,
+                    dp(13),
+                    0,
+                    0
                 )
             }
 
-            val actionsRow =
-                LinearLayout(this).apply {
-                    orientation = LinearLayout.HORIZONTAL
-                    gravity = Gravity.CENTER_VERTICAL
-                    setPadding(0, dp(13), 0, 0)
-                }
+        val waitingConfirmation =
+            goal.status ==
+            AyanaDurableGoalStore.STATUS_WAITING_CONFIRMATION
 
-            val waitingConfirmation =
-                goal.status == AyanaDurableGoalStore.STATUS_WAITING_CONFIRMATION
-            val runningNow =
-                goal.isCurrent &&
-                    goal.status == AyanaDurableGoalStore.STATUS_ACTIVE &&
-                    AyanaVoiceService.isRunning &&
-                    isCommandBusyState(AyanaVoiceService.currentStatusState)
+        val runningNow =
+            goal.status ==
+            AyanaDurableGoalStore.STATUS_ACTIVE &&
+                AyanaVoiceService.isRunning &&
+                isCommandBusyState(
+                    AyanaVoiceService.currentStatusState
+                )
 
-            val resumeButton =
-                TextView(this).apply {
-                    text =
-                        when {
-                            runningNow -> "Выполняется"
-                            waitingConfirmation -> "Подтвердить"
-                            else -> "Продолжить"
+        val resumeButton =
+            TextView(this).apply {
+                text =
+                    when {
+                        runningNow -> "Выполняется"
+                        waitingConfirmation -> "Подтвердить"
+                        else -> "Продолжить"
+                    }
+                textSize = 13.5f
+                gravity = Gravity.CENTER
+                setTextColor(
+                    Color.parseColor(
+                        if (runningNow) {
+                            "#64748B"
+                        } else {
+                            "#BAE6FD"
                         }
-                    textSize = 13.5f
-                    gravity = Gravity.CENTER
-                    setTextColor(
-                        Color.parseColor(
-                            if (runningNow) "#64748B" else "#BAE6FD"
-                        )
                     )
-                    background = softDrawable(
+                )
+                background =
+                    softDrawable(
                         if (runningNow) "#111827" else "#10202B",
                         if (runningNow) "#253044" else "#28566B",
                         13
                     )
-                    setPadding(dp(12), dp(8), dp(12), dp(8))
-                    isEnabled = !runningNow
-                    alpha = if (runningNow) 0.62f else 1f
-                    setOnClickListener {
-                        val selected =
-                            durableGoalStore
-                                .selectRecoverable(goal.id)
-                        if (selected == null) {
-                            Toast.makeText(
-                                this@MainActivity,
-                                "Не удалось выбрать цель",
-                                Toast.LENGTH_SHORT
-                            ).show()
-                            renderTasks()
+                setPadding(
+                    dp(12),
+                    dp(8),
+                    dp(12),
+                    dp(8)
+                )
+                isEnabled = !runningNow
+                alpha = if (runningNow) 0.62f else 1f
+                setOnClickListener {
+                    sendDurableGoalAction(
+                        if (waitingConfirmation) {
+                            AyanaVoiceService.ACTION_CONFIRM_GOAL
                         } else {
+                            AyanaVoiceService.ACTION_RESUME_GOAL
+                        }
+                    )
+                }
+            }
+
+        actionsRow.addView(
+            resumeButton,
+            LinearLayout.LayoutParams(
+                0,
+                dp(40),
+                1f
+            ).apply {
+                marginEnd = dp(6)
+            }
+        )
+
+        val cancelButton =
+            TextView(this).apply {
+                text = "Отменить"
+                textSize = 13.5f
+                gravity = Gravity.CENTER
+                setTextColor(Color.parseColor("#FCA5A5"))
+                background = softDrawable("#1B1017", "#5B2838", 13)
+                setPadding(
+                    dp(12),
+                    dp(8),
+                    dp(12),
+                    dp(8)
+                )
+                setOnClickListener {
+                    android.app.AlertDialog.Builder(this@MainActivity)
+                        .setTitle("Отменить активную цель?")
+                        .setMessage(goal.command)
+                        .setNegativeButton("Нет", null)
+                        .setPositiveButton("Отменить") { _, _ ->
                             sendDurableGoalAction(
-                                if (waitingConfirmation) {
-                                    AyanaVoiceService.ACTION_CONFIRM_GOAL
-                                } else {
-                                    AyanaVoiceService.ACTION_RESUME_GOAL
-                                }
+                                AyanaVoiceService.ACTION_CANCEL_GOAL
                             )
                         }
-                    }
+                        .show()
                 }
+            }
 
-            actionsRow.addView(
-                resumeButton,
-                LinearLayout.LayoutParams(0, dp(40), 1f).apply {
-                    marginEnd = dp(6)
-                }
+        actionsRow.addView(
+            cancelButton,
+            LinearLayout.LayoutParams(
+                0,
+                dp(40),
+                1f
+            ).apply {
+                marginStart = dp(6)
+            }
+        )
+
+        card.addView(actionsRow)
+
+        contentContainer.addView(
+            card,
+            sectionParams(
+                top = 6
             )
-
-            val cancelButton =
-                TextView(this).apply {
-                    text = "Отменить"
-                    textSize = 13.5f
-                    gravity = Gravity.CENTER
-                    setTextColor(Color.parseColor("#FCA5A5"))
-                    background = softDrawable("#1B1017", "#5B2838", 13)
-                    setPadding(dp(12), dp(8), dp(12), dp(8))
-                    setOnClickListener {
-                        android.app.AlertDialog.Builder(this@MainActivity)
-                            .setTitle("Отменить цель?")
-                            .setMessage(goal.command)
-                            .setNegativeButton("Нет", null)
-                            .setPositiveButton("Отменить") { _, _ ->
-                                val selected =
-                                    durableGoalStore
-                                        .selectRecoverable(goal.id)
-                                if (selected == null) {
-                                    Toast.makeText(
-                                        this@MainActivity,
-                                        "Не удалось выбрать цель",
-                                        Toast.LENGTH_SHORT
-                                    ).show()
-                                    renderTasks()
-                                } else {
-                                    sendDurableGoalAction(
-                                        AyanaVoiceService.ACTION_CANCEL_GOAL
-                                    )
-                                }
-                            }
-                            .show()
-                    }
-                }
-
-            actionsRow.addView(
-                cancelButton,
-                LinearLayout.LayoutParams(0, dp(40), 1f).apply {
-                    marginStart = dp(6)
-                }
-            )
-
-            card.addView(actionsRow)
-            contentContainer.addView(
-                card,
-                sectionParams(top = if (index == 0) 6 else 8)
-            )
-        }
+        )
     }
 
     private fun sendDurableGoalAction(
@@ -3698,14 +3802,117 @@ class MainActivity : AppCompatActivity() {
             sectionParams(top = 8)
         )
 
-        val records =
+        val filterScroll =
+            HorizontalScrollView(this).apply {
+                isHorizontalScrollBarEnabled =
+                    false
+            }
+
+        val filterRow =
+            LinearLayout(this).apply {
+                orientation =
+                    LinearLayout.HORIZONTAL
+            }
+
+        listOf(
+            "all" to "Все",
+            "error" to "Ошибки",
+            "android" to "Android",
+            "voice" to "Голос",
+            "agent_core" to "Agent Core"
+        )
+            .forEach {
+                pair ->
+                val selected =
+                    historyFilter ==
+                        pair.first
+
+                filterRow.addView(
+                    TextView(this).apply {
+                        text =
+                            pair.second
+                        textSize =
+                            13.5f
+                        gravity =
+                            Gravity.CENTER
+                        setTextColor(
+                            Color.parseColor(
+                                if (selected) {
+                                    "#FFFFFF"
+                                } else {
+                                    "#93A4BA"
+                                }
+                            )
+                        )
+                        background =
+                            softDrawable(
+                                if (selected) {
+                                    "#241C45"
+                                } else {
+                                    "#0A111E"
+                                },
+                                if (selected) {
+                                    "#6D5CE7"
+                                } else {
+                                    "#27364D"
+                                },
+                                13
+                            )
+                        setPadding(
+                            dp(14),
+                            dp(8),
+                            dp(14),
+                            dp(8)
+                        )
+                        setOnClickListener {
+                            historyFilter =
+                                pair.first
+                            renderHistory()
+                        }
+                    },
+                    LinearLayout.LayoutParams(
+                        ViewGroup.LayoutParams.WRAP_CONTENT,
+                        dp(38)
+                    ).apply {
+                        marginEnd =
+                            dp(8)
+                    }
+                )
+            }
+
+        filterScroll.addView(
+            filterRow
+        )
+
+        contentContainer.addView(
+            filterScroll,
+            sectionParams(
+                top =
+                    9
+            )
+        )
+
+        val allRecords =
             commandHistoryStore.recent(40)
+
+        val records =
+            allRecords.filter {
+                historyRecordMatchesFilter(
+                    it,
+                    historyFilter
+                )
+            }
 
         if (records.isEmpty()) {
             val empty = panel(20)
             empty.addView(
                 TextView(this).apply {
-                    text = "История пока пуста. После следующей голосовой или текстовой команды здесь появится полный диагностический след."
+                    text =
+                        if (allRecords.isEmpty()) {
+                            "История пока пуста. После следующей команды здесь появится диагностический след."
+                        } else {
+                            "По выбранному фильтру записей нет."
+                        }
                     textSize = 16f
                     setTextColor(Color.parseColor("#96A4B8"))
                 }
@@ -3838,30 +4045,132 @@ class MainActivity : AppCompatActivity() {
 
             val events = record.optJSONArray("events")
             if (events != null && events.length() > 0) {
-                val startIndex = maxOf(0, events.length() - 6)
-                val trace = buildString {
-                    for (index in startIndex until events.length()) {
-                        val event = events.optJSONObject(index) ?: continue
-                        if (isNotEmpty()) append("\n")
-                        append("• ")
-                        append(event.optString("state"))
-                        append(" — ")
-                        append(event.optString("message").take(180))
-                    }
-                }
-                card.addView(
+                val traceView =
                     TextView(this).apply {
-                        text = trace
-                        textSize = 12.5f
-                        setTextColor(Color.parseColor("#7F91A8"))
-                        setPadding(0, dp(8), 0, 0)
+                        val startIndex =
+                            maxOf(
+                                0,
+                                events.length() -
+                                    8
+                            )
+
+                        text =
+                            buildString {
+                                for (
+                                    index in
+                                    startIndex until events.length()
+                                ) {
+                                    val event =
+                                        events.optJSONObject(
+                                            index
+                                        )
+                                            ?: continue
+
+                                    if (
+                                        isNotEmpty()
+                                    ) {
+                                        append(
+                                            "\n"
+                                        )
+                                    }
+
+                                    append(
+                                        "• "
+                                    )
+                                    append(
+                                        event.optString(
+                                            "state"
+                                        )
+                                    )
+                                    append(
+                                        " — "
+                                    )
+                                    append(
+                                        compactHistoryEventMessage(
+                                            record,
+                                            event
+                                        )
+                                            .take(
+                                                180
+                                            )
+                                    )
+                                }
+                            }
+
+                        textSize =
+                            12.5f
+                        setTextColor(
+                            Color.parseColor(
+                                "#7F91A8"
+                            )
+                        )
+                        setPadding(
+                            0,
+                            dp(8),
+                            0,
+                            0
+                        )
+                        visibility =
+                            View.GONE
                     }
+
+                val detailsButton =
+                    TextView(this).apply {
+                        text =
+                            "Показать детали"
+                        textSize =
+                            12.5f
+                        setTextColor(
+                            Color.parseColor(
+                                "#9E90FF"
+                            )
+                        )
+                        setPadding(
+                            0,
+                            dp(8),
+                            0,
+                            0
+                        )
+                        setOnClickListener {
+                            val show =
+                                traceView.visibility !=
+                                    View.VISIBLE
+
+                            traceView.visibility =
+                                if (show) {
+                                    View.VISIBLE
+                                } else {
+                                    View.GONE
+                                }
+
+                            text =
+                                if (show) {
+                                    "Скрыть детали"
+                                } else {
+                                    "Показать детали"
+                                }
+                        }
+                    }
+
+                card.addView(
+                    detailsButton
+                )
+                card.addView(
+                    traceView
                 )
             }
 
-            card.addView(
+            val actionRow =
+                LinearLayout(this).apply {
+                    orientation =
+                        LinearLayout.HORIZONTAL
+                    gravity =
+                        Gravity.CENTER_VERTICAL
+                }
+
+            actionRow.addView(
                 TextView(this).apply {
-                    text = "Копировать запись"
+                    text = "Копировать"
                     textSize = 13.5f
                     gravity = Gravity.CENTER
                     setTextColor(Color.parseColor("#DDE7FF"))
@@ -3884,10 +4193,90 @@ class MainActivity : AppCompatActivity() {
                     }
                 },
                 LinearLayout.LayoutParams(
+                    0,
+                    dp(40),
+                    1f
+                )
+            )
+
+            actionRow.addView(
+                TextView(this).apply {
+                    text =
+                        "Удалить"
+                    textSize =
+                        13.5f
+                    gravity =
+                        Gravity.CENTER
+                    setTextColor(
+                        Color.parseColor(
+                            "#FCA5A5"
+                        )
+                    )
+                    background =
+                        softDrawable(
+                            "#1B1017",
+                            "#5B2838",
+                            13
+                        )
+                    setPadding(
+                        dp(12),
+                        dp(8),
+                        dp(12),
+                        dp(8)
+                    )
+                    setOnClickListener {
+                        AlertDialog
+                            .Builder(
+                                this@MainActivity
+                            )
+                            .setTitle(
+                                "Удалить эту запись?"
+                            )
+                            .setMessage(
+                                record.optString(
+                                    "command"
+                                )
+                                    .take(
+                                        180
+                                    )
+                            )
+                            .setNegativeButton(
+                                "Отмена",
+                                null
+                            )
+                            .setPositiveButton(
+                                "Удалить"
+                            ) {
+                                _,
+                                _ ->
+                                commandHistoryStore.delete(
+                                    record.optString(
+                                        "id"
+                                    )
+                                )
+                                renderHistory()
+                            }
+                            .show()
+                    }
+                },
+                LinearLayout.LayoutParams(
+                    0,
+                    dp(40),
+                    0.72f
+                ).apply {
+                    marginStart =
+                        dp(8)
+                }
+            )
+
+            card.addView(
+                actionRow,
+                LinearLayout.LayoutParams(
                     ViewGroup.LayoutParams.MATCH_PARENT,
                     dp(40)
                 ).apply {
-                    topMargin = dp(12)
+                    topMargin =
+                        dp(12)
                 }
             )
 
@@ -3896,6 +4285,166 @@ class MainActivity : AppCompatActivity() {
                 sectionParams(top = 9)
             )
         }
+    }
+
+    private fun historyRecordMatchesFilter(
+        record: org.json.JSONObject,
+        filter: String
+    ): Boolean {
+
+        return when (
+            filter
+        ) {
+            "error" ->
+                record.optString(
+                    "status"
+                ) ==
+                    "error"
+
+            "voice" ->
+                record.optString(
+                    "source"
+                ) ==
+                    "voice"
+
+            "agent_core" ->
+                historyHasEventPrefix(
+                    record,
+                    "agent_"
+                )
+
+            "android" ->
+                historyHasEventPrefix(
+                    record,
+                    "app_"
+                ) ||
+                    historyHasEventPrefix(
+                        record,
+                        "android"
+                    ) ||
+                    historyHasEventPrefix(
+                        record,
+                        "tool_"
+                    ) ||
+                    record.optString(
+                        "command"
+                    )
+                        .lowercase(
+                            Locale.ROOT
+                        )
+                        .let {
+                            command ->
+                            command.contains(
+                                "открой"
+                            ) ||
+                                command.contains(
+                                    "настрой"
+                                ) ||
+                                command.contains(
+                                    "экран"
+                                ) ||
+                                command.contains(
+                                    "прилож"
+                                )
+                        }
+
+            else ->
+                true
+        }
+    }
+
+    private fun historyHasEventPrefix(
+        record: org.json.JSONObject,
+        prefix: String
+    ): Boolean {
+
+        val events =
+            record.optJSONArray(
+                "events"
+            )
+                ?: return false
+
+        for (
+            index in
+            0 until events.length()
+        ) {
+            if (
+                events
+                    .optJSONObject(
+                        index
+                    )
+                    ?.optString(
+                        "state"
+                    )
+                    ?.startsWith(
+                        prefix
+                    ) ==
+                true
+            ) {
+                return true
+            }
+        }
+
+        return false
+    }
+
+    private fun compactHistoryEventMessage(
+        record: org.json.JSONObject,
+        event: org.json.JSONObject
+    ): String {
+
+        val state =
+            event.optString(
+                "state"
+            )
+
+        val message =
+            event.optString(
+                "message"
+            )
+
+        val result =
+            record.optString(
+                "result"
+            )
+
+        if (
+            state in
+            setOf(
+                "success",
+                "error",
+                "cancelled"
+            ) &&
+            result.isNotBlank() &&
+            (
+                message ==
+                    result ||
+                message.take(
+                    600
+                ) ==
+                    result.take(
+                        600
+                    )
+                )
+        ) {
+            return when (
+                state
+            ) {
+                "success" ->
+                    "Команда завершена"
+
+                "error" ->
+                    "Команда завершилась ошибкой"
+
+                "cancelled" ->
+                    "Команда остановлена"
+
+                else ->
+                    message
+            }
+        }
+
+        return message
     }
 
     private fun formatHistoryRecordForClipboard(
@@ -3954,7 +4503,12 @@ class MainActivity : AppCompatActivity() {
                     }
                     append(event.optString("state"))
                     append(": ")
-                    append(event.optString("message"))
+                    append(
+                        compactHistoryEventMessage(
+                            record,
+                            event
+                        )
+                    )
                     val details = event.optString("details")
                     if (details.isNotBlank()) {
                         append(" | ")
@@ -3974,103 +4528,61 @@ class MainActivity : AppCompatActivity() {
         contentContainer.addView(
             pageTitle(
                 "Диагностика",
-                "Состояние ключевых систем AYANA"
+                "Честное состояние основных модулей"
             )
         )
 
-        val durableGoal =
-            durableGoalStore
-                .getCurrentForUi()
-        val recoverableGoals =
-            durableGoalStore
-                .getRecoverableViews(20)
-        val capabilitySnapshot =
-            capabilityRegistry
-                .snapshot()
-        val capabilityRuntime =
-            capabilitySnapshot
-                .optJSONObject("runtime")
-
-        val checks =
-            listOf(
-                Triple(
-                    "Микрофон",
-                    checkSelfPermissionCompat(
-                        Manifest.permission.RECORD_AUDIO
-                    ),
-                    "Доступ к голосовым командам"
-                ),
-                Triple(
-                    "Спец. возможности",
-                    isAccessibilityEnabled(),
-                    "Управление интерфейсом Android"
-                ),
-                Triple(
-                    "Голосовой сервис",
-                    AyanaVoiceService.isRunning,
-                    "Активация «Аяна» и фоновые команды"
-                ),
-                Triple(
-                    "Orb AYANA",
-                    true,
-                    "Один глобальный Orb поверх всех окон • управляется только голосовым сервисом"
-                ),
-                Triple(
-                    "Точные напоминания",
-                    taskScheduler
-                        .canScheduleExact(),
-                    "Точное системное расписание"
-                ),
-                Triple(
-                    "Уведомления",
-                    notificationsEnabled(),
-                    "Системные уведомления AYANA"
-                ),
-                Triple(
-                    "Память и задачи",
-                    true,
-                    "Memory v2: ${memoryStore.count()} фактов • Routines v2: ${taskStore.count()} задач"
-                ),
-                Triple(
-                    "Device Intelligence",
-                    (capabilityRuntime?.optInt("launchable_app_count", -1) ?: -1) >= 0,
-                    "App Resolver v2 • запускаемых приложений: ${capabilityRuntime?.optInt("launchable_app_count", -1) ?: -1}"
-                ),
-                Triple(
-                    "Agent Intelligence Core",
-                    true,
-                    if (durableGoal == null) {
-                        "Planner v2 • Multi-Goal: ${recoverableGoals.size} сохранённых целей"
-                    } else {
-                        "${durableGoalStore.statusLabel(durableGoal.status)} • Multi-Goal: ${recoverableGoals.size} • checkpoint=${durableGoal.lastCheckpoint}"
-                    }
-                ),
-                Triple(
-                    "Safety Engine",
-                    true,
-                    "4 уровня риска • локальный fail-closed policy gate"
-                )
-            )
-
-        checks.forEach {
-            check ->
-
-            contentContainer.addView(
-                diagnosticRow(
-                    check.first,
-                    check.second,
-                    check.third
-                ),
-                sectionParams(
-                    top =
-                        7
-                )
-            )
-        }
-
-        val allGood =
-            checks.all {
-                it.second
+        val report =
+            try {
+                selfDiagnostics
+                    .run(
+                        focus = "all",
+                        appName = ""
+                    )
+            } catch (
+                error: Exception
+            ) {
+                org.json.JSONObject()
+                    .put(
+                        "overall_status",
+                        AyanaSelfDiagnostics.STATUS_FAIL
+                    )
+                    .put(
+                        "passed",
+                        0
+                    )
+                    .put(
+                        "warnings",
+                        0
+                    )
+                    .put(
+                        "unknown",
+                        0
+                    )
+                    .put(
+                        "failed",
+                        1
+                    )
+                    .put(
+                        "checks",
+                        org.json.JSONArray()
+                            .put(
+                                org.json.JSONObject()
+                                    .put(
+                                        "name",
+                                        "Self-Diagnostics"
+                                    )
+                                    .put(
+                                        "status",
+                                        AyanaSelfDiagnostics.STATUS_FAIL
+                                    )
+                                    .put(
+                                        "details",
+                                        error.message
+                                            ?: "Неизвестная ошибка"
+                                    )
+                            )
+                    )
             }
 
         val summary =
@@ -4078,36 +4590,49 @@ class MainActivity : AppCompatActivity() {
                 20
             )
 
+        val overall =
+            report.optString(
+                "overall_status",
+                AyanaSelfDiagnostics.STATUS_UNKNOWN
+            )
+
         summary.addView(
             TextView(this).apply {
-
                 text =
-                    if (
-                        allGood
-                    ) {
-                        "✓ Все основные системы работают"
-                    } else {
-                        "Некоторые разрешения требуют внимания"
-                    }
-
+                    "Состояние AYANA: ${diagnosticStatusLabel(overall)}"
                 textSize =
-                    16.5f
-
+                    18f
                 setTypeface(
                     Typeface.DEFAULT,
                     Typeface.BOLD
                 )
+                setTextColor(
+                    diagnosticStatusColor(
+                        overall
+                    )
+                )
+            }
+        )
 
+        summary.addView(
+            TextView(this).apply {
+                text =
+                    "Исправно ${report.optInt("passed")}  •  " +
+                        "Внимание ${report.optInt("warnings")}  •  " +
+                        "Нет данных ${report.optInt("unknown")}  •  " +
+                        "Ошибки ${report.optInt("failed")}"
+                textSize =
+                    14.5f
                 setTextColor(
                     Color.parseColor(
-                        if (
-                            allGood
-                        ) {
-                            "#86EFAC"
-                        } else {
-                            "#FBBF24"
-                        }
+                        "#98A7BB"
                     )
+                )
+                setPadding(
+                    0,
+                    dp(6),
+                    0,
+                    0
                 )
             }
         )
@@ -4116,9 +4641,251 @@ class MainActivity : AppCompatActivity() {
             summary,
             sectionParams(
                 top =
-                    14
+                    8
             )
         )
+
+        val checks =
+            report.optJSONArray(
+                "checks"
+            )
+                ?: org.json.JSONArray()
+
+        for (
+            index in
+            0 until checks.length()
+        ) {
+            val item =
+                checks.optJSONObject(
+                    index
+                )
+                    ?: continue
+
+            contentContainer.addView(
+                healthDiagnosticRow(
+                    name =
+                        item.optString(
+                            "name"
+                        ),
+                    status =
+                        item.optString(
+                            "status",
+                            AyanaSelfDiagnostics.STATUS_UNKNOWN
+                        ),
+                    details =
+                        item.optString(
+                            "details"
+                        )
+                ),
+                sectionParams(
+                    top =
+                        7
+                )
+            )
+        }
+
+        val recommendations =
+            report.optJSONArray(
+                "recommendations"
+            )
+
+        if (
+            recommendations !=
+            null &&
+            recommendations.length() >
+            0
+        ) {
+            val card =
+                panel(
+                    20
+                )
+
+            card.addView(
+                smallSectionTitle(
+                    "ТРЕБУЕТ ВНИМАНИЯ"
+                )
+            )
+
+            for (
+                index in
+                0 until recommendations.length()
+            ) {
+                val item =
+                    recommendations.optString(
+                        index
+                    )
+                        .trim()
+
+                if (
+                    item.isBlank()
+                ) {
+                    continue
+                }
+
+                card.addView(
+                    TextView(this).apply {
+                        text =
+                            "• $item"
+                        textSize =
+                            14f
+                        setTextColor(
+                            Color.parseColor(
+                                "#B9C6D8"
+                            )
+                        )
+                        setPadding(
+                            0,
+                            dp(7),
+                            0,
+                            0
+                        )
+                    }
+                )
+            }
+
+            contentContainer.addView(
+                card,
+                sectionParams(
+                    top =
+                        12
+                )
+            )
+        }
+    }
+
+    private fun diagnosticStatusLabel(
+        status: String
+    ): String {
+
+        return when (
+            status
+        ) {
+            AyanaSelfDiagnostics.STATUS_PASS ->
+                "Исправно"
+
+            AyanaSelfDiagnostics.STATUS_WARNING ->
+                "Внимание"
+
+            AyanaSelfDiagnostics.STATUS_FAIL ->
+                "Ошибка"
+
+            else ->
+                "Нет данных"
+        }
+    }
+
+    private fun diagnosticStatusColor(
+        status: String
+    ): Int {
+
+        return Color.parseColor(
+            when (
+                status
+            ) {
+                AyanaSelfDiagnostics.STATUS_PASS ->
+                    "#86EFAC"
+
+                AyanaSelfDiagnostics.STATUS_WARNING ->
+                    "#FBBF24"
+
+                AyanaSelfDiagnostics.STATUS_FAIL ->
+                    "#FCA5A5"
+
+                else ->
+                    "#94A3B8"
+            }
+        )
+    }
+
+    private fun healthDiagnosticRow(
+        name: String,
+        status: String,
+        details: String
+    ): View {
+
+        val row =
+            panel(
+                17
+            )
+
+        val header =
+            LinearLayout(this).apply {
+                orientation =
+                    LinearLayout.HORIZONTAL
+                gravity =
+                    Gravity.CENTER_VERTICAL
+            }
+
+        header.addView(
+            TextView(this).apply {
+                text =
+                    name
+                textSize =
+                    15.5f
+                setTypeface(
+                    Typeface.DEFAULT,
+                    Typeface.BOLD
+                )
+                setTextColor(
+                    Color.WHITE
+                )
+            },
+            LinearLayout.LayoutParams(
+                0,
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+                1f
+            )
+        )
+
+        header.addView(
+            TextView(this).apply {
+                text =
+                    diagnosticStatusLabel(
+                        status
+                    )
+                textSize =
+                    12.5f
+                setTypeface(
+                    Typeface.DEFAULT,
+                    Typeface.BOLD
+                )
+                setTextColor(
+                    diagnosticStatusColor(
+                        status
+                    )
+                )
+            }
+        )
+
+        row.addView(
+            header
+        )
+
+        if (
+            details.isNotBlank()
+        ) {
+            row.addView(
+                TextView(this).apply {
+                    text =
+                        details
+                    textSize =
+                        13.5f
+                    setTextColor(
+                        Color.parseColor(
+                            "#8393A9"
+                        )
+                    )
+                    setPadding(
+                        0,
+                        dp(5),
+                        0,
+                        0
+                    )
+                }
+            )
+        }
+
+        return row
     }
 
     private fun renderSettings() {
@@ -6018,204 +6785,310 @@ class MainActivity : AppCompatActivity() {
         context: Context
     ) : View(context) {
 
-        private val gridPaint =
-            Paint(Paint.ANTI_ALIAS_FLAG).apply {
-                style = Paint.Style.STROKE
-                strokeWidth = 1f
+        private val barPaint =
+            Paint(
+                Paint.ANTI_ALIAS_FLAG
+            ).apply {
+                style =
+                    Paint.Style.FILL
             }
 
-        private val wavePaint =
-            Paint(Paint.ANTI_ALIAS_FLAG).apply {
-                style = Paint.Style.STROKE
-                strokeCap = Paint.Cap.ROUND
-                strokeJoin = Paint.Join.ROUND
-            }
-
-        private val path = Path()
-        private var attached = false
+        private var attached =
+            false
 
         override fun onAttachedToWindow() {
             super.onAttachedToWindow()
-            attached = true
+            attached =
+                true
             postInvalidateOnAnimation()
         }
 
         override fun onDetachedFromWindow() {
-            attached = false
+            attached =
+                false
             super.onDetachedFromWindow()
         }
 
         override fun onDraw(
             canvas: Canvas
         ) {
-            super.onDraw(canvas)
+            super.onDraw(
+                canvas
+            )
 
-            val w = width.toFloat()
-            val h = height.toFloat()
+            val w =
+                width.toFloat()
 
-            if (w <= 1f || h <= 1f) {
+            val h =
+                height.toFloat()
+
+            if (
+                w <=
+                1f ||
+                h <=
+                1f
+            ) {
                 return
             }
 
-            gridPaint.color =
-                Color.argb(
-                    34,
-                    83,
-                    108,
-                    143
-                )
-
-            for (i in 1..4) {
-                val y = h * i / 5f
-                canvas.drawLine(
-                    dp(12).toFloat(),
-                    y,
-                    w - dp(12),
-                    y,
-                    gridPaint
-                )
-            }
-
-            for (i in 1..6) {
-                val x = w * i / 7f
-                canvas.drawLine(
-                    x,
-                    dp(12).toFloat(),
-                    x,
-                    h - dp(12),
-                    gridPaint
-                )
-            }
-
             val state =
-                AyanaVoiceService.currentStatusState
+                AyanaVoiceService
+                    .currentStatusState
 
-            val amplitude =
-                when (state) {
-                    AyanaVoiceService.STATE_LISTENING -> h * 0.22f
-                    AyanaVoiceService.STATE_COMMAND -> h * 0.28f
-                    AyanaVoiceService.STATE_THINKING -> h * 0.19f
-                    AyanaVoiceService.STATE_SPEAKING -> h * 0.25f
-                    AyanaVoiceService.STATE_ERROR -> h * 0.12f
-                    else -> h * 0.10f
-                }
+            val count =
+                9
 
-            val speed =
-                when (state) {
-                    AyanaVoiceService.STATE_THINKING -> 3.6f
-                    AyanaVoiceService.STATE_COMMAND -> 4.4f
-                    AyanaVoiceService.STATE_SPEAKING -> 4.8f
-                    else -> 2.7f
-                }
+            val gap =
+                dp(
+                    10
+                )
+                    .toFloat()
+
+            val available =
+                (
+                    w -
+                        dp(
+                            34
+                        ) *
+                            2f -
+                        gap *
+                            (
+                                count -
+                                    1
+                                )
+                    )
+                    .coerceAtLeast(
+                        count *
+                            dp(
+                                6
+                            )
+                                .toFloat()
+                    )
+
+            val barWidth =
+                (
+                    available /
+                        count
+                    )
+                    .coerceIn(
+                        dp(
+                            6
+                        )
+                            .toFloat(),
+                        dp(
+                            14
+                        )
+                            .toFloat()
+                    )
+
+            val totalWidth =
+                barWidth *
+                    count +
+                    gap *
+                        (
+                            count -
+                                1
+                            )
+
+            val startX =
+                (
+                    w -
+                        totalWidth
+                    ) /
+                    2f
+
+            val centerY =
+                h /
+                    2f
 
             val t =
-                (System.nanoTime() / 1_000_000_000.0).toFloat()
+                (
+                    System.nanoTime() /
+                        1_000_000_000.0
+                    )
+                    .toFloat()
 
-            val primary =
-                stateColor(state)
+            val baseFraction =
+                when (
+                    state
+                ) {
+                    AyanaVoiceService.STATE_COMMAND ->
+                        0.30f
 
-            val secondary =
-                when (state) {
-                    AyanaVoiceService.STATE_ERROR ->
-                        Color.parseColor("#F87171")
                     AyanaVoiceService.STATE_THINKING ->
-                        Color.parseColor("#A78BFA")
+                        0.24f
+
+                    AyanaVoiceService.STATE_EXECUTING ->
+                        0.22f
+
+                    AyanaVoiceService.STATE_SPEAKING ->
+                        0.34f
+
+                    AyanaVoiceService.STATE_ERROR ->
+                        0.16f
+
+                    AyanaVoiceService.STATE_SUCCESS ->
+                        0.18f
+
                     else ->
-                        Color.parseColor("#38BDF8")
+                        0.18f
                 }
 
-            for (track in 0..2) {
-                path.reset()
+            val motion =
+                when (
+                    state
+                ) {
+                    AyanaVoiceService.STATE_COMMAND ->
+                        4.8f
 
-                val phaseOffset = track * 0.85f
-                val trackScale = 1f - track * 0.18f
-                val center =
-                    h * (0.48f + (track - 1) * 0.055f)
+                    AyanaVoiceService.STATE_THINKING ->
+                        2.1f
 
-                var x = 0f
-                var first = true
+                    AyanaVoiceService.STATE_EXECUTING ->
+                        3.2f
 
-                while (x <= w) {
-                    val nx = x / w
-                    val envelope =
-                        Math.sin(
-                            Math.PI * nx
-                        ).toFloat()
+                    AyanaVoiceService.STATE_SPEAKING ->
+                        5.2f
 
-                    val harmonic =
-                        Math.sin(
-                            nx * Math.PI * 6.0 +
-                                t * speed +
-                                phaseOffset
-                        ).toFloat()
-
-                    val micro =
-                        Math.sin(
-                            nx * Math.PI * 15.0 -
-                                t * (speed * 0.48f) +
-                                track
-                        ).toFloat() *
-                            0.18f
-
-                    val y =
-                        center +
-                            (harmonic + micro) *
-                            amplitude *
-                            envelope *
-                            trackScale
-
-                    if (first) {
-                        path.moveTo(x, y)
-                        first = false
-                    } else {
-                        path.lineTo(x, y)
-                    }
-
-                    x += 4f
+                    else ->
+                        1.35f
                 }
 
-                wavePaint.color =
-                    if (track == 1) {
-                        secondary
+            barPaint.color =
+                stateColor(
+                    state
+                )
+
+            for (
+                index in
+                0 until count
+            ) {
+                val phase =
+                    t *
+                        motion +
+                        index *
+                            0.62f
+
+                val wave =
+                    (
+                        Math.sin(
+                            phase.toDouble()
+                        ) +
+                            1.0
+                        )
+                        .toFloat() /
+                        2f
+
+                val sweep =
+                    if (
+                        state ==
+                        AyanaVoiceService.STATE_EXECUTING
+                    ) {
+                        val cursor =
+                            (
+                                t *
+                                    2.2f
+                                ) %
+                                count
+
+                        (
+                            1f -
+                                kotlin.math.abs(
+                                    index -
+                                        cursor
+                                ) /
+                                3f
+                            )
+                            .coerceIn(
+                                0f,
+                                1f
+                            )
                     } else {
-                        primary
+                        0f
                     }
 
-                wavePaint.alpha =
-                    when (track) {
-                        0 -> 120
-                        1 -> 230
-                        else -> 90
-                    }
+                val fraction =
+                    (
+                        baseFraction +
+                            wave *
+                                when (
+                                    state
+                                ) {
+                                    AyanaVoiceService.STATE_COMMAND,
+                                    AyanaVoiceService.STATE_SPEAKING ->
+                                        0.48f
 
-                wavePaint.strokeWidth =
-                    when (track) {
-                        1 -> dp(3).toFloat()
-                        else -> dp(2).toFloat()
-                    }
+                                    AyanaVoiceService.STATE_THINKING ->
+                                        0.24f
 
-                canvas.drawPath(
-                    path,
-                    wavePaint
+                                    AyanaVoiceService.STATE_EXECUTING ->
+                                        0.18f +
+                                            sweep *
+                                                0.28f
+
+                                    else ->
+                                        0.14f
+                                }
+                        )
+                        .coerceIn(
+                            0.13f,
+                            0.82f
+                        )
+
+                val barHeight =
+                    h *
+                        fraction
+
+                val left =
+                    startX +
+                        index *
+                            (
+                                barWidth +
+                                    gap
+                                )
+
+                val top =
+                    centerY -
+                        barHeight /
+                            2f
+
+                val right =
+                    left +
+                        barWidth
+
+                val bottom =
+                    centerY +
+                        barHeight /
+                            2f
+
+                barPaint.alpha =
+                    (
+                        135 +
+                            wave *
+                                105
+                        )
+                        .toInt()
+                        .coerceIn(
+                            110,
+                            240
+                        )
+
+                canvas.drawRoundRect(
+                    left,
+                    top,
+                    right,
+                    bottom,
+                    barWidth /
+                        2f,
+                    barWidth /
+                        2f,
+                    barPaint
                 )
             }
 
-            val scanX =
-                ((t * 72f) % w)
-
-            wavePaint.color = secondary
-            wavePaint.alpha = 70
-            wavePaint.strokeWidth = 1f
-
-            canvas.drawLine(
-                scanX,
-                dp(12).toFloat(),
-                scanX,
-                h - dp(12),
-                wavePaint
-            )
-
-            if (attached) {
+            if (
+                attached
+            ) {
                 postInvalidateOnAnimation()
             }
         }
