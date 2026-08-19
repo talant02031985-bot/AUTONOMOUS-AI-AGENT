@@ -52,8 +52,10 @@ import kotlin.math.abs
 
 class AyanaVoiceService : Service() {
 
-    // AYANA v11.1.2 APP SETTINGS INTEGRITY FINAL.
-    // Built on the device-confirmed v11.1.1 command/app baseline. v11.1.2 adds
+    // AYANA v11.1.5 WINDOW CONTEXT INTEGRITY.
+    // Built on v11.1.2 App Settings Integrity. v11.1.5 adds context-safe
+    // terminal verification for multi-window / popup / PiP screens while preserving
+    // the existing direct app-settings routes. v11.1.2 adds
     // routing-envelope cleanup plus strict app-settings terminal verification
     // with an OEM-safe App Info + Accessibility fallback. The v9.0/v9.1 audio, STOP and local
     // fast-routing stack is intentionally frozen: streamed 24 kHz Marin PCM,
@@ -4659,8 +4661,9 @@ class AyanaVoiceService : Service() {
 
             val normalizedScreen =
                 normalizeVerificationText(
-                    screenBefore
-                        .toString()
+                    screenVerificationTextForInteraction(
+                        screenBefore
+                    )
                 )
 
             val visibleTarget =
@@ -4988,96 +4991,252 @@ class AyanaVoiceService : Service() {
         section: String
     ): Boolean {
 
-        if (
-            !screen.optBoolean(
-                "success",
-                false
-            )
-        ) {
-            return false
-        }
-
-        val normalizedScreen =
-            normalizeVerificationText(
-                screen.toString()
-            )
-
-        if (
-            normalizedScreen
-                .isBlank()
-        ) {
+        if (!screen.optBoolean("success", false)) {
             return false
         }
 
         val markers =
-            appDetailVerificationMarkers(
-                section
-            )
+            appDetailVerificationMarkers(section)
 
-        if (
-            markers.isEmpty()
-        ) {
+        if (markers.isEmpty()) {
             return false
         }
 
-        val markerFound =
-            markers.any { marker ->
-                normalizedScreen.contains(
-                    normalizeVerificationText(
-                        marker
-                    )
-                )
-            }
-
-        if (
-            !markerFound
-        ) {
-            return false
-        }
+        val normalizedMarkers =
+            markers
+                .map { normalizeVerificationText(it) }
+                .filter { it.isNotBlank() }
 
         val normalizedApp =
-            normalizeVerificationText(
-                appTarget
-            )
+            normalizeVerificationText(appTarget)
 
-        val appFound =
-            normalizedApp.isBlank() ||
-                normalizedScreen.contains(
-                    normalizedApp
-                )
+        val contexts =
+            appDetailVerificationContexts(screen)
 
-        if (
-            !appFound
-        ) {
+        if (contexts.isEmpty()) {
             return false
         }
 
-        // App Info itself contains rows named «Уведомления», «Разрешения»,
-        // «Хранилище», etc. Merely seeing such a row is NOT proof that the
-        // requested child screen was opened.
-        if (
-            section !=
-            "info"
-        ) {
-            val stillOnAppInfo =
-                normalizedScreen.contains(
-                    "информация о приложении"
-                ) ||
-                    normalizedScreen.contains(
-                        "сведения о приложении"
-                    ) ||
-                    normalizedScreen.contains(
-                        "app info"
-                    )
+        return contexts.any { contextText ->
+            val normalizedContext =
+                normalizeVerificationText(contextText)
 
-            if (
-                stillOnAppInfo
-            ) {
-                return false
+            if (normalizedContext.isBlank()) {
+                return@any false
+            }
+
+            val markerFound =
+                normalizedMarkers.any { marker ->
+                    normalizedContext.contains(marker)
+                }
+
+            if (!markerFound) {
+                return@any false
+            }
+
+            val appFound =
+                normalizedApp.isBlank() ||
+                    normalizedContext.contains(normalizedApp)
+
+            if (!appFound) {
+                return@any false
+            }
+
+            if (section != "info") {
+                val stillOnAppInfo =
+                    normalizedContext.contains("информация о приложении") ||
+                        normalizedContext.contains("сведения о приложении") ||
+                        normalizedContext.contains("app info")
+
+                if (stillOnAppInfo) {
+                    return@any false
+                }
+            }
+
+            true
+        }
+    }
+
+    private fun screenVerificationTextForInteraction(
+        screen: JSONObject
+    ): String {
+
+        val windows = screen.optJSONArray("windows")
+        if (windows != null) {
+            val values = mutableListOf<String>()
+            var hasInteractionContext = false
+
+            for (index in 0 until windows.length()) {
+                val window = windows.optJSONObject(index) ?: continue
+                if (window.optBoolean("interaction_context", false)) {
+                    hasInteractionContext = true
+                    val verification =
+                        window.optString("verification_text").trim()
+                    if (verification.isNotBlank()) {
+                        values.add(verification)
+                    }
+                }
+            }
+
+            if (hasInteractionContext) {
+                return values.joinToString(" | ")
             }
         }
 
-        return true
+        return screen.optString("verification_text")
+            .ifBlank {
+                val visible = screen.optJSONArray("visible_text")
+                buildString {
+                    if (visible != null) {
+                        for (index in 0 until visible.length()) {
+                            val value = visible.optString(index).trim()
+                            if (value.isBlank()) continue
+                            if (isNotEmpty()) append(" | ")
+                            append(value)
+                        }
+                    }
+                }
+            }
+    }
+
+    /**
+     * Never prove a terminal screen by combining words from unrelated visible
+     * windows. Window Context Manager v1 exposes one visible_text array per
+     * context; marker + app label must coexist inside the same context.
+     */
+    private fun appDetailVerificationContexts(
+        screen: JSONObject
+    ): List<String> {
+
+        val result =
+            mutableListOf<String>()
+
+        val windows =
+            screen.optJSONArray("windows")
+
+        if (windows != null) {
+            var hasInteractionContext = false
+            for (index in 0 until windows.length()) {
+                val window = windows.optJSONObject(index) ?: continue
+                if (window.optBoolean("interaction_context", false)) {
+                    hasInteractionContext = true
+                    break
+                }
+            }
+
+            val structuredWindowContext =
+                screen.optString("window_context_mode").isNotBlank()
+
+            // New Window Context snapshots fail closed if no interaction window
+            // was selected. Never fall back to combining all visible windows.
+            if (structuredWindowContext && !hasInteractionContext) {
+                return emptyList()
+            }
+
+            for (index in 0 until windows.length()) {
+                val window = windows.optJSONObject(index) ?: continue
+
+                if (
+                    hasInteractionContext &&
+                    !window.optBoolean("interaction_context", false)
+                ) {
+                    continue
+                }
+
+                val typeName =
+                    window.optString("type_name")
+
+                if (typeName == "input_method") {
+                    continue
+                }
+
+                val occlusion =
+                    window.optDouble("occlusion_ratio", 0.0)
+
+                if (occlusion >= 0.95) {
+                    continue
+                }
+
+                val text =
+                    window.optString("verification_text").trim()
+
+                if (text.isNotBlank()) {
+                    result.add(text)
+                }
+            }
+        }
+
+        if (result.isNotEmpty()) {
+            return result
+        }
+
+        // Backward-compatible fallback for old snapshots. New v3.6 snapshots
+        // should normally take the structured branch above.
+        val fallback =
+            screen.optString("verification_text")
+                .ifBlank {
+                    val visible = screen.optJSONArray("visible_text")
+                    buildString {
+                        if (visible != null) {
+                            for (index in 0 until visible.length()) {
+                                val value = visible.optString(index).trim()
+                                if (value.isBlank()) continue
+                                if (isNotEmpty()) append(" | ")
+                                append(value)
+                            }
+                        }
+                    }
+                }
+
+        return if (fallback.isBlank()) emptyList() else listOf(fallback)
+    }
+
+    private fun appDetailVerificationDiagnosticSummary(
+        screen: JSONObject
+    ): String {
+
+        if (!screen.optBoolean("success", false)) {
+            return "screen_success=false"
+        }
+
+        val windows = screen.optJSONArray("windows")
+            ?: return (
+                "legacy_snapshot; package=${screen.optString("package")}; " +
+                    "visible=${screen.optJSONArray("visible_text")?.toString().orEmpty().take(500)}"
+                ).take(700)
+
+        return buildString {
+            append("primary=")
+            append(screen.optString("primary_context_id"))
+            append("; windows=")
+            append(windows.length())
+
+            val limit = minOf(windows.length(), 5)
+            for (index in 0 until limit) {
+                val window = windows.optJSONObject(index) ?: continue
+                append(" || ")
+                append(window.optString("context_id"))
+                append(" pkg=")
+                append(window.optString("package"))
+                append(" type=")
+                append(window.optString("type_name"))
+                append(" layer=")
+                append(window.optInt("layer", 0))
+                append(" active=")
+                append(window.optBoolean("active", false))
+                append(" focused=")
+                append(window.optBoolean("focused", false))
+                append(" evidence_age=")
+                append(window.optLong("evidence_age_ms", -1L))
+                append(" text=")
+                append(
+                    window.optJSONArray("visible_text")
+                        ?.toString()
+                        .orEmpty()
+                        .take(260)
+                )
+            }
+        }.take(1800)
     }
 
     private fun awaitVerifiedAppDetailScreen(
@@ -13632,7 +13791,12 @@ class AyanaVoiceService : Service() {
                     state = "app_info_verify_failed",
                     message = "App Info не подтверждён по экрану",
                     details =
-                        "package=${resolved.packageName}; label=${resolved.label}".take(420)
+                        (
+                            "package=${resolved.packageName}; label=${resolved.label}; " +
+                                appDetailVerificationDiagnosticSummary(
+                                    verification.optJSONObject("screen") ?: JSONObject()
+                                )
+                            ).take(1800)
                 )
 
                 resolved.toJson()
@@ -14116,7 +14280,12 @@ class AyanaVoiceService : Service() {
                     state = "app_settings_verify_failed",
                     message = "Не удалось подтвердить App Info перед fallback",
                     details =
-                        "package=$packageName; section=$normalizedSection".take(520)
+                        (
+                            "package=$packageName; section=$normalizedSection; " +
+                                appDetailVerificationDiagnosticSummary(
+                                    appInfoVerification.optJSONObject("screen") ?: JSONObject()
+                                )
+                            ).take(1800)
                 )
 
                 return toolResult(
@@ -14182,7 +14351,14 @@ class AyanaVoiceService : Service() {
                     state = "app_settings_verify_failed",
                     message = "Конечный экран приложения не подтверждён",
                     details =
-                        "package=$packageName; section=$normalizedSection".take(520)
+                        (
+                            "package=$packageName; section=$normalizedSection; " +
+                                appDetailVerificationDiagnosticSummary(
+                                    subpageResult.optJSONObject("screen") ?:
+                                        appInfoVerification.optJSONObject("screen") ?:
+                                        JSONObject()
+                                )
+                            ).take(1800)
                 )
 
                 toolResult(
