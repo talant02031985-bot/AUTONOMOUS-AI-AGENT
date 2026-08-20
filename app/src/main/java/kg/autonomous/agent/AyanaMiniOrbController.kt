@@ -5,10 +5,8 @@ import android.content.Intent
 import android.graphics.Canvas
 import android.graphics.Color
 import android.graphics.Paint
-import android.graphics.Path
+import android.graphics.RectF
 import android.graphics.PixelFormat
-import android.graphics.RadialGradient
-import android.graphics.Shader
 import android.os.Build
 import android.os.Handler
 import android.os.Looper
@@ -22,7 +20,7 @@ import kotlin.math.abs
 import kotlin.math.sin
 
 /**
- * AYANA Floating Orb v3.1.1 — SINGLE INSTANCE + BRANDED LOGO + COMPILE FIX.
+ * AYANA Floating Orb v4.0 — AYANA CORE / LOW LOAD.
  *
  * Rules:
  * 1) exactly one overlay View per app process;
@@ -30,7 +28,8 @@ import kotlin.math.sin
  * 3) repeated refresh() only updates the existing View;
  * 4) drag position is persisted;
  * 5) tapping the Orb opens AYANA.
- * 6) the center uses the installed AYANA application logo; the old letter A is only a fail-safe fallback.
+ * 6) center mark is the lightweight AYANA Core symbol: luminous core + three broken arcs.
+ * 7) animation is frame-capped to protect text input and IME latency.
  *
  * The service owns WHEN the Orb exists. This controller only owns HOW it is
  * rendered. It never starts/stops AyanaVoiceService itself.
@@ -617,42 +616,29 @@ class AyanaMiniOrbController(
                         resources
                             .displayMetrics
                             .density
+                strokeCap =
+                    Paint.Cap.ROUND
             }
 
-        private val labelPaint =
-            Paint(
-                Paint.ANTI_ALIAS_FLAG
-            ).apply {
+        private val arcBounds =
+            RectF()
 
-                color =
-                    Color.WHITE
+        private val bodyColor =
+            Color.rgb(
+                8,
+                17,
+                31
+            )
 
-                textAlign =
-                    Paint.Align.CENTER
+        private var accentColor =
+            Color.rgb(
+                125,
+                211,
+                252
+            )
 
-                typeface =
-                    android.graphics.Typeface.DEFAULT_BOLD
-            }
-
-        // Use the real installed AYANA icon instead of a synthetic letter.
-        // Resolving through PackageManager keeps the Orb automatically in sync
-        // with the app branding if the launcher icon resource changes later.
-        private val logoDrawable:
-            android.graphics.drawable.Drawable? =
-            try {
-                context.packageManager
-                    .getApplicationIcon(
-                        context.packageName
-                    )
-                    .mutate()
-            } catch (_: Exception) {
-                null
-            }
-
-        // Reused clipping path: Canvas has clipPath(), not clipCircle().
-        // Reusing the Path avoids allocating a new object on every animation frame.
-        private val logoClipPath =
-            Path()
+        private var attached =
+            false
 
         private var ayanaState =
             AyanaVoiceService.STATE_LISTENING
@@ -660,12 +646,32 @@ class AyanaMiniOrbController(
         private var terminalFlashUntil =
             0L
 
+        override fun onAttachedToWindow() {
+            super.onAttachedToWindow()
+            attached =
+                true
+            postInvalidateDelayed(
+                FRAME_LISTENING_MS
+            )
+        }
+
+        override fun onDetachedFromWindow() {
+            attached =
+                false
+            super.onDetachedFromWindow()
+        }
+
         fun setAyanaState(
             state: String
         ) {
 
             ayanaState =
                 state
+
+            accentColor =
+                strokeFor(
+                    state
+                )
 
             if (
                 state ==
@@ -708,155 +714,197 @@ class AyanaMiniOrbController(
                     width,
                     height
                 ) *
-                    0.30f
+                    0.245f
 
-            val speed =
+            val activeMotion =
                 when (
                     ayanaState
                 ) {
-
-                    AyanaVoiceService.STATE_COMMAND ->
-                        145.0
-
-                    AyanaVoiceService.STATE_EXECUTING ->
-                        125.0
-
-                    AyanaVoiceService.STATE_THINKING ->
-                        245.0
-
+                    AyanaVoiceService.STATE_LISTENING,
+                    AyanaVoiceService.STATE_COMMAND,
+                    AyanaVoiceService.STATE_THINKING,
+                    AyanaVoiceService.STATE_EXECUTING,
                     AyanaVoiceService.STATE_SPEAKING ->
-                        215.0
-
-                    AyanaVoiceService.STATE_LISTENING ->
-                        520.0
+                        true
 
                     else ->
-                        700.0
+                        false
                 }
 
-            val amount =
+            val speedDegPerMs =
                 when (
                     ayanaState
                 ) {
-
                     AyanaVoiceService.STATE_COMMAND ->
-                        0.095f
-
-                    AyanaVoiceService.STATE_EXECUTING ->
                         0.085f
 
                     AyanaVoiceService.STATE_THINKING ->
-                        0.065f
+                        0.055f
+
+                    AyanaVoiceService.STATE_EXECUTING ->
+                        0.105f
 
                     AyanaVoiceService.STATE_SPEAKING ->
-                        0.070f
+                        0.075f
 
                     AyanaVoiceService.STATE_LISTENING ->
-                        0.035f
+                        0.020f
+
+                    else ->
+                        0f
+                }
+
+            val breatheAmount =
+                when (
+                    ayanaState
+                ) {
+                    AyanaVoiceService.STATE_COMMAND,
+                    AyanaVoiceService.STATE_SPEAKING ->
+                        0.12f
+
+                    AyanaVoiceService.STATE_THINKING,
+                    AyanaVoiceService.STATE_EXECUTING ->
+                        0.08f
+
+                    AyanaVoiceService.STATE_LISTENING ->
+                        0.045f
 
                     else ->
                         0f
                 }
 
             val pulse =
-                (
-                    sin(
-                        now /
-                            speed
-                    ) *
-                        amount
-                    )
-                    .toFloat()
-
-            val radius =
-                baseRadius *
+                if (activeMotion) {
                     (
-                        1f +
-                            pulse
+                        sin(
+                            now /
+                                360.0
+                        ) *
+                            breatheAmount
                         )
+                        .toFloat()
+                } else {
+                    0f
+                }
 
-            corePaint.shader =
-                RadialGradient(
-                    cx -
-                        radius *
-                        0.28f,
-                    cy -
-                        radius *
-                        0.30f,
-                    radius *
-                        1.35f,
-                    gradientFor(
-                        ayanaState
-                    ),
-                    null,
-                    Shader.TileMode.CLAMP
-                )
-
-            canvas.drawCircle(
-                cx,
-                cy,
-                radius,
-                corePaint
-            )
-
+            // Dark, stable body: no per-frame bitmap, clipping path or gradient
+            // allocation. This keeps the overlay cheap while the IME is active.
             corePaint.shader =
                 null
 
-            ringPaint.color =
-                strokeFor(
-                    ayanaState
-                )
+            corePaint.color =
+                bodyColor
 
-            ringPaint.alpha =
-                215
+            corePaint.alpha =
+                245
 
             canvas.drawCircle(
                 cx,
                 cy,
-                radius +
-                    dpLocal(
-                        5
-                    ),
-                ringPaint
+                baseRadius *
+                    1.42f,
+                corePaint
             )
 
-            if (
-                ayanaState ==
-                AyanaVoiceService.STATE_EXECUTING
-            ) {
+            val accent =
+                accentColor
 
-                val phase =
+            // Luminous central AYANA Core nucleus.
+            corePaint.color =
+                accent
+
+            corePaint.alpha =
+                if (
+                    now <
+                    terminalFlashUntil
+                ) {
+                    245
+                } else {
+                    220
+                }
+
+            canvas.drawCircle(
+                cx,
+                cy,
+                baseRadius *
                     (
-                        now %
-                            850L
-                        ) /
-                        850f
+                        0.24f +
+                            pulse
+                        ),
+                corePaint
+            )
+
+            ringPaint.color =
+                accent
+
+            val rotation =
+                (
+                    now *
+                        speedDegPerMs
+                    ) %
+                    360f
+
+            for (ring in 0..2) {
+                val radius =
+                    baseRadius +
+                        dpLocal(
+                            4 +
+                                ring *
+                                    6
+                        )
+
+                arcBounds.set(
+                    cx -
+                        radius,
+                    cy -
+                        radius,
+                    cx +
+                        radius,
+                    cy +
+                        radius
+                )
+
+                ringPaint.strokeWidth =
+                    dpLocal(
+                        if (ring == 0) 3 else 2
+                    )
 
                 ringPaint.alpha =
-                    (
-                        220 *
-                            (
-                                1f -
-                                    phase
-                                )
-                        )
-                        .toInt()
-                        .coerceIn(
-                            0,
-                            220
-                        )
+                    205 -
+                        ring *
+                            35
 
-                canvas.drawCircle(
-                    cx,
-                    cy,
-                    radius +
-                        dpLocal(
-                            6
-                        ) +
-                        dpLocal(
-                            15
-                        ) *
-                            phase,
+                val direction =
+                    if (ring % 2 == 0) {
+                        1f
+                    } else {
+                        -1f
+                    }
+
+                val startAngle =
+                    rotation *
+                        direction +
+                        ring *
+                            74f
+
+                canvas.drawArc(
+                    arcBounds,
+                    startAngle,
+                    70f -
+                        ring *
+                            8f,
+                    false,
+                    ringPaint
+                )
+
+                canvas.drawArc(
+                    arcBounds,
+                    startAngle +
+                        174f,
+                    34f +
+                        ring *
+                            5f,
+                    false,
                     ringPaint
                 )
             }
@@ -865,7 +913,6 @@ class AyanaMiniOrbController(
                 now <
                 terminalFlashUntil
             ) {
-
                 val remaining =
                     (
                         terminalFlashUntil -
@@ -881,13 +928,11 @@ class AyanaMiniOrbController(
                             TERMINAL_FLASH_MS.toFloat()
 
                 ringPaint.color =
-                    strokeFor(
-                        ayanaState
-                    )
+                    accent
 
                 ringPaint.alpha =
                     (
-                        235 *
+                        210 *
                             (
                                 1f -
                                     phase
@@ -896,108 +941,61 @@ class AyanaMiniOrbController(
                         .toInt()
                         .coerceIn(
                             0,
-                            235
+                            210
                         )
+
+                val flashRadius =
+                    baseRadius +
+                        dpLocal(
+                            14
+                        ) +
+                        dpLocal(
+                            9
+                        ) *
+                            phase
 
                 canvas.drawCircle(
                     cx,
                     cy,
-                    radius +
-                        dpLocal(
-                            7
-                        ) +
-                        dpLocal(
-                            18
-                        ) *
-                            phase,
+                    flashRadius,
                     ringPaint
                 )
             }
 
-            val logo =
-                logoDrawable
-
-            if (logo != null) {
-
-                val logoRadius =
-                    radius *
-                        0.82f
-
-                val left =
-                    (cx - logoRadius)
-                        .toInt()
-
-                val top =
-                    (cy - logoRadius)
-                        .toInt()
-
-                val right =
-                    (cx + logoRadius)
-                        .toInt()
-
-                val bottom =
-                    (cy + logoRadius)
-                        .toInt()
-
-                val saveCount =
-                    canvas.save()
-
-                // A circular clip keeps adaptive/square launcher artwork clean
-                // inside the Orb while the animated state ring remains visible.
-                logoClipPath.reset()
-                logoClipPath.addCircle(
-                    cx,
-                    cy,
-                    logoRadius,
-                    Path.Direction.CW
-                )
-                canvas.clipPath(
-                    logoClipPath
-                )
-
-                logo.setBounds(
-                    left,
-                    top,
-                    right,
-                    bottom
-                )
-
-                logo.alpha =
-                    245
-
-                logo.draw(
-                    canvas
-                )
-
-                canvas.restoreToCount(
-                    saveCount
-                )
-
-            } else {
-
-                // Fail safe only: branding resource failure must never make
-                // the global control disappear or crash the voice service.
-                labelPaint.textSize =
-                    radius *
-                        0.76f
-
-                canvas.drawText(
-                    "A",
-                    cx,
-                    cy +
-                        labelPaint.textSize *
-                            0.34f,
-                    labelPaint
-                )
-            }
-
             if (
+                attached &&
                 shouldAnimate(
                     now
                 )
             ) {
+                postInvalidateDelayed(
+                    frameDelayMs(
+                        ayanaState
+                    )
+                )
+            }
+        }
 
-                postInvalidateOnAnimation()
+        private fun frameDelayMs(
+            state: String
+        ): Long {
+
+            return when (
+                state
+            ) {
+                AyanaVoiceService.STATE_COMMAND,
+                AyanaVoiceService.STATE_EXECUTING ->
+                    FRAME_ACTIVE_MS
+
+                AyanaVoiceService.STATE_THINKING,
+                AyanaVoiceService.STATE_SPEAKING ->
+                    FRAME_NORMAL_MS
+
+                AyanaVoiceService.STATE_LISTENING ->
+                    FRAME_LISTENING_MS
+
+                else ->
+                    FRAME_TERMINAL_MS
             }
         }
 
@@ -1107,14 +1105,22 @@ class AyanaMiniOrbController(
             now: Long
         ): Boolean {
 
-            return ayanaState in
-                setOf(
+            val active =
+                when (
+                    ayanaState
+                ) {
                     AyanaVoiceService.STATE_LISTENING,
                     AyanaVoiceService.STATE_COMMAND,
                     AyanaVoiceService.STATE_THINKING,
                     AyanaVoiceService.STATE_EXECUTING,
-                    AyanaVoiceService.STATE_SPEAKING
-                ) ||
+                    AyanaVoiceService.STATE_SPEAKING ->
+                        true
+
+                    else ->
+                        false
+                }
+
+            return active ||
                 now <
                 terminalFlashUntil
         }
@@ -1155,6 +1161,18 @@ class AyanaMiniOrbController(
 
         private const val TERMINAL_FLASH_MS =
             1200L
+
+        private const val FRAME_ACTIVE_MS =
+            40L
+
+        private const val FRAME_NORMAL_MS =
+            55L
+
+        private const val FRAME_LISTENING_MS =
+            85L
+
+        private const val FRAME_TERMINAL_MS =
+            70L
 
         private val LOCK =
             Any()
