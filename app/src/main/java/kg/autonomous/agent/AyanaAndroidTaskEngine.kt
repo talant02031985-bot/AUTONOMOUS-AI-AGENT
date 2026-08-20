@@ -5,7 +5,7 @@ import org.json.JSONObject
 import java.util.Locale
 
 /**
- * AYANA Android Task Engine v4.2 WINDOW CONTEXT — resumable deterministic executor with goal-integrity verification, durable checkpoints and text-first semantic clicks.
+ * AYANA Android Task Engine v4.3 EVIDENCE CONTRACT — resumable deterministic executor with goal-integrity verification, durable checkpoints and text-first semantic clicks.
  *
  * IMPORTANT ARCHITECTURE RULE:
  * The LLM understands the user's intent and produces ONE short structured plan.
@@ -1411,7 +1411,7 @@ class AyanaAndroidTaskEngine(
                 if (verified) {
                     "Конечное состояние подтверждено"
                 } else {
-                    "Ожидаемые признаки экрана не найдены"
+                    "Ожидаемые признаки экрана не подтверждены доступным содержимым"
                 }
             )
     }
@@ -1645,8 +1645,51 @@ class AyanaAndroidTaskEngine(
                     continue
                 }
 
+                val contentState =
+                    window
+                        .optString(
+                            "content_state"
+                        )
+                        .trim()
+
+                val failureReason =
+                    window
+                        .optString(
+                            "failure_reason"
+                        )
+                        .trim()
+
+                // v4.3 strict proof contract:
+                // - structure_only/unavailable are never terminal evidence;
+                // - event-only partial text may help diagnostics, but it must not
+                //   prove a terminal screen because it can describe the element
+                //   that was just clicked rather than the destination screen.
+                if (
+                    contentState.isNotBlank() &&
+                    contentState !in
+                        setOf(
+                            "readable",
+                            "partial"
+                        )
+                ) {
+                    continue
+                }
+
+                if (
+                    contentState ==
+                    "partial" &&
+                    failureReason ==
+                    "event_evidence_only"
+                ) {
+                    continue
+                }
+
                 val text =
-                    window.optString("verification_text").trim()
+                    window
+                        .optString(
+                            "verification_text"
+                        )
+                        .trim()
 
                 if (text.isNotBlank()) {
                     result.add(text)
