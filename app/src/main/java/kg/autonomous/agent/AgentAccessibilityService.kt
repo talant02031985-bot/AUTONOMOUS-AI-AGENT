@@ -19,10 +19,11 @@ import kotlin.math.max
 class AgentAccessibilityService :
     AccessibilityService() {
 
-    // AYANA Accessibility v4.1 — ACTIVE ROOT CONTENT + SCREEN TRUTH.
-    // Every visible Android window is an independent context. Android 13+ roots
-    // are requested with descendant prefetch before falling back to legacy roots.
-    // Fresh AccessibilityEvent evidence is merged only into the matching window.
+    // AYANA Accessibility v4.2 — HOT PATH RECOVERY + SCREEN TRUTH.
+    // Every visible Android window is an independent context. Normal accessibility
+    // events stay lightweight; deep tree acquisition is reserved for structural
+    // changes and explicit screen reads. Fresh event evidence is merged only into
+    // the matching window.
     // Cross-window verification/clicking stays fail-closed in split-screen,
     // freeform, PiP, popup/dialog, Recents and overlay scenarios.
 
@@ -76,6 +77,12 @@ class AgentAccessibilityService :
 
     private val recentEventEvidence =
         ArrayDeque<EventEvidence>()
+
+    // AccessibilityService callbacks run on the process main thread. v4.0/v4.1
+    // accidentally performed descendant-prefetch tree walks from this hot path.
+    // Event handling is now deliberately O(1): metadata + one source node only.
+    // Full tree acquisition happens only when AYANA explicitly asks for a screen
+    // snapshot/action, never for every accessibility event.
 
     override fun onServiceConnected() {
         super.onServiceConnected()
@@ -143,6 +150,19 @@ class AgentAccessibilityService :
             } catch (_: Exception) {
                 -1
             }
+
+        // Text editing/selection events are deliberately metadata-only. They can
+        // fire for every keystroke (including IME activity) and must never trigger
+        // a descendant walk on the process main thread.
+        if (
+            event.eventType ==
+            AccessibilityEvent.TYPE_VIEW_TEXT_CHANGED ||
+            event.eventType ==
+            AccessibilityEvent.TYPE_VIEW_TEXT_SELECTION_CHANGED
+        ) {
+            pruneEventEvidence()
+            return
+        }
 
         captureEventEvidence(
             event
@@ -1208,6 +1228,9 @@ class AgentAccessibilityService :
             return
         }
 
+        // Keep only the event SOURCE node. Never climb to parents and never walk
+        // descendants here: this callback shares the same process main thread as
+        // EditText rendering and the floating Orb.
         val source =
             try {
                 event.source
@@ -1215,30 +1238,25 @@ class AgentAccessibilityService :
                 null
             }
 
-        val evidenceRoot =
-            source
-                ?.let {
-                    highestUsableEventRoot(
-                        it
-                    )
-                }
-
         val nodes =
-            if (
-                evidenceRoot !=
-                null
-            ) {
-                snapshotEventTree(
-                    root =
-                        evidenceRoot,
-                    maxNodes =
-                        EVENT_EVIDENCE_NODE_LIMIT,
-                    maxChars =
-                        EVENT_EVIDENCE_CHAR_LIMIT
+            JSONArray()
+
+        if (source != null) {
+            try {
+                nodes.put(
+                    nodeToJson(
+                        node = source,
+                        depth = 0,
+                        index = 1
+                    )
+                        .put(
+                            "evidence_source",
+                            "accessibility_event_source"
+                        )
                 )
-            } else {
-                JSONArray()
+            } catch (_: Exception) {
             }
+        }
 
         val texts =
             linkedSetOf<String>()
@@ -3255,55 +3273,11 @@ class AgentAccessibilityService :
         window: AccessibilityWindowInfo
     ): AccessibilityNodeInfo? {
 
-        var sparseFallback:
-            AccessibilityNodeInfo? =
-            null
-
-        if (
-            Build.VERSION.SDK_INT >=
-            Build.VERSION_CODES.TIRAMISU
-        ) {
-            val strategies =
-                intArrayOf(
-                    AccessibilityNodeInfo.FLAG_PREFETCH_ANCESTORS or
-                        AccessibilityNodeInfo.FLAG_PREFETCH_SIBLINGS or
-                        AccessibilityNodeInfo.FLAG_PREFETCH_DESCENDANTS_HYBRID or
-                        AccessibilityNodeInfo.FLAG_PREFETCH_UNINTERRUPTIBLE,
-                    AccessibilityNodeInfo.FLAG_PREFETCH_DESCENDANTS_BREADTH_FIRST or
-                        AccessibilityNodeInfo.FLAG_PREFETCH_UNINTERRUPTIBLE,
-                    AccessibilityNodeInfo.FLAG_PREFETCH_DESCENDANTS_DEPTH_FIRST or
-                        AccessibilityNodeInfo.FLAG_PREFETCH_UNINTERRUPTIBLE
-                )
-
-            for (strategy in strategies) {
-                val root =
-                    try {
-                        window.getRoot(
-                            strategy
-                        )
-                    } catch (_: Exception) {
-                        null
-                    }
-                        ?: continue
-
-                if (
-                    sparseFallback ==
-                    null
-                ) {
-                    sparseFallback =
-                        root
-                }
-
-                if (
-                    rootLooksPopulated(
-                        root
-                    )
-                ) {
-                    return root
-                }
-            }
-        }
-
+        // Fast path first. In v4.0/v4.1 we tried several descendant-prefetch
+        // strategies before even checking the ordinary root. That multiplies IPC
+        // work across every visible window and did not restore Chrome/Settings
+        // content on the device. Prefer the stable legacy root and only attempt
+        // ONE bounded prefetch for the active/focused sparse window.
         val legacy =
             try {
                 window.root
@@ -3321,11 +3295,45 @@ class AgentAccessibilityService :
             return legacy
         }
 
-        // Fail-soft extraction: keeping a sparse package-bearing root is still
-        // useful for window identity, bounds and event correlation, but it is
-        // NOT considered proof of screen content by verification code.
+        val foregroundCandidate =
+            try {
+                window.isActive ||
+                    window.isFocused
+            } catch (_: Exception) {
+                false
+            }
+
+        if (
+            foregroundCandidate &&
+            Build.VERSION.SDK_INT >=
+            Build.VERSION_CODES.TIRAMISU
+        ) {
+            val prefetched =
+                try {
+                    window.getRoot(
+                        AccessibilityNodeInfo.FLAG_PREFETCH_DESCENDANTS_HYBRID
+                    )
+                } catch (_: Exception) {
+                    null
+                }
+
+            if (
+                prefetched !=
+                null &&
+                rootLooksPopulated(
+                    prefetched
+                )
+            ) {
+                return prefetched
+            }
+
+            if (legacy == null) {
+                return prefetched
+            }
+        }
+
+        // A sparse root is still valid window identity, but never content proof.
         return legacy
-            ?: sparseFallback
     }
 
     private fun rootLooksPopulated(
@@ -3378,33 +3386,14 @@ class AgentAccessibilityService :
     }
 
     /**
-     * Child traversal also asks Android 13+ to prefetch the descendant subtree.
-     * Normal getChild(index) remains the compatibility path on older Android.
+     * Safe child access for traversal. Root-level prefetch, when justified, has
+     * already happened in prefetchedWindowRoot(). Re-prefetching descendants for
+     * EVERY child caused the v11.2 UI/Orb regression and high CPU/thermal load.
      */
     private fun childWithPrefetch(
         node: AccessibilityNodeInfo,
         index: Int
     ): AccessibilityNodeInfo? {
-
-        if (
-            Build.VERSION.SDK_INT >=
-            Build.VERSION_CODES.TIRAMISU
-        ) {
-            val prefetched =
-                try {
-                    node.getChild(
-                        index,
-                        AccessibilityNodeInfo.FLAG_PREFETCH_DESCENDANTS_HYBRID or
-                            AccessibilityNodeInfo.FLAG_PREFETCH_SIBLINGS
-                    )
-                } catch (_: Exception) {
-                    null
-                }
-
-            if (prefetched != null) {
-                return prefetched
-            }
-        }
 
         return try {
             node.getChild(
