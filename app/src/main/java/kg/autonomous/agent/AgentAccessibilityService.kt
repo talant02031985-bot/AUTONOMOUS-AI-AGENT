@@ -19,7 +19,7 @@ import kotlin.math.max
 class AgentAccessibilityService :
     AccessibilityService() {
 
-    // AYANA Accessibility v4.2 — HOT PATH RECOVERY + SCREEN TRUTH.
+    // AYANA Accessibility v4.2.1 — HOT PATH RECOVERY + COMPILE FIX + SCREEN TRUTH.
     // Every visible Android window is an independent context. Normal accessibility
     // events stay lightweight; deep tree acquisition is reserved for structural
     // changes and explicit screen reads. Fresh event evidence is merged only into
@@ -1357,9 +1357,9 @@ class AgentAccessibilityService :
 
         val evidenceBounds =
             Rect().apply {
-                if (evidenceRoot != null) {
+                if (source != null) {
                     try {
-                        evidenceRoot.getBoundsInScreen(this)
+                        source.getBoundsInScreen(this)
                     } catch (_: Exception) {
                     }
                 }
