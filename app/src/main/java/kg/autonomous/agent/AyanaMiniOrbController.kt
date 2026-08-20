@@ -6,6 +6,8 @@ import android.graphics.Canvas
 import android.graphics.Color
 import android.graphics.Paint
 import android.graphics.RectF
+import android.graphics.RadialGradient
+import android.graphics.Shader
 import android.graphics.PixelFormat
 import android.os.Build
 import android.os.Handler
@@ -20,7 +22,7 @@ import kotlin.math.abs
 import kotlin.math.sin
 
 /**
- * AYANA Floating Orb v4.1 — TRANSPARENT CORE / SMOOTH IDLE.
+ * AYANA Floating Orb v4.2 — GLASS CORE / TRANSPARENT ORBITS.
  *
  * Rules:
  * 1) exactly one overlay View per app process;
@@ -28,8 +30,9 @@ import kotlin.math.sin
  * 3) repeated refresh() only updates the existing View;
  * 4) drag position is persisted;
  * 5) tapping the Orb opens AYANA.
- * 6) the overlay background and orb body are fully transparent; only the luminous core and arcs are rendered.
- * 7) idle motion is smoother/faster while remaining frame-capped to protect text input and IME latency.
+ * 6) the overlay background is fully transparent; the symbol itself is a light translucent glass core, never a dark disk.
+ * 7) idle motion is visibly smoother/faster while remaining frame-capped to protect text input and IME latency.
+ * 8) shaders are rebuilt only on size/state changes; no bitmap decoding or per-frame shader allocation.
  *
  * The service owns WHEN the Orb exists. This controller only owns HOW it is
  * rendered. It never starts/stops AyanaVoiceService itself.
@@ -598,6 +601,11 @@ class AyanaMiniOrbController(
         context: Context
     ) : View(context) {
 
+        private val glassPaint =
+            Paint(
+                Paint.ANTI_ALIAS_FLAG
+            )
+
         private val corePaint =
             Paint(
                 Paint.ANTI_ALIAS_FLAG
@@ -607,21 +615,28 @@ class AyanaMiniOrbController(
             Paint(
                 Paint.ANTI_ALIAS_FLAG
             ).apply {
-
-                style =
-                    Paint.Style.STROKE
-
-                strokeWidth =
-                    3f *
-                        resources
-                            .displayMetrics
-                            .density
-                strokeCap =
-                    Paint.Cap.ROUND
+                style = Paint.Style.STROKE
+                strokeCap = Paint.Cap.ROUND
             }
+
+        private val finePaint =
+            Paint(
+                Paint.ANTI_ALIAS_FLAG
+            ).apply {
+                style = Paint.Style.STROKE
+                strokeCap = Paint.Cap.ROUND
+            }
+
+        private val nodePaint =
+            Paint(
+                Paint.ANTI_ALIAS_FLAG
+            )
 
         private val arcBounds =
             RectF()
+
+        private var glassShader: RadialGradient? = null
+        private var coreShader: RadialGradient? = null
 
         private var accentColor =
             Color.rgb(
@@ -641,318 +656,355 @@ class AyanaMiniOrbController(
 
         override fun onAttachedToWindow() {
             super.onAttachedToWindow()
-            attached =
-                true
+            attached = true
+            rebuildShaders()
             postInvalidateDelayed(
                 FRAME_LISTENING_MS
             )
         }
 
         override fun onDetachedFromWindow() {
-            attached =
-                false
+            attached = false
             super.onDetachedFromWindow()
+        }
+
+        override fun onSizeChanged(
+            w: Int,
+            h: Int,
+            oldw: Int,
+            oldh: Int
+        ) {
+            super.onSizeChanged(
+                w,
+                h,
+                oldw,
+                oldh
+            )
+            rebuildShaders()
         }
 
         fun setAyanaState(
             state: String
         ) {
 
-            ayanaState =
-                state
-
-            accentColor =
-                strokeFor(
-                    state
-                )
+            ayanaState = state
+            accentColor = strokeFor(state)
 
             if (
-                state ==
-                AyanaVoiceService.STATE_SUCCESS ||
-                state ==
-                AyanaVoiceService.STATE_ERROR ||
-                state ==
-                AyanaVoiceService.STATE_CANCELLED
+                state == AyanaVoiceService.STATE_SUCCESS ||
+                state == AyanaVoiceService.STATE_ERROR ||
+                state == AyanaVoiceService.STATE_CANCELLED
             ) {
-
                 terminalFlashUntil =
                     SystemClock.uptimeMillis() +
                         TERMINAL_FLASH_MS
             }
 
+            rebuildShaders()
             invalidate()
+        }
+
+        private fun rebuildShaders() {
+            if (width <= 0 || height <= 0) {
+                return
+            }
+
+            val cx = width / 2f
+            val cy = height / 2f
+            val minSide = minOf(width, height).toFloat()
+            val shellRadius = minSide * 0.225f
+            val coreRadius = shellRadius * 0.42f
+
+            val accent = accentColor
+            val pale = Color.rgb(224, 247, 255)
+
+            glassShader =
+                RadialGradient(
+                    cx,
+                    cy,
+                    shellRadius * 1.18f,
+                    intArrayOf(
+                        withAlpha(pale, 42),
+                        withAlpha(accent, 34),
+                        withAlpha(accent, 14),
+                        Color.TRANSPARENT
+                    ),
+                    floatArrayOf(
+                        0f,
+                        0.38f,
+                        0.76f,
+                        1f
+                    ),
+                    Shader.TileMode.CLAMP
+                )
+
+            coreShader =
+                RadialGradient(
+                    cx,
+                    cy,
+                    coreRadius * 1.85f,
+                    intArrayOf(
+                        Color.WHITE,
+                        withAlpha(accent, 245),
+                        withAlpha(accent, 105),
+                        Color.TRANSPARENT
+                    ),
+                    floatArrayOf(
+                        0f,
+                        0.22f,
+                        0.62f,
+                        1f
+                    ),
+                    Shader.TileMode.CLAMP
+                )
+
+            glassPaint.shader = glassShader
+            corePaint.shader = coreShader
         }
 
         override fun onDraw(
             canvas: Canvas
         ) {
 
-            super.onDraw(
-                canvas
-            )
+            super.onDraw(canvas)
 
-            val now =
-                SystemClock.uptimeMillis()
-
-            val cx =
-                width /
-                    2f
-
-            val cy =
-                height /
-                    2f
-
-            val baseRadius =
-                minOf(
-                    width,
-                    height
-                ) *
-                    0.245f
+            val now = SystemClock.uptimeMillis()
+            val cx = width / 2f
+            val cy = height / 2f
+            val minSide = minOf(width, height).toFloat()
+            val shellRadius = minSide * 0.225f
 
             val activeMotion =
-                when (
-                    ayanaState
-                ) {
+                when (ayanaState) {
                     AyanaVoiceService.STATE_LISTENING,
                     AyanaVoiceService.STATE_COMMAND,
                     AyanaVoiceService.STATE_THINKING,
                     AyanaVoiceService.STATE_EXECUTING,
-                    AyanaVoiceService.STATE_SPEAKING ->
-                        true
-
-                    else ->
-                        false
+                    AyanaVoiceService.STATE_SPEAKING -> true
+                    else -> false
                 }
 
-            val speedDegPerMs =
-                when (
-                    ayanaState
-                ) {
-                    AyanaVoiceService.STATE_COMMAND ->
-                        0.085f
-
-                    AyanaVoiceService.STATE_THINKING ->
-                        0.055f
-
-                    AyanaVoiceService.STATE_EXECUTING ->
-                        0.105f
-
-                    AyanaVoiceService.STATE_SPEAKING ->
-                        0.075f
-
-                    AyanaVoiceService.STATE_LISTENING ->
-                        0.050f
-
-                    else ->
-                        0f
+            val idleCycleMs =
+                when (ayanaState) {
+                    AyanaVoiceService.STATE_LISTENING -> 3000f
+                    AyanaVoiceService.STATE_COMMAND -> 2300f
+                    AyanaVoiceService.STATE_THINKING -> 2500f
+                    AyanaVoiceService.STATE_EXECUTING -> 1900f
+                    AyanaVoiceService.STATE_SPEAKING -> 2700f
+                    else -> 3600f
                 }
+
+            val rotation =
+                ((now % idleCycleMs.toLong()) / idleCycleMs) * 360f
+
+            val reverseRotation =
+                360f -
+                    (
+                        ((now % (idleCycleMs * 1.28f).toLong()) /
+                            (idleCycleMs * 1.28f)) *
+                            360f
+                        )
 
             val breatheAmount =
-                when (
-                    ayanaState
-                ) {
+                when (ayanaState) {
                     AyanaVoiceService.STATE_COMMAND,
-                    AyanaVoiceService.STATE_SPEAKING ->
-                        0.12f
-
+                    AyanaVoiceService.STATE_SPEAKING -> 0.075f
                     AyanaVoiceService.STATE_THINKING,
-                    AyanaVoiceService.STATE_EXECUTING ->
-                        0.08f
-
-                    AyanaVoiceService.STATE_LISTENING ->
-                        0.045f
-
-                    else ->
-                        0f
+                    AyanaVoiceService.STATE_EXECUTING -> 0.055f
+                    AyanaVoiceService.STATE_LISTENING -> 0.035f
+                    else -> 0f
                 }
 
             val pulse =
                 if (activeMotion) {
                     (
                         sin(
-                            now /
-                                360.0
-                        ) *
-                            breatheAmount
-                        )
-                        .toFloat()
+                            now / 340.0
+                        ) * breatheAmount
+                        ).toFloat()
                 } else {
                     0f
                 }
 
-            // v4.1: fully transparent orb body. Never paint a solid backing
-            // disk behind the symbol. The overlay remains visually open over
-            // Word, Chrome, Settings, and other apps. Keep the render path
-            // allocation-free so the smoother idle animation does not bring
-            // back the IME/text-input regression.
-            corePaint.shader =
-                null
+            val accent = accentColor
+            val pale = Color.rgb(224, 247, 255)
 
-            val accent =
-                accentColor
-
-            // Very light outer nucleus glow; this is translucent color only,
-            // not a background fill.
-            corePaint.color =
-                accent
-
-            corePaint.alpha =
-                48
-
+            // Transparent overlay: only translucent glass/light is painted.
+            glassPaint.alpha =
+                if (ayanaState == AyanaVoiceService.STATE_THINKING) 210 else 185
             canvas.drawCircle(
                 cx,
                 cy,
-                baseRadius *
-                    (
-                        0.42f +
-                            pulse *
-                                0.35f
-                        ),
-                corePaint
+                shellRadius * (1f + pulse * 0.22f),
+                glassPaint
             )
 
-            // Luminous central AYANA Core nucleus.
+            // Central luminous energy bead.
             corePaint.alpha =
-                if (
-                    now <
-                    terminalFlashUntil
-                ) {
-                    245
-                } else {
-                    225
-                }
-
+                if (now < terminalFlashUntil) 255 else 238
             canvas.drawCircle(
                 cx,
                 cy,
-                baseRadius *
-                    (
-                        0.20f +
-                            pulse *
-                                0.55f
-                        ),
+                shellRadius * (0.46f + pulse * 0.55f),
                 corePaint
             )
 
-            ringPaint.color =
-                accent
+            // Glass shell: multiple very thin concentric highlights.
+            finePaint.color = withAlpha(pale, 155)
+            finePaint.strokeWidth = dpLocal(0.8f)
+            canvas.drawCircle(
+                cx,
+                cy,
+                shellRadius * 0.72f,
+                finePaint
+            )
 
-            val rotation =
-                (
-                    now *
-                        speedDegPerMs
-                    ) %
-                    360f
+            finePaint.color = withAlpha(accent, 115)
+            finePaint.strokeWidth = dpLocal(0.7f)
+            canvas.drawCircle(
+                cx,
+                cy,
+                shellRadius * 0.92f,
+                finePaint
+            )
 
-            for (ring in 0..2) {
-                val radius =
-                    baseRadius +
-                        dpLocal(
-                            4 +
-                                ring *
-                                    6
-                        )
+            ringPaint.color = withAlpha(pale, 175)
+            ringPaint.strokeWidth = dpLocal(1.05f)
+            arcBounds.set(
+                cx - shellRadius,
+                cy - shellRadius,
+                cx + shellRadius,
+                cy + shellRadius
+            )
+            canvas.drawArc(
+                arcBounds,
+                rotation + 205f,
+                86f,
+                false,
+                ringPaint
+            )
 
-                arcBounds.set(
-                    cx -
-                        radius,
-                    cy -
-                        radius,
-                    cx +
-                        radius,
-                    cy +
-                        radius
-                )
+            ringPaint.color = withAlpha(accent, 190)
+            ringPaint.strokeWidth = dpLocal(1.4f)
+            canvas.drawArc(
+                arcBounds,
+                reverseRotation + 25f,
+                54f,
+                false,
+                ringPaint
+            )
 
-                ringPaint.strokeWidth =
-                    dpLocal(
-                        if (ring == 0) 2 else 1
-                    )
+            // Inner HUD segments.
+            val innerRadius = shellRadius * 0.62f
+            arcBounds.set(
+                cx - innerRadius,
+                cy - innerRadius,
+                cx + innerRadius,
+                cy + innerRadius
+            )
+            ringPaint.color = withAlpha(accent, 225)
+            ringPaint.strokeWidth = dpLocal(1.5f)
+            canvas.drawArc(
+                arcBounds,
+                rotation * 1.18f + 18f,
+                42f,
+                false,
+                ringPaint
+            )
+            canvas.drawArc(
+                arcBounds,
+                rotation * 1.18f + 194f,
+                27f,
+                false,
+                ringPaint
+            )
 
-                ringPaint.alpha =
-                    205 -
-                        ring *
-                            35
+            // Three outer orbital paths: thin, broken and asymmetric like the
+            // approved glass-core concept. They deliberately rotate at
+            // different speeds/directions so idle never looks frozen.
+            drawOrbit(
+                canvas = canvas,
+                cx = cx,
+                cy = cy,
+                radius = shellRadius + dpLocal(5.5f),
+                start = rotation + 8f,
+                sweepA = 72f,
+                sweepB = 39f,
+                offsetB = 178f,
+                color = withAlpha(accent, 205),
+                widthDp = 1.25f
+            )
 
-                val direction =
-                    if (ring % 2 == 0) {
-                        1f
-                    } else {
-                        -1f
-                    }
+            drawOrbit(
+                canvas = canvas,
+                cx = cx,
+                cy = cy,
+                radius = shellRadius + dpLocal(10.5f),
+                start = reverseRotation + 74f,
+                sweepA = 58f,
+                sweepB = 31f,
+                offsetB = 162f,
+                color = withAlpha(pale, 150),
+                widthDp = 0.9f
+            )
 
-                val startAngle =
-                    rotation *
-                        direction +
-                        ring *
-                            74f
+            drawOrbit(
+                canvas = canvas,
+                cx = cx,
+                cy = cy,
+                radius = shellRadius + dpLocal(15.0f),
+                start = rotation * 0.76f + 228f,
+                sweepA = 49f,
+                sweepB = 25f,
+                offsetB = 151f,
+                color = withAlpha(accent, 138),
+                widthDp = 0.75f
+            )
 
-                canvas.drawArc(
-                    arcBounds,
-                    startAngle,
-                    70f -
-                        ring *
-                            8f,
-                    false,
-                    ringPaint
-                )
+            // Small luminous orbital nodes. No bitmap, no allocation.
+            drawNode(
+                canvas,
+                cx,
+                cy,
+                shellRadius + dpLocal(10.5f),
+                reverseRotation + 93f,
+                accent,
+                1.7f
+            )
+            drawNode(
+                canvas,
+                cx,
+                cy,
+                shellRadius + dpLocal(15.0f),
+                rotation * 0.76f + 254f,
+                pale,
+                1.15f
+            )
 
-                canvas.drawArc(
-                    arcBounds,
-                    startAngle +
-                        174f,
-                    34f +
-                        ring *
-                            5f,
-                    false,
-                    ringPaint
-                )
-            }
-
-            if (
-                now <
-                terminalFlashUntil
-            ) {
+            if (now < terminalFlashUntil) {
                 val remaining =
-                    (
-                        terminalFlashUntil -
-                            now
-                        )
-                        .coerceAtLeast(
-                            0L
-                        )
+                    (terminalFlashUntil - now)
+                        .coerceAtLeast(0L)
 
                 val phase =
                     1f -
                         remaining /
                             TERMINAL_FLASH_MS.toFloat()
 
-                ringPaint.color =
-                    accent
-
+                ringPaint.color = accent
                 ringPaint.alpha =
                     (
-                        210 *
-                            (
-                                1f -
-                                    phase
-                                )
+                        190 *
+                            (1f - phase)
                         )
                         .toInt()
-                        .coerceIn(
-                            0,
-                            210
-                        )
+                        .coerceIn(0, 190)
+                ringPaint.strokeWidth = dpLocal(1.2f)
 
                 val flashRadius =
-                    baseRadius +
-                        dpLocal(
-                            14
-                        ) +
-                        dpLocal(
-                            9
-                        ) *
-                            phase
+                    shellRadius +
+                        dpLocal(12f) +
+                        dpLocal(10f) * phase
 
                 canvas.drawCircle(
                     cx,
@@ -964,139 +1016,119 @@ class AyanaMiniOrbController(
 
             if (
                 attached &&
-                shouldAnimate(
-                    now
-                )
+                shouldAnimate(now)
             ) {
                 postInvalidateDelayed(
-                    frameDelayMs(
-                        ayanaState
-                    )
+                    frameDelayMs(ayanaState)
                 )
             }
+        }
+
+        private fun drawOrbit(
+            canvas: Canvas,
+            cx: Float,
+            cy: Float,
+            radius: Float,
+            start: Float,
+            sweepA: Float,
+            sweepB: Float,
+            offsetB: Float,
+            color: Int,
+            widthDp: Float
+        ) {
+            arcBounds.set(
+                cx - radius,
+                cy - radius,
+                cx + radius,
+                cy + radius
+            )
+            ringPaint.color = color
+            ringPaint.alpha = Color.alpha(color)
+            ringPaint.strokeWidth = dpLocal(widthDp)
+            canvas.drawArc(
+                arcBounds,
+                start,
+                sweepA,
+                false,
+                ringPaint
+            )
+            canvas.drawArc(
+                arcBounds,
+                start + offsetB,
+                sweepB,
+                false,
+                ringPaint
+            )
+        }
+
+        private fun drawNode(
+            canvas: Canvas,
+            cx: Float,
+            cy: Float,
+            radius: Float,
+            angleDeg: Float,
+            color: Int,
+            radiusDp: Float
+        ) {
+            val radians =
+                Math.toRadians(
+                    angleDeg.toDouble()
+                )
+            val x =
+                cx +
+                    Math.cos(radians)
+                        .toFloat() *
+                    radius
+            val y =
+                cy +
+                    Math.sin(radians)
+                        .toFloat() *
+                    radius
+
+            nodePaint.color = color
+            nodePaint.alpha = 215
+            canvas.drawCircle(
+                x,
+                y,
+                dpLocal(radiusDp),
+                nodePaint
+            )
+
+            nodePaint.alpha = 62
+            canvas.drawCircle(
+                x,
+                y,
+                dpLocal(radiusDp * 2.5f),
+                nodePaint
+            )
         }
 
         private fun frameDelayMs(
             state: String
         ): Long {
-
-            return when (
-                state
-            ) {
+            return when (state) {
                 AyanaVoiceService.STATE_COMMAND,
-                AyanaVoiceService.STATE_EXECUTING ->
-                    FRAME_ACTIVE_MS
-
+                AyanaVoiceService.STATE_EXECUTING -> FRAME_ACTIVE_MS
                 AyanaVoiceService.STATE_THINKING,
-                AyanaVoiceService.STATE_SPEAKING ->
-                    FRAME_NORMAL_MS
-
-                AyanaVoiceService.STATE_LISTENING ->
-                    FRAME_LISTENING_MS
-
-                else ->
-                    FRAME_TERMINAL_MS
-            }
-        }
-
-        private fun gradientFor(
-            state: String
-        ): IntArray {
-
-            return when (
-                state
-            ) {
-
-                AyanaVoiceService.STATE_COMMAND ->
-                    intArrayOf(
-                        Color.parseColor("#22D3EE"),
-                        Color.parseColor("#2563EB"),
-                        Color.parseColor("#111827")
-                    )
-
-                AyanaVoiceService.STATE_THINKING ->
-                    intArrayOf(
-                        Color.parseColor("#A78BFA"),
-                        Color.parseColor("#6D28D9"),
-                        Color.parseColor("#111827")
-                    )
-
-                AyanaVoiceService.STATE_EXECUTING ->
-                    intArrayOf(
-                        Color.parseColor("#2DD4BF"),
-                        Color.parseColor("#0E7490"),
-                        Color.parseColor("#0F172A")
-                    )
-
-                AyanaVoiceService.STATE_SUCCESS ->
-                    intArrayOf(
-                        Color.parseColor("#4ADE80"),
-                        Color.parseColor("#15803D"),
-                        Color.parseColor("#0F172A")
-                    )
-
-                AyanaVoiceService.STATE_ERROR ->
-                    intArrayOf(
-                        Color.parseColor("#F87171"),
-                        Color.parseColor("#B91C1C"),
-                        Color.parseColor("#111827")
-                    )
-
-                AyanaVoiceService.STATE_CANCELLED ->
-                    intArrayOf(
-                        Color.parseColor("#FBBF24"),
-                        Color.parseColor("#D97706"),
-                        Color.parseColor("#111827")
-                    )
-
-                AyanaVoiceService.STATE_SPEAKING ->
-                    intArrayOf(
-                        Color.parseColor("#818CF8"),
-                        Color.parseColor("#4F46E5"),
-                        Color.parseColor("#111827")
-                    )
-
-                else ->
-                    intArrayOf(
-                        Color.parseColor("#38BDF8"),
-                        Color.parseColor("#2563EB"),
-                        Color.parseColor("#0F172A")
-                    )
+                AyanaVoiceService.STATE_SPEAKING -> FRAME_NORMAL_MS
+                AyanaVoiceService.STATE_LISTENING -> FRAME_LISTENING_MS
+                else -> FRAME_TERMINAL_MS
             }
         }
 
         private fun strokeFor(
             state: String
         ): Int {
-
             return Color.parseColor(
-                when (
-                    state
-                ) {
-
-                    AyanaVoiceService.STATE_COMMAND ->
-                        "#67E8F9"
-
-                    AyanaVoiceService.STATE_THINKING ->
-                        "#C4B5FD"
-
-                    AyanaVoiceService.STATE_EXECUTING ->
-                        "#5EEAD4"
-
-                    AyanaVoiceService.STATE_SUCCESS ->
-                        "#86EFAC"
-
-                    AyanaVoiceService.STATE_ERROR ->
-                        "#FCA5A5"
-
-                    AyanaVoiceService.STATE_CANCELLED ->
-                        "#FCD34D"
-
-                    AyanaVoiceService.STATE_SPEAKING ->
-                        "#A5B4FC"
-
-                    else ->
-                        "#7DD3FC"
+                when (state) {
+                    AyanaVoiceService.STATE_COMMAND -> "#67E8F9"
+                    AyanaVoiceService.STATE_THINKING -> "#C4B5FD"
+                    AyanaVoiceService.STATE_EXECUTING -> "#5EEAD4"
+                    AyanaVoiceService.STATE_SUCCESS -> "#86EFAC"
+                    AyanaVoiceService.STATE_ERROR -> "#FCA5A5"
+                    AyanaVoiceService.STATE_CANCELLED -> "#FCD34D"
+                    AyanaVoiceService.STATE_SPEAKING -> "#A5B4FC"
+                    else -> "#67D7FF"
                 }
             )
         }
@@ -1104,31 +1136,34 @@ class AyanaMiniOrbController(
         private fun shouldAnimate(
             now: Long
         ): Boolean {
-
             val active =
-                when (
-                    ayanaState
-                ) {
+                when (ayanaState) {
                     AyanaVoiceService.STATE_LISTENING,
                     AyanaVoiceService.STATE_COMMAND,
                     AyanaVoiceService.STATE_THINKING,
                     AyanaVoiceService.STATE_EXECUTING,
-                    AyanaVoiceService.STATE_SPEAKING ->
-                        true
-
-                    else ->
-                        false
+                    AyanaVoiceService.STATE_SPEAKING -> true
+                    else -> false
                 }
 
-            return active ||
-                now <
-                terminalFlashUntil
+            return active || now < terminalFlashUntil
+        }
+
+        private fun withAlpha(
+            color: Int,
+            alpha: Int
+        ): Int {
+            return Color.argb(
+                alpha.coerceIn(0, 255),
+                Color.red(color),
+                Color.green(color),
+                Color.blue(color)
+            )
         }
 
         private fun dpLocal(
-            value: Int
+            value: Float
         ): Float {
-
             return value *
                 resources
                     .displayMetrics
@@ -1163,13 +1198,13 @@ class AyanaMiniOrbController(
             1200L
 
         private const val FRAME_ACTIVE_MS =
-            40L
+            36L
 
         private const val FRAME_NORMAL_MS =
-            55L
+            42L
 
         private const val FRAME_LISTENING_MS =
-            50L
+            45L
 
         private const val FRAME_TERMINAL_MS =
             70L
