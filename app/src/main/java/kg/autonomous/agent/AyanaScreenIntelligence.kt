@@ -3,6 +3,10 @@ package kg.autonomous.agent
 import android.content.Context
 import org.json.JSONObject
 
+/**
+ * AYANA Screen Intelligence v3.0 — evidence contract.
+ * Snapshot success is separated from content understanding.
+ */
 class AyanaScreenIntelligence(
     context: Context
 ) {
@@ -18,12 +22,10 @@ class AyanaScreenIntelligence(
                 .instance
                 ?: return unavailable()
 
-        return service
-            .buildScreenSnapshot()
-            .put(
-                "source",
-                "android_accessibility"
-            )
+        return annotateSnapshot(
+            service
+                .buildScreenSnapshot()
+        )
     }
 
     fun click(
@@ -86,6 +88,20 @@ class AyanaScreenIntelligence(
             .put(
                 "screen_changed",
                 before != after
+            )
+            .put(
+                "action_accepted",
+                success
+            )
+            .put(
+                "proof_level",
+                if (before != after) {
+                    "screen_change"
+                } else if (success) {
+                    "action_accepted"
+                } else {
+                    "none"
+                }
             )
             .put(
                 "screen",
@@ -170,6 +186,20 @@ class AyanaScreenIntelligence(
                 before != after
             )
             .put(
+                "action_accepted",
+                success
+            )
+            .put(
+                "proof_level",
+                if (before != after) {
+                    "screen_change"
+                } else if (success) {
+                    "action_accepted"
+                } else {
+                    "none"
+                }
+            )
+            .put(
                 "screen",
                 compactScreenState(
                     service
@@ -224,6 +254,20 @@ class AyanaScreenIntelligence(
             .put(
                 "screen_changed",
                 before != after
+            )
+            .put(
+                "action_accepted",
+                success
+            )
+            .put(
+                "proof_level",
+                if (before != after) {
+                    "screen_change"
+                } else if (success) {
+                    "action_accepted"
+                } else {
+                    "none"
+                }
             )
             .put(
                 "screen",
@@ -415,12 +459,100 @@ class AyanaScreenIntelligence(
         service: AgentAccessibilityService
     ): JSONObject {
 
-        return service
-            .buildScreenSnapshot(
-                maxNodes =
-                    80,
-                maxChars =
-                    8000
+        return annotateSnapshot(
+            service
+                .buildScreenSnapshot(
+                    maxNodes =
+                        80,
+                    maxChars =
+                        8000
+                )
+        )
+    }
+
+    private fun annotateSnapshot(
+        snapshot: JSONObject
+    ): JSONObject {
+
+        val snapshotSuccess =
+            snapshot.optBoolean(
+                "success",
+                false
+            )
+
+        val contentState =
+            snapshot
+                .optString(
+                    "primary_content_state",
+                    snapshot.optString(
+                        "content_status",
+                        "unknown"
+                    )
+                )
+                .ifBlank {
+                    "unknown"
+                }
+
+        val contentAvailable =
+            snapshot.optBoolean(
+                "primary_content_available",
+                contentState == "readable" ||
+                    contentState == "partial"
+            )
+
+        val message =
+            when {
+                !snapshotSuccess ->
+                    "Снимок Accessibility получить не удалось"
+
+                contentState == "readable" ->
+                    "Основное окно и его содержимое доступны для чтения"
+
+                contentState == "partial" ->
+                    "Основное окно читается только частично"
+
+                contentState == "structure_only" ->
+                    "Структура окна доступна, но читаемый текст не подтверждён"
+
+                contentState == "unavailable" ->
+                    "Окно определено, но его содержимое недоступно для надёжного чтения"
+
+                else ->
+                    "Состояние содержимого экрана не удалось подтвердить"
+            }
+
+        return snapshot
+            .put(
+                "source",
+                "android_accessibility"
+            )
+            .put(
+                "content_contract_version",
+                snapshot.optInt(
+                    "content_contract_version",
+                    2
+                )
+            )
+            .put(
+                "snapshot_success",
+                snapshotSuccess
+            )
+            .put(
+                "understanding_success",
+                snapshotSuccess &&
+                    contentAvailable
+            )
+            .put(
+                "content_status",
+                contentState
+            )
+            .put(
+                "content_available",
+                contentAvailable
+            )
+            .put(
+                "content_message",
+                message
             )
     }
 
@@ -430,6 +562,30 @@ class AyanaScreenIntelligence(
         return JSONObject()
             .put(
                 "success",
+                false
+            )
+            .put(
+                "snapshot_success",
+                false
+            )
+            .put(
+                "understanding_success",
+                false
+            )
+            .put(
+                "content_contract_version",
+                2
+            )
+            .put(
+                "content_status",
+                "unknown"
+            )
+            .put(
+                "primary_content_state",
+                "unknown"
+            )
+            .put(
+                "primary_content_available",
                 false
             )
             .put(
