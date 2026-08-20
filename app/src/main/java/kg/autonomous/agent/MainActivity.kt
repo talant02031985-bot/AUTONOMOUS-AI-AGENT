@@ -48,7 +48,7 @@ import java.util.Locale
 
 class MainActivity : AppCompatActivity() {
 
-    // UI generation: v6.3 NEON STATE VISUALIZER
+    // UI generation: v6.4 CINEMATIC AUDIO CORE
 
     private enum class Page {
         HOME,
@@ -1158,7 +1158,7 @@ class MainActivity : AppCompatActivity() {
             LinearLayout.LayoutParams(
                 0,
                 ViewGroup.LayoutParams.MATCH_PARENT,
-                1.0f
+                0.82f
             )
         )
 
@@ -1184,10 +1184,10 @@ class MainActivity : AppCompatActivity() {
             neural,
             LinearLayout.LayoutParams(
                 0,
-                dp(248),
-                1.12f
+                dp(284),
+                1.48f
             ).apply {
-                marginStart = dp(22)
+                marginStart = dp(16)
             }
         )
 
@@ -6789,21 +6789,32 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    // AYANA UI v6.3 — cinematic state-aware audio visualizer.
+    // AYANA UI v6.4 — cinematic audio core.
     //
-    // Design goals:
-    // - large central AYANA wordmark, no extra mini-wave/logo above it;
-    // - horizontal luminous waveform across the full card;
-    // - concentric energy rings / orbital particles around the center;
-    // - a distinct palette for waiting, listening, thinking, executing,
-    //   speaking, success and error;
-    // - no bitmap assets and no per-frame shader allocation;
-    // - frame-capped drawing so text input stays responsive.
+    // This renderer intentionally does NOT use the approved concept images as
+    // background PNGs. Instead it recreates their visual language with cached
+    // shaders and deterministic Canvas geometry, so the visualizer stays vivid
+    // without bringing back the text-input lag.
+    //
+    // State palette contract:
+    // - waiting: cyan / blue / violet;
+    // - active listening: turquoise / emerald;
+    // - thinking: blue / violet;
+    // - executing: cyan / gold / orange;
+    // - Marin speaking: pink / crimson / orange / gold;
+    // - success: green;
+    // - error: red / orange.
     private inner class AyanaPulseView(
         context: Context
     ) : View(context) {
 
         private val wavePaint =
+            Paint(Paint.ANTI_ALIAS_FLAG).apply {
+                style = Paint.Style.STROKE
+                strokeCap = Paint.Cap.ROUND
+            }
+
+        private val waveGlowPaint =
             Paint(Paint.ANTI_ALIAS_FLAG).apply {
                 style = Paint.Style.STROKE
                 strokeCap = Paint.Cap.ROUND
@@ -6833,7 +6844,18 @@ class MainActivity : AppCompatActivity() {
                 style = Paint.Style.FILL
             }
 
+        private val sparkPaint =
+            Paint(Paint.ANTI_ALIAS_FLAG).apply {
+                style = Paint.Style.STROKE
+                strokeCap = Paint.Cap.ROUND
+            }
+
         private val haloPaint =
+            Paint(Paint.ANTI_ALIAS_FLAG).apply {
+                style = Paint.Style.FILL
+            }
+
+        private val outerHaloPaint =
             Paint(Paint.ANTI_ALIAS_FLAG).apply {
                 style = Paint.Style.FILL
             }
@@ -6853,6 +6875,7 @@ class MainActivity : AppCompatActivity() {
             }
 
         private val energyPath = Path()
+        private val wavePath = Path()
 
         private var attached = false
         private var shaderState = ""
@@ -6861,65 +6884,75 @@ class MainActivity : AppCompatActivity() {
         private var waveShader: Shader? = null
         private var textShader: Shader? = null
         private var haloShader: Shader? = null
+        private var outerHaloShader: Shader? = null
 
         private val paletteWaiting = intArrayOf(
-            Color.parseColor("#22D3EE"),
-            Color.parseColor("#3B82F6"),
-            Color.parseColor("#8B5CF6")
+            Color.parseColor("#16D9FF"),
+            Color.parseColor("#2D7BFF"),
+            Color.parseColor("#7657FF"),
+            Color.parseColor("#B34DFF")
         )
 
         private val paletteListening = intArrayOf(
-            Color.parseColor("#22F5E5"),
-            Color.parseColor("#16D7C5"),
-            Color.parseColor("#2EEA7A")
+            Color.parseColor("#00F5E9"),
+            Color.parseColor("#00D7C9"),
+            Color.parseColor("#13D98A"),
+            Color.parseColor("#5CFFB2")
         )
 
         private val paletteThinking = intArrayOf(
-            Color.parseColor("#60A5FA"),
+            Color.parseColor("#26B9FF"),
+            Color.parseColor("#4F7CFF"),
             Color.parseColor("#8B5CF6"),
-            Color.parseColor("#D946EF")
+            Color.parseColor("#C451F6")
         )
 
         private val paletteExecuting = intArrayOf(
-            Color.parseColor("#38BDF8"),
-            Color.parseColor("#FBBF24"),
-            Color.parseColor("#F97316")
+            Color.parseColor("#2ED8FF"),
+            Color.parseColor("#4F9FFF"),
+            Color.parseColor("#FFC72C"),
+            Color.parseColor("#FF7A18")
         )
 
         private val paletteSpeaking = intArrayOf(
-            Color.parseColor("#F59E0B"),
-            Color.parseColor("#F43F5E"),
-            Color.parseColor("#EC4899")
+            Color.parseColor("#FFB11A"),
+            Color.parseColor("#FF6B20"),
+            Color.parseColor("#FF2D72"),
+            Color.parseColor("#F229B7")
         )
 
         private val paletteSuccess = intArrayOf(
-            Color.parseColor("#2DD4BF"),
-            Color.parseColor("#22C55E"),
-            Color.parseColor("#86EFAC")
+            Color.parseColor("#27F0B2"),
+            Color.parseColor("#19D86C"),
+            Color.parseColor("#4EEB87"),
+            Color.parseColor("#A1FFB7")
         )
 
         private val paletteError = intArrayOf(
-            Color.parseColor("#FB7185"),
-            Color.parseColor("#EF4444"),
-            Color.parseColor("#F97316")
+            Color.parseColor("#FF6A2A"),
+            Color.parseColor("#FF3B30"),
+            Color.parseColor("#FF1744"),
+            Color.parseColor("#FF9A28")
         )
 
         private val paletteCancelled = intArrayOf(
-            Color.parseColor("#FDE68A"),
-            Color.parseColor("#F59E0B"),
-            Color.parseColor("#F97316")
+            Color.parseColor("#FFE082"),
+            Color.parseColor("#FFB020"),
+            Color.parseColor("#FF8A1E"),
+            Color.parseColor("#FF6F00")
         )
 
         private val paletteStopped = intArrayOf(
-            Color.parseColor("#64748B"),
+            Color.parseColor("#5F6B7A"),
+            Color.parseColor("#77859A"),
             Color.parseColor("#94A3B8"),
-            Color.parseColor("#475569")
+            Color.parseColor("#4B5563")
         )
 
         override fun onAttachedToWindow() {
             super.onAttachedToWindow()
             attached = true
-            postInvalidateDelayed(40L)
+            postInvalidateDelayed(50L)
         }
 
         override fun onDetachedFromWindow() {
@@ -6956,48 +6989,70 @@ class MainActivity : AppCompatActivity() {
             val t = now / 1000.0
             val cx = w * 0.5f
             val cy = h * 0.5f
-            val coreRadius = minOf(h * 0.37f, w * 0.19f)
-            val outerRadius = coreRadius * 1.16f
 
-            // Soft central energy glow. Shader is cached until state/size changes.
+            // The energy core fills most of the visual block, matching the
+            // approved references instead of sitting as a small logo in a card.
+            val coreRadius = minOf(h * 0.445f, w * 0.285f)
+            val outerRadius = coreRadius * 1.23f
+
+            outerHaloPaint.shader = outerHaloShader
+            outerHaloPaint.alpha =
+                when (state) {
+                    AyanaVoiceService.STATE_COMMAND,
+                    AyanaVoiceService.STATE_SPEAKING -> 205
+                    AyanaVoiceService.STATE_EXECUTING -> 190
+                    AyanaVoiceService.STATE_THINKING -> 170
+                    else -> 138
+                }
+            canvas.drawCircle(cx, cy, outerRadius * 1.08f, outerHaloPaint)
+
             haloPaint.shader = haloShader
             haloPaint.alpha =
                 when (state) {
                     AyanaVoiceService.STATE_COMMAND,
-                    AyanaVoiceService.STATE_SPEAKING -> 235
+                    AyanaVoiceService.STATE_SPEAKING -> 248
                     AyanaVoiceService.STATE_THINKING,
-                    AyanaVoiceService.STATE_EXECUTING -> 205
-                    else -> 175
+                    AyanaVoiceService.STATE_EXECUTING -> 225
+                    else -> 202
                 }
-            canvas.drawCircle(cx, cy, coreRadius * 1.14f, haloPaint)
+            canvas.drawCircle(cx, cy, coreRadius * 1.10f, haloPaint)
 
-            // Concentric HUD / energy rings.
+            // Fine concentric full rings create the dense luminous depth seen
+            // in the approved images. They are cheap to draw and deterministic.
+            for (i in 0 until 10) {
+                val radius = coreRadius * (0.40f + i * 0.075f)
+                ringPaint.color = palette[i % palette.size]
+                ringPaint.strokeWidth = dp(if (i % 4 == 0) 2 else 1).toFloat()
+                ringPaint.alpha = 24 + i * 8
+                canvas.drawCircle(cx, cy, radius, ringPaint)
+            }
+
+            // Brighter rotating ring fragments supply the high-tech HUD energy.
             val ringMotion =
                 when (state) {
-                    AyanaVoiceService.STATE_COMMAND -> 48.0
-                    AyanaVoiceService.STATE_THINKING -> 26.0
-                    AyanaVoiceService.STATE_EXECUTING -> 56.0
-                    AyanaVoiceService.STATE_SPEAKING -> 62.0
-                    else -> 16.0
+                    AyanaVoiceService.STATE_COMMAND -> 54.0
+                    AyanaVoiceService.STATE_THINKING -> 30.0
+                    AyanaVoiceService.STATE_EXECUTING -> 62.0
+                    AyanaVoiceService.STATE_SPEAKING -> 70.0
+                    AyanaVoiceService.STATE_SUCCESS -> 22.0
+                    AyanaVoiceService.STATE_ERROR -> 34.0
+                    else -> 18.0
                 }
 
-            for (i in 0 until 5) {
-                val radius = coreRadius * (0.68f + i * 0.12f)
-                ringPaint.color = palette[i % palette.size]
-                ringPaint.alpha = 58 + i * 16
-                ringPaint.strokeWidth = dp(if (i % 2 == 0) 1 else 2).toFloat()
-
-                val start =
-                    ((t * ringMotion * if (i % 2 == 0) 1.0 else -0.72) + i * 51.0)
-                        .toFloat()
-
+            for (i in 0 until 7) {
+                val radius = coreRadius * (0.67f + i * 0.083f)
+                ringPaint.color = palette[(i + 1) % palette.size]
+                ringPaint.alpha = 62 + i * 14
+                ringPaint.strokeWidth = dp(if (i % 3 == 0) 2 else 1).toFloat()
+                val dir = if (i % 2 == 0) 1.0 else -0.74
+                val start = (t * ringMotion * dir + i * 47.0).toFloat()
                 canvas.drawArc(
                     cx - radius,
                     cy - radius,
                     cx + radius,
                     cy + radius,
                     start,
-                    72f + i * 13f,
+                    48f + i * 8f,
                     false,
                     ringPaint
                 )
@@ -7006,39 +7061,48 @@ class MainActivity : AppCompatActivity() {
                     cy - radius,
                     cx + radius,
                     cy + radius,
-                    start + 168f,
-                    35f + i * 8f,
+                    start + 142f,
+                    20f + i * 6f,
+                    false,
+                    ringPaint
+                )
+                canvas.drawArc(
+                    cx - radius,
+                    cy - radius,
+                    cx + radius,
+                    cy + radius,
+                    start + 238f,
+                    28f + i * 5f,
                     false,
                     ringPaint
                 )
             }
 
-            // Three translucent energy ribbons. They give the visualizer the
-            // luminous circular/aurora look of the approved concept without
-            // using a heavy background bitmap.
+            // Layered aurora / plasma ribbons. Five layers and multiple
+            // frequencies make the center resemble the approved energy sphere.
             val energySpeed =
                 when (state) {
-                    AyanaVoiceService.STATE_COMMAND -> 2.8
-                    AyanaVoiceService.STATE_THINKING -> 1.8
-                    AyanaVoiceService.STATE_EXECUTING -> 3.2
-                    AyanaVoiceService.STATE_SPEAKING -> 3.7
-                    else -> 1.25
+                    AyanaVoiceService.STATE_COMMAND -> 3.0
+                    AyanaVoiceService.STATE_THINKING -> 2.0
+                    AyanaVoiceService.STATE_EXECUTING -> 3.5
+                    AyanaVoiceService.STATE_SPEAKING -> 4.0
+                    else -> 1.30
                 }
 
-            for (layer in 0 until 3) {
+            for (layer in 0 until 5) {
                 energyPath.reset()
-                val samples = 72
+                val samples = 88
                 for (i in 0..samples) {
-                    val a =
-                        i.toDouble() / samples.toDouble() * Math.PI * 2.0
+                    val a = i.toDouble() / samples.toDouble() * Math.PI * 2.0
                     val wobble =
-                        0.78 +
-                            0.10 * Math.sin(a * (3.0 + layer) + t * energySpeed + layer) +
-                            0.055 * Math.sin(a * 7.0 - t * 1.35 + layer * 0.8)
+                        0.75 +
+                            0.115 * Math.sin(a * (2.0 + layer * 0.45) + t * energySpeed + layer * 0.71) +
+                            0.070 * Math.sin(a * (5.0 + layer * 0.30) - t * (1.10 + layer * 0.09)) +
+                            0.035 * Math.sin(a * 9.0 + t * 0.62 + layer)
                     val radius = coreRadius * wobble.toFloat()
-                    val angle = a + layer * 0.72
+                    val angle = a + layer * 0.47 + t * 0.045 * (if (layer % 2 == 0) 1.0 else -1.0)
                     val x = cx + Math.cos(angle).toFloat() * radius
-                    val y = cy + Math.sin(angle).toFloat() * radius * 0.88f
+                    val y = cy + Math.sin(angle).toFloat() * radius * (0.84f + layer * 0.018f)
                     if (i == 0) {
                         energyPath.moveTo(x, y)
                     } else {
@@ -7046,98 +7110,133 @@ class MainActivity : AppCompatActivity() {
                     }
                 }
                 energyPath.close()
-                energyPaint.color = palette[layer]
-                energyPaint.alpha = 72 + layer * 24
-                energyPaint.strokeWidth = dp(if (layer == 1) 2 else 1).toFloat()
+
+                // Soft outer glow, then a crisp inner ribbon.
+                energyPaint.color = palette[layer % palette.size]
+                energyPaint.alpha = 22 + layer * 8
+                energyPaint.strokeWidth = dp(5 - (layer % 2)).toFloat()
+                canvas.drawPath(energyPath, energyPaint)
+
+                energyPaint.alpha = 72 + layer * 15
+                energyPaint.strokeWidth = dp(if (layer == 2) 2 else 1).toFloat()
                 canvas.drawPath(energyPath, energyPaint)
             }
 
-            // Outer particle orbit. Positions are deterministic; only their
-            // intensity breathes, so there is no frame-to-frame random jitter.
-            val particleCount = 18
+            // Particle halo. Deterministic motion avoids random jitter.
+            val particleCount = 46
             for (i in 0 until particleCount) {
                 val angle =
                     i.toDouble() / particleCount.toDouble() * Math.PI * 2.0 +
-                        t * 0.13
-                val sparkle =
-                    ((Math.sin(t * 2.4 + i * 0.91) + 1.0) * 0.5)
-                        .toFloat()
-                val radius = outerRadius * (0.94f + 0.05f * sparkle)
+                        t * (0.10 + (i % 4) * 0.004)
+                val twinkle =
+                    ((Math.sin(t * 2.2 + i * 0.73) + 1.0) * 0.5).toFloat()
+                val radius = outerRadius * (0.92f + 0.075f * twinkle)
                 val x = cx + Math.cos(angle).toFloat() * radius
                 val y = cy + Math.sin(angle).toFloat() * radius
                 particlePaint.color = palette[i % palette.size]
-                particlePaint.alpha = (80 + sparkle * 150f).toInt()
+                particlePaint.alpha = (62 + twinkle * 180f).toInt()
                 canvas.drawCircle(
                     x,
                     y,
-                    dp(if (i % 5 == 0) 2 else 1).toFloat(),
+                    dp(if (i % 9 == 0) 2 else 1).toFloat(),
                     particlePaint
                 )
+
+                if (i % 11 == 0) {
+                    sparkPaint.color = palette[(i + 1) % palette.size]
+                    sparkPaint.alpha = (88 + twinkle * 130f).toInt()
+                    sparkPaint.strokeWidth = dp(1).toFloat()
+                    val arm = dp(5).toFloat() * (0.65f + twinkle * 0.55f)
+                    canvas.drawLine(x - arm, y, x + arm, y, sparkPaint)
+                    canvas.drawLine(x, y - arm, x, y + arm, sparkPaint)
+                }
             }
 
-            // Horizontal sound wave / spectrum. Thin vertical spikes create
-            // the same visual language as the approved oscillograph reference.
-            wavePaint.shader = waveShader
-            wavePaint.strokeWidth = dp(1).toFloat()
-            wavePaint.alpha = 235
-            baselinePaint.color = palette[1]
-            baselinePaint.alpha = 105
-            canvas.drawLine(0f, cy, w, cy, baselinePaint)
-
+            // Full-width luminous audio waveform. The path is drawn twice:
+            // broad translucent glow first, then the crisp bright spectrum.
+            wavePath.reset()
             val waveStrength =
                 when (state) {
-                    AyanaVoiceService.STATE_COMMAND -> 0.90f
-                    AyanaVoiceService.STATE_THINKING -> 0.48f
-                    AyanaVoiceService.STATE_EXECUTING -> 0.64f
+                    AyanaVoiceService.STATE_COMMAND -> 0.92f
+                    AyanaVoiceService.STATE_THINKING -> 0.55f
+                    AyanaVoiceService.STATE_EXECUTING -> 0.76f
                     AyanaVoiceService.STATE_SPEAKING -> 1.00f
-                    AyanaVoiceService.STATE_SUCCESS -> 0.26f
-                    AyanaVoiceService.STATE_ERROR -> 0.34f
-                    else -> 0.30f
+                    AyanaVoiceService.STATE_SUCCESS -> 0.36f
+                    AyanaVoiceService.STATE_ERROR -> 0.48f
+                    AyanaVoiceService.STATE_CANCELLED -> 0.38f
+                    AyanaVoiceService.STATE_STOPPED -> 0.12f
+                    else -> 0.31f
                 }
 
             val waveSpeed =
                 when (state) {
-                    AyanaVoiceService.STATE_COMMAND -> 5.2
-                    AyanaVoiceService.STATE_THINKING -> 2.1
-                    AyanaVoiceService.STATE_EXECUTING -> 3.8
-                    AyanaVoiceService.STATE_SPEAKING -> 6.1
-                    else -> 1.45
+                    AyanaVoiceService.STATE_COMMAND -> 5.5
+                    AyanaVoiceService.STATE_THINKING -> 2.4
+                    AyanaVoiceService.STATE_EXECUTING -> 4.2
+                    AyanaVoiceService.STATE_SPEAKING -> 6.4
+                    AyanaVoiceService.STATE_ERROR -> 3.3
+                    else -> 1.55
                 }
 
-            val spikeCount = 104
-            val maxSpike = h * 0.25f * waveStrength
+            val spikeCount = 168
+            val maxSpike = h * 0.285f * waveStrength
             for (i in 0 until spikeCount) {
                 val xNorm = i.toFloat() / (spikeCount - 1).toFloat()
                 val signed = xNorm * 2f - 1f
                 val x = xNorm * w
-                val envelope =
-                    (0.30f + 0.70f * (1f - kotlin.math.abs(signed))).coerceIn(0.30f, 1f)
+                val centerEnvelope =
+                    (0.18f + 0.82f * (1f - kotlin.math.abs(signed))).coerceIn(0.18f, 1f)
+                val outerAccent =
+                    (0.68f + 0.32f * kotlin.math.abs(signed)).coerceIn(0.68f, 1f)
                 val signal =
-                    0.56 * Math.sin(i * 0.47 + t * waveSpeed) +
-                        0.29 * Math.sin(i * 1.11 - t * waveSpeed * 0.72) +
-                        0.15 * Math.sin(i * 2.03 + t * waveSpeed * 0.31)
+                    0.44 * Math.sin(i * 0.37 + t * waveSpeed) +
+                        0.27 * Math.sin(i * 0.91 - t * waveSpeed * 0.71) +
+                        0.18 * Math.sin(i * 1.83 + t * waveSpeed * 0.38) +
+                        0.11 * Math.sin(i * 2.77 - t * waveSpeed * 0.19)
+                val micro = 0.55 + 0.45 * Math.abs(Math.sin(i * 0.71 + t * 0.8))
                 val spike =
-                    (dp(2).toFloat() + kotlin.math.abs(signal).toFloat() * maxSpike * envelope)
-                canvas.drawLine(x, cy - spike, x, cy + spike, wavePaint)
+                    dp(1).toFloat() +
+                        kotlin.math.abs(signal).toFloat() *
+                        maxSpike *
+                        centerEnvelope *
+                        outerAccent *
+                        micro.toFloat()
+                wavePath.moveTo(x, cy - spike)
+                wavePath.lineTo(x, cy + spike)
             }
 
-            // Large AYANA wordmark in the center. No extra waveform icon is
-            // drawn above it. The letters share the same gradient as the wave.
-            val targetTextSize = (h * 0.22f).coerceAtLeast(dp(18).toFloat())
+            waveGlowPaint.shader = waveShader
+            waveGlowPaint.strokeWidth = dp(4).toFloat()
+            waveGlowPaint.alpha = 45
+            canvas.drawPath(wavePath, waveGlowPaint)
+
+            wavePaint.shader = waveShader
+            wavePaint.strokeWidth = dp(1).toFloat()
+            wavePaint.alpha = 245
+            canvas.drawPath(wavePath, wavePaint)
+
+            baselinePaint.color = palette[1]
+            baselinePaint.alpha = 118
+            canvas.drawLine(0f, cy, w, cy, baselinePaint)
+
+            // Large central wordmark. There is deliberately NO mini waveform
+            // or secondary icon above it.
+            val targetTextSize = (h * 0.255f).coerceAtLeast(dp(24).toFloat())
             textPaint.textSize = targetTextSize
             textGlowPaint.textSize = targetTextSize
-            val maxTextWidth = coreRadius * 1.90f
+            val maxTextWidth = coreRadius * 2.55f
             val measured = textPaint.measureText("AYANA")
             if (measured > maxTextWidth && measured > 0f) {
                 val scaled = targetTextSize * maxTextWidth / measured
                 textPaint.textSize = scaled
                 textGlowPaint.textSize = scaled
             }
+
             textPaint.shader = textShader
             textPaint.alpha = 255
             textGlowPaint.shader = textShader
-            textGlowPaint.alpha = 88
-            textGlowPaint.strokeWidth = dp(4).toFloat()
+            textGlowPaint.alpha = 62
+            textGlowPaint.strokeWidth = dp(7).toFloat()
 
             val textY =
                 cy - (textPaint.ascent() + textPaint.descent()) * 0.5f
@@ -7147,13 +7246,13 @@ class MainActivity : AppCompatActivity() {
             if (attached && isShown) {
                 val delayMs =
                     when {
-                        textModeVisible -> 66L
-                        state == AyanaVoiceService.STATE_COMMAND -> 28L
-                        state == AyanaVoiceService.STATE_SPEAKING -> 28L
-                        state == AyanaVoiceService.STATE_EXECUTING -> 32L
-                        state == AyanaVoiceService.STATE_THINKING -> 36L
-                        state == AyanaVoiceService.STATE_LISTENING -> 45L
-                        else -> 80L
+                        textModeVisible -> 72L
+                        state == AyanaVoiceService.STATE_COMMAND -> 30L
+                        state == AyanaVoiceService.STATE_SPEAKING -> 30L
+                        state == AyanaVoiceService.STATE_EXECUTING -> 34L
+                        state == AyanaVoiceService.STATE_THINKING -> 38L
+                        state == AyanaVoiceService.STATE_LISTENING -> 58L
+                        else -> 78L
                     }
                 postInvalidateDelayed(delayMs)
             }
@@ -7183,7 +7282,8 @@ class MainActivity : AppCompatActivity() {
                 shaderHeight == height &&
                 waveShader != null &&
                 textShader != null &&
-                haloShader != null
+                haloShader != null &&
+                outerHaloShader != null
             ) {
                 return
             }
@@ -7196,7 +7296,7 @@ class MainActivity : AppCompatActivity() {
             val h = height.toFloat().coerceAtLeast(1f)
             val cx = w * 0.5f
             val cy = h * 0.5f
-            val radius = minOf(h * 0.43f, w * 0.22f).coerceAtLeast(1f)
+            val radius = minOf(h * 0.455f, w * 0.29f).coerceAtLeast(1f)
 
             waveShader =
                 android.graphics.LinearGradient(
@@ -7208,10 +7308,10 @@ class MainActivity : AppCompatActivity() {
                         palette[0],
                         palette[1],
                         Color.WHITE,
-                        palette[1],
-                        palette[2]
+                        palette[2],
+                        palette[3]
                     ),
-                    floatArrayOf(0f, 0.28f, 0.5f, 0.72f, 1f),
+                    floatArrayOf(0f, 0.27f, 0.5f, 0.73f, 1f),
                     Shader.TileMode.CLAMP
                 )
 
@@ -7224,9 +7324,10 @@ class MainActivity : AppCompatActivity() {
                     intArrayOf(
                         palette[0],
                         palette[1],
-                        palette[2]
+                        palette[2],
+                        palette[3]
                     ),
-                    null,
+                    floatArrayOf(0f, 0.34f, 0.67f, 1f),
                     Shader.TileMode.CLAMP
                 )
 
@@ -7236,12 +7337,46 @@ class MainActivity : AppCompatActivity() {
                     cy,
                     radius * 1.08f,
                     intArrayOf(
-                        Color.argb(235, 255, 255, 255),
-                        Color.argb(155, Color.red(palette[1]), Color.green(palette[1]), Color.blue(palette[1])),
-                        Color.argb(58, Color.red(palette[2]), Color.green(palette[2]), Color.blue(palette[2])),
+                        Color.argb(250, 255, 255, 255),
+                        Color.argb(
+                            190,
+                            Color.red(palette[1]),
+                            Color.green(palette[1]),
+                            Color.blue(palette[1])
+                        ),
+                        Color.argb(
+                            82,
+                            Color.red(palette[2]),
+                            Color.green(palette[2]),
+                            Color.blue(palette[2])
+                        ),
                         Color.TRANSPARENT
                     ),
-                    floatArrayOf(0f, 0.22f, 0.64f, 1f),
+                    floatArrayOf(0f, 0.20f, 0.64f, 1f),
+                    Shader.TileMode.CLAMP
+                )
+
+            outerHaloShader =
+                RadialGradient(
+                    cx,
+                    cy,
+                    radius * 1.42f,
+                    intArrayOf(
+                        Color.argb(
+                            46,
+                            Color.red(palette[0]),
+                            Color.green(palette[0]),
+                            Color.blue(palette[0])
+                        ),
+                        Color.argb(
+                            28,
+                            Color.red(palette[3]),
+                            Color.green(palette[3]),
+                            Color.blue(palette[3])
+                        ),
+                        Color.TRANSPARENT
+                    ),
+                    floatArrayOf(0f, 0.66f, 1f),
                     Shader.TileMode.CLAMP
                 )
         }
