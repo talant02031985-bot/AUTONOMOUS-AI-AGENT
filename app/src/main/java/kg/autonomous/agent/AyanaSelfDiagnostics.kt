@@ -5,7 +5,7 @@ import org.json.JSONArray
 import org.json.JSONObject
 
 /**
- * AYANA Self-Diagnostics v3.1 — HONEST HEALTH.
+ * AYANA Self-Diagnostics v4.0 — VERIFIED HEALTH.
  *
  * Health states are explicit:
  * PASS     = fresh/observable evidence is healthy;
@@ -159,6 +159,50 @@ class AyanaSelfDiagnostics(
                 -1
             )
 
+        val screenLatency =
+            runtime.optLong(
+                "screen_snapshot_latency_ms",
+                -1L
+            )
+
+        val externalScreenFresh =
+            runtime.optBoolean(
+                "external_screen_evidence_fresh",
+                false
+            )
+
+        val externalScreenPackage =
+            runtime.optString(
+                "external_screen_last_package"
+            )
+
+        val externalScreenContentState =
+            runtime.optString(
+                "external_screen_last_content_state",
+                "unknown"
+            )
+
+        // Running diagnostics inside AYANA must not hide a recent confirmed
+        // external-app readability problem. Prefer recent external evidence when
+        // the current snapshot is AYANA's own UI.
+        val effectiveScreenContentState =
+            if (
+                externalScreenFresh &&
+                externalScreenPackage.isNotBlank() &&
+                externalScreenPackage != appContext.packageName &&
+                externalScreenContentState in
+                    setOf(
+                        "partial",
+                        "structure_only",
+                        "unavailable",
+                        "unknown"
+                    )
+            ) {
+                externalScreenContentState
+            } else {
+                screenContentState
+            }
+
         addCheck(
             checks,
             "screen_intelligence",
@@ -170,11 +214,21 @@ class AyanaSelfDiagnostics(
                     screenWindows <= 0 ->
                     STATUS_UNKNOWN
 
-                screenContentState == "readable" ->
+                effectiveScreenContentState == "readable" &&
+                    (
+                        screenLatency < 0L ||
+                            screenLatency <
+                            SCREEN_LATENCY_WARNING_MS
+                        ) ->
                     STATUS_PASS
 
-                screenContentState == "partial" ||
-                    screenContentState == "structure_only" ->
+                effectiveScreenContentState == "readable" ||
+                    effectiveScreenContentState == "partial" ||
+                    effectiveScreenContentState == "structure_only" ->
+                    STATUS_WARNING
+
+                effectiveScreenContentState == "unavailable" &&
+                    externalScreenFresh ->
                     STATUS_WARNING
 
                 else ->
@@ -191,8 +245,27 @@ class AyanaSelfDiagnostics(
                 screenWindows <= 0 ->
                     "Активные окна не обнаружены в момент проверки"
 
+                externalScreenFresh &&
+                    externalScreenPackage.isNotBlank() &&
+                    externalScreenContentState == "unavailable" ->
+                    "Последняя внешняя проверка: $externalScreenPackage — окно определено, но содержимое недоступно для надёжного чтения"
+
+                externalScreenFresh &&
+                    externalScreenPackage.isNotBlank() &&
+                    externalScreenContentState == "structure_only" ->
+                    "Последняя внешняя проверка: $externalScreenPackage — структура окна доступна, но читаемый текст не подтверждён"
+
+                externalScreenFresh &&
+                    externalScreenPackage.isNotBlank() &&
+                    externalScreenContentState == "partial" ->
+                    "Последняя внешняя проверка: $externalScreenPackage — содержимое читается только частично"
+
+                screenContentState == "readable" &&
+                    screenLatency >= SCREEN_LATENCY_WARNING_MS ->
+                    "Текущий экран читается, но snapshot медленный: $screenLatency мс"
+
                 screenContentState == "readable" ->
-                    "Окна: $screenWindows; основной экран читается; элементов текста: $screenPrimaryText; режим=${runtime.optString("screen_context_mode")}" 
+                    "Окна: $screenWindows; основной экран читается; элементов текста: $screenPrimaryText; snapshot=${screenLatency}мс; режим=${runtime.optString("screen_context_mode")}"
 
                 screenContentState == "partial" ->
                     "Основное окно определено, но содержимое читается только частично; элементов текста: $screenPrimaryText"
@@ -358,6 +431,17 @@ class AyanaSelfDiagnostics(
                     "Последний запрос успешен: $agentLatency мс"
             }
         )
+
+        val lastCommandSource =
+            runtime.optString(
+                "last_command_source"
+            )
+
+        val lastCommandTtsExpected =
+            runtime.optBoolean(
+                "last_command_tts_expected",
+                lastCommandSource == "voice"
+            )
 
         val ttsAt =
             runtime.optLong(
@@ -903,7 +987,7 @@ class AyanaSelfDiagnostics(
                 "Включите службу AYANA в специальных возможностях Android."
 
             "screen_intelligence" ->
-                "Если окна определяются, но текст отсутствует, проверьте Window Content Core/Accessibility root extraction; не объявляйте экран подтверждённым."
+                "Если внешнее окно определяется, но текст отсутствует, Screen Perception остаётся WARNING/Нет данных; не ослабляйте strict verification ради PASS."
 
             "overlay" ->
                 "Разрешите AYANA отображение поверх других приложений, если нужен глобальный Orb."
@@ -951,6 +1035,9 @@ class AyanaSelfDiagnostics(
 
         private const val AGENT_LATENCY_WARNING_MS =
             6000L
+
+        private const val SCREEN_LATENCY_WARNING_MS =
+            350L
 
         private const val TTS_FIRST_BYTE_WARNING_MS =
             2500L
