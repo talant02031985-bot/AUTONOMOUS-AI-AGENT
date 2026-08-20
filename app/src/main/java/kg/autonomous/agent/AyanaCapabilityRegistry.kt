@@ -10,7 +10,7 @@ import org.json.JSONArray
 import org.json.JSONObject
 
 /**
- * AYANA Device Capability Registry v1.1 — SYSTEM AWARENESS.
+ * AYANA Device Capability Registry v1.2 — SCREEN TRUTH.
  *
  * Machine-readable source of truth about what is implemented in this build and
  * what is actually available on the current device right now. This separates
@@ -135,6 +135,25 @@ class AyanaCapabilityRegistry(
                 ?.length()
                 ?: -1
 
+        val screenPrimaryContentState =
+            screenSnapshot
+                ?.optString(
+                    "primary_content_state",
+                    "unknown"
+                )
+                .orEmpty()
+                .ifBlank {
+                    "unknown"
+                }
+
+        val screenPrimaryReadableTextCount =
+            screenSnapshot
+                ?.optInt(
+                    "primary_readable_text_count",
+                    -1
+                )
+                ?: -1
+
         val recentHistory =
             try {
                 AyanaCommandHistoryStore(
@@ -192,6 +211,8 @@ class AyanaCapabilityRegistry(
             .put("screen_snapshot_ok", screenSnapshot?.optBoolean("success", false) == true)
             .put("screen_window_count", screenSnapshot?.optInt("window_count", -1) ?: -1)
             .put("screen_visible_text_count", screenVisibleCount)
+            .put("screen_primary_content_state", screenPrimaryContentState)
+            .put("screen_primary_readable_text_count", screenPrimaryReadableTextCount)
             .put("screen_context_mode", screenSnapshot?.optString("window_context_mode").orEmpty())
             .put("screen_primary_package", screenSnapshot?.optString("package").orEmpty())
             .put("recent_command_count", recentHistory.size)
@@ -233,7 +254,7 @@ class AyanaCapabilityRegistry(
             implemented = true,
             available = accessibilityConnected,
             deviceConfirmed = false,
-            note = "v11.2 Window Content Core uses Android 13+ root descendant prefetch; full content extraction requires device confirmation"
+            note = "v11.2.1 Screen Truth uses Android 13+ prefetch plus same-window active-root upgrade; full content extraction still requires device confirmation"
         )
         capability(
             capabilities,
@@ -389,7 +410,7 @@ class AyanaCapabilityRegistry(
                 append("; last_error_result=")
                 append(runtime.optString("last_error_result").take(320))
             }
-            append(". Implemented v11.2: dynamic_app_resolver, window_context, strict_verification, planner_v2, multi_goal_management, memory_v2, task_management_v2, honest_self_diagnostics_v3. Not implemented yet: visual screenshot understanding, external mail/calendar/files integrations, offline_llm, controlled_proactivity.")
+            append(". Implemented v11.2.1: dynamic_app_resolver, window_context, strict_verification, planner_v2, multi_goal_management, memory_v2, task_management_v2, honest_self_diagnostics_v3. Not implemented yet: visual screenshot understanding, external mail/calendar/files integrations, offline_llm, controlled_proactivity.")
         }
     }
 
@@ -412,7 +433,7 @@ class AyanaCapabilityRegistry(
     }
 
     companion object {
-        const val BUILD_LABEL = "AYANA v11.2 SYSTEM INTEGRITY & AGENT MATURITY"
+        const val BUILD_LABEL = "AYANA v11.2.1 STABILITY & SCREEN TRUTH"
 
         private const val PREFS_NAME = "ayana_capability_runtime_v11"
         private const val KEY_AGENT_CORE_OK = "agent_core_ok"
