@@ -7,6 +7,7 @@ import android.graphics.Path
 import android.graphics.Rect
 import android.os.Build
 import android.os.Bundle
+import android.os.SystemClock
 import android.view.accessibility.AccessibilityEvent
 import android.view.accessibility.AccessibilityNodeInfo
 import android.view.accessibility.AccessibilityWindowInfo
@@ -19,7 +20,7 @@ import kotlin.math.max
 class AgentAccessibilityService :
     AccessibilityService() {
 
-    // AYANA Accessibility v4.2.1 — HOT PATH RECOVERY + COMPILE FIX + SCREEN TRUTH.
+    // AYANA Accessibility v5.0 — PERCEPTION TRUTH + HOT PATH RECOVERY.
     // Every visible Android window is an independent context. Normal accessibility
     // events stay lightweight; deep tree acquisition is reserved for structural
     // changes and explicit screen reads. Fresh event evidence is merged only into
@@ -692,6 +693,9 @@ class AgentAccessibilityService :
         maxChars: Int = 14000
     ): JSONObject {
 
+        val snapshotStartedAt =
+            SystemClock.elapsedRealtime()
+
         val liveContexts =
             resolveWindowContexts()
 
@@ -706,9 +710,21 @@ class AgentAccessibilityService :
         ) {
             return JSONObject()
                 .put("success", false)
+                .put("snapshot_success", false)
+                .put("understanding_success", false)
+                .put("content_contract_version", 2)
+                .put("content_status", "unknown")
+                .put("primary_content_state", "unknown")
+                .put("primary_content_available", false)
+                .put("primary_failure_reason", "no_accessible_window")
                 .put("message", "Активное окно недоступно")
                 .put("window_count", 0)
                 .put("raw_window_count", safeWindowCount())
+                .put(
+                    "snapshot_duration_ms",
+                    (SystemClock.elapsedRealtime() - snapshotStartedAt)
+                        .coerceAtLeast(0L)
+                )
         }
 
         data class WindowAccumulator(
@@ -1037,19 +1053,81 @@ class AgentAccessibilityService :
                                 )
                     }
 
+            val liveReadableTextCount =
+                accumulator.liveTexts
+                    .count { text ->
+                        val clean =
+                            safeText(
+                                text
+                            )
+
+                        clean.isNotBlank() &&
+                            (
+                                contextTitle.isBlank() ||
+                                    clean != contextTitle
+                                )
+                    }
+
+            val evidenceReadableTextCount =
+                accumulator.evidenceTexts
+                    .count { text ->
+                        safeText(
+                            text
+                        )
+                            .isNotBlank()
+                    }
+
+            val contextNodeCount =
+                accumulator.nodes
+                    .length()
+
+            val hasFreshEventEvidence =
+                accumulator.evidenceAgeMs >= 0L &&
+                    accumulator.evidenceAgeMs <= EVENT_VERIFICATION_TTL_MS
+
             val contextContentState =
                 when {
-                    readableTextCount >= 2 ->
+                    liveReadableTextCount >= 2 ->
                         "readable"
 
-                    readableTextCount == 1 ->
+                    liveReadableTextCount == 1 ->
                         "partial"
 
-                    accumulator.nodes.length() > 1 ->
+                    // Fresh event evidence is useful, but it is deliberately
+                    // weaker than a live Accessibility tree. It can support a
+                    // cautious partial observation, never a full readable claim.
+                    hasFreshEventEvidence &&
+                        evidenceReadableTextCount >= 1 ->
+                        "partial"
+
+                    contextNodeCount > 1 ->
                         "structure_only"
 
                     else ->
                         "unavailable"
+                }
+
+            val contextFailureReason =
+                when {
+                    contextContentState == "readable" ->
+                        ""
+
+                    contextContentState == "partial" &&
+                        liveReadableTextCount > 0 ->
+                        "limited_live_text"
+
+                    contextContentState == "partial" &&
+                        hasFreshEventEvidence ->
+                        "event_evidence_only"
+
+                    contextNodeCount > 1 ->
+                        "structure_without_readable_text"
+
+                    context.root == null ->
+                        "root_unavailable"
+
+                    else ->
+                        "sparse_root"
                 }
 
             windowsJson.put(
@@ -1066,13 +1144,23 @@ class AgentAccessibilityService :
                     .put("focused", context.focused)
                     .put("picture_in_picture", context.pictureInPicture)
                     .put("source", context.source)
+                    .put("acquisition_source", context.source)
                     .put("interaction_rank", context.rank)
                     .put("interaction_context", context.contextId in interactionIds)
                     .put("occlusion_ratio", contextOcclusionRatio(context, allContexts))
                     .put("bounds", rectToJson(context.bounds))
                     .put("evidence_age_ms", accumulator.evidenceAgeMs)
+                    .put("node_count", contextNodeCount)
+                    .put("live_readable_text_count", liveReadableTextCount)
+                    .put("evidence_readable_text_count", evidenceReadableTextCount)
                     .put("readable_text_count", readableTextCount)
                     .put("content_state", contextContentState)
+                    .put(
+                        "content_available",
+                        contextContentState == "readable" ||
+                            contextContentState == "partial"
+                    )
+                    .put("failure_reason", contextFailureReason)
                     .put("verification_text", contextVerificationText)
                     .put("visible_text", visibleArray)
             )
@@ -1131,37 +1219,138 @@ class AgentAccessibilityService :
                 }
                 ?: 0
 
+        val primaryLiveReadableTextCount =
+            primaryAccumulator
+                ?.liveTexts
+                ?.count { text ->
+                    val clean =
+                        safeText(
+                            text
+                        )
+
+                    clean.isNotBlank() &&
+                        (
+                            primaryTitle.isBlank() ||
+                                clean != primaryTitle
+                            )
+                }
+                ?: 0
+
+        val primaryEvidenceReadableTextCount =
+            primaryAccumulator
+                ?.evidenceTexts
+                ?.count { text ->
+                    safeText(
+                        text
+                    )
+                        .isNotBlank()
+                }
+                ?: 0
+
+        val primaryFreshEvidence =
+            primaryAccumulator != null &&
+                primaryAccumulator.evidenceAgeMs >= 0L &&
+                primaryAccumulator.evidenceAgeMs <= EVENT_VERIFICATION_TTL_MS
+
+        val primaryNodeCount =
+            primaryAccumulator
+                ?.nodes
+                ?.length()
+                ?: 0
+
         val primaryContentState =
             when {
                 primary == null ->
                     "unknown"
 
-                primaryReadableTextCount >= 2 ->
+                primaryLiveReadableTextCount >= 2 ->
                     "readable"
 
-                primaryReadableTextCount == 1 ->
+                primaryLiveReadableTextCount == 1 ->
                     "partial"
 
-                (primaryAccumulator?.nodes?.length() ?: 0) > 1 ->
+                primaryFreshEvidence &&
+                    primaryEvidenceReadableTextCount >= 1 ->
+                    "partial"
+
+                primaryNodeCount > 1 ->
                     "structure_only"
 
                 else ->
                     "unavailable"
             }
 
+        val primaryFailureReason =
+            when {
+                primaryContentState == "readable" ->
+                    ""
+
+                primaryContentState == "partial" &&
+                    primaryLiveReadableTextCount > 0 ->
+                    "limited_live_text"
+
+                primaryContentState == "partial" &&
+                    primaryFreshEvidence ->
+                    "event_evidence_only"
+
+                primaryNodeCount > 1 ->
+                    "structure_without_readable_text"
+
+                primary?.root == null ->
+                    "root_unavailable"
+
+                else ->
+                    "sparse_root"
+            }
+
+        var readableWindowCount = 0
+        var partialWindowCount = 0
+        var structureOnlyWindowCount = 0
+        var unavailableWindowCount = 0
+
+        for (index in 0 until windowsJson.length()) {
+            when (
+                windowsJson
+                    .optJSONObject(index)
+                    ?.optString("content_state")
+            ) {
+                "readable" -> readableWindowCount++
+                "partial" -> partialWindowCount++
+                "structure_only" -> structureOnlyWindowCount++
+                "unavailable" -> unavailableWindowCount++
+            }
+        }
+
+        val primaryContentAvailable =
+            primaryContentState == "readable" ||
+                primaryContentState == "partial"
+
         return JSONObject()
             .put("success", true)
+            .put("snapshot_success", true)
+            .put("understanding_success", primaryContentAvailable)
+            .put("content_contract_version", 2)
+            .put("content_status", primaryContentState)
             .put("package", primary?.packageName.orEmpty())
             .put("root_class", primary?.className.orEmpty())
             .put("primary_context_id", primary?.contextId.orEmpty())
             .put("primary_window_title", primary?.title.orEmpty())
             .put("interaction_package", primary?.packageName.orEmpty())
             .put("primary_content_state", primaryContentState)
-            .put("primary_content_available", primaryContentState == "readable" || primaryContentState == "partial")
+            .put("primary_content_available", primaryContentAvailable)
+            .put("primary_failure_reason", primaryFailureReason)
+            .put("primary_acquisition_source", primary?.source.orEmpty())
             .put("primary_readable_text_count", primaryReadableTextCount)
-            .put("window_context_mode", "v3_active_root_upgrade")
+            .put("primary_live_readable_text_count", primaryLiveReadableTextCount)
+            .put("primary_evidence_readable_text_count", primaryEvidenceReadableTextCount)
+            .put("primary_node_count", primaryNodeCount)
+            .put("window_context_mode", "v5_perception_truth")
             .put("window_count", allContexts.size)
             .put("raw_window_count", safeWindowCount())
+            .put("readable_window_count", readableWindowCount)
+            .put("partial_window_count", partialWindowCount)
+            .put("structure_only_window_count", structureOnlyWindowCount)
+            .put("unavailable_window_count", unavailableWindowCount)
             .put("evidence_context_count", evidenceContextCount)
             .put("packages", packageArray)
             .put("visible_text", visibleText)
@@ -1176,6 +1365,11 @@ class AgentAccessibilityService :
             .put(
                 "event_age_ms",
                 (System.currentTimeMillis() - lastEventTime)
+                    .coerceAtLeast(0L)
+            )
+            .put(
+                "snapshot_duration_ms",
+                (SystemClock.elapsedRealtime() - snapshotStartedAt)
                     .coerceAtLeast(0L)
             )
     }
