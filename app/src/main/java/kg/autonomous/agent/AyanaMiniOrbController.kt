@@ -20,7 +20,7 @@ import kotlin.math.abs
 import kotlin.math.sin
 
 /**
- * AYANA Floating Orb v4.0 — AYANA CORE / LOW LOAD.
+ * AYANA Floating Orb v4.1 — TRANSPARENT CORE / SMOOTH IDLE.
  *
  * Rules:
  * 1) exactly one overlay View per app process;
@@ -28,8 +28,8 @@ import kotlin.math.sin
  * 3) repeated refresh() only updates the existing View;
  * 4) drag position is persisted;
  * 5) tapping the Orb opens AYANA.
- * 6) center mark is the lightweight AYANA Core symbol: luminous core + three broken arcs.
- * 7) animation is frame-capped to protect text input and IME latency.
+ * 6) the overlay background and orb body are fully transparent; only the luminous core and arcs are rendered.
+ * 7) idle motion is smoother/faster while remaining frame-capped to protect text input and IME latency.
  *
  * The service owns WHEN the Orb exists. This controller only owns HOW it is
  * rendered. It never starts/stops AyanaVoiceService itself.
@@ -623,13 +623,6 @@ class AyanaMiniOrbController(
         private val arcBounds =
             RectF()
 
-        private val bodyColor =
-            Color.rgb(
-                8,
-                17,
-                31
-            )
-
         private var accentColor =
             Color.rgb(
                 125,
@@ -748,7 +741,7 @@ class AyanaMiniOrbController(
                         0.075f
 
                     AyanaVoiceService.STATE_LISTENING ->
-                        0.020f
+                        0.050f
 
                     else ->
                         0f
@@ -787,32 +780,38 @@ class AyanaMiniOrbController(
                     0f
                 }
 
-            // Dark, stable body: no per-frame bitmap, clipping path or gradient
-            // allocation. This keeps the overlay cheap while the IME is active.
+            // v4.1: fully transparent orb body. Never paint a solid backing
+            // disk behind the symbol. The overlay remains visually open over
+            // Word, Chrome, Settings, and other apps. Keep the render path
+            // allocation-free so the smoother idle animation does not bring
+            // back the IME/text-input regression.
             corePaint.shader =
                 null
 
+            val accent =
+                accentColor
+
+            // Very light outer nucleus glow; this is translucent color only,
+            // not a background fill.
             corePaint.color =
-                bodyColor
+                accent
 
             corePaint.alpha =
-                245
+                48
 
             canvas.drawCircle(
                 cx,
                 cy,
                 baseRadius *
-                    1.42f,
+                    (
+                        0.42f +
+                            pulse *
+                                0.35f
+                        ),
                 corePaint
             )
 
-            val accent =
-                accentColor
-
             // Luminous central AYANA Core nucleus.
-            corePaint.color =
-                accent
-
             corePaint.alpha =
                 if (
                     now <
@@ -820,7 +819,7 @@ class AyanaMiniOrbController(
                 ) {
                     245
                 } else {
-                    220
+                    225
                 }
 
             canvas.drawCircle(
@@ -828,8 +827,9 @@ class AyanaMiniOrbController(
                 cy,
                 baseRadius *
                     (
-                        0.24f +
-                            pulse
+                        0.20f +
+                            pulse *
+                                0.55f
                         ),
                 corePaint
             )
@@ -866,7 +866,7 @@ class AyanaMiniOrbController(
 
                 ringPaint.strokeWidth =
                     dpLocal(
-                        if (ring == 0) 3 else 2
+                        if (ring == 0) 2 else 1
                     )
 
                 ringPaint.alpha =
@@ -1169,7 +1169,7 @@ class AyanaMiniOrbController(
             55L
 
         private const val FRAME_LISTENING_MS =
-            85L
+            50L
 
         private const val FRAME_TERMINAL_MS =
             70L
