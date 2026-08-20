@@ -15236,6 +15236,9 @@ class AyanaVoiceService : Service() {
         var totalBytes =
             0L
 
+        var firstByteLatencyMs =
+            -1L
+
         val requestStartedAt =
             SystemClock.elapsedRealtime()
 
@@ -15494,6 +15497,9 @@ class AyanaVoiceService : Service() {
                                 SystemClock.elapsedRealtime() -
                                     requestStartedAt
 
+                            firstByteLatencyMs =
+                                firstByteMs
+
                             commandHistoryStore.addEvent(
                                 activeCommandHistoryId,
                                 state = "tts_first_byte",
@@ -15588,6 +15594,12 @@ class AyanaVoiceService : Service() {
                     details = technical
                 )
 
+                capabilityRegistry.recordTtsResult(
+                    success = false,
+                    firstByteMs = firstByteLatencyMs,
+                    error = technical
+                )
+
                 mainHandler.post {
                     if (
                         token == audioToken &&
@@ -15646,6 +15658,12 @@ class AyanaVoiceService : Service() {
                 state = "tts_complete",
                 message = "Marin: поток полностью воспроизведён",
                 details = "pcm_bytes=$totalBytes"
+            )
+
+            capabilityRegistry.recordTtsResult(
+                success = true,
+                firstByteMs = firstByteLatencyMs,
+                error = ""
             )
 
             mainHandler.post {
