@@ -5274,6 +5274,12 @@ class MainActivity : AppCompatActivity() {
             }
 
         if (
+            ::contentContainer.isInitialized
+        ) {
+            contentContainer.postInvalidateOnAnimation()
+        }
+
+        if (
             textModeVisible
         ) {
 
@@ -6800,7 +6806,9 @@ class MainActivity : AppCompatActivity() {
             super.onAttachedToWindow()
             attached =
                 true
-            postInvalidateOnAnimation()
+            postInvalidateDelayed(
+                90L
+            )
         }
 
         override fun onDetachedFromWindow() {
@@ -7086,10 +7094,40 @@ class MainActivity : AppCompatActivity() {
                 )
             }
 
+            val animate =
+                when (
+                    state
+                ) {
+                    AyanaVoiceService.STATE_LISTENING,
+                    AyanaVoiceService.STATE_COMMAND,
+                    AyanaVoiceService.STATE_THINKING,
+                    AyanaVoiceService.STATE_EXECUTING,
+                    AyanaVoiceService.STATE_SPEAKING ->
+                        true
+
+                    else ->
+                        false
+                }
+
             if (
-                attached
+                attached &&
+                !textModeVisible &&
+                animate
             ) {
-                postInvalidateOnAnimation()
+                // UI v6.1: animation is intentionally frame-capped. v6.0 plus
+                // the animated overlay could compete with IME rendering and
+                // produce ~0.5 s typing stalls on the tablet. Text entry has
+                // priority; visual motion resumes immediately after text mode.
+                postInvalidateDelayed(
+                    if (
+                        state ==
+                        AyanaVoiceService.STATE_LISTENING
+                    ) {
+                        90L
+                    } else {
+                        55L
+                    }
+                )
             }
         }
     }
