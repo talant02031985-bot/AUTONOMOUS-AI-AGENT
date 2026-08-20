@@ -969,7 +969,7 @@ class AyanaMiniOrbController(
                 shellRadius + dpLocal(10.5f),
                 reverseRotation + 93f,
                 accent,
-                1.7f
+                1.35f
             )
             drawNode(
                 canvas,
@@ -1197,17 +1197,23 @@ class AyanaMiniOrbController(
         private const val TERMINAL_FLASH_MS =
             1200L
 
+        // v4.3 SMOOTH ROTATION:
+        // The old 36-45 ms cadence produced visibly stepped orbital motion
+        // on high-refresh tablets. Keep the vector-only renderer, but raise
+        // the active/idle animation cadence to ~38-42 FPS. This remains far
+        // below display refresh rate and avoids the old continuous 60/120 FPS
+        // load that could compete with text input.
         private const val FRAME_ACTIVE_MS =
-            36L
+            24L
 
         private const val FRAME_NORMAL_MS =
-            42L
+            26L
 
         private const val FRAME_LISTENING_MS =
-            45L
+            25L
 
         private const val FRAME_TERMINAL_MS =
-            70L
+            60L
 
         private val LOCK =
             Any()
