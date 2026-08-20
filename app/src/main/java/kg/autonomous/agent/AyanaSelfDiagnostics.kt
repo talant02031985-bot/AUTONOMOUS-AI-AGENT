@@ -5,7 +5,7 @@ import org.json.JSONArray
 import org.json.JSONObject
 
 /**
- * AYANA Self-Diagnostics v3.0 — HONEST HEALTH.
+ * AYANA Self-Diagnostics v3.1 — HONEST HEALTH.
  *
  * Health states are explicit:
  * PASS     = fresh/observable evidence is healthy;
@@ -63,7 +63,7 @@ class AyanaSelfDiagnostics(
                     false
                 )
             ) {
-                "RECORD_AUDIO разрешён"
+                "Доступ к микрофону разрешён"
             } else {
                 "Нет разрешения RECORD_AUDIO"
             }
@@ -121,7 +121,7 @@ class AyanaSelfDiagnostics(
             } else {
                 STATUS_FAIL
             },
-            "Accessibility AYANA",
+            "Управление экраном AYANA",
             if (accessibility) {
                 "Сервис подключён"
             } else {
@@ -147,6 +147,18 @@ class AyanaSelfDiagnostics(
                 -1
             )
 
+        val screenContentState =
+            runtime.optString(
+                "screen_primary_content_state",
+                "unknown"
+            )
+
+        val screenPrimaryText =
+            runtime.optInt(
+                "screen_primary_readable_text_count",
+                -1
+            )
+
         addCheck(
             checks,
             "screen_intelligence",
@@ -158,16 +170,20 @@ class AyanaSelfDiagnostics(
                     screenWindows <= 0 ->
                     STATUS_UNKNOWN
 
-                screenText <= 0 ->
+                screenContentState == "readable" ->
+                    STATUS_PASS
+
+                screenContentState == "partial" ||
+                    screenContentState == "structure_only" ->
                     STATUS_WARNING
 
                 else ->
-                    STATUS_PASS
+                    STATUS_UNKNOWN
             },
             "Экран и окна",
             when {
                 !accessibility ->
-                    "Нельзя проверить чтение экрана без Accessibility"
+                    "Нельзя проверить чтение экрана без сервиса специальных возможностей"
 
                 !screenSnapshotOk ->
                     "В момент проверки Android не отдал пригодный snapshot экрана"
@@ -175,11 +191,17 @@ class AyanaSelfDiagnostics(
                 screenWindows <= 0 ->
                     "Активные окна не обнаружены в момент проверки"
 
-                screenText <= 0 ->
-                    "Окна обнаружены ($screenWindows), но читаемый текст текущего контекста отсутствует"
+                screenContentState == "readable" ->
+                    "Окна: $screenWindows; основной экран читается; элементов текста: $screenPrimaryText; режим=${runtime.optString("screen_context_mode")}" 
+
+                screenContentState == "partial" ->
+                    "Основное окно определено, но содержимое читается только частично; элементов текста: $screenPrimaryText"
+
+                screenContentState == "structure_only" ->
+                    "Основное окно определено и структура доступна, но читаемый текст не подтверждён"
 
                 else ->
-                    "Окна: $screenWindows; читаемых элементов: $screenText; режим=${runtime.optString("screen_context_mode")}"
+                    "Основное окно определено, но его содержимое сейчас недоступно для надёжного чтения"
             }
         )
 
@@ -694,10 +716,10 @@ class AyanaSelfDiagnostics(
             )
 
         val base =
-            "Самодиагностика: PASS=${result.optInt("passed")}, " +
-                "WARNING=${result.optInt("warnings")}, " +
-                "UNKNOWN=${result.optInt("unknown")}, " +
-                "FAIL=${result.optInt("failed")}."
+            "Самодиагностика: исправно=${result.optInt("passed")}, " +
+                "внимание=${result.optInt("warnings")}, " +
+                "нет данных=${result.optInt("unknown")}, " +
+                "ошибки=${result.optInt("failed")}."
 
         val appPart =
             result
