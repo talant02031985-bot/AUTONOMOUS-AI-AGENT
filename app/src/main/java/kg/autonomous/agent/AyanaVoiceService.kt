@@ -24,6 +24,8 @@ import android.media.audiofx.AcousticEchoCanceler
 import android.media.audiofx.NoiseSuppressor
 import android.media.ToneGenerator
 import android.net.Uri
+import android.net.ConnectivityManager
+import android.net.NetworkCapabilities
 import android.os.BatteryManager
 import android.os.Build
 import android.os.Handler
@@ -52,7 +54,7 @@ import kotlin.math.abs
 
 class AyanaVoiceService : Service() {
 
-    // AYANA v11.1.5 WINDOW CONTEXT INTEGRITY.
+    // AYANA v11.3 PERCEPTION, TRUTH & AUTONOMY CORE.
     // Built on v11.1.2 App Settings Integrity. v11.1.5 adds context-safe
     // terminal verification for multi-window / popup / PiP screens while preserving
     // the existing direct app-settings routes. v11.1.2 adds
@@ -2718,6 +2720,18 @@ class AyanaVoiceService : Service() {
                 source = if (silent) "text" else "voice"
             )
 
+        capabilityRegistry
+            .recordCommandContext(
+                source =
+                    if (silent) {
+                        "text"
+                    } else {
+                        "voice"
+                    },
+                ttsExpected =
+                    !silent
+            )
+
         broadcastStatus(
             if (silent) {
                 "Текст: $originalCommand"
@@ -2865,6 +2879,59 @@ class AyanaVoiceService : Service() {
                 )
                 return
             }
+
+        // CAPABILITY TRUTH FAST-PATH v11.3
+        // Questions about photo/video upload must describe THIS Android client,
+        // not generic ChatGPT capabilities.
+        localCapabilityTruthReply(
+            routingNormalized
+        )
+            ?.let {
+                reply ->
+                respondAndResume(
+                    reply,
+                    silent,
+                    success = true
+                )
+                return
+            }
+
+        // GOOGLE IMAGES FAST-PATH v11.3
+        // Obvious "show/find pictures" commands are deterministic browser
+        // actions and must not spend 6-8 seconds on Agent Core + Planner.
+        extractLocalImageSearchQuery(
+            routingNormalized
+        )
+            ?.takeIf {
+                it.isNotBlank()
+            }
+            ?.let {
+                query ->
+                openGoogleImageSearch(
+                    query,
+                    silent
+                )
+                return
+            }
+
+        // NETWORK TEST FAST-PATH v11.3
+        // FAST.com starts measurement automatically. AYANA still does not claim
+        // an Mbps result because current screen content is not reliably readable.
+        if (
+            isInternetSpeedTestRequest(
+                routingNormalized
+            )
+        ) {
+            openInternetSpeedTest(
+                specificallyMobile =
+                    routingNormalized.contains(
+                        "мобиль"
+                    ),
+                silent =
+                    silent
+            )
+            return
+        }
 
         // BASIC LOCAL CALCULATOR v8.9
         // Simple two-number arithmetic must not spend a network round-trip.
@@ -6826,6 +6893,398 @@ class AyanaVoiceService : Service() {
 
             else ->
                 null
+        }
+    }
+
+    private fun localCapabilityTruthReply(
+        command: String
+    ): String? {
+
+        val normalized =
+            command
+                .lowercase(
+                    Locale.ROOT
+                )
+                .replace(
+                    'ё',
+                    'е'
+                )
+                .trim()
+
+        val hasPhoto =
+            normalized.contains(
+                "фото"
+            ) ||
+                normalized.contains(
+                    "фотограф"
+                ) ||
+                normalized.contains(
+                    "изображен"
+                )
+
+        val hasVideo =
+            normalized.contains(
+                "видео"
+            )
+
+        val mediaTopic =
+            hasPhoto ||
+                hasVideo
+
+        if (!mediaTopic) {
+            return null
+        }
+
+        val asksAyanaCapability =
+            normalized.contains(
+                "тебе"
+            ) ||
+                normalized.contains(
+                    "ты "
+                ) ||
+                normalized.startsWith(
+                    "ты "
+                ) ||
+                normalized.contains(
+                    "загруз"
+                ) ||
+                normalized.contains(
+                    "отправ"
+                ) ||
+                normalized.contains(
+                    "посмотр"
+                ) ||
+                normalized.contains(
+                    "проанализ"
+                )
+
+        if (!asksAyanaCapability) {
+            return null
+        }
+
+        val asksUpload =
+            normalized.contains(
+                "загруз"
+            ) ||
+                normalized.contains(
+                    "отправ"
+                ) ||
+                normalized.contains(
+                    "куда"
+                )
+
+        val asksAnalysis =
+            normalized.contains(
+                "посмотр"
+            ) ||
+                normalized.contains(
+                    "проанализ"
+                ) ||
+                normalized.contains(
+                    "анализ"
+                )
+
+        return when {
+            hasPhoto &&
+                hasVideo &&
+                asksUpload ->
+                "В текущей версии AYANA загрузка фотографий и видео в мой чат ещё не реализована. Вложения и Vision будут отдельным модулем."
+
+            hasPhoto &&
+                hasVideo &&
+                asksAnalysis ->
+                "Пока нет: текущая AYANA ещё не принимает и не анализирует фотографии или видео напрямую. Это запланировано в Vision-модуле."
+
+            hasVideo &&
+                asksUpload ->
+                "В текущей версии AYANA загрузка видео в мой чат ещё не реализована."
+
+            hasVideo &&
+                asksAnalysis ->
+                "В текущей версии AYANA прямой анализ видео ещё не реализован."
+
+            hasPhoto &&
+                asksUpload ->
+                "В текущей версии AYANA загрузка фотографий в мой чат ещё не реализована. Vision и вложения будут отдельным модулем."
+
+            hasPhoto &&
+                asksAnalysis ->
+                "Пока нет: текущая AYANA ещё не принимает и не анализирует фотографии напрямую. Это запланировано в Vision-модуле."
+
+            else ->
+                null
+        }
+    }
+
+    private fun extractLocalImageSearchQuery(
+        command: String
+    ): String? {
+
+        val normalized =
+            command
+                .lowercase(
+                    Locale.ROOT
+                )
+                .replace(
+                    'ё',
+                    'е'
+                )
+                .trim()
+
+        val front =
+            Regex(
+                """^(?:покажи|найди|поищи)(?:\s+мне)?\s+(?:картинки|изображения|фотографии|фото)\s+(.+)$"""
+            )
+                .matchEntire(
+                    normalized
+                )
+
+        if (
+            front !=
+            null
+        ) {
+            return front
+                .groupValues[1]
+                .trim()
+                .takeIf {
+                    it.isNotBlank()
+                }
+        }
+
+        val back =
+            Regex(
+                """^(.+?)\s+(?:покажи|найди|поищи)\s+(?:картинки|изображения|фотографии|фото)$"""
+            )
+                .matchEntire(
+                    normalized
+                )
+
+        if (
+            back !=
+            null
+        ) {
+            return back
+                .groupValues[1]
+                .trim()
+                .takeIf {
+                    it.isNotBlank()
+                }
+        }
+
+        return null
+    }
+
+    private fun openGoogleImageSearch(
+        query: String,
+        silent: Boolean
+    ) {
+
+        val uri =
+            Uri.parse(
+                "https://www.google.com/search?tbm=isch&q=" +
+                    Uri.encode(
+                        query
+                    )
+            )
+
+        try {
+            startActivity(
+                Intent(
+                    Intent.ACTION_VIEW,
+                    uri
+                ).apply {
+                    addFlags(
+                        Intent.FLAG_ACTIVITY_NEW_TASK
+                    )
+                }
+            )
+
+            finishLocalCommand(
+                "Открываю картинки: $query",
+                silent
+            )
+
+        } catch (
+            _: ActivityNotFoundException
+        ) {
+            respondAndResume(
+                "Не удалось открыть поиск картинок.",
+                silent,
+                success = false
+            )
+        }
+    }
+
+    private fun isInternetSpeedTestRequest(
+        command: String
+    ): Boolean {
+
+        val normalized =
+            command
+                .lowercase(
+                    Locale.ROOT
+                )
+                .replace(
+                    'ё',
+                    'е'
+                )
+
+        val speed =
+            normalized.contains(
+                "скорост"
+            ) ||
+                normalized.contains(
+                    "speedtest"
+                ) ||
+                normalized.contains(
+                    "спидтест"
+                )
+
+        val network =
+            normalized.contains(
+                "интернет"
+            ) ||
+                normalized.contains(
+                    "сети"
+                ) ||
+                normalized.contains(
+                    "мобиль"
+                )
+
+        val intent =
+            normalized.contains(
+                "тест"
+            ) ||
+                normalized.contains(
+                    "проверь"
+                ) ||
+                normalized.contains(
+                    "измер"
+                ) ||
+                normalized.contains(
+                    "протест"
+                ) ||
+                normalized.contains(
+                    "можешь"
+                )
+
+        return speed &&
+            network &&
+            intent
+    }
+
+    private fun activeNetworkTransport():
+        String {
+
+        return try {
+
+            val connectivity =
+                getSystemService(
+                    Context.CONNECTIVITY_SERVICE
+                ) as?
+                    ConnectivityManager
+                    ?: return "unknown"
+
+            val network =
+                connectivity
+                    .activeNetwork
+                    ?: return "none"
+
+            val capabilities =
+                connectivity
+                    .getNetworkCapabilities(
+                        network
+                    )
+                    ?: return "unknown"
+
+            when {
+                capabilities.hasTransport(
+                    NetworkCapabilities.TRANSPORT_WIFI
+                ) ->
+                    "wifi"
+
+                capabilities.hasTransport(
+                    NetworkCapabilities.TRANSPORT_CELLULAR
+                ) ->
+                    "cellular"
+
+                capabilities.hasTransport(
+                    NetworkCapabilities.TRANSPORT_ETHERNET
+                ) ->
+                    "ethernet"
+
+                else ->
+                    "other"
+            }
+
+        } catch (_: Exception) {
+            "unknown"
+        }
+    }
+
+    private fun openInternetSpeedTest(
+        specificallyMobile: Boolean,
+        silent: Boolean
+    ) {
+
+        val transport =
+            activeNetworkTransport()
+
+        if (
+            specificallyMobile &&
+            transport ==
+            "wifi"
+        ) {
+            respondAndResume(
+                "Сейчас активен Wi‑Fi. Чтобы проверить именно мобильный интернет, отключи Wi‑Fi и повтори команду.",
+                silent,
+                success = true
+            )
+            return
+        }
+
+        if (
+            transport ==
+            "none"
+        ) {
+            respondAndResume(
+                "Активного интернет-подключения сейчас не обнаружено.",
+                silent,
+                success = false
+            )
+            return
+        }
+
+        val uri =
+            Uri.parse(
+                "https://fast.com/"
+            )
+
+        try {
+            startActivity(
+                Intent(
+                    Intent.ACTION_VIEW,
+                    uri
+                ).apply {
+                    addFlags(
+                        Intent.FLAG_ACTIVITY_NEW_TASK
+                    )
+                }
+            )
+
+            finishLocalCommand(
+                "Открываю тест скорости. FAST.com начнёт измерение автоматически; результат Mbps я пока не подтверждаю сама.",
+                silent
+            )
+
+        } catch (
+            _: ActivityNotFoundException
+        ) {
+            respondAndResume(
+                "Не удалось открыть тест скорости.",
+                silent,
+                success = false
+            )
         }
     }
 
@@ -12118,8 +12577,16 @@ class AyanaVoiceService : Service() {
 
                 "get_screen_state" -> {
 
-                    screenIntelligence
-                        .getScreenState()
+                    val screen =
+                        screenIntelligence
+                            .getScreenState()
+
+                    capabilityRegistry
+                        .recordScreenObservation(
+                            screen
+                        )
+
+                    screen
                 }
 
                 "click_screen_element" -> {
@@ -12426,6 +12893,18 @@ class AyanaVoiceService : Service() {
                             )
                         }
                 )
+
+        result
+            .optJSONObject(
+                "screen"
+            )
+            ?.let {
+                screen ->
+                capabilityRegistry
+                    .recordScreenObservation(
+                        screen
+                    )
+            }
 
         commandHistoryStore.addEvent(
             activeCommandHistoryId,
