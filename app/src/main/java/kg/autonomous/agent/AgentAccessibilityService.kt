@@ -19,7 +19,7 @@ import kotlin.math.max
 class AgentAccessibilityService :
     AccessibilityService() {
 
-    // AYANA Accessibility v4.0 — WINDOW CONTENT CORE.
+    // AYANA Accessibility v4.1 — ACTIVE ROOT CONTENT + SCREEN TRUTH.
     // Every visible Android window is an independent context. Android 13+ roots
     // are requested with descendant prefetch before falling back to legacy roots.
     // Fresh AccessibilityEvent evidence is merged only into the matching window.
@@ -997,6 +997,41 @@ class AgentAccessibilityService :
                 verificationVisible.addAll(contextVerificationTexts)
             }
 
+            val contextTitle =
+                safeText(
+                    context.title
+                )
+
+            val readableTextCount =
+                accumulator.texts
+                    .count { text ->
+                        val clean =
+                            safeText(
+                                text
+                            )
+
+                        clean.isNotBlank() &&
+                            (
+                                contextTitle.isBlank() ||
+                                    clean != contextTitle
+                                )
+                    }
+
+            val contextContentState =
+                when {
+                    readableTextCount >= 2 ->
+                        "readable"
+
+                    readableTextCount == 1 ->
+                        "partial"
+
+                    accumulator.nodes.length() > 1 ->
+                        "structure_only"
+
+                    else ->
+                        "unavailable"
+                }
+
             windowsJson.put(
                 JSONObject()
                     .put("context_id", context.contextId)
@@ -1016,6 +1051,8 @@ class AgentAccessibilityService :
                     .put("occlusion_ratio", contextOcclusionRatio(context, allContexts))
                     .put("bounds", rectToJson(context.bounds))
                     .put("evidence_age_ms", accumulator.evidenceAgeMs)
+                    .put("readable_text_count", readableTextCount)
+                    .put("content_state", contextContentState)
                     .put("verification_text", contextVerificationText)
                     .put("visible_text", visibleArray)
             )
@@ -1043,6 +1080,55 @@ class AgentAccessibilityService :
                 .joinToString(" | ")
                 .take(VERIFICATION_TEXT_MAX_CHARS)
 
+        val primaryAccumulator =
+            primary
+                ?.let { primaryContext ->
+                    accumulators[
+                        primaryContext.contextId
+                    ]
+                }
+
+        val primaryTitle =
+            safeText(
+                primary?.title
+                    .orEmpty()
+            )
+
+        val primaryReadableTextCount =
+            primaryAccumulator
+                ?.texts
+                ?.count { text ->
+                    val clean =
+                        safeText(
+                            text
+                        )
+
+                    clean.isNotBlank() &&
+                        (
+                            primaryTitle.isBlank() ||
+                                clean != primaryTitle
+                            )
+                }
+                ?: 0
+
+        val primaryContentState =
+            when {
+                primary == null ->
+                    "unknown"
+
+                primaryReadableTextCount >= 2 ->
+                    "readable"
+
+                primaryReadableTextCount == 1 ->
+                    "partial"
+
+                (primaryAccumulator?.nodes?.length() ?: 0) > 1 ->
+                    "structure_only"
+
+                else ->
+                    "unavailable"
+            }
+
         return JSONObject()
             .put("success", true)
             .put("package", primary?.packageName.orEmpty())
@@ -1050,7 +1136,10 @@ class AgentAccessibilityService :
             .put("primary_context_id", primary?.contextId.orEmpty())
             .put("primary_window_title", primary?.title.orEmpty())
             .put("interaction_package", primary?.packageName.orEmpty())
-            .put("window_context_mode", "v2_prefetch")
+            .put("primary_content_state", primaryContentState)
+            .put("primary_content_available", primaryContentState == "readable" || primaryContentState == "partial")
+            .put("primary_readable_text_count", primaryReadableTextCount)
+            .put("window_context_mode", "v3_active_root_upgrade")
             .put("window_count", allContexts.size)
             .put("raw_window_count", safeWindowCount())
             .put("evidence_context_count", evidenceContextCount)
@@ -1719,8 +1808,8 @@ class AgentAccessibilityService :
                     ?.toString()
                     .orEmpty()
 
-            val alreadyPresent =
-                contexts.any { context ->
+            val matchingIndex =
+                contexts.indexOfFirst { context ->
                     (
                         activeWindowId >= 0 &&
                         context.windowId == activeWindowId
@@ -1728,7 +1817,62 @@ class AgentAccessibilityService :
                         context.root === activeRoot
                 }
 
-            if (!alreadyPresent) {
+            // v4.0 treated "same window id already present" as sufficient and
+            // discarded rootInActiveWindow. On Samsung/Chrome the root obtained
+            // from AccessibilityWindowInfo may be only a package-bearing shell,
+            // while rootInActiveWindow for the SAME window can contain the real
+            // descendant tree. Upgrade the existing context when the active root
+            // is measurably richer instead of throwing it away.
+            if (matchingIndex >= 0) {
+                val existing =
+                    contexts[matchingIndex]
+
+                val existingScore =
+                    rootContentScore(
+                        existing.root
+                    )
+
+                val activeScore =
+                    rootContentScore(
+                        activeRoot
+                    )
+
+                if (activeScore > existingScore) {
+                    val upgradedPackage =
+                        activePackage
+                            .ifBlank {
+                                existing.packageName
+                            }
+
+                    contexts[matchingIndex] =
+                        existing.copy(
+                            packageName = upgradedPackage,
+                            className = activeRoot.className
+                                ?.toString()
+                                .orEmpty()
+                                .ifBlank {
+                                    existing.className
+                                },
+                            active = true,
+                            focused = true,
+                            root = activeRoot,
+                            source = "active_root_upgrade",
+                            rank = maxOf(
+                                existing.rank,
+                                windowInteractionRank(
+                                    windowId = activeWindowId,
+                                    packageName = upgradedPackage,
+                                    type = existing.type,
+                                    layer = existing.layer,
+                                    active = true,
+                                    focused = true,
+                                    pictureInPicture = existing.pictureInPicture
+                                )
+                            )
+                        )
+                }
+
+            } else {
                 val bounds = Rect()
                 try { activeRoot.getBoundsInScreen(bounds) } catch (_: Exception) { }
 
@@ -2999,6 +3143,114 @@ class AgentAccessibilityService :
      * identity while legacy root traversal returned an empty content tree.
      * Try safe descendant prefetch strategies, then fall back to getRoot().
      */
+    /**
+     * Cheap root richness score used only to choose between two roots that
+     * describe the same Android window. It never combines evidence from
+     * different windows and therefore preserves strict verification isolation.
+     */
+    private fun rootContentScore(
+        root: AccessibilityNodeInfo?
+    ): Int {
+
+        if (root == null) {
+            return 0
+        }
+
+        var score = 1
+
+        val childCount =
+            try {
+                root.childCount
+            } catch (_: Exception) {
+                0
+            }
+
+        score +=
+            childCount
+                .coerceAtMost(12) *
+                4
+
+        val text =
+            try {
+                safeText(
+                    root.text
+                        ?.toString()
+                        .orEmpty()
+                )
+            } catch (_: Exception) {
+                ""
+            }
+
+        val description =
+            try {
+                safeText(
+                    root.contentDescription
+                        ?.toString()
+                        .orEmpty()
+                )
+            } catch (_: Exception) {
+                ""
+            }
+
+        if (text.isNotBlank()) {
+            score += 8
+        }
+
+        if (description.isNotBlank()) {
+            score += 6
+        }
+
+        // Probe only the first level. Full traversal happens later in the
+        // snapshot builder and is intentionally not duplicated here.
+        val probeCount =
+            childCount
+                .coerceAtMost(6)
+
+        for (index in 0 until probeCount) {
+            val child =
+                try {
+                    root.getChild(index)
+                } catch (_: Exception) {
+                    null
+                }
+                    ?: continue
+
+            score += 2
+
+            val childText =
+                try {
+                    safeText(
+                        child.text
+                            ?.toString()
+                            .orEmpty()
+                    )
+                } catch (_: Exception) {
+                    ""
+                }
+
+            val childDescription =
+                try {
+                    safeText(
+                        child.contentDescription
+                            ?.toString()
+                            .orEmpty()
+                    )
+                } catch (_: Exception) {
+                    ""
+                }
+
+            if (childText.isNotBlank()) {
+                score += 5
+            }
+
+            if (childDescription.isNotBlank()) {
+                score += 4
+            }
+        }
+
+        return score
+    }
+
     private fun prefetchedWindowRoot(
         window: AccessibilityWindowInfo
     ): AccessibilityNodeInfo? {
