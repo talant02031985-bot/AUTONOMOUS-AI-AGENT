@@ -6787,6 +6787,7 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
+    // AYANA UI v6.2 — thin, continuously state-aware visualizer.
     private inner class AyanaPulseView(
         context: Context
     ) : View(context) {
@@ -6846,48 +6847,20 @@ class MainActivity : AppCompatActivity() {
             val count =
                 9
 
-            val gap =
+            // v6.2: thin oscilloscope-style lines. v6.1 allowed every
+            // segment to grow up to 14dp wide, which looked heavy rather than
+            // like a live signal. Keep a fixed lightweight width instead.
+            val barWidth =
                 dp(
-                    10
+                    4
                 )
                     .toFloat()
 
-            val available =
-                (
-                    w -
-                        dp(
-                            34
-                        ) *
-                            2f -
-                        gap *
-                            (
-                                count -
-                                    1
-                                )
-                    )
-                    .coerceAtLeast(
-                        count *
-                            dp(
-                                6
-                            )
-                                .toFloat()
-                    )
-
-            val barWidth =
-                (
-                    available /
-                        count
-                    )
-                    .coerceIn(
-                        dp(
-                            6
-                        )
-                            .toFloat(),
-                        dp(
-                            14
-                        )
-                            .toFloat()
-                    )
+            val gap =
+                dp(
+                    12
+                )
+                    .toFloat()
 
             val totalWidth =
                 barWidth *
@@ -7111,22 +7084,43 @@ class MainActivity : AppCompatActivity() {
 
             if (
                 attached &&
-                !textModeVisible &&
-                animate
+                isShown
             ) {
-                // UI v6.1: animation is intentionally frame-capped. v6.0 plus
-                // the animated overlay could compete with IME rendering and
-                // produce ~0.5 s typing stalls on the tablet. Text entry has
-                // priority; visual motion resumes immediately after text mode.
-                postInvalidateDelayed(
-                    if (
-                        state ==
-                        AyanaVoiceService.STATE_LISTENING
-                    ) {
-                        90L
-                    } else {
-                        55L
+                // v6.2: never freeze the visualizer just because text mode is
+                // open. The old v6.1 gate (!textModeVisible) made the waveform
+                // appear broken and also prevented state changes from being
+                // painted while the keyboard panel was visible.
+                //
+                // Keep it deliberately frame-capped instead of using a 60 FPS
+                // invalidate loop. Accessibility hot-path work is handled
+                // separately; this view now stays responsive with a tiny draw
+                // cost (9 slim rectangles only).
+                val delayMs =
+                    when {
+                        textModeVisible ->
+                            if (animate) 100L else 180L
+
+                        state == AyanaVoiceService.STATE_LISTENING ->
+                            110L
+
+                        state == AyanaVoiceService.STATE_COMMAND ->
+                            60L
+
+                        state == AyanaVoiceService.STATE_THINKING ->
+                            75L
+
+                        state == AyanaVoiceService.STATE_EXECUTING ->
+                            65L
+
+                        state == AyanaVoiceService.STATE_SPEAKING ->
+                            55L
+
+                        else ->
+                            180L
                     }
+
+                postInvalidateDelayed(
+                    delayMs
                 )
             }
         }
