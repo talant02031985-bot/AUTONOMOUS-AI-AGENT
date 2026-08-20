@@ -365,7 +365,7 @@ class AyanaVoiceService : Service() {
     private val readyFile by lazy {
         File(
             filesDir,
-            "ayana_ready_da_marin.mp3"
+            "ayana_ready_da_marin_ru_signature_v1.mp3"
         )
     }
 
@@ -15682,7 +15682,11 @@ class AyanaVoiceService : Service() {
         commandHistoryStore.addEvent(
             activeCommandHistoryId,
             state = "tts_request",
-            message = "Marin: потоковый запрос голоса отправлен"
+            message = "Marin: потоковый запрос голоса отправлен",
+            details =
+                "voice=$TTS_EXPECTED_VOICE; " +
+                    "profile=$TTS_VOICE_PROFILE; " +
+                    "speed=$TTS_EXPECTED_SPEED"
         )
 
         thread(
@@ -15767,6 +15771,11 @@ class AyanaVoiceService : Service() {
                         "format",
                         "pcm"
                     )
+
+                    put(
+                        "voice_profile",
+                        TTS_VOICE_PROFILE
+                    )
                 }
 
             connection.outputStream
@@ -15805,6 +15814,10 @@ class AyanaVoiceService : Service() {
                         .trim()
                 )
             }
+
+            verifyTtsVoiceContract(
+                connection
+            )
 
             val minBuffer =
                 AudioTrack.getMinBufferSize(
@@ -16341,6 +16354,53 @@ class AyanaVoiceService : Service() {
         }
     }
 
+    private fun verifyTtsVoiceContract(
+        connection: HttpsURLConnection
+    ) {
+        val voice =
+            connection
+                .getHeaderField(
+                    "X-Ayana-Voice"
+                )
+                ?.trim()
+                ?.lowercase(
+                    Locale.ROOT
+                )
+                .orEmpty()
+
+        val profile =
+            connection
+                .getHeaderField(
+                    "X-Ayana-Voice-Profile"
+                )
+                ?.trim()
+                .orEmpty()
+
+        val speed =
+            connection
+                .getHeaderField(
+                    "X-Ayana-Voice-Speed"
+                )
+                ?.trim()
+                .orEmpty()
+
+        if (
+            voice !=
+            TTS_EXPECTED_VOICE ||
+            profile !=
+            TTS_VOICE_PROFILE ||
+            speed !=
+            TTS_EXPECTED_SPEED
+        ) {
+            throw IllegalStateException(
+                "TTS voice contract mismatch: " +
+                    "voice=${voice.ifBlank { "missing" }}; " +
+                    "profile=${profile.ifBlank { "missing" }}; " +
+                    "speed=${speed.ifBlank { "missing" }}"
+            )
+        }
+    }
+
     private fun downloadTtsToFile(
         text: String,
         target: File
@@ -16385,10 +16445,17 @@ class AyanaVoiceService : Service() {
                         text
                     )
 
-                    // Wake acknowledgement is intentionally cached as MP3.
+                    // Wake acknowledgement is intentionally cached as MP3,
+                    // but it uses the exact same locked Marin voice profile and
+                    // speed as every other AYANA spoken response.
                     put(
                         "format",
                         "mp3"
+                    )
+
+                    put(
+                        "voice_profile",
+                        TTS_VOICE_PROFILE
                     )
                 }
 
@@ -16417,6 +16484,10 @@ class AyanaVoiceService : Service() {
                     "TTS HTTP $responseCode"
                 )
             }
+
+            verifyTtsVoiceContract(
+                connection
+            )
 
             connection.inputStream
                 .use { input ->
@@ -16455,6 +16526,21 @@ class AyanaVoiceService : Service() {
 
         try {
 
+            // The cached wake acknowledgement must sound through the same speech
+            // playback profile as streamed Marin. Different Android audio usage or
+            // volume can make the very same generated voice sound like another
+            // speaker, so keep those parameters aligned as well.
+            player.setAudioAttributes(
+                AudioAttributes.Builder()
+                    .setUsage(
+                        AudioAttributes.USAGE_VOICE_COMMUNICATION
+                    )
+                    .setContentType(
+                        AudioAttributes.CONTENT_TYPE_SPEECH
+                    )
+                    .build()
+            )
+
             player.setDataSource(
                 file.absolutePath
             )
@@ -16464,16 +16550,10 @@ class AyanaVoiceService : Service() {
 
                 try {
 
-                    if (
-                        currentStatusState ==
-                        STATE_SPEAKING
-                    ) {
-
-                        prepared.setVolume(
-                            BARGE_IN_TTS_VOLUME,
-                            BARGE_IN_TTS_VOLUME
-                        )
-                    }
+                    prepared.setVolume(
+                        BARGE_IN_TTS_VOLUME,
+                        BARGE_IN_TTS_VOLUME
+                    )
 
                     prepared.start()
 
@@ -17538,6 +17618,15 @@ class AyanaVoiceService : Service() {
 
         private const val CANCEL_DIAGNOSTIC_INTERVAL_MS =
             1200L
+
+        private const val TTS_EXPECTED_VOICE =
+            "marin"
+
+        private const val TTS_VOICE_PROFILE =
+            "marin_ru_signature_v1"
+
+        private const val TTS_EXPECTED_SPEED =
+            "1.1"
 
         private const val TTS_PCM_SAMPLE_RATE_HZ =
             24000
