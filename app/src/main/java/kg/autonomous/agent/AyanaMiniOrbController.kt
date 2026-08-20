@@ -22,7 +22,7 @@ import kotlin.math.abs
 import kotlin.math.sin
 
 /**
- * AYANA Floating Orb v4.2 — GLASS CORE / TRANSPARENT ORBITS.
+ * AYANA Floating Orb v4.4 — CONTINUOUS PHASE / GLASS CORE.
  *
  * Rules:
  * 1) exactly one overlay View per app process;
@@ -33,6 +33,7 @@ import kotlin.math.sin
  * 6) the overlay background is fully transparent; the symbol itself is a light translucent glass core, never a dark disk.
  * 7) idle motion is visibly smoother/faster while remaining frame-capped to protect text input and IME latency.
  * 8) shaders are rebuilt only on size/state changes; no bitmap decoding or per-frame shader allocation.
+ * 9) every orbital layer owns a continuous 360-degree phase; multiplied child angles never inherit a parent modulo reset.
  *
  * The service owns WHEN the Orb exists. This controller only owns HOW it is
  * rendered. It never starts/stops AyanaVoiceService itself.
@@ -687,6 +688,14 @@ class AyanaMiniOrbController(
             state: String
         ) {
 
+            // Frequent service refreshes may repeat the same state. Rebuilding
+            // two radial shaders on every identical refresh can steal a frame
+            // from the overlay, so only rebuild when the state actually changes.
+            if (state == ayanaState) {
+                invalidate()
+                return
+            }
+
             ayanaState = state
             accentColor = strokeFor(state)
 
@@ -794,16 +803,22 @@ class AyanaMiniOrbController(
                     else -> 3600f
                 }
 
+            // v4.4: each moving layer gets its own continuous phase.
+            // v4.3 first wrapped a base angle 0..360 and then multiplied it
+            // by 1.18 / 0.76. At every base wrap those child angles jumped
+            // ~65 / ~86 degrees, which produced the visible jerk every
+            // 1.9-3.0 seconds depending on state.
             val rotation =
-                ((now % idleCycleMs.toLong()) / idleCycleMs) * 360f
+                continuousAngle(now, idleCycleMs, 1.0f, false)
 
             val reverseRotation =
-                360f -
-                    (
-                        ((now % (idleCycleMs * 1.28f).toLong()) /
-                            (idleCycleMs * 1.28f)) *
-                            360f
-                        )
+                continuousAngle(now, idleCycleMs * 1.28f, 1.0f, true)
+
+            val innerRotation =
+                continuousAngle(now, idleCycleMs, 1.18f, false)
+
+            val slowRotation =
+                continuousAngle(now, idleCycleMs, 0.76f, false)
 
             val breatheAmount =
                 when (ayanaState) {
@@ -906,14 +921,14 @@ class AyanaMiniOrbController(
             ringPaint.strokeWidth = dpLocal(1.5f)
             canvas.drawArc(
                 arcBounds,
-                rotation * 1.18f + 18f,
+                innerRotation + 18f,
                 42f,
                 false,
                 ringPaint
             )
             canvas.drawArc(
                 arcBounds,
-                rotation * 1.18f + 194f,
+                innerRotation + 194f,
                 27f,
                 false,
                 ringPaint
@@ -953,7 +968,7 @@ class AyanaMiniOrbController(
                 cx = cx,
                 cy = cy,
                 radius = shellRadius + dpLocal(15.0f),
-                start = rotation * 0.76f + 228f,
+                start = slowRotation + 228f,
                 sweepA = 49f,
                 sweepB = 25f,
                 offsetB = 151f,
@@ -976,7 +991,7 @@ class AyanaMiniOrbController(
                 cx,
                 cy,
                 shellRadius + dpLocal(15.0f),
-                rotation * 0.76f + 254f,
+                slowRotation + 254f,
                 pale,
                 1.15f
             )
@@ -1021,6 +1036,30 @@ class AyanaMiniOrbController(
                 postInvalidateDelayed(
                     frameDelayMs(ayanaState)
                 )
+            }
+        }
+
+        private fun continuousAngle(
+            nowMs: Long,
+            cycleMs: Float,
+            speedMultiplier: Float,
+            reverse: Boolean
+        ): Float {
+            val turns =
+                nowMs.toDouble() *
+                    speedMultiplier.toDouble() /
+                    cycleMs.toDouble()
+
+            val fractional =
+                turns - kotlin.math.floor(turns)
+
+            val degrees =
+                (fractional * 360.0).toFloat()
+
+            return if (reverse) {
+                (360f - degrees) % 360f
+            } else {
+                degrees
             }
         }
 
@@ -1197,7 +1236,7 @@ class AyanaMiniOrbController(
         private const val TERMINAL_FLASH_MS =
             1200L
 
-        // v4.3 SMOOTH ROTATION:
+        // v4.4 CONTINUOUS PHASE:
         // The old 36-45 ms cadence produced visibly stepped orbital motion
         // on high-refresh tablets. Keep the vector-only renderer, but raise
         // the active/idle animation cadence to ~38-42 FPS. This remains far
