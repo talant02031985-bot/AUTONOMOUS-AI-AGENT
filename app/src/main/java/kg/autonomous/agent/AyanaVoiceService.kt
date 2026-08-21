@@ -33,6 +33,7 @@ import android.os.IBinder
 import android.os.Looper
 import android.os.SystemClock
 import android.provider.Settings
+import android.util.Base64
 import com.k2fsa.sherpa.onnx.FeatureConfig
 import com.k2fsa.sherpa.onnx.OnlineModelConfig
 import com.k2fsa.sherpa.onnx.OnlineRecognizer
@@ -54,7 +55,9 @@ import kotlin.math.abs
 
 class AyanaVoiceService : Service() {
 
-    // AYANA v11.5 EXECUTION ROUTER HARDENING.
+    // AYANA v11.6 MULTIMODAL INTAKE.
+    // v11.5 execution-router integrity is preserved unchanged; v11.6 adds a bounded
+    // text-mode attachment transport for images, supported documents and sampled video frames.
     // App open/minimize/close now share one deterministic local lifecycle router,
     // short follow-ups retain local app context, and terminal verification is fresh-state based.
     // Voice capture / Marin PCM / STOP acoustics remain inherited from v11.4.
@@ -598,6 +601,44 @@ class AyanaVoiceService : Service() {
                         state =
                             currentStatusState
                     )
+                }
+            }
+
+            ACTION_MULTIMODAL_COMMAND -> {
+
+                val command =
+                    intent.getStringExtra(
+                        EXTRA_TEXT_COMMAND
+                    )
+                        ?.trim()
+                        .orEmpty()
+
+                val manifest =
+                    intent.getStringExtra(
+                        EXTRA_MULTIMODAL_MANIFEST
+                    )
+                        ?.trim()
+                        .orEmpty()
+
+                if (
+                    command.isNotBlank() &&
+                    manifest.isNotBlank()
+                ) {
+                    isRunning = true
+                    ayanaPreferences.miniOrbEnabled = true
+                    miniOrbController.refresh(
+                        enabled = true,
+                        state = currentStatusState
+                    )
+                    stopSherpaListening()
+                    mainHandler.post {
+                        if (!shuttingDown) {
+                            executeMultimodalCommand(
+                                command,
+                                manifest
+                            )
+                        }
+                    }
                 }
             }
 
@@ -8022,9 +8063,18 @@ class AyanaVoiceService : Service() {
                 "видео"
             )
 
+        val hasDocument =
+            normalized.contains("файл") ||
+                normalized.contains("документ") ||
+                normalized.contains("pdf") ||
+                normalized.contains("ворд") ||
+                normalized.contains("excel") ||
+                normalized.contains("эксель")
+
         val mediaTopic =
             hasPhoto ||
-                hasVideo
+                hasVideo ||
+                hasDocument
 
         if (!mediaTopic) {
             return null
@@ -8080,31 +8130,39 @@ class AyanaVoiceService : Service() {
                 )
 
         return when {
+            hasDocument &&
+                asksUpload ->
+                "Да. В текстовом режиме AYANA можно прикрепить PDF, текстовые и кодовые файлы, Word/ODT/RTF, PowerPoint и таблицы Excel/CSV. Файл проходит проверку типа и размера перед отправкой на анализ."
+
+            hasDocument &&
+                asksAnalysis ->
+                "Да. Я могу анализировать поддерживаемые документы и файлы, которые вы прикрепите в текстовом режиме AYANA. Для PDF учитываются текст и страницы, для обычных документов — извлечённый текст, для таблиц — файловая обработка модели."
+
             hasPhoto &&
                 hasVideo &&
                 asksUpload ->
-                "В текущей версии AYANA загрузка фотографий и видео в мой чат ещё не реализована. Вложения и Vision будут отдельным модулем."
+                "Да. В текстовом режиме AYANA можно прикрепить фото, поддерживаемый файл или видео. Фото анализируется напрямую, документы — как файловый ввод, а видео — по ограниченной выборке кадров без анализа звуковой дорожки."
 
             hasPhoto &&
                 hasVideo &&
                 asksAnalysis ->
-                "Пока нет: текущая AYANA ещё не принимает и не анализирует фотографии или видео напрямую. Это запланировано в Vision-модуле."
+                "Да. Фото я анализирую напрямую. Видео в текущем мультимодальном режиме анализирую визуально по выборке кадров; звуковую дорожку видео пока не анализирую."
 
             hasVideo &&
                 asksUpload ->
-                "В текущей версии AYANA загрузка видео в мой чат ещё не реализована."
+                "Да. Видео можно прикрепить в текстовом режиме AYANA. Сейчас я выполняю визуальный анализ по выборке кадров; аудио из видео пока не анализируется."
 
             hasVideo &&
                 asksAnalysis ->
-                "В текущей версии AYANA прямой анализ видео ещё не реализован."
+                "Видео анализируется визуально по ограниченной выборке кадров. Это не покадровый просмотр всего ролика, и звуковую дорожку я пока не анализирую."
 
             hasPhoto &&
                 asksUpload ->
-                "В текущей версии AYANA загрузка фотографий в мой чат ещё не реализована. Vision и вложения будут отдельным модулем."
+                "Да. Фото и изображения можно прикрепить в текстовом режиме AYANA и отправить мне на визуальный анализ."
 
             hasPhoto &&
                 asksAnalysis ->
-                "Пока нет: текущая AYANA ещё не принимает и не анализирует фотографии напрямую. Это запланировано в Vision-модуле."
+                "Да. В текущей версии AYANA я могу принять прикреплённое фото или изображение и проанализировать его содержимое."
 
             else ->
                 null
@@ -12859,6 +12917,258 @@ class AyanaVoiceService : Service() {
                     "Готово."
                 )
         }
+    }
+
+    private fun executeMultimodalCommand(
+        prompt: String,
+        manifestText: String
+    ) {
+        stopSherpaListening()
+        listenMode = ListenMode.BUSY
+        cancelRequested = false
+        activeCommandToken = ++commandGeneration
+        val commandToken = activeCommandToken
+
+        activeCommandHistoryId =
+            commandHistoryStore.begin(
+                command = "$prompt [мультимодальное вложение]",
+                source = "text"
+            )
+
+        val manifest =
+            try {
+                JSONObject(manifestText)
+            } catch (_: Exception) {
+                respondAndResume(
+                    "Вложение повреждено или уже недоступно.",
+                    silent = true,
+                    success = false,
+                    technical = "invalid_multimodal_manifest"
+                )
+                return
+            }
+
+        val displayName =
+            manifest.optString("display_name", "вложение")
+                .trim()
+                .take(160)
+                .ifBlank { "вложение" }
+
+        capabilityRegistry.recordCommandContext(
+            source = "text",
+            ttsExpected = false
+        )
+
+        commandHistoryStore.addEvent(
+            activeCommandHistoryId,
+            state = "multimodal_attachment",
+            message = "Вложение подготовлено для мультимодального анализа",
+            details = "kind=${manifest.optString("kind")}; name=${displayName.take(120)}; mime=${manifest.optString("mime_type").take(80)}"
+        )
+
+        broadcastStatus(
+            "Анализирую $displayName…",
+            STATE_THINKING
+        )
+
+        val worker =
+            thread(
+                start = false,
+                name = "AyanaMultimodalCore"
+            ) {
+                try {
+                    val result =
+                        callMultimodalCore(
+                            prompt = prompt,
+                            manifest = manifest
+                        )
+
+                    if (
+                        cancelRequested ||
+                        shuttingDown ||
+                        commandToken != activeCommandToken
+                    ) {
+                        return@thread
+                    }
+
+                    val success = result.optBoolean("success", false)
+                    val reply = result.optString(
+                        "reply",
+                        if (success) {
+                            "Анализ завершён."
+                        } else {
+                            "Не удалось проанализировать вложение."
+                        }
+                    ).trim()
+
+                    mainHandler.post {
+                        if (
+                            !cancelRequested &&
+                            !shuttingDown &&
+                            commandToken == activeCommandToken
+                        ) {
+                            respondAndResume(
+                                reply.ifBlank {
+                                    if (success) "Анализ завершён." else "Не удалось проанализировать вложение."
+                                },
+                                silent = true,
+                                success = success,
+                                technical = result.optString("technical").take(500)
+                            )
+                        }
+                    }
+                } catch (error: Exception) {
+                    if (
+                        !cancelRequested &&
+                        !shuttingDown &&
+                        commandToken == activeCommandToken
+                    ) {
+                        mainHandler.post {
+                            respondAndResume(
+                                "Не удалось проанализировать вложение: ${error.message ?: "ошибка соединения"}.",
+                                silent = true,
+                                success = false,
+                                technical = error.javaClass.simpleName
+                            )
+                        }
+                    }
+                } finally {
+                    try {
+                        AyanaMultimodalAttachmentManager(applicationContext)
+                            .cleanupPrepared(manifest)
+                    } catch (_: Exception) {
+                    }
+
+                    if (Thread.currentThread() === currentAgentThread) {
+                        currentAgentThread = null
+                    }
+                }
+            }
+
+        currentAgentThread = worker
+        worker.start()
+    }
+
+    private fun callMultimodalCore(
+        prompt: String,
+        manifest: JSONObject
+    ): JSONObject {
+        var connection: HttpsURLConnection? = null
+
+        try {
+            val kind = manifest.optString("kind")
+            val requestJson = JSONObject()
+                .put("prompt", prompt.take(MAX_MULTIMODAL_PROMPT_CHARS))
+                .put("kind", kind)
+                .put("display_name", manifest.optString("display_name").take(160))
+                .put("mime_type", manifest.optString("mime_type").take(120))
+
+            when (kind) {
+                AyanaMultimodalAttachmentManager.KIND_IMAGE,
+                AyanaMultimodalAttachmentManager.KIND_DOCUMENT -> {
+                    val file = validatedMultimodalCacheFile(
+                        manifest.optString("path")
+                    )
+                    val maxBytes = MAX_MULTIMODAL_DIRECT_BYTES
+                    if (file.length() <= 0L || file.length() > maxBytes) {
+                        throw IllegalArgumentException("Размер подготовленного вложения недопустим")
+                    }
+                    requestJson.put(
+                        "data_base64",
+                        Base64.encodeToString(file.readBytes(), Base64.NO_WRAP)
+                    )
+                }
+
+                AyanaMultimodalAttachmentManager.KIND_VIDEO_VISUAL -> {
+                    val sourceFrames = manifest.optJSONArray("frames") ?: JSONArray()
+                    val frames = JSONArray()
+                    var totalBytes = 0L
+                    val frameCount = minOf(sourceFrames.length(), MAX_MULTIMODAL_VIDEO_FRAMES)
+                    for (i in 0 until frameCount) {
+                        val item = sourceFrames.optJSONObject(i) ?: continue
+                        val file = validatedMultimodalCacheFile(item.optString("path"))
+                        if (file.length() <= 0L) continue
+                        totalBytes += file.length()
+                        if (totalBytes > MAX_MULTIMODAL_VIDEO_FRAME_BYTES) {
+                            throw IllegalArgumentException("Слишком большой набор видеокадров")
+                        }
+                        frames.put(
+                            JSONObject()
+                                .put("timestamp_ms", item.optLong("timestamp_ms", 0L))
+                                .put(
+                                    "data_base64",
+                                    Base64.encodeToString(file.readBytes(), Base64.NO_WRAP)
+                                )
+                        )
+                    }
+                    if (frames.length() < 2) {
+                        throw IllegalArgumentException("Недостаточно видеокадров для анализа")
+                    }
+                    requestJson.put("frames", frames)
+                    requestJson.put("duration_ms", manifest.optLong("duration_ms", 0L))
+                    requestJson.put("audio_analysis", false)
+                }
+
+                else ->
+                    throw IllegalArgumentException("Неподдерживаемый тип мультимодального вложения")
+            }
+
+            connection =
+                URL("$WORKER_URL/multimodal")
+                    .openConnection() as HttpsURLConnection
+
+            currentAgentConnection = connection
+            connection.requestMethod = "POST"
+            connection.setRequestProperty("Content-Type", "application/json")
+            connection.connectTimeout = MULTIMODAL_CONNECT_TIMEOUT_MS
+            connection.readTimeout = MULTIMODAL_READ_TIMEOUT_MS
+            connection.doOutput = true
+
+            connection.outputStream.use { output ->
+                output.write(requestJson.toString().toByteArray(Charsets.UTF_8))
+            }
+
+            val code = connection.responseCode
+            val stream = if (code in 200..299) connection.inputStream else connection.errorStream
+            val raw = stream?.bufferedReader(Charsets.UTF_8)?.use { it.readText() }.orEmpty()
+            val response = try { JSONObject(raw) } catch (_: Exception) { JSONObject() }
+
+            if (code !in 200..299) {
+                val detail = response.optString("error")
+                    .ifBlank { response.optString("details") }
+                    .ifBlank { "HTTP $code" }
+                return JSONObject()
+                    .put("success", false)
+                    .put("reply", "Мультимодальный анализ не выполнен: ${detail.take(220)}")
+                    .put("technical", "http=$code")
+            }
+
+            val reply = response.optString("reply").trim()
+            return JSONObject()
+                .put("success", response.optBoolean("ok", reply.isNotBlank()))
+                .put("reply", reply)
+                .put("technical", "kind=$kind")
+
+        } finally {
+            if (currentAgentConnection === connection) {
+                currentAgentConnection = null
+            }
+            try { connection?.disconnect() } catch (_: Exception) { }
+        }
+    }
+
+    private fun validatedMultimodalCacheFile(
+        path: String
+    ): File {
+        if (path.isBlank()) {
+            throw IllegalArgumentException("Путь вложения отсутствует")
+        }
+        val root = File(cacheDir, "ayana_multimodal").canonicalFile
+        val file = File(path).canonicalFile
+        if (!file.path.startsWith(root.path + File.separator) || !file.isFile) {
+            throw SecurityException("Вложение находится вне приватного cache AYANA")
+        }
+        return file
     }
 
     private fun callAgentCore(
@@ -18769,6 +19079,9 @@ class AyanaVoiceService : Service() {
         const val ACTION_TEXT_COMMAND =
             "kg.autonomous.agent.action.TEXT_COMMAND"
 
+        const val ACTION_MULTIMODAL_COMMAND =
+            "kg.autonomous.agent.action.MULTIMODAL_COMMAND"
+
         const val ACTION_REFRESH_OVERLAY =
             "kg.autonomous.agent.action.REFRESH_OVERLAY"
 
@@ -18777,6 +19090,9 @@ class AyanaVoiceService : Service() {
 
         const val EXTRA_TEXT_COMMAND =
             "text_command"
+
+        const val EXTRA_MULTIMODAL_MANIFEST =
+            "multimodal_manifest"
 
         const val EXTRA_STATUS_TEXT =
             "status_text"
@@ -18859,6 +19175,13 @@ class AyanaVoiceService : Service() {
 
         private const val WORKER_URL =
             "https://ayana-ai.talant02031985.workers.dev"
+
+        private const val MAX_MULTIMODAL_PROMPT_CHARS = 6000
+        private const val MAX_MULTIMODAL_DIRECT_BYTES = 8L * 1024L * 1024L
+        private const val MAX_MULTIMODAL_VIDEO_FRAMES = 8
+        private const val MAX_MULTIMODAL_VIDEO_FRAME_BYTES = 6L * 1024L * 1024L
+        private const val MULTIMODAL_CONNECT_TIMEOUT_MS = 20000
+        private const val MULTIMODAL_READ_TIMEOUT_MS = 90000
 
         private val APP_LAUNCH_PREFIXES =
             listOf(
