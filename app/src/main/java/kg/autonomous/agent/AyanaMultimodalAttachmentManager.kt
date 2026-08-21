@@ -15,7 +15,7 @@ import java.util.UUID
 import kotlin.math.roundToInt
 
 /**
- * AYANA Multimodal Attachment Manager v1.0.
+ * AYANA Multimodal Attachment Manager v1.1 — ROUTING INTEGRITY.
  *
  * Security / reliability contract:
  * - never exposes arbitrary user filesystem paths to the service/Worker;
@@ -402,6 +402,101 @@ class AyanaMultimodalAttachmentManager(
         const val KIND_IMAGE = "image"
         const val KIND_DOCUMENT = "document"
         const val KIND_VIDEO_VISUAL = "video_visual"
+
+        /**
+         * Decide whether a currently selected attachment belongs to this text command.
+         *
+         * The default is attachment-aware: once the user explicitly selected a file,
+         * ordinary analytical questions should stay grounded in it. Clear deterministic
+         * device/control commands are the exception and must continue through AYANA's
+         * local execution router instead of being hijacked by the multimodal endpoint.
+         * Explicit references to the attachment always win over device-verb heuristics.
+         */
+        fun shouldUseAttachmentForCommand(command: String): Boolean {
+            val normalized = command
+                .lowercase(Locale.ROOT)
+                .replace('ё', 'е')
+                .replace(Regex("\\s+"), " ")
+                .trim()
+
+            if (normalized.isBlank()) return true
+
+            val mediaTopic = listOf(
+                "фото", "фотограф", "изображен", "картин",
+                "видео", "ролик", "кадр",
+                "файл", "документ", "pdf", "ворд", "word",
+                "таблиц", "excel", "эксель", "вложен"
+            ).any(normalized::contains)
+
+            val capabilityQuestion = mediaTopic && listOf(
+                "ты умеешь", "умеешь ", "умеешь ли", "можешь ", "можешь ли", "ты можешь",
+                "способна ли", "поддерживаешь", "можно ли тебе",
+                "что ты умеешь", "какие форматы"
+            ).any(normalized::contains)
+
+            if (capabilityQuestion) return false
+
+            val explicitAttachmentReference = listOf(
+                "это вложение", "этого вложения", "этом вложении",
+                "этот файл", "этого файла", "этом файле",
+                "этот документ", "этого документа", "этом документе",
+                "эту фотограф", "этой фотограф", "на фотографии",
+                "это фото", "этом фото", "на фото",
+                "это изображение", "этом изображении", "на изображении",
+                "это видео", "этого видео", "этом видео", "в видео",
+                "этот ролик", "этом ролике", "в ролике",
+                "эти кадры", "этих кадрах", "на кадрах"
+            ).any(normalized::contains)
+
+            if (explicitAttachmentReference) return true
+
+            val attachmentAnalysisIntent = listOf(
+                "проанализ", "опиши", "перескаж", "кратко перескаж",
+                "сделай вывод", "выдели главное", "выдели основные",
+                "назови три", "назови основные", "извлеки", "прочитай",
+                "что изображено", "что видишь", "что на нем", "что на нём",
+                "что происходит", "какие объекты", "какие надписи",
+                "какие люди", "о чем он", "о чём он", "о чем документ",
+                "суммариз", "резюм", "сравни содерж"
+            ).any(normalized::contains)
+
+            if (attachmentAnalysisIntent) return true
+
+            val exactLocalControls = setOf(
+                "домой", "на главный экран", "главный экран", "назад",
+                "громче", "тише", "без звука", "включи звук", "верни звук",
+                "стоп", "остановись", "останови команду"
+            )
+            if (normalized in exactLocalControls) return false
+
+            val deterministicPrefixes = listOf(
+                "открой ", "запусти ", "включи ", "сверни ", "закрой ",
+                "информация о приложении ", "информацию о приложении ",
+                "сведения о приложении ", "уведомления ", "уведомление ",
+                "разрешения ", "батарея ", "хранилище ",
+                "мобильные данные ", "язык приложения ",
+                "открой настройки", "покажи настройки", "настройки ",
+                "найди в google ", "найди в гугле ", "поищи в google ",
+                "поищи в гугле ", "найди на карте ", "покажи на карте ",
+                "напомни ", "создай напоминание ", "удали напоминание ",
+                "отмени напоминание ", "покажи напоминания",
+                "запомни ", "забудь ", "очисти память",
+                "продолжи задачу", "продолжи цель", "отмени текущую задачу"
+            )
+
+            if (deterministicPrefixes.any(normalized::startsWith)) return false
+
+            val calculatorLike =
+                normalized.startsWith("сколько будет ") ||
+                    Regex("^[0-9\\s+\\-*/×÷.,()]+$").matches(normalized)
+            if (calculatorLike) return false
+
+            // Selected attachment + an otherwise ordinary question => keep it
+            // grounded in the attachment. This is what supports natural follow-ups
+            // such as «Какие основные объекты появляются?» without repeating
+            // «в этом видео» every turn.
+            return true
+        }
 
         private const val MANIFEST_VERSION = 1
         private const val CACHE_DIR_NAME = "ayana_multimodal"
