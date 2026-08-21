@@ -55,6 +55,10 @@ import kotlin.math.abs
 
 class AyanaVoiceService : Service() {
 
+    // AYANA v12.0 EXECUTION & PERCEPTION FOUNDATION.
+    // Unified Execution Kernel owns cancellation/terminal/evidence state across long-running lanes.
+    // Goal Compiler v2 provides executor/verification contracts and Settings verification can fuse
+    // exact package-targeted Android intents with fresh same-window semantic Settings evidence.
     // AYANA v11.7 MULTIMODAL ROUTING + GROUNDED FOLLOW-UP.
     // v11.5 execution-router integrity is preserved. v11.6 attachment intake remains,
     // while v11.7 prevents attachments from hijacking deterministic device commands
@@ -168,6 +172,9 @@ class AyanaVoiceService : Service() {
     @Volatile
     private var currentAgentConnection:
         HttpsURLConnection? = null
+
+    private val executionKernel =
+        AyanaExecutionKernel()
 
     private val cancelListenerWatchdog =
         object : Runnable {
@@ -373,6 +380,7 @@ class AyanaVoiceService : Service() {
                 },
             shouldCancel = {
                 cancelRequested ||
+                    executionKernel.isCancelled() ||
                     shuttingDown
             }
         )
@@ -1860,8 +1868,12 @@ class AyanaVoiceService : Service() {
                     ListenMode.CANCEL -> {
 
                         if (
-                            currentStatusState ==
-                            STATE_SPEAKING &&
+                            currentStatusState in
+                            setOf(
+                                STATE_THINKING,
+                                STATE_EXECUTING,
+                                STATE_SPEAKING
+                            ) &&
                             text.isNotBlank() &&
                             text !=
                             lastCancelDiagnosticText &&
@@ -2735,6 +2747,13 @@ class AyanaVoiceService : Service() {
                         }
                 )
 
+            beginExecutionSession(
+                objective = originalCommand,
+                source = if (silent) "text" else "voice",
+                lane = "local_control",
+                executor = "orb_control_executor"
+            )
+
             broadcastStatus(
                 "Настраиваю Orb AYANA…",
                 STATE_EXECUTING
@@ -2781,6 +2800,13 @@ class AyanaVoiceService : Service() {
                 command = originalCommand,
                 source = if (silent) "text" else "voice"
             )
+
+        beginExecutionSession(
+            objective = originalCommand,
+            source = if (silent) "text" else "voice",
+            lane = "command_router",
+            executor = "deterministic_router"
+        )
 
         capabilityRegistry
             .recordCommandContext(
@@ -5435,6 +5461,12 @@ class AyanaVoiceService : Service() {
                 append(window.optInt("evidence_readable_text_count", 0))
                 append(" acq=")
                 append(window.optString("acquisition_source"))
+                append(" surface=")
+                append(window.optString("semantic_surface"))
+                append(" surface_conf=")
+                append(window.optInt("semantic_surface_confidence", 0))
+                append(" title=")
+                append(window.optString("title").take(120))
                 append(" text=")
                 append(
                     window.optJSONArray("visible_text")
@@ -5537,6 +5569,90 @@ class AyanaVoiceService : Service() {
                 "screen",
                 latest
             )
+    }
+
+    private fun verifySettingsIntentAttestation(
+        screen: JSONObject,
+        targetPackage: String,
+        section: String,
+        dispatchedAtMs: Long
+    ): JSONObject {
+        if (targetPackage.isBlank() || !screen.optBoolean("success", false)) {
+            return JSONObject().put("success", false)
+        }
+
+        val dispatchAge =
+            (System.currentTimeMillis() - dispatchedAtMs)
+                .coerceAtLeast(0L)
+
+        if (dispatchAge > APP_DETAIL_VERIFY_TIMEOUT_MS + 1500L) {
+            return JSONObject()
+                .put("success", false)
+                .put("reason", "intent_attestation_stale")
+        }
+
+        val expectedSurface =
+            when (section) {
+                "info" -> setOf("app_info", "app_info_structure")
+                "notifications" -> setOf("app_notifications")
+                "permissions" -> setOf("app_permissions")
+                "battery" -> setOf("app_battery")
+                "storage" -> setOf("app_storage")
+                "open_by_default" -> setOf("app_defaults")
+                else -> emptySet()
+            }
+
+        if (expectedSurface.isEmpty()) {
+            return JSONObject()
+                .put("success", false)
+                .put("reason", "surface_not_attestable")
+        }
+
+        val windows = screen.optJSONArray("windows") ?: JSONArray()
+
+        for (index in 0 until windows.length()) {
+            val window = windows.optJSONObject(index) ?: continue
+            if (
+                window.optString("package") != "com.android.settings" ||
+                !(window.optBoolean("active", false) || window.optBoolean("focused", false))
+            ) {
+                continue
+            }
+
+            val surface = window.optString("semantic_surface").trim()
+            val confidence = window.optInt("semantic_surface_confidence", 0)
+            val evidenceAge = window.optLong("evidence_age_ms", -1L)
+
+            if (surface !in expectedSurface) {
+                continue
+            }
+
+            val structuralOnly = surface == "app_info_structure"
+            val evidenceFreshEnough =
+                !structuralOnly ||
+                    (evidenceAge in 0L..SETTINGS_ATTESTATION_EVIDENCE_MAX_AGE_MS)
+
+            val threshold = if (structuralOnly) 70 else 80
+
+            if (confidence >= threshold && evidenceFreshEnough) {
+                return JSONObject()
+                    .put("success", true)
+                    .put("verified", true)
+                    .put("surface", surface)
+                    .put("confidence", confidence)
+                    .put("evidence_age_ms", evidenceAge)
+                    .put("dispatch_age_ms", dispatchAge)
+                    .put("target_package", targetPackage)
+                    .put("section", section)
+                    .put("verification_mode", "exact_intent_plus_same_window_semantic_surface")
+            }
+        }
+
+        return JSONObject()
+            .put("success", false)
+            .put("reason", "semantic_surface_not_proven")
+            .put("target_package", targetPackage)
+            .put("section", section)
     }
 
     private fun extractSettingsAppSearchTarget(
@@ -6726,7 +6842,7 @@ class AyanaVoiceService : Service() {
 
                 commandHistoryStore.addEvent(
                     activeCommandHistoryId,
-                    state = "lifecycle_blocked",
+                    state = "lifecycle_unsupported",
                     message = "Закрытие не подменено сворачиванием",
                     details =
                         "package=$packageName; reason=no_verified_cross_app_close_executor"
@@ -6738,7 +6854,7 @@ class AyanaVoiceService : Service() {
                         !cancelRequested &&
                         !shuttingDown
                     ) {
-                        respondBlockedAndResume(
+                        respondUnsupportedAndResume(
                             text = message,
                             silent = silent,
                             technical =
@@ -8740,6 +8856,45 @@ class AyanaVoiceService : Service() {
         }
     }
 
+    private fun beginExecutionSession(
+        objective: String,
+        source: String,
+        lane: String,
+        executor: String
+    ) {
+        val snapshot =
+            executionKernel.begin(
+                objective = objective,
+                source = source,
+                lane = lane,
+                executor = executor
+            )
+
+        commandHistoryStore.addEvent(
+            activeCommandHistoryId,
+            state = "execution_session_started",
+            message = "Execution Session создана",
+            details =
+                "execution_id=${snapshot.id}; lane=${snapshot.lane}; executor=${snapshot.executor}".take(700)
+        )
+    }
+
+    private fun executionPhase(
+        phase: String,
+        executor: String? = null
+    ) {
+        executionKernel.setPhase(phase)
+        if (!executor.isNullOrBlank()) {
+            executionKernel.setExecutor(executor)
+        }
+        commandHistoryStore.addEvent(
+            activeCommandHistoryId,
+            state = "execution_phase",
+            message = phase,
+            details = executionKernel.diagnosticSummary().take(900)
+        )
+    }
+
     private fun finishLocalCommand(
         text: String,
         silent: Boolean
@@ -8827,6 +8982,21 @@ class AyanaVoiceService : Service() {
         )
     }
 
+    private fun respondUnsupportedAndResume(
+        text: String,
+        silent: Boolean,
+        technical: String = ""
+    ) {
+        respondAndResume(
+            text = text,
+            silent = silent,
+            success = false,
+            terminalStatus =
+                AyanaCommandHistoryStore.STATUS_UNSUPPORTED,
+            technical = technical
+        )
+    }
+
     private fun showTextAndResume(
         text: String
     ) {
@@ -8881,7 +9051,18 @@ class AyanaVoiceService : Service() {
         val commandToken =
             activeCommandToken
 
+        executionPhase(
+            phase = "agent_core",
+            executor = "agent_core_executor"
+        )
+
         startCancelListening()
+        commandHistoryStore.addEvent(
+            activeCommandHistoryId,
+            state = "cancel_listener_armed",
+            message = "STOP активирован для Agent Core",
+            details = "lane=agent_core; execution=${executionKernel.current()?.id.orEmpty()}"
+        )
 
         val worker =
             thread(
@@ -10728,6 +10909,7 @@ class AyanaVoiceService : Service() {
 
         currentAgentThread =
             worker
+        executionKernel.bindThread(worker)
     }
 
     // =========================================================
@@ -10839,6 +11021,13 @@ class AyanaVoiceService : Service() {
                 command = command,
                 source = if (silent) "text" else "voice"
             )
+
+        beginExecutionSession(
+            objective = command,
+            source = if (silent) "text" else "voice",
+            lane = "durable_goal_control",
+            executor = "durable_goal_executor"
+        )
 
         broadcastStatus(
             command,
@@ -12949,6 +13138,12 @@ class AyanaVoiceService : Service() {
                         command = "$prompt [мультимодальное вложение]",
                         source = "text"
                     )
+                beginExecutionSession(
+                    objective = prompt,
+                    source = "text",
+                    lane = "multimodal",
+                    executor = "multimodal_manifest_validator"
+                )
                 respondAndResume(
                     "Вложение повреждено или уже недоступно.",
                     silent = true,
@@ -12993,6 +13188,13 @@ class AyanaVoiceService : Service() {
                 source = "text"
             )
 
+        beginExecutionSession(
+            objective = prompt,
+            source = "text",
+            lane = "multimodal",
+            executor = "multimodal_executor"
+        )
+
         val displayName =
             manifest.optString("display_name", "вложение")
                 .trim()
@@ -13014,6 +13216,22 @@ class AyanaVoiceService : Service() {
         broadcastStatus(
             "Анализирую $displayName…",
             STATE_THINKING
+        )
+
+        executionPhase(
+            phase = "multimodal_network",
+            executor = "multimodal_executor"
+        )
+
+        // v12.0 UNIFIED CANCELLATION CONTRACT:
+        // arm the same local STOP listener BEFORE the long multimodal request.
+        // v11.7 left ListenMode=BUSY here, so spoken STOP could never be heard.
+        startCancelListening()
+        commandHistoryStore.addEvent(
+            activeCommandHistoryId,
+            state = "cancel_listener_armed",
+            message = "STOP активирован для мультимодального анализа",
+            details = "lane=multimodal; execution=${executionKernel.current()?.id.orEmpty()}"
         )
 
         val worker =
@@ -13110,6 +13328,7 @@ class AyanaVoiceService : Service() {
             }
 
         currentAgentThread = worker
+        executionKernel.bindThread(worker)
         worker.start()
     }
 
@@ -13182,6 +13401,7 @@ class AyanaVoiceService : Service() {
                     .openConnection() as HttpsURLConnection
 
             currentAgentConnection = connection
+            executionKernel.bindConnection(connection)
             connection.requestMethod = "POST"
             connection.setRequestProperty("Content-Type", "application/json")
             connection.connectTimeout = MULTIMODAL_CONNECT_TIMEOUT_MS
@@ -13218,6 +13438,7 @@ class AyanaVoiceService : Service() {
             if (currentAgentConnection === connection) {
                 currentAgentConnection = null
             }
+            executionKernel.clearConnection(connection)
             try { connection?.disconnect() } catch (_: Exception) { }
         }
     }
@@ -13264,6 +13485,7 @@ class AyanaVoiceService : Service() {
 
             currentAgentConnection =
                 connection
+            executionKernel.bindConnection(connection)
 
             connection.requestMethod =
                 "POST"
@@ -13456,6 +13678,8 @@ class AyanaVoiceService : Service() {
                 currentAgentConnection =
                     null
             }
+
+            executionKernel.clearConnection(connection)
 
             connection
                 ?.disconnect()
@@ -14266,6 +14490,39 @@ class AyanaVoiceService : Service() {
                 )
         }
 
+        val executionContract =
+            compiled.optJSONObject(
+                "execution_contract"
+            ) ?: JSONObject()
+
+        val executorKey =
+            executionContract.optString(
+                "executor_key",
+                "android_goal_executor"
+            )
+
+        executionPhase(
+            phase = "android_goal_execution",
+            executor = executorKey
+        )
+
+        commandHistoryStore.addEvent(
+            activeCommandHistoryId,
+            state = "goal_compiled",
+            message = "Goal Compiler v2: контракт выполнения готов",
+            details =
+                "goal_type=${compiled.optString("goal_type")}; executor=$executorKey; " +
+                    "verify=${executionContract.optString("verification_policy")}; " +
+                    "terminal=${executionContract.optString("terminal_policy")}".take(1000)
+        )
+
+        executionKernel.addEvidence(
+            type = "goal_compiled",
+            source = "goal_compiler_v2",
+            detail = executionContract.toString(),
+            confidence = 100
+        )
+
         val plan =
             compiled.optJSONObject(
                 "plan"
@@ -14425,6 +14682,7 @@ class AyanaVoiceService : Service() {
                     },
                 shouldCancel = {
                     cancelRequested ||
+                        executionKernel.isCancelled() ||
                         shuttingDown ||
                         goalCommandToken !=
                         activeCommandToken
@@ -14475,6 +14733,10 @@ class AyanaVoiceService : Service() {
                 compiled.optString(
                     "goal_type"
                 )
+            )
+            .put(
+                "execution_contract",
+                executionContract
             )
             .put(
                 "compiled_target",
@@ -15867,6 +16129,9 @@ class AyanaVoiceService : Service() {
 
         return try {
 
+            val intentDispatchedAt =
+                System.currentTimeMillis()
+
             startAppInfoIntent(
                 resolved.packageName
             )
@@ -15878,12 +16143,40 @@ class AyanaVoiceService : Service() {
                     timeoutMs = APP_DETAIL_VERIFY_TIMEOUT_MS
                 )
 
+            val intentAttestation =
+                if (verification.optBoolean("success", false)) {
+                    JSONObject().put("success", false)
+                } else {
+                    verifySettingsIntentAttestation(
+                        screen = verification.optJSONObject("screen") ?: JSONObject(),
+                        targetPackage = resolved.packageName,
+                        section = "info",
+                        dispatchedAtMs = intentDispatchedAt
+                    )
+                }
+
             if (
                 verification.optBoolean(
                     "success",
                     false
-                )
+                ) ||
+                intentAttestation.optBoolean("success", false)
             ) {
+
+                if (intentAttestation.optBoolean("success", false)) {
+                    commandHistoryStore.addEvent(
+                        activeCommandHistoryId,
+                        state = "settings_intent_attested",
+                        message = "App Info подтверждён exact-intent attestation",
+                        details = intentAttestation.toString().take(900)
+                    )
+                    executionKernel.addEvidence(
+                        type = "settings_intent_attestation",
+                        source = "settings_verifier",
+                        detail = intentAttestation.toString(),
+                        confidence = intentAttestation.optInt("confidence", 80)
+                    )
+                }
 
                 commandHistoryStore.addEvent(
                     activeCommandHistoryId,
@@ -16307,6 +16600,9 @@ class AyanaVoiceService : Service() {
 
             return try {
 
+                val intentDispatchedAt =
+                    System.currentTimeMillis()
+
                 startAppInfoIntent(
                     packageName
                 )
@@ -16318,12 +16614,33 @@ class AyanaVoiceService : Service() {
                         timeoutMs = APP_DETAIL_VERIFY_TIMEOUT_MS
                     )
 
+                val intentAttestation =
+                    if (verification.optBoolean("success", false)) {
+                        JSONObject().put("success", false)
+                    } else {
+                        verifySettingsIntentAttestation(
+                            screen = verification.optJSONObject("screen") ?: JSONObject(),
+                            targetPackage = packageName,
+                            section = "info",
+                            dispatchedAtMs = intentDispatchedAt
+                        )
+                    }
+
                 if (
                     verification.optBoolean(
                         "success",
                         false
-                    )
+                    ) ||
+                    intentAttestation.optBoolean("success", false)
                 ) {
+                    if (intentAttestation.optBoolean("success", false)) {
+                        commandHistoryStore.addEvent(
+                            activeCommandHistoryId,
+                            state = "settings_intent_attested",
+                            message = "App Info подтверждён exact-intent attestation",
+                            details = intentAttestation.toString().take(900)
+                        )
+                    }
                     commandHistoryStore.addEvent(
                         activeCommandHistoryId,
                         state = "app_settings_verified",
@@ -16386,6 +16703,9 @@ class AyanaVoiceService : Service() {
 
             try {
 
+                val intentDispatchedAt =
+                    System.currentTimeMillis()
+
                 startActivity(
                     directIntent.apply {
                         addFlags(
@@ -16401,12 +16721,40 @@ class AyanaVoiceService : Service() {
                         timeoutMs = APP_DETAIL_VERIFY_TIMEOUT_MS
                     )
 
+                val intentAttestation =
+                    if (directVerification.optBoolean("success", false)) {
+                        JSONObject().put("success", false)
+                    } else {
+                        verifySettingsIntentAttestation(
+                            screen = directVerification.optJSONObject("screen") ?: JSONObject(),
+                            targetPackage = packageName,
+                            section = normalizedSection,
+                            dispatchedAtMs = intentDispatchedAt
+                        )
+                    }
+
                 if (
                     directVerification.optBoolean(
                         "success",
                         false
-                    )
+                    ) ||
+                    intentAttestation.optBoolean("success", false)
                 ) {
+
+                    if (intentAttestation.optBoolean("success", false)) {
+                        commandHistoryStore.addEvent(
+                            activeCommandHistoryId,
+                            state = "settings_intent_attested",
+                            message = "Раздел Settings подтверждён exact-intent attestation",
+                            details = intentAttestation.toString().take(900)
+                        )
+                        executionKernel.addEvidence(
+                            type = "settings_intent_attestation",
+                            source = "settings_verifier",
+                            detail = intentAttestation.toString(),
+                            confidence = intentAttestation.optInt("confidence", 80)
+                        )
+                    }
 
                     commandHistoryStore.addEvent(
                         activeCommandHistoryId,
@@ -16470,6 +16818,9 @@ class AyanaVoiceService : Service() {
         // Accessibility, and only return SUCCESS after the final screen is observed.
         return try {
 
+            val appInfoIntentDispatchedAt =
+                System.currentTimeMillis()
+
             startAppInfoIntent(
                 packageName
             )
@@ -16481,11 +16832,24 @@ class AyanaVoiceService : Service() {
                     timeoutMs = APP_DETAIL_VERIFY_TIMEOUT_MS
                 )
 
+            val appInfoAttestation =
+                if (appInfoVerification.optBoolean("success", false)) {
+                    JSONObject().put("success", false)
+                } else {
+                    verifySettingsIntentAttestation(
+                        screen = appInfoVerification.optJSONObject("screen") ?: JSONObject(),
+                        targetPackage = packageName,
+                        section = "info",
+                        dispatchedAtMs = appInfoIntentDispatchedAt
+                    )
+                }
+
             if (
                 !appInfoVerification.optBoolean(
                     "success",
                     false
-                )
+                ) &&
+                !appInfoAttestation.optBoolean("success", false)
             ) {
 
                 commandHistoryStore.addEvent(
@@ -16509,6 +16873,15 @@ class AyanaVoiceService : Service() {
                         "verified",
                         false
                     )
+            }
+
+            if (appInfoAttestation.optBoolean("success", false)) {
+                commandHistoryStore.addEvent(
+                    activeCommandHistoryId,
+                    state = "settings_intent_attested",
+                    message = "Fallback App Info подтверждён exact-intent attestation",
+                    details = appInfoAttestation.toString().take(900)
+                )
             }
 
             val subpageResult =
@@ -17228,6 +17601,11 @@ class AyanaVoiceService : Service() {
         bargeInAudioDiagnosticLogged =
             false
 
+        executionPhase(
+            phase = "tts_stream",
+            executor = "tts_executor"
+        )
+
         enterCommunicationAudioMode()
 
         // The cancel microphone is started only after the communication audio
@@ -17296,6 +17674,7 @@ class AyanaVoiceService : Service() {
 
             currentTtsConnection =
                 connection
+            executionKernel.bindConnection(connection)
 
             connection.requestMethod =
                 "POST"
@@ -17685,6 +18064,8 @@ class AyanaVoiceService : Service() {
                 currentTtsConnection =
                     null
             }
+
+            executionKernel.clearConnection(connection)
 
             try {
                 connection?.disconnect()
@@ -18283,22 +18664,52 @@ class AyanaVoiceService : Service() {
     ) {
         val id = activeCommandHistoryId ?: return
 
-        if (
-            terminalStatus ==
-            AyanaCommandHistoryStore.STATUS_BLOCKED
-        ) {
-            commandHistoryStore.finishBlocked(
-                id = id,
-                result = result,
-                technical = technical
-            )
-        } else {
-            commandHistoryStore.finish(
-                id = id,
-                success = success,
-                result = result,
-                technical = technical
-            )
+        val kernelStatus =
+            when {
+                terminalStatus == AyanaCommandHistoryStore.STATUS_BLOCKED ->
+                    AyanaExecutionKernel.TerminalStatus.BLOCKED
+                terminalStatus == AyanaCommandHistoryStore.STATUS_UNSUPPORTED ->
+                    AyanaExecutionKernel.TerminalStatus.UNSUPPORTED
+                success ->
+                    AyanaExecutionKernel.TerminalStatus.SUCCESS
+                else ->
+                    AyanaExecutionKernel.TerminalStatus.ERROR
+            }
+
+        executionKernel.complete(
+            status = kernelStatus,
+            reason = technical.ifBlank { result }.take(600)
+        )
+
+        commandHistoryStore.addEvent(
+            id,
+            state = "execution_terminal",
+            message = kernelStatus.name,
+            details = executionKernel.diagnosticSummary().take(1000)
+        )
+
+        when (terminalStatus) {
+            AyanaCommandHistoryStore.STATUS_BLOCKED ->
+                commandHistoryStore.finishBlocked(
+                    id = id,
+                    result = result,
+                    technical = technical
+                )
+
+            AyanaCommandHistoryStore.STATUS_UNSUPPORTED ->
+                commandHistoryStore.finishUnsupported(
+                    id = id,
+                    result = result,
+                    technical = technical
+                )
+
+            else ->
+                commandHistoryStore.finish(
+                    id = id,
+                    success = success,
+                    result = result,
+                    technical = technical
+                )
         }
 
         activeCommandHistoryId = null
@@ -18309,6 +18720,7 @@ class AyanaVoiceService : Service() {
     ): Boolean {
 
         return cancelRequested ||
+            executionKernel.isCancelled() ||
             shuttingDown ||
             token !=
             activeCommandToken
@@ -18692,6 +19104,19 @@ class AyanaVoiceService : Service() {
         cancelRequested =
             true
 
+        val cancelledExecution =
+            executionKernel.cancel(
+                reason = "cancel_source=$source"
+            )
+
+        commandHistoryStore.addEvent(
+            activeCommandHistoryId,
+            state = "execution_cancelled",
+            message = "Execution Session остановлена",
+            details =
+                "execution_id=${cancelledExecution?.id.orEmpty()}; lane=${cancelledExecution?.lane.orEmpty()}; source=$source".take(900)
+        )
+
         commandGeneration++
 
         try {
@@ -18923,6 +19348,10 @@ class AyanaVoiceService : Service() {
 
         cancelRequested =
             true
+
+        executionKernel.cancel(
+            reason = "shutdown"
+        )
 
         commandGeneration++
 
@@ -19458,6 +19887,9 @@ class AyanaVoiceService : Service() {
         // so success is never inferred from startActivity() alone.
         private const val APP_DETAIL_VERIFY_TIMEOUT_MS =
             3200L
+
+        private const val SETTINGS_ATTESTATION_EVIDENCE_MAX_AGE_MS =
+            2500L
 
         private const val APP_DETAIL_VERIFY_POLL_MS =
             80L
