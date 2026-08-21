@@ -5590,6 +5590,28 @@ class MainActivity : AppCompatActivity() {
             }
     }
 
+    private fun showTextAnswer(
+        text: String
+    ) {
+
+        if (
+            !textModeVisible
+        ) {
+
+            textModeVisible =
+                true
+
+            textPanel.visibility =
+                View.VISIBLE
+        }
+
+        answerCard.visibility =
+            View.VISIBLE
+
+        textAnswer.text =
+            text
+    }
+
     private fun hideKeyboard() {
 
         if (
