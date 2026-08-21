@@ -20,7 +20,7 @@ import kotlin.math.max
 class AgentAccessibilityService :
     AccessibilityService() {
 
-    // AYANA Accessibility v5.1 — SETTINGS PERCEPTION RECOVERY + HOT PATH INTEGRITY.
+    // AYANA Accessibility v5.2 — ON-DEMAND SETTINGS EVIDENCE + HOT PATH INTEGRITY.
     // Every visible Android window is an independent context. Normal accessibility
     // events stay lightweight. Samsung/Android Settings is the one bounded exception:
     // sparse Settings roots can hide visible App Info / Notifications / Permissions
@@ -83,6 +83,10 @@ class AgentAccessibilityService :
 
     @Volatile
     private var lastSettingsStructuralRecoveryAt =
+        0L
+
+    @Volatile
+    private var lastSettingsSnapshotRecoveryAt =
         0L
 
     // AccessibilityService callbacks run on the process main thread. v4.0/v4.1
@@ -705,6 +709,17 @@ class AgentAccessibilityService :
 
         val liveContexts =
             resolveWindowContexts()
+
+        // SETTINGS PERCEPTION v5.2
+        // Event-driven recovery is not always enough on Samsung One UI: an App
+        // Info transition can expose the correct Settings window while delivering
+        // no useful event.source at all. Snapshot callers are already outside the
+        // accessibility hot event path, so when the active Settings context is
+        // sparse we may do one throttled API-33 descendant prefetch and inject the
+        // resulting evidence into that SAME window context.
+        maybeCaptureSettingsOnDemandEvidence(
+            liveContexts
+        )
 
         val evidence =
             currentEventEvidenceBurst(
@@ -2420,6 +2435,264 @@ class AgentAccessibilityService :
             area.toDouble() / screenArea.toDouble() <= OWN_OVERLAY_MAX_AREA_RATIO
     }
 
+    private fun maybeCaptureSettingsOnDemandEvidence(
+        liveContexts: List<WindowContext>
+    ) {
+
+        if (
+            Build.VERSION.SDK_INT <
+            Build.VERSION_CODES.TIRAMISU
+        ) {
+            return
+        }
+
+        val target =
+            liveContexts
+                .filter { context ->
+                    context.packageName == SETTINGS_PACKAGE &&
+                        (
+                            context.active ||
+                                context.focused
+                            ) &&
+                        context.type == AccessibilityWindowInfo.TYPE_APPLICATION
+                }
+                .minByOrNull { context ->
+                    context.rank
+                }
+                ?: return
+
+        val nowElapsed =
+            SystemClock.elapsedRealtime()
+
+        if (
+            nowElapsed -
+            lastSettingsSnapshotRecoveryAt <
+            SETTINGS_SNAPSHOT_RECOVERY_THROTTLE_MS
+        ) {
+            return
+        }
+
+        // If we already have very fresh readable Settings evidence for this exact
+        // window, do not spend another IPC-prefetch request during verifier polls.
+        val nowWall =
+            System.currentTimeMillis()
+
+        val alreadyFresh =
+            synchronized(
+                eventEvidenceLock
+            ) {
+                recentEventEvidence.any { evidence ->
+                    evidence.packageName == SETTINGS_PACKAGE &&
+                        evidence.windowId == target.windowId &&
+                        nowWall - evidence.at <=
+                            SETTINGS_SNAPSHOT_FRESH_EVIDENCE_MS &&
+                        evidence.visibleText.size >= 2
+                }
+            }
+
+        if (alreadyFresh) {
+            return
+        }
+
+        lastSettingsSnapshotRecoveryAt =
+            nowElapsed
+
+        val strategy =
+            AccessibilityNodeInfo.FLAG_PREFETCH_DESCENDANTS_DEPTH_FIRST or
+                AccessibilityNodeInfo.FLAG_PREFETCH_UNINTERRUPTIBLE
+
+        val candidates =
+            mutableListOf<AccessibilityNodeInfo>()
+
+        try {
+            windows
+                .firstOrNull { window ->
+                    try {
+                        window.id == target.windowId
+                    } catch (_: Exception) {
+                        false
+                    }
+                }
+                ?.getRoot(
+                    strategy
+                )
+                ?.let { root ->
+                    if (
+                        root.packageName
+                            ?.toString()
+                            .orEmpty() ==
+                        SETTINGS_PACKAGE
+                    ) {
+                        candidates.add(root)
+                    }
+                }
+        } catch (_: Exception) {
+        }
+
+        try {
+            getRootInActiveWindow(
+                strategy
+            )
+                ?.let { root ->
+                    val rootPackage =
+                        root.packageName
+                            ?.toString()
+                            .orEmpty()
+
+                    val rootWindowId =
+                        try {
+                            root.windowId
+                        } catch (_: Exception) {
+                            -1
+                        }
+
+                    if (
+                        rootPackage == SETTINGS_PACKAGE &&
+                        (
+                            target.windowId < 0 ||
+                                rootWindowId < 0 ||
+                                rootWindowId == target.windowId
+                            )
+                    ) {
+                        candidates.add(root)
+                    }
+                }
+        } catch (_: Exception) {
+        }
+
+        // Keep the ordinary root as a last fallback. It costs no extra prefetch and
+        // still lets this path capture a transient readable tree that appeared
+        // between resolveWindowContexts() and this bounded recovery attempt.
+        target.root
+            ?.let { root ->
+                if (
+                    root.packageName
+                        ?.toString()
+                        .orEmpty() ==
+                    SETTINGS_PACKAGE
+                ) {
+                    candidates.add(root)
+                }
+            }
+
+        var bestNodes =
+            JSONArray()
+
+        var bestTexts =
+            emptyList<String>()
+
+        var bestScore =
+            -1
+
+        for (root in candidates.distinctBy { candidate ->
+            val id =
+                try {
+                    candidate.windowId
+                } catch (_: Exception) {
+                    -1
+                }
+
+            "$id|${System.identityHashCode(candidate)}"
+        }) {
+            val nodes =
+                try {
+                    snapshotEventTree(
+                        root = root,
+                        maxNodes = SETTINGS_SNAPSHOT_RECOVERY_NODE_LIMIT,
+                        maxChars = SETTINGS_SNAPSHOT_RECOVERY_CHAR_LIMIT
+                    )
+                } catch (_: Exception) {
+                    JSONArray()
+                }
+
+            val textArray =
+                collectVisibleTexts(
+                    nodes
+                )
+
+            val texts =
+                mutableListOf<String>()
+
+            for (index in 0 until textArray.length()) {
+                val value =
+                    safeText(
+                        textArray.optString(index)
+                    )
+
+                if (
+                    value.isNotBlank() &&
+                    value !in texts
+                ) {
+                    texts.add(value)
+                }
+
+                if (
+                    texts.size >=
+                    EVENT_EVIDENCE_TEXT_LIMIT
+                ) {
+                    break
+                }
+            }
+
+            val score =
+                texts.size * 100 +
+                    nodes.length()
+
+            if (score > bestScore) {
+                bestScore = score
+                bestNodes = nodes
+                bestTexts = texts
+            }
+        }
+
+        if (
+            bestNodes.length() == 0 &&
+            bestTexts.isEmpty()
+        ) {
+            return
+        }
+
+        for (index in 0 until bestNodes.length()) {
+            bestNodes
+                .optJSONObject(index)
+                ?.put(
+                    "evidence_source",
+                    "settings_on_demand_prefetch"
+                )
+        }
+
+        val evidence =
+            EventEvidence(
+                at = nowWall,
+                windowId = target.windowId,
+                packageName = SETTINGS_PACKAGE,
+                className = target.className,
+                eventType = AccessibilityEvent.TYPE_WINDOW_CONTENT_CHANGED,
+                bounds = Rect(target.bounds),
+                nodes = bestNodes,
+                visibleText = bestTexts
+            )
+
+        synchronized(
+            eventEvidenceLock
+        ) {
+            pruneEventEvidenceLocked(
+                nowWall
+            )
+
+            recentEventEvidence.addFirst(
+                evidence
+            )
+
+            while (
+                recentEventEvidence.size >
+                EVENT_EVIDENCE_MAX_RECORDS
+            ) {
+                recentEventEvidence.removeLast()
+            }
+        }
+    }
+
     private fun currentEventEvidenceBurst(
         liveContexts: List<WindowContext>
     ): List<EventEvidence> {
@@ -3811,6 +4084,18 @@ class AgentAccessibilityService :
 
         private const val SETTINGS_EVENT_RECOVERY_CHAR_LIMIT =
             6500
+
+        private const val SETTINGS_SNAPSHOT_RECOVERY_THROTTLE_MS =
+            700L
+
+        private const val SETTINGS_SNAPSHOT_FRESH_EVIDENCE_MS =
+            900L
+
+        private const val SETTINGS_SNAPSHOT_RECOVERY_NODE_LIMIT =
+            100
+
+        private const val SETTINGS_SNAPSHOT_RECOVERY_CHAR_LIMIT =
+            8500
 
         @Volatile
         var instance:
