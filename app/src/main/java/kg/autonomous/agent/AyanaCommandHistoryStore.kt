@@ -11,11 +11,12 @@ import java.util.UUID
 
 /**
  * Persistent command/event history for AYANA diagnostics.
- * v2.5: BLOCKED is a first-class terminal status for unsupported/capability-gated actions.
+ * v2.6: BLOCKED and UNSUPPORTED are distinct first-class terminal states; terminal diagnostics record result truncation metadata.
+ * v2.5: BLOCKED became a first-class terminal status.
  * v2.4: per-record delete, compact terminal events, and agent-facing last-issue context.
  *
  * v2:
- * - SUCCESS / ERROR / BLOCKED / CANCELLED are explicit statuses;
+ * - SUCCESS / ERROR / BLOCKED / UNSUPPORTED / CANCELLED are explicit statuses;
  * - copied diagnostics are compact (raw JSON is still stored internally);
  * - no result is classified by searching words such as "ошибка" inside a reply.
  */
@@ -313,6 +314,21 @@ class AyanaCommandHistoryStore(
                 result,
             technical =
                 technical
+        )
+    }
+
+    fun finishUnsupported(
+        id: String?,
+        result: String,
+        technical: String = ""
+    ) {
+
+        finishWithStatus(
+            id = id,
+            status = STATUS_UNSUPPORTED,
+            success = false,
+            result = result,
+            technical = technical
         )
     }
 
@@ -684,6 +700,9 @@ class AyanaCommandHistoryStore(
                         STATUS_BLOCKED ->
                             "BLOCKED"
 
+                        STATUS_UNSUPPORTED ->
+                            "UNSUPPORTED"
+
                         STATUS_CANCELLED ->
                             "CANCELLED"
 
@@ -749,6 +768,11 @@ class AyanaCommandHistoryStore(
                         "result"
                     )
                 )
+
+                if (record.optBoolean("result_truncated", false)) {
+                    append("\nresult_meta=truncated; original_length=")
+                    append(record.optInt("result_length", -1))
+                }
 
                 val technical =
                     record.optString(
@@ -964,6 +988,14 @@ class AyanaCommandHistoryStore(
                     )
                 )
                 .put(
+                    "result_length",
+                    result.length
+                )
+                .put(
+                    "result_truncated",
+                    result.length > MAX_RESULT_CHARS
+                )
+                .put(
                     "technical",
                     technical.take(
                         MAX_TECHNICAL_CHARS
@@ -994,6 +1026,9 @@ class AyanaCommandHistoryStore(
 
                     STATUS_BLOCKED ->
                         "Команда заблокирована возможностями устройства"
+
+                    STATUS_UNSUPPORTED ->
+                        "Команда не поддерживается текущим набором исполнителей"
 
                     STATUS_CANCELLED ->
                         "Команда остановлена"
@@ -1065,6 +1100,7 @@ class AyanaCommandHistoryStore(
                     STATUS_SUCCESS,
                     STATUS_ERROR,
                     STATUS_BLOCKED,
+                    STATUS_UNSUPPORTED,
                     STATUS_CANCELLED
                 )
 
@@ -1093,6 +1129,9 @@ class AyanaCommandHistoryStore(
 
                 STATUS_BLOCKED ->
                     "Команда заблокирована возможностями устройства"
+
+                STATUS_UNSUPPORTED ->
+                    "Команда не поддерживается текущим набором исполнителей"
 
                 STATUS_CANCELLED ->
                     "Команда остановлена"
@@ -1835,6 +1874,9 @@ class AyanaCommandHistoryStore(
 
         const val STATUS_BLOCKED =
             "blocked"
+
+        const val STATUS_UNSUPPORTED =
+            "unsupported"
 
         const val STATUS_CANCELLED =
             "cancelled"
