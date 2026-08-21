@@ -5,7 +5,7 @@ import org.json.JSONObject
 import java.util.Locale
 
 /**
- * AYANA Planner v2.1 — lifecycle terminal integrity.
+ * AYANA Planner v2.2 — execution contract + bounded recovery.
  *
  * A deterministic planning envelope above Agent Core. It does not click the UI
  * and does not replace the verified Android Goal Compiler. Its job is to keep
@@ -58,12 +58,20 @@ class AyanaAgentPlanner(
             ?: JSONObject()
 
         return JSONObject()
-            .put("planner_version", "2.1")
+            .put("planner_version", "2.2")
             .put("objective", clean.take(MAX_OBJECTIVE_CHARS))
             .put("domain", domain)
             .put("complexity", complexity)
             .put("risk_hint", risk)
             .put("terminal_criterion", terminal)
+            .put(
+                "execution_policy",
+                executionPolicy(
+                    domain = domain,
+                    risk = risk,
+                    complexity = complexity
+                )
+            )
             .put("subgoals", subgoalsJson)
             .put("app_hint", appHint)
             .put("app_resolution", appResolution ?: JSONObject.NULL)
@@ -107,7 +115,7 @@ class AyanaAgentPlanner(
             }
 
         return buildString {
-            append("LOCAL PLANNER v2.1: domain=")
+            append("LOCAL PLANNER v2.2: domain=")
             append(envelope.optString("domain"))
             append("; complexity=")
             append(envelope.optString("complexity"))
@@ -115,6 +123,15 @@ class AyanaAgentPlanner(
             append(envelope.optString("risk_hint"))
             append("; terminal=")
             append(envelope.optString("terminal_criterion").take(420))
+            val policy = envelope.optJSONObject("execution_policy")
+            if (policy != null) {
+                append("; verify=")
+                append(policy.optString("verification_policy"))
+                append("; replan_budget=")
+                append(policy.optInt("max_replans", 0))
+                append("; cancellation=")
+                append(policy.optString("cancellation_policy"))
+            }
             if (list.isNotEmpty()) {
                 append("; explicit_subgoals=[")
                 append(list.joinToString(" | "))
@@ -123,6 +140,31 @@ class AyanaAgentPlanner(
             append(appText)
             append(". Preserve the whole objective; never mark success if only an intermediate subgoal is verified.")
         }.take(MAX_CONTEXT_CHARS)
+    }
+
+    private fun executionPolicy(
+        domain: String,
+        risk: String,
+        complexity: String
+    ): JSONObject {
+        val maxReplans =
+            when {
+                risk == "prohibited_or_sensitive" -> 0
+                risk == "high" -> 1
+                complexity == "high" -> 2
+                complexity == "multi_step" -> 2
+                domain == "android_action" -> 1
+                else -> 0
+            }
+
+        return JSONObject()
+            .put("terminal_policy", "verified_terminal_only")
+            .put("verification_policy", if (domain == "android_action") "fresh_evidence_required" else "domain_result_required")
+            .put("cancellation_policy", "unified_execution_session")
+            .put("max_replans", maxReplans)
+            .put("anti_cycle", true)
+            .put("fail_closed", true)
+            .put("allow_false_success", false)
     }
 
     private fun splitSubgoals(command: String): List<String> {
