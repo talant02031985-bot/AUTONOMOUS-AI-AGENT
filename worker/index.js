@@ -157,7 +157,7 @@ const DEVICE_TOOLS = [
   {
     type: "function",
     name: "press_back",
-    description: "Press the Android Back global navigation action.",
+    description: "Press the Android Back global navigation action. This changes navigation state only. NEVER use it as proof that an app was closed or its process terminated.",
     strict: true,
     parameters: {
       type: "object",
@@ -169,7 +169,7 @@ const DEVICE_TOOLS = [
   {
     type: "function",
     name: "press_home",
-    description: "Go to the Android home screen.",
+    description: "Go to the Android home screen and therefore minimize/remove the current foreground app from view. This does NOT close, terminate, force-stop, or prove removal of an app task. NEVER use press_home to satisfy a user request to close/terminate an app.",
     strict: true,
     parameters: {
       type: "object",
@@ -714,7 +714,7 @@ Screen Intelligence / Perception Contract v2:
 - Для нажатия всегда предпочитай click_screen_element. Для ввода обычного текста используй input_screen_text. Для прокрутки используй scroll_screen.
 - После каждого действия изучай returned screen и screen_changed. Если действие не сработало, получи новый get_screen_state и выбери другой безопасный семантический путь.
 - Не повторяй семантический переход, который уже привёл к тому же экрану без прогресса. Цикл «target → другой экран → Назад → тот же target» является основанием остановиться, а не пробовать его снова.
-- Семантика закрытия приложений должна быть честной: Home/«Домой» только сворачивает/убирает приложение с переднего плана и НЕ считается закрытием процесса. Для Recents «закрой всё кроме…» действуй только если нужные карточки/окна действительно идентифицированы; иначе остановись безопасно.
+- Семантика закрытия приложений должна быть честной: Home/«Домой» и Back/«Назад» НИКОГДА не являются закрытием процесса. Если пользователь просит «закрой/заверши приложение», а отдельного подтверждённого close/force-stop инструмента нет, НЕ вызывай press_home/press_back как замену: прямо сообщи, что надёжное закрытие текущими средствами недоступно. Для «сверни приложение» Home допустим только как сворачивание. Для Recents «закрой всё кроме…» действуй только если нужные карточки/окна действительно идентифицированы; иначе остановись безопасно.
 - tap_screen_coordinates — только крайний резерв, когда семантический Accessibility-путь не работает. До него обязательно объясни пользователю необходимость и получи явное подтверждение.
 - Если click_screen_element возвращает requires_confirmation=true, остановись и запроси короткое явное подтверждение. Только после подтверждения повтори инструмент с confirmed=true.
 - Никогда не вводи через input_screen_text пароли, PIN, OTP/SMS-коды, данные банковских карт, токены, ключи или другие секреты.
@@ -1518,7 +1518,7 @@ export default {
         ok: true,
         service: "AYANA AI",
         ai: "ready",
-        agent_core: "v9.0-agent-intelligence",
+        agent_core: "v10.2-execution-integrity",
         voice: "marin"
       });
     }
