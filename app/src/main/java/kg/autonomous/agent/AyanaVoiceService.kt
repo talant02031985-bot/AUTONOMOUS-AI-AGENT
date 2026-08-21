@@ -54,9 +54,10 @@ import kotlin.math.abs
 
 class AyanaVoiceService : Service() {
 
-    // AYANA v11.4 EXECUTION INTEGRITY & SPEED.
-    // App lifecycle intents are now deterministic and goal-verified.
-    // Voice/TTS/STOP implementation remains inherited unchanged from v11.3.1.
+    // AYANA v11.5 EXECUTION ROUTER HARDENING.
+    // App open/minimize/close now share one deterministic local lifecycle router,
+    // short follow-ups retain local app context, and terminal verification is fresh-state based.
+    // Voice capture / Marin PCM / STOP acoustics remain inherited from v11.4.
     // AYANA v11.3 PERCEPTION, TRUTH & AUTONOMY CORE.
     // Built on v11.1.2 App Settings Integrity. v11.1.5 adds context-safe
     // terminal verification for multi-window / popup / PiP screens while preserving
@@ -203,6 +204,21 @@ class AyanaVoiceService : Service() {
     @Volatile
     private var activeCommandHistoryId:
         String? = null
+
+    // v11.5 local lifecycle continuity. A short clarification such as
+    // «Что сделать с YouTube?» keeps only the resolved app target locally; the
+    // next «открой / сверни / закрой» never needs an Agent Core round-trip.
+    @Volatile
+    private var pendingLifecycleTarget:
+        String? = null
+
+    @Volatile
+    private var pendingLifecycleLabel:
+        String? = null
+
+    @Volatile
+    private var pendingLifecycleExpiresAtMs =
+        0L
 
     // AUTONOMOUS CORE v10: persistent state of the currently executing
     // multi-step device goal. v11 keeps multiple recoverable goals instead of
@@ -2952,20 +2968,54 @@ class AyanaVoiceService : Service() {
             return
         }
 
-        // APP LIFECYCLE FAST-PATH v11.4
-        // «Сверни <app>» and «закрой <app>» are intentionally NOT equivalent.
-        // Minimize is allowed only when the requested app is verified foreground;
-        // true close is fail-closed until AYANA has a dedicated close/task-removal
-        // executor. Never substitute Home/Back and call that a successful close.
+        // APP EXECUTION ROUTER v11.5
+        // One deterministic path owns simple app open/minimize/close commands.
+        // It also consumes a short local clarification context before any Agent Core
+        // handoff. No command-specific YouTube patching is used here.
+        val pendingLifecycleAction =
+            extractPendingLifecycleFollowUpAction(
+                routingNormalized
+            )
+
+        if (pendingLifecycleAction != null) {
+            val pendingTarget =
+                consumePendingLifecycleTarget()
+
+            if (!pendingTarget.isNullOrBlank()) {
+                handleLocalAppLifecycleRequest(
+                    action = pendingLifecycleAction,
+                    requestedName = pendingTarget,
+                    silent = silent
+                )
+                return
+            }
+        } else {
+            clearExpiredOrInterruptedLifecycleContext()
+        }
+
         val lifecycleRequest =
             extractLocalAppLifecycleRequest(
                 routingNormalized
             )
 
         if (lifecycleRequest != null) {
+            clearPendingLifecycleContext()
             handleLocalAppLifecycleRequest(
                 action = lifecycleRequest.first,
                 requestedName = lifecycleRequest.second,
+                silent = silent
+            )
+            return
+        }
+
+        val lifecycleClarificationTarget =
+            extractLifecycleClarificationTarget(
+                routingNormalized
+            )
+
+        if (!lifecycleClarificationTarget.isNullOrBlank()) {
+            beginLocalLifecycleClarification(
+                candidate = lifecycleClarificationTarget,
                 silent = silent
             )
             return
@@ -5860,40 +5910,84 @@ class AyanaVoiceService : Service() {
     }
 
     // =========================================================
-    // APP LIFECYCLE INTENT — v11.4
+    // APP EXECUTION ROUTER — v11.5
     // =========================================================
+
+    private fun extractPendingLifecycleFollowUpAction(
+        command: String
+    ): String? {
+
+        val clean =
+            normalizeLifecycleRoutingText(
+                command
+            )
+
+        return when (clean) {
+            "сверни",
+            "свернуть",
+            "просто сверни",
+            "сверни его",
+            "сверни ее",
+            "сверни приложение" ->
+                "minimize"
+
+            "закрой",
+            "закрыть",
+            "просто закрой",
+            "полностью закрой",
+            "закрой его",
+            "закрой ее",
+            "заверши",
+            "заверши приложение" ->
+                "close"
+
+            "открой",
+            "открыть",
+            "просто открой",
+            "открой его",
+            "открой ее",
+            "запусти",
+            "включи" ->
+                "open"
+
+            else ->
+                null
+        }
+    }
 
     private fun extractLocalAppLifecycleRequest(
         command: String
     ): Pair<String, String>? {
 
         val clean =
-            command
-                .trim()
-                .trim(
-                    ' ',
-                    '"',
-                    '«',
-                    '»',
-                    '.',
-                    ',',
-                    '!',
-                    '?',
-                    ';',
-                    ':'
-                )
-                .replace(
-                    Regex("\\s+"),
-                    " "
-                )
+            normalizeLifecycleRoutingText(
+                command
+            )
 
         if (clean.isBlank()) {
             return null
         }
 
-        // These phrases describe windows/dialogs/Recents or AYANA itself, not a
-        // named installed application lifecycle request. Leave them to their own
-        // routes instead of stealing them with a broad «закрой …» prefix.
+        // Short action-only commands are deterministic device actions. With no
+        // pending clarification, minimize/close refer to the currently foreground
+        // app. This is what prevents a bare «сверни» from reaching Agent Core.
+        when (clean) {
+            "сверни",
+            "свернуть",
+            "просто сверни",
+            "сверни приложение" ->
+                return "minimize" to FOREGROUND_APP_SENTINEL
+
+            "закрой",
+            "закрыть",
+            "просто закрой",
+            "полностью закрой",
+            "заверши",
+            "заверши приложение" ->
+                return "close" to FOREGROUND_APP_SENTINEL
+        }
+
+        // Windows/dialogs/Recents are not named application lifecycle requests.
         val excludedPrefixes =
             listOf(
                 "закрой все",
@@ -5923,31 +6017,14 @@ class AyanaVoiceService : Service() {
         for (prefix in minimizePrefixes) {
             if (clean.startsWith(prefix)) {
                 val target =
-                    clean
-                        .removePrefix(prefix)
-                        .trim()
-                        .trim(
-                            ' ',
-                            '"',
-                            '«',
-                            '»',
-                            '.',
-                            ',',
-                            '!',
-                            '?',
-                            ';',
-                            ':'
-                        )
+                    lifecycleTargetAfterPrefix(
+                        clean,
+                        prefix
+                    )
 
                 if (
                     target.isBlank() ||
-                    target in setOf(
-                        "все",
-                        "все окна",
-                        "все приложения",
-                        "окно",
-                        "приложение"
-                    )
+                    target in LIFECYCLE_INVALID_TARGETS
                 ) {
                     return null
                 }
@@ -5968,36 +6045,14 @@ class AyanaVoiceService : Service() {
         for (prefix in closePrefixes) {
             if (clean.startsWith(prefix)) {
                 val target =
-                    clean
-                        .removePrefix(prefix)
-                        .trim()
-                        .trim(
-                            ' ',
-                            '"',
-                            '«',
-                            '»',
-                            '.',
-                            ',',
-                            '!',
-                            '?',
-                            ';',
-                            ':'
-                        )
+                    lifecycleTargetAfterPrefix(
+                        clean,
+                        prefix
+                    )
 
                 if (
                     target.isBlank() ||
-                    target in setOf(
-                        "все",
-                        "все окна",
-                        "все приложения",
-                        "окно",
-                        "приложение",
-                        "аяна",
-                        "аяну",
-                        "айана",
-                        "айану",
-                        "ayana"
-                    )
+                    target in LIFECYCLE_INVALID_CLOSE_TARGETS
                 ) {
                     return null
                 }
@@ -6006,52 +6061,197 @@ class AyanaVoiceService : Service() {
             }
         }
 
+        // Simple app launches now use the same resolver + verification contract as
+        // minimize. Complex/settings/search commands intentionally remain with their
+        // dedicated routers below.
+        val openPrefix =
+            APP_LAUNCH_PREFIXES
+                .firstOrNull {
+                    clean.startsWith(it)
+                }
+
+        if (openPrefix != null) {
+            val target =
+                lifecycleTargetAfterPrefix(
+                    clean,
+                    openPrefix
+                )
+
+            if (
+                target.isBlank() ||
+                !isSafeSimpleLifecycleOpenTarget(
+                    target = target,
+                    wholeCommand = clean
+                )
+            ) {
+                return null
+            }
+
+            return "open" to target
+        }
+
         return null
     }
 
-    private fun isTrueAppCloseRequest(
-        command: String
-    ): Boolean =
-        extractLocalAppLifecycleRequest(
-            repairCommonRecognitionForRouting(
-                normalizeRecognitionText(
-                    command
-                )
+    private fun normalizeLifecycleRoutingText(
+        value: String
+    ): String =
+        value
+            .lowercase(
+                Locale.ROOT
             )
-        )
-            ?.first ==
-            "close"
+            .replace(
+                'ё',
+                'е'
+            )
+            .trim()
+            .trim(
+                ' ',
+                '"',
+                '«',
+                '»',
+                '.',
+                ',',
+                '!',
+                '?',
+                ';',
+                ':'
+            )
+            .replace(
+                Regex("\\s+"),
+                " "
+            )
 
-    private fun handleLocalAppLifecycleRequest(
-        action: String,
-        requestedName: String,
+    private fun lifecycleTargetAfterPrefix(
+        command: String,
+        prefix: String
+    ): String =
+        command
+            .removePrefix(
+                prefix
+            )
+            .trim()
+            .trim(
+                ' ',
+                '"',
+                '«',
+                '»',
+                '.',
+                ',',
+                '!',
+                '?',
+                ';',
+                ':'
+            )
+
+    private fun isSafeSimpleLifecycleOpenTarget(
+        target: String,
+        wholeCommand: String
+    ): Boolean {
+
+        if (
+            target in LIFECYCLE_NON_APP_OPEN_TARGETS
+        ) {
+            return false
+        }
+
+        if (
+            wholeCommand.contains(" и ") ||
+            wholeCommand.contains(" затем ") ||
+            wholeCommand.contains(" потом ")
+        ) {
+            return false
+        }
+
+        if (
+            LIFECYCLE_OPEN_DELEGATE_MARKERS.any {
+                target.contains(it)
+            }
+        ) {
+            return false
+        }
+
+        return target
+            .split(' ')
+            .count {
+                it.isNotBlank()
+            } <=
+            5
+    }
+
+    /**
+     * Detects a short ASR fragment that still contains one known app alias but no
+     * trustworthy action verb. Example observed on-device: «ни ютуб». This is a
+     * generic app-fragment rule across the alias set, not a phrase-specific repair.
+     */
+    private fun extractLifecycleClarificationTarget(
+        command: String
+    ): String? {
+
+        val clean =
+            normalizeLifecycleRoutingText(
+                command
+            )
+
+        val wordCount =
+            clean
+                .split(' ')
+                .count {
+                    it.isNotBlank()
+                }
+
+        if (
+            wordCount !in
+            2..4
+        ) {
+            return null
+        }
+
+        if (
+            LIFECYCLE_CLARIFICATION_EXCLUSION_MARKERS.any {
+                clean.contains(it)
+            }
+        ) {
+            return null
+        }
+
+        return KNOWN_LOCAL_LAUNCH_ALIASES
+            .asSequence()
+            .filter {
+                it.isNotBlank() &&
+                    clean != it
+            }
+            .sortedByDescending {
+                it.length
+            }
+            .firstOrNull { alias ->
+                Regex(
+                    "(^|\\s)" +
+                        Regex.escape(alias) +
+                        "($|\\s)"
+                )
+                    .containsMatchIn(
+                        clean
+                    )
+            }
+    }
+
+    private fun beginLocalLifecycleClarification(
+        candidate: String,
         silent: Boolean
     ) {
 
         val commandToken =
             activeCommandToken
 
-        commandHistoryStore.addEvent(
-            activeCommandHistoryId,
-            state = "lifecycle_intent",
-            message =
-                if (action == "minimize") {
-                    "Локальная команда сворачивания приложения"
-                } else {
-                    "Локальная команда закрытия приложения"
-                },
-            details = "action=$action; app=${requestedName.take(160)}"
-        )
-
         thread(
             start = true,
-            name = "AyanaAppLifecycle"
+            name = "AyanaLifecycleClarify"
         ) {
-
             val resolution =
                 try {
                     appResolver.resolve(
-                        requestedName
+                        candidate
                     )
                 } catch (_: Exception) {
                     null
@@ -6068,44 +6268,417 @@ class AyanaVoiceService : Service() {
                         !cancelRequested &&
                         !shuttingDown
                     ) {
-                        respondAndResume(
-                            "Не нашла установленное приложение $requestedName.",
-                            silent,
-                            success = false
+                        askAyana(
+                            candidate,
+                            silent
                         )
                     }
                 }
                 return@thread
             }
 
-            val label =
+            pendingLifecycleTarget =
                 resolution.label
                     .ifBlank {
-                        requestedName
+                        candidate
                     }
 
-            val packageName =
-                resolution.packageName
+            pendingLifecycleLabel =
+                resolution.label
+                    .ifBlank {
+                        candidate
+                    }
+
+            pendingLifecycleExpiresAtMs =
+                SystemClock.elapsedRealtime() +
+                    LIFECYCLE_CONTEXT_TTL_MS
 
             commandHistoryStore.addEvent(
                 activeCommandHistoryId,
-                state = "lifecycle_app_resolved",
-                message = "Приложение определено",
+                state = "lifecycle_clarification",
+                message = "Приложение распознано локально, действие не определено",
                 details =
-                    "label=${label.take(120)}; package=${packageName.take(180)}; " +
+                    "candidate=${candidate.take(120)}; " +
+                        "label=${resolution.label.take(120)}; " +
+                        "package=${resolution.packageName.take(180)}; " +
                         "confidence=${resolution.confidence}; source=${resolution.source}"
             )
 
+            val label =
+                resolution.label
+                    .ifBlank {
+                        candidate
+                    }
+
+            mainHandler.post {
+                if (
+                    commandToken == activeCommandToken &&
+                    !cancelRequested &&
+                    !shuttingDown
+                ) {
+                    respondAndResume(
+                        "Что сделать с $label: открыть, свернуть или закрыть?",
+                        silent,
+                        success = true
+                    )
+                }
+            }
+        }
+    }
+
+    private fun consumePendingLifecycleTarget(): String? {
+
+        val now =
+            SystemClock.elapsedRealtime()
+
+        val target =
+            pendingLifecycleTarget
+
+        val valid =
+            !target.isNullOrBlank() &&
+                pendingLifecycleExpiresAtMs >
+                    now
+
+        clearPendingLifecycleContext()
+
+        return if (valid) {
+            target
+        } else {
+            null
+        }
+    }
+
+    private fun clearExpiredOrInterruptedLifecycleContext() {
+
+        if (
+            pendingLifecycleTarget == null
+        ) {
+            return
+        }
+
+        if (
+            pendingLifecycleExpiresAtMs <=
+            SystemClock.elapsedRealtime()
+        ) {
+            clearPendingLifecycleContext()
+            return
+        }
+
+        // A different complete command supersedes the old clarification context.
+        clearPendingLifecycleContext()
+    }
+
+    private fun clearPendingLifecycleContext() {
+        pendingLifecycleTarget =
+            null
+        pendingLifecycleLabel =
+            null
+        pendingLifecycleExpiresAtMs =
+            0L
+    }
+
+    private fun isTrueAppCloseRequest(
+        command: String
+    ): Boolean =
+        extractLocalAppLifecycleRequest(
+            repairCommonRecognitionForRouting(
+                normalizeRecognitionText(
+                    command
+                )
+            )
+        )
+            ?.first ==
+            "close"
+
+    private fun currentForegroundPackage(): String =
+        try {
+            screenIntelligence
+                .getScreenState()
+                .optString(
+                    "package"
+                )
+                .trim()
+        } catch (_: Exception) {
+            ""
+        }
+
+    private fun appLabelForPackage(
+        packageName: String
+    ): String {
+
+        if (packageName.isBlank()) {
+            return "приложение"
+        }
+
+        return try {
+            val info =
+                packageManager
+                    .getApplicationInfo(
+                        packageName,
+                        0
+                    )
+
+            packageManager
+                .getApplicationLabel(
+                    info
+                )
+                .toString()
+                .trim()
+                .ifBlank {
+                    packageName.substringAfterLast('.')
+                }
+        } catch (_: Exception) {
+            packageName.substringAfterLast('.')
+                .ifBlank {
+                    "приложение"
+                }
+        }
+    }
+
+    private fun defaultHomePackage(): String =
+        try {
+            packageManager
+                .resolveActivity(
+                    Intent(
+                        Intent.ACTION_MAIN
+                    ).apply {
+                        addCategory(
+                            Intent.CATEGORY_HOME
+                        )
+                    },
+                    PackageManager.MATCH_DEFAULT_ONLY
+                )
+                ?.activityInfo
+                ?.packageName
+                .orEmpty()
+                .trim()
+        } catch (_: Exception) {
+            ""
+        }
+
+    private fun waitForForegroundPackage(
+        expectedPackage: String,
+        timeoutMs: Long = LIFECYCLE_VERIFY_TIMEOUT_MS
+    ): String {
+
+        val deadline =
+            SystemClock.elapsedRealtime() +
+                timeoutMs
+
+        var latest =
+            ""
+
+        do {
+            latest =
+                currentForegroundPackage()
+
+            if (
+                latest == expectedPackage
+            ) {
+                return latest
+            }
+
+            try {
+                Thread.sleep(
+                    LIFECYCLE_VERIFY_POLL_MS
+                )
+            } catch (_: InterruptedException) {
+                break
+            }
+        } while (
+            SystemClock.elapsedRealtime() <
+            deadline &&
+            !cancelRequested &&
+            !shuttingDown
+        )
+
+        return latest
+    }
+
+    private fun waitForForegroundToLeave(
+        targetPackage: String,
+        timeoutMs: Long = LIFECYCLE_VERIFY_TIMEOUT_MS
+    ): String {
+
+        val deadline =
+            SystemClock.elapsedRealtime() +
+                timeoutMs
+
+        var latest =
+            targetPackage
+
+        do {
+            latest =
+                currentForegroundPackage()
+
+            if (
+                latest.isNotBlank() &&
+                latest != targetPackage
+            ) {
+                return latest
+            }
+
+            try {
+                Thread.sleep(
+                    LIFECYCLE_VERIFY_POLL_MS
+                )
+            } catch (_: InterruptedException) {
+                break
+            }
+        } while (
+            SystemClock.elapsedRealtime() <
+            deadline &&
+            !cancelRequested &&
+            !shuttingDown
+        )
+
+        return latest
+    }
+
+    private fun handleLocalAppLifecycleRequest(
+        action: String,
+        requestedName: String,
+        silent: Boolean
+    ) {
+
+        val commandToken =
+            activeCommandToken
+
+        commandHistoryStore.addEvent(
+            activeCommandHistoryId,
+            state = "lifecycle_intent",
+            message =
+                when (action) {
+                    "open" ->
+                        "Локальная команда открытия приложения"
+
+                    "minimize" ->
+                        "Локальная команда сворачивания приложения"
+
+                    else ->
+                        "Локальная команда закрытия приложения"
+                },
+            details =
+                "action=$action; app=${requestedName.take(160)}"
+        )
+
+        thread(
+            start = true,
+            name = "AyanaAppLifecycle"
+        ) {
+
+            val foregroundMode =
+                requestedName ==
+                    FOREGROUND_APP_SENTINEL
+
+            var label =
+                requestedName
+
+            var packageName =
+                ""
+
+            if (foregroundMode) {
+                packageName =
+                    currentForegroundPackage()
+
+                if (packageName.isBlank()) {
+                    mainHandler.post {
+                        if (
+                            commandToken == activeCommandToken &&
+                            !cancelRequested &&
+                            !shuttingDown
+                        ) {
+                            respondAndResume(
+                                "Не могу надёжно определить текущее приложение.",
+                                silent,
+                                success = false
+                            )
+                        }
+                    }
+                    return@thread
+                }
+
+                label =
+                    appLabelForPackage(
+                        packageName
+                    )
+
+                commandHistoryStore.addEvent(
+                    activeCommandHistoryId,
+                    state = "lifecycle_foreground_resolved",
+                    message = "Текущее приложение определено по свежему screen state",
+                    details =
+                        "label=${label.take(120)}; package=${packageName.take(180)}"
+                )
+            } else {
+                val resolution =
+                    try {
+                        appResolver.resolve(
+                            requestedName
+                        )
+                    } catch (_: Exception) {
+                        null
+                    }
+
+                if (
+                    resolution == null ||
+                    !resolution.success ||
+                    resolution.packageName.isBlank()
+                ) {
+                    mainHandler.post {
+                        if (
+                            commandToken == activeCommandToken &&
+                            !cancelRequested &&
+                            !shuttingDown
+                        ) {
+                            respondAndResume(
+                                "Не нашла установленное приложение $requestedName.",
+                                silent,
+                                success = false
+                            )
+                        }
+                    }
+                    return@thread
+                }
+
+                label =
+                    resolution.label
+                        .ifBlank {
+                            requestedName
+                        }
+
+                packageName =
+                    resolution.packageName
+
+                commandHistoryStore.addEvent(
+                    activeCommandHistoryId,
+                    state = "lifecycle_app_resolved",
+                    message = "Приложение определено",
+                    details =
+                        "label=${label.take(120)}; package=${packageName.take(180)}; " +
+                            "confidence=${resolution.confidence}; source=${resolution.source}"
+                )
+            }
+
+            if (
+                commandToken != activeCommandToken ||
+                cancelRequested ||
+                shuttingDown
+            ) {
+                return@thread
+            }
+
             if (action == "close") {
                 val message =
-                    "Надёжно закрыть процесс $label текущими средствами я пока не могу. " +
-                        "Команда «Домой» только свернула бы приложение, поэтому я не выдаю это за закрытие."
+                    "Надёжно закрыть $label текущими средствами Android я пока не могу. " +
+                        "Сворачивание и «Назад» не считаю закрытием."
 
                 commandHistoryStore.addEvent(
                     activeCommandHistoryId,
                     state = "lifecycle_blocked",
                     message = "Закрытие не подменено сворачиванием",
-                    details = "package=$packageName; reason=no_verified_close_executor"
+                    details =
+                        "package=$packageName; reason=no_verified_cross_app_close_executor"
                 )
 
                 mainHandler.post {
@@ -6114,29 +6687,102 @@ class AyanaVoiceService : Service() {
                         !cancelRequested &&
                         !shuttingDown
                     ) {
-                        respondAndResume(
-                            message,
-                            silent,
-                            success = false
+                        respondBlockedAndResume(
+                            text = message,
+                            silent = silent,
+                            technical =
+                                "package=$packageName; reason=no_verified_cross_app_close_executor"
                         )
                     }
                 }
                 return@thread
             }
 
-            val before =
-                try {
-                    screenIntelligence
-                        .getScreenState()
-                } catch (_: Exception) {
-                    JSONObject()
+            if (action == "open") {
+                val launchResult =
+                    try {
+                        appResolver.launch(
+                            requestedName
+                        )
+                    } catch (error: Exception) {
+                        JSONObject()
+                            .put(
+                                "success",
+                                false
+                            )
+                            .put(
+                                "message",
+                                error.message
+                                    ?: "Ошибка запуска приложения"
+                            )
+                    }
+
+                val afterPackage =
+                    if (
+                        launchResult.optBoolean(
+                            "success",
+                            false
+                        )
+                    ) {
+                        waitForForegroundPackage(
+                            packageName
+                        )
+                    } else {
+                        currentForegroundPackage()
+                    }
+
+                val verified =
+                    launchResult.optBoolean(
+                        "success",
+                        false
+                    ) &&
+                        afterPackage == packageName
+
+                commandHistoryStore.addEvent(
+                    activeCommandHistoryId,
+                    state =
+                        if (verified) {
+                            "lifecycle_verified"
+                        } else {
+                            "lifecycle_unverified"
+                        },
+                    message =
+                        if (verified) {
+                            "Открытие подтверждено по свежему foreground package"
+                        } else {
+                            "Открытие не удалось надёжно подтвердить"
+                        },
+                    details =
+                        "action=open; target=$packageName; after=$afterPackage; " +
+                            "launch_success=${launchResult.optBoolean("success", false)}"
+                )
+
+                mainHandler.post {
+                    if (
+                        commandToken == activeCommandToken &&
+                        !cancelRequested &&
+                        !shuttingDown
+                    ) {
+                        if (verified) {
+                            respondAndResume(
+                                "Открываю $label.",
+                                silent,
+                                success = true
+                            )
+                        } else {
+                            respondAndResume(
+                                "Запуск $label не удалось надёжно подтвердить.",
+                                silent,
+                                success = false
+                            )
+                        }
+                    }
                 }
+                return@thread
+            }
 
             val beforePackage =
-                before.optString(
-                    "package"
-                )
-                    .trim()
+                currentForegroundPackage()
 
             if (beforePackage.isBlank()) {
                 mainHandler.post {
@@ -6146,7 +6792,7 @@ class AyanaVoiceService : Service() {
                         !shuttingDown
                     ) {
                         respondAndResume(
-                            "Не могу надёжно подтвердить, что $label сейчас на переднем плане, поэтому ничего не сворачиваю вслепую.",
+                            "Не могу надёжно определить приложение на переднем плане, поэтому ничего не сворачиваю вслепую.",
                             silent,
                             success = false
                         )
@@ -6155,12 +6801,16 @@ class AyanaVoiceService : Service() {
                 return@thread
             }
 
-            if (beforePackage != packageName) {
+            if (
+                !foregroundMode &&
+                beforePackage != packageName
+            ) {
                 commandHistoryStore.addEvent(
                     activeCommandHistoryId,
                     state = "lifecycle_verified",
                     message = "Целевое приложение уже не на переднем плане",
-                    details = "target=$packageName; foreground=$beforePackage"
+                    details =
+                        "target=$packageName; foreground=$beforePackage"
                 )
 
                 mainHandler.post {
@@ -6179,11 +6829,35 @@ class AyanaVoiceService : Service() {
                 return@thread
             }
 
+            if (foregroundMode) {
+                packageName =
+                    beforePackage
+                label =
+                    appLabelForPackage(
+                        packageName
+                    )
+            }
+
+            val homePackage =
+                defaultHomePackage()
+
             if (
-                commandToken != activeCommandToken ||
-                cancelRequested ||
-                shuttingDown
+                homePackage.isNotBlank() &&
+                packageName == homePackage
             ) {
+                mainHandler.post {
+                    if (
+                        commandToken == activeCommandToken &&
+                        !cancelRequested &&
+                        !shuttingDown
+                    ) {
+                        respondAndResume(
+                            "Уже открыт главный экран.",
+                            silent,
+                            success = true
+                        )
+                    }
+                }
                 return@thread
             }
 
@@ -6199,23 +6873,13 @@ class AyanaVoiceService : Service() {
                         )
                 }
 
-            val after =
-                homeResult
-                    .optJSONObject(
-                        "screen"
-                    )
-                    ?: try {
-                        screenIntelligence
-                            .getScreenState()
-                    } catch (_: Exception) {
-                        JSONObject()
-                    }
-
+            // v11.5 intentionally ignores an embedded post-action snapshot as final
+            // proof. Poll a fresh Screen Intelligence state until the target leaves
+            // foreground or the bounded verification deadline expires.
             val afterPackage =
-                after.optString(
-                    "package"
+                waitForForegroundToLeave(
+                    packageName
                 )
-                    .trim()
 
             val verified =
                 homeResult.optBoolean(
@@ -6235,7 +6899,7 @@ class AyanaVoiceService : Service() {
                     },
                 message =
                     if (verified) {
-                        "Сворачивание подтверждено по foreground package"
+                        "Сворачивание подтверждено свежим foreground state"
                     } else {
                         "Сворачивание не удалось надёжно подтвердить"
                     },
@@ -6258,7 +6922,7 @@ class AyanaVoiceService : Service() {
                         )
                     } else {
                         respondAndResume(
-                            "Команда «Домой» выполнена не была или результат сворачивания $label не удалось надёжно подтвердить.",
+                            "Результат сворачивания $label не удалось надёжно подтвердить.",
                             silent,
                             success = false
                         )
@@ -8049,14 +8713,18 @@ class AyanaVoiceService : Service() {
     private fun respondAndResume(
         text: String,
         silent: Boolean,
-        success: Boolean = true
+        success: Boolean = true,
+        terminalStatus: String? = null,
+        technical: String = ""
     ) {
 
         if (silent) {
 
             finishActiveCommandHistory(
                 success = success,
-                result = text
+                result = text,
+                technical = technical,
+                terminalStatus = terminalStatus
             )
 
             showTextAndResume(text)
@@ -8068,9 +8736,26 @@ class AyanaVoiceService : Service() {
             // command as CANCELLED instead of losing activeCommandHistoryId.
             speakAndResume(
                 text = text,
-                historySuccess = success
+                historySuccess = success,
+                historyTerminalStatus = terminalStatus,
+                historyTechnical = technical
             )
         }
+    }
+
+    private fun respondBlockedAndResume(
+        text: String,
+        silent: Boolean,
+        technical: String = ""
+    ) {
+        respondAndResume(
+            text = text,
+            silent = silent,
+            success = false,
+            terminalStatus =
+                AyanaCommandHistoryStore.STATUS_BLOCKED,
+            technical = technical
+        )
     }
 
     private fun showTextAndResume(
@@ -16119,13 +16804,17 @@ class AyanaVoiceService : Service() {
 
     private fun speakAndResume(
         text: String,
-        historySuccess: Boolean
+        historySuccess: Boolean,
+        historyTerminalStatus: String? = null,
+        historyTechnical: String = ""
     ) {
 
         if (text.isBlank()) {
             finishActiveCommandHistory(
                 success = historySuccess,
-                result = text
+                result = text,
+                technical = historyTechnical,
+                terminalStatus = historyTerminalStatus
             )
 
             startFollowUpOrWake()
@@ -16187,7 +16876,9 @@ class AyanaVoiceService : Service() {
             streamTtsPcmAndPlay(
                 text = text,
                 token = token,
-                historySuccess = historySuccess
+                historySuccess = historySuccess,
+                historyTerminalStatus = historyTerminalStatus,
+                historyTechnical = historyTechnical
             )
         }
     }
@@ -16195,7 +16886,9 @@ class AyanaVoiceService : Service() {
     private fun streamTtsPcmAndPlay(
         text: String,
         token: Long,
-        historySuccess: Boolean
+        historySuccess: Boolean,
+        historyTerminalStatus: String? = null,
+        historyTechnical: String = ""
     ) {
 
         var connection:
@@ -16657,7 +17350,9 @@ class AyanaVoiceService : Service() {
                 ) {
                     finishActiveCommandHistory(
                         success = historySuccess,
-                        result = text
+                        result = text,
+                        technical = historyTechnical,
+                        terminalStatus = historyTerminalStatus
                     )
 
                     startFollowUpOrWake()
@@ -17208,15 +17903,29 @@ class AyanaVoiceService : Service() {
     private fun finishActiveCommandHistory(
         success: Boolean,
         result: String,
-        technical: String = ""
+        technical: String = "",
+        terminalStatus: String? = null
     ) {
         val id = activeCommandHistoryId ?: return
-        commandHistoryStore.finish(
-            id = id,
-            success = success,
-            result = result,
-            technical = technical
-        )
+
+        if (
+            terminalStatus ==
+            AyanaCommandHistoryStore.STATUS_BLOCKED
+        ) {
+            commandHistoryStore.finishBlocked(
+                id = id,
+                result = result,
+                technical = technical
+            )
+        } else {
+            commandHistoryStore.finish(
+                id = id,
+                success = success,
+                result = result,
+                technical = technical
+            )
+        }
+
         activeCommandHistoryId = null
     }
 
@@ -18381,6 +19090,99 @@ class AyanaVoiceService : Service() {
         private const val FOLLOW_UP_WINDOW_MS =
             8000L
 
+        // v11.5 app execution router. The context TTL deliberately outlives one
+        // Marin clarification response so the user's short follow-up remains local.
+        private const val LIFECYCLE_CONTEXT_TTL_MS =
+            30000L
+
+        private const val LIFECYCLE_VERIFY_TIMEOUT_MS =
+            2200L
+
+        private const val LIFECYCLE_VERIFY_POLL_MS =
+            60L
+
+        private const val FOREGROUND_APP_SENTINEL =
+            "__ayana_foreground_app__"
+
+        private val LIFECYCLE_INVALID_TARGETS =
+            setOf(
+                "все",
+                "все окна",
+                "все приложения",
+                "окно",
+                "приложение"
+            )
+
+        private val LIFECYCLE_INVALID_CLOSE_TARGETS =
+            LIFECYCLE_INVALID_TARGETS +
+                setOf(
+                    "аяна",
+                    "аяну",
+                    "айана",
+                    "айану",
+                    "ayana"
+                )
+
+        private val LIFECYCLE_NON_APP_OPEN_TARGETS =
+            setOf(
+                "настройки",
+                "wifi",
+                "wi-fi",
+                "вай фай",
+                "bluetooth",
+                "блютуз",
+                "уведомления",
+                "быстрые настройки",
+                "панель уведомлений",
+                "главный экран",
+                "домой"
+            )
+
+        private val LIFECYCLE_OPEN_DELEGATE_MARKERS =
+            listOf(
+                "настрой",
+                "уведом",
+                "разреш",
+                "информац",
+                "батаре",
+                "хранилищ",
+                "мобильн",
+                "поиск",
+                "найди",
+                "поищи",
+                "ищи",
+                "сайт",
+                "ссылк",
+                "страниц",
+                "картин",
+                "фото "
+            )
+
+        private val LIFECYCLE_CLARIFICATION_EXCLUSION_MARKERS =
+            listOf(
+                "открой",
+                "запусти",
+                "включи",
+                "сверни",
+                "закрой",
+                "заверши",
+                "найди",
+                "ищи",
+                "поищи",
+                "поиск",
+                "настрой",
+                "уведом",
+                "разреш",
+                "информац",
+                "покажи",
+                "перейди",
+                "зайди",
+                "нажми",
+                "выбери",
+                "музык",
+                "видео"
+            )
+
         const val STATE_LISTENING =
             "listening"
 
@@ -18404,6 +19206,9 @@ class AyanaVoiceService : Service() {
 
         const val STATE_ERROR =
             "error"
+
+        const val STATE_BLOCKED =
+            "blocked"
 
         const val STATE_CANCELLED =
             "cancelled"
