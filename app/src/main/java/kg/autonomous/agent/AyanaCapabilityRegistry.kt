@@ -10,7 +10,7 @@ import org.json.JSONArray
 import org.json.JSONObject
 
 /**
- * AYANA Device Capability Registry v2.0 — CAPABILITY TRUTH.
+ * AYANA Device Capability Registry v2.2 — MULTIMODAL DEVICE-CONFIRMED TRUTH.
  *
  * Single machine-readable source of truth for:
  * 1) what this build implements;
@@ -826,8 +826,8 @@ class AyanaCapabilityRegistry(
             "image_upload_to_ayana",
             implemented = true,
             available = true,
-            deviceConfirmed = false,
-            note = "v11.6 text-mode private-cache attachment transport; requires device acceptance"
+            deviceConfirmed = true,
+            note = "device-confirmed on target tablet: v11.6+ text-mode private-cache image attachment transport"
         )
 
         capability(
@@ -835,8 +835,8 @@ class AyanaCapabilityRegistry(
             "video_upload_to_ayana",
             implemented = true,
             available = true,
-            deviceConfirmed = false,
-            note = "v11.6 accepts a selected video locally and sends only bounded sampled visual frames"
+            deviceConfirmed = true,
+            note = "device-confirmed on target tablet: selected video is converted to bounded sampled visual frames"
         )
 
         capability(
@@ -844,8 +844,8 @@ class AyanaCapabilityRegistry(
             "image_vision_analysis",
             implemented = true,
             available = true,
-            deviceConfirmed = false,
-            note = "v11.6 Responses API image input through dedicated multimodal endpoint; requires device acceptance"
+            deviceConfirmed = true,
+            note = "device-confirmed on target tablet through dedicated Responses multimodal endpoint"
         )
 
         capability(
@@ -853,8 +853,8 @@ class AyanaCapabilityRegistry(
             "video_analysis",
             implemented = true,
             available = true,
-            deviceConfirmed = false,
-            note = "visual sampled-frame analysis only; video audio track is not analyzed in v11.6"
+            deviceConfirmed = true,
+            note = "device-confirmed visual sampled-frame analysis only; video audio track is not analyzed"
         )
 
         capability(
@@ -871,8 +871,8 @@ class AyanaCapabilityRegistry(
             "document_understanding",
             implemented = true,
             available = true,
-            deviceConfirmed = false,
-            note = "v11.6 supported document/file input through dedicated multimodal endpoint; 8 MB Android staging cap"
+            deviceConfirmed = true,
+            note = "device-confirmed on target tablet for PDF/DOCX; supported file input uses dedicated multimodal endpoint with 8 MB Android staging cap"
         )
 
         capability(
@@ -965,7 +965,7 @@ class AyanaCapabilityRegistry(
             )
 
             append(
-                "Multimodal v11.6 is implemented but not device-confirmed: private-cache photo/document intake; video is sampled visual frames only, no audio. Never inherit other generic ChatGPT abilities. "
+                "Multimodal intake is device-confirmed on the target tablet for image, PDF/DOCX and sampled-frame visual video analysis; video audio remains unavailable. Never inherit other generic ChatGPT abilities. "
             )
 
             append(
