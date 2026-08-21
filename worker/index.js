@@ -731,11 +731,11 @@ Screen Intelligence / Perception Contract v2:
 `.trim();
 
 const AYANA_CURRENT_CAPABILITIES = `
-КАРТА ФАКТИЧЕСКОГО СОСТОЯНИЯ AYANA — v11.6 MULTIMODAL INTAKE поверх PERCEPTION / EXECUTION INTEGRITY.
+КАРТА ФАКТИЧЕСКОГО СОСТОЯНИЯ AYANA — v11.7 MULTIMODAL ROUTING + GROUNDED FOLLOW-UP поверх PERCEPTION / EXECUTION INTEGRITY.
 Свежий Android AGENT INTELLIGENCE CONTEXT всегда имеет приоритет над этой статической картой.
 
 КРИТИЧЕСКАЯ CAPABILITY TRUTH:
-- v11.6 добавляет attachment transport в существующий текстовый режим: фото, поддерживаемые документы и видео;
+- v11.6 добавил attachment transport в существующий текстовый режим: фото, поддерживаемые документы и видео; v11.7 связывает успешный multimodal response_id с последующим Agent Core turn и защищает local Android routing от hijack вложением;
 - фото анализируется через image input; документы через file input; видео — только по ограниченной выборке кадров, БЕЗ анализа звуковой дорожки;
 - AYANA пока НЕ умеет самостоятельно измерить и вернуть подтверждённый Mbps; она может только открыть FAST.com;
 - Google Images route реализован отдельно от обычного Google-поиска;
@@ -766,7 +766,7 @@ DEVICE-CONFIRMED БАЗА:
 - локальные fast-path ответы для простых подтверждений; русский display-name для внутренних Android section keys;
 - UI/ORB остаются отдельным стабильным слоем; функциональный v11.3 не должен откатывать подтверждённые исправления плавности ввода и continuous-phase Orb.
 
-- Capability Truth v2.1: v11.6 image/file intake реализован; video analysis ограничен sampled visual frames без audio; до device-теста эти функции не называются device-confirmed;
+- Capability Truth v2.2: image/PDF/DOCX и sampled-frame video visual intake подтверждены device-тестами на целевом планшете; video audio analysis по-прежнему отсутствует;
 - быстрые локальные маршруты: Google Images, FAST.com, простые подтверждения и calculator без лишнего Planner;
 - Worker Grounding v10: self-awareness обязан опираться на runtime/last-error/external-screen evidence, а не на общие способности модели.
 
@@ -918,7 +918,9 @@ const AYANA_VOICE_STYLE = `
 
 const AYANA_TEXT_STYLE = `
 РЕЖИМ ОТВЕТА: ТЕКСТ.
-По умолчанию отвечай компактно: обычно до 6 пунктов. Не раздувай простой вопрос в длинный обзор. Если пользователь явно просит подробно/глубоко/тщательно — дай полный ответ.
+По умолчанию отвечай компактно: обычно до 6 пунктов. Не раздувай простой вопрос в длинный обзор.
+Если пользователь явно просит подробно, глубоко, тщательно, полный/весь список, все пункты или все направления — дай полный ответ.
+Для исчерпывающего списка сначала выдай ВСЕ верхнеуровневые пункты компактно и только потом раскрывай детали. Не объявляй число N, если в ответе фактически нет всех N пунктов.
 `.trim();
 
 const ANDROID_GOAL_V7_INSTRUCTIONS = `
@@ -970,7 +972,10 @@ function normalizeIntentText(message = "") {
 
 function isDeepRequest(message = "") {
   const n = normalizeIntentText(message);
-  return /(подробн|глубок|тщательн|детальн|развернут|полный анализ|проанализируй|сравни|исследуй|пошагов)/.test(n);
+  const explicitDepth = /(подробн|глубок|тщательн|детальн|развернут|полный анализ|проанализируй|сравни|исследуй|пошагов)/.test(n);
+  const exhaustiveList = /(полный|полностью|весь|всю|все)\s+(?:список|перечень|план|отчет|обзор|направлен|пункт|этап|шаг|возможност|требован)/.test(n)
+    || /(?:все|весь)\s+(?:основн\w*\s+)?(?:направлен|пункт|этап|шаг|возможност|требован)/.test(n);
+  return explicitDepth || exhaustiveList;
 }
 
 function isAyanaSelfReviewRequest(message = "") {
@@ -1208,7 +1213,7 @@ async function handleMultimodal(request, env) {
     `.trim(),
     input: [{ role: "user", content }],
     max_output_tokens: 1400,
-    store: false
+    store: true
   };
 
   const result = await callOpenAI(env, payload);
@@ -1228,6 +1233,7 @@ async function handleMultimodal(request, env) {
     ok: true,
     kind,
     display_name: displayName,
+    response_id: String(result.data?.id || ""),
     reply
   });
 }
@@ -1389,7 +1395,7 @@ ${styleInstructions}${productInstructions}${scopeInstructions}${recoveryInstruct
       : durableRecoveryMode
         ? (source === "voice" ? 420 : 520)
       : deepRequest
-        ? (source === "voice" ? 650 : 1600)
+        ? (source === "voice" ? 650 : 2200)
         : source === "voice"
           ? 420
           : selfAutonomyMode
@@ -1648,7 +1654,7 @@ export default {
         ok: true,
         service: "AYANA AI",
         ai: "ready",
-        agent_core: "v10.3-multimodal-intake",
+        agent_core: "v10.4-multimodal-grounded-context",
         voice: "marin"
       });
     }
