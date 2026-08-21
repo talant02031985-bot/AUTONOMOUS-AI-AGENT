@@ -824,46 +824,55 @@ class AyanaCapabilityRegistry(
         capability(
             capabilities,
             "image_upload_to_ayana",
-            implemented = false,
-            available = false,
+            implemented = true,
+            available = true,
             deviceConfirmed = false,
-            note = "no photo attachment control exists in current AYANA chat UI"
+            note = "v11.6 text-mode private-cache attachment transport; requires device acceptance"
         )
 
         capability(
             capabilities,
             "video_upload_to_ayana",
-            implemented = false,
-            available = false,
+            implemented = true,
+            available = true,
             deviceConfirmed = false,
-            note = "no video attachment control exists in current AYANA chat UI"
+            note = "v11.6 accepts a selected video locally and sends only bounded sampled visual frames"
         )
 
         capability(
             capabilities,
             "image_vision_analysis",
-            implemented = false,
-            available = false,
+            implemented = true,
+            available = true,
             deviceConfirmed = false,
-            note = "planned Vision layer; do not claim current photo/screenshot understanding"
+            note = "v11.6 Responses API image input through dedicated multimodal endpoint; requires device acceptance"
         )
 
         capability(
             capabilities,
             "video_analysis",
+            implemented = true,
+            available = true,
+            deviceConfirmed = false,
+            note = "visual sampled-frame analysis only; video audio track is not analyzed in v11.6"
+        )
+
+        capability(
+            capabilities,
+            "video_audio_analysis",
             implemented = false,
             available = false,
             deviceConfirmed = false,
-            note = "not implemented"
+            note = "v11.6 does not transcribe or analyze the video's audio track"
         )
 
         capability(
             capabilities,
             "document_understanding",
-            implemented = false,
-            available = false,
+            implemented = true,
+            available = true,
             deviceConfirmed = false,
-            note = "planned after perception stabilization"
+            note = "v11.6 supported document/file input through dedicated multimodal endpoint; 8 MB Android staging cap"
         )
 
         capability(
@@ -944,11 +953,11 @@ class AyanaCapabilityRegistry(
             )
 
             append(
-                "image_upload=false; video_upload=false; image_vision=false; video_analysis=false; "
+                "image_upload=true; video_upload=true; image_vision=true; video_analysis=visual_sampled_frames; video_audio_analysis=false; "
             )
 
             append(
-                "document_understanding=false; external_mail_calendar_files=false; offline_llm=false; broad_proactivity=false; "
+                "document_understanding=true; external_mail_calendar_files=false; offline_llm=false; broad_proactivity=false; "
             )
 
             append(
@@ -956,7 +965,7 @@ class AyanaCapabilityRegistry(
             )
 
             append(
-                "Never inherit generic ChatGPT attachment/vision abilities. "
+                "Multimodal v11.6 is implemented but not device-confirmed: private-cache photo/document intake; video is sampled visual frames only, no audio. Never inherit other generic ChatGPT abilities. "
             )
 
             append(
@@ -1225,7 +1234,7 @@ class AyanaCapabilityRegistry(
     companion object {
 
         const val BUILD_LABEL =
-            "AYANA v11.3 PERCEPTION, TRUTH & AUTONOMY CORE"
+            "v11.6_multimodal_intake"
 
         private const val PREFS_NAME =
             "ayana_capability_runtime_v11"
