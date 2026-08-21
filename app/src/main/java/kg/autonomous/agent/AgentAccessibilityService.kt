@@ -20,8 +20,8 @@ import kotlin.math.max
 class AgentAccessibilityService :
     AccessibilityService() {
 
-    // AYANA Accessibility v5.2 — ON-DEMAND SETTINGS EVIDENCE + HOT PATH INTEGRITY.
-    // Every visible Android window is an independent context. Normal accessibility
+    // AYANA Accessibility v5.3 — SEMANTIC SETTINGS SURFACE + EVIDENCE FUSION.
+    // Every visible Android window is an independent context. v5.3 adds generic same-window semantic surface classification for Settings without app-specific rules. Normal accessibility
     // events stay lightweight. Samsung/Android Settings is the one bounded exception:
     // sparse Settings roots can hide visible App Info / Notifications / Permissions
     // content from normal window snapshots, so v5.1 captures a throttled descendant
@@ -1184,6 +1184,22 @@ class AgentAccessibilityService :
                     )
                     .put("failure_reason", contextFailureReason)
                     .put("verification_text", contextVerificationText)
+                    .put(
+                        "semantic_surface",
+                        settingsSemanticSurface(
+                            packageName = context.packageName,
+                            title = context.title,
+                            verificationText = contextVerificationText
+                        )
+                    )
+                    .put(
+                        "semantic_surface_confidence",
+                        settingsSemanticConfidence(
+                            packageName = context.packageName,
+                            title = context.title,
+                            verificationText = contextVerificationText
+                        )
+                    )
                     .put("visible_text", visibleArray)
             )
 
@@ -4004,6 +4020,74 @@ class AgentAccessibilityService :
     private var lastRootSource:
         String =
         "unavailable"
+
+    private fun settingsSemanticSurface(
+        packageName: String,
+        title: String,
+        verificationText: String
+    ): String {
+        if (packageName != SETTINGS_PACKAGE) return ""
+
+        val n = normalize("$title | $verificationText")
+        val titleN = normalize(title)
+
+        return when {
+            titleN.contains("уведом") || titleN.contains("notification") ||
+                n.contains("категории уведом") || n.contains("notification categories") ->
+                "app_notifications"
+
+            titleN.contains("разреш") || titleN.contains("permission") ||
+                n.contains("разрешено") || n.contains("не разрешено") ->
+                "app_permissions"
+
+            titleN.contains("батар") || titleN.contains("аккумуля") || titleN.contains("battery") ->
+                "app_battery"
+
+            titleN.contains("хранили") || titleN.contains("память") || titleN.contains("storage") ->
+                "app_storage"
+
+            titleN.contains("по умолч") || titleN.contains("open by default") ||
+                titleN.contains("открытие ссыл") ->
+                "app_defaults"
+
+            titleN.contains("информация о прилож") || titleN.contains("сведения о прилож") ||
+                titleN.contains("app info") ->
+                "app_info"
+
+            // Samsung may expose a sparse App Info root without the app label or
+            // title but still exposes the stable action cluster from the SAME
+            // Settings window. This is structural evidence only; target identity
+            // must come from a separate exact intent attestation in VoiceService.
+            hasAppInfoActionCluster(n) ->
+                "app_info_structure"
+
+            else -> "settings_unknown"
+        }
+    }
+
+    private fun settingsSemanticConfidence(
+        packageName: String,
+        title: String,
+        verificationText: String
+    ): Int {
+        if (packageName != SETTINGS_PACKAGE) return 0
+        val surface = settingsSemanticSurface(packageName, title, verificationText)
+        return when (surface) {
+            "app_notifications", "app_permissions", "app_battery", "app_storage",
+            "app_defaults", "app_info" -> 90
+            "app_info_structure" -> 72
+            "settings_unknown" -> 35
+            else -> 0
+        }
+    }
+
+    private fun hasAppInfoActionCluster(normalized: String): Boolean {
+        val hasOpen = normalized.contains("открыть") || normalized.contains("open") ||
+            normalized.contains("включить") || normalized.contains("enable")
+        val hasStop = normalized.contains("остановить") || normalized.contains("force stop") ||
+            normalized.contains("принудительно останов")
+        return hasOpen && hasStop
+    }
 
     companion object {
 
