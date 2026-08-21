@@ -5,7 +5,7 @@ import org.json.JSONObject
 import java.util.Locale
 
 /**
- * AYANA Planner v2.0.
+ * AYANA Planner v2.1 — lifecycle terminal integrity.
  *
  * A deterministic planning envelope above Agent Core. It does not click the UI
  * and does not replace the verified Android Goal Compiler. Its job is to keep
@@ -58,7 +58,7 @@ class AyanaAgentPlanner(
             ?: JSONObject()
 
         return JSONObject()
-            .put("planner_version", "2.0")
+            .put("planner_version", "2.1")
             .put("objective", clean.take(MAX_OBJECTIVE_CHARS))
             .put("domain", domain)
             .put("complexity", complexity)
@@ -107,7 +107,7 @@ class AyanaAgentPlanner(
             }
 
         return buildString {
-            append("LOCAL PLANNER v2: domain=")
+            append("LOCAL PLANNER v2.1: domain=")
             append(envelope.optString("domain"))
             append("; complexity=")
             append(envelope.optString("complexity"))
@@ -168,7 +168,7 @@ class AyanaAgentPlanner(
 
     private fun inferDomain(normalized: String): String =
         when {
-            Regex("(открой|запусти|перейди|нажми|выбери|прокрут|настройк|разрешен|уведомлен)").containsMatchIn(normalized) ->
+            Regex("(открой|запусти|перейди|нажми|выбери|прокрут|настройк|разрешен|уведомлен|закрой|сверни|домой|назад|убери .*с экрана)").containsMatchIn(normalized) ->
                 "android_action"
             Regex("(запомни|помни|вспомни|забудь|памят)").containsMatchIn(normalized) ->
                 "memory"
@@ -191,6 +191,14 @@ class AyanaAgentPlanner(
                 "self_diagnostics" -> "Диагностика возвращает наблюдаемые runtime-проверки"
                 else -> "Пользователь получил ответ на исходную цель"
             }
+        }
+
+        if (isAppCloseLifecycle(normalized)) {
+            return "Закрытие приложения подтверждено отдельным lifecycle/close evidence; Home/Back не считаются закрытием процесса"
+        }
+
+        if (isAppMinimizeLifecycle(normalized)) {
+            return "Свежий Android state подтверждает, что целевое приложение больше не foreground"
         }
 
         val markers = listOf(
@@ -220,6 +228,7 @@ class AyanaAgentPlanner(
         normalized: String
     ): String {
         val patterns = listOf(
+            Regex("(?i)(?:полностью\\s+закрой|закрой|сверни|заверши\\s+приложение)(?:\\s+приложение)?\\s+([\\p{L}\\p{N} ._-]{2,60})"),
             Regex("(?i)(?:открой|запусти|включи)(?:\\s+приложение)?\\s+([\\p{L}\\p{N} ._-]{2,60})"),
             Regex("(?i)(?:настройки|информация|уведомления|разрешения)\\s+(?:приложения\\s+)?([\\p{L}\\p{N} ._-]{2,60})")
         )
@@ -231,6 +240,19 @@ class AyanaAgentPlanner(
                 .trim(' ', ',', '.', ';', ':', '-')
             if (
                 candidate.isNotBlank() &&
+                !listOf(
+                    "все",
+                    "окно",
+                    "вкладк",
+                    "диалог",
+                    "меню",
+                    "клавиатур",
+                    "аяну",
+                    "айану",
+                    "ayana"
+                ).any { prefix ->
+                    normalize(candidate).startsWith(prefix)
+                } &&
                 !candidate.equals("настройки", ignoreCase = true) &&
                 !candidate.equals("специальные возможности", ignoreCase = true)
             ) {
@@ -249,10 +271,58 @@ class AyanaAgentPlanner(
                 "prohibited_or_sensitive"
             Regex("(удали|отправь|купи|оплати|переведи деньги|подтверди покуп)").containsMatchIn(normalized) ->
                 "high"
-            Regex("(введи|нажми|выбери|измени|включи|выключи)").containsMatchIn(normalized) ->
+            Regex("(введи|нажми|выбери|измени|включи|выключи|закрой|сверни)").containsMatchIn(normalized) ->
                 "action"
             else -> "low"
         }
+
+    private fun isAppCloseLifecycle(
+        normalized: String
+    ): Boolean {
+        val excluded =
+            listOf(
+                "закрой все",
+                "закрой окно",
+                "закрой вкладк",
+                "закрой диалог",
+                "закрой меню",
+                "закрой клавиатур",
+                "закрой аяну",
+                "закрой айану",
+                "закрой ayana",
+                "полностью закрой все",
+                "полностью закрой окно"
+            )
+
+        if (excluded.any { normalized.startsWith(it) }) {
+            return false
+        }
+
+        return Regex("^(?:полностью )?закрой(?: приложение)?\\s+.+")
+            .containsMatchIn(
+                normalized
+            ) ||
+            Regex("^заверши приложение\\s+.+")
+                .containsMatchIn(
+                    normalized
+                )
+    }
+
+    private fun isAppMinimizeLifecycle(
+        normalized: String
+    ): Boolean {
+        if (
+            normalized.startsWith("сверни все") ||
+            normalized.startsWith("сверни окно")
+        ) {
+            return false
+        }
+
+        return Regex("^сверни(?: приложение)?\\s+.+")
+            .containsMatchIn(
+                normalized
+            )
+    }
 
     private fun isLikelyMultiStep(normalized: String): Boolean {
         val verbs = listOf("открой", "перейди", "найди", "нажми", "выбери", "прокрути")
