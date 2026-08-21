@@ -55,9 +55,11 @@ import kotlin.math.abs
 
 class AyanaVoiceService : Service() {
 
-    // AYANA v11.6 MULTIMODAL INTAKE.
-    // v11.5 execution-router integrity is preserved unchanged; v11.6 adds a bounded
-    // text-mode attachment transport for images, supported documents and sampled video frames.
+    // AYANA v11.7 MULTIMODAL ROUTING + GROUNDED FOLLOW-UP.
+    // v11.5 execution-router integrity is preserved. v11.6 attachment intake remains,
+    // while v11.7 prevents attachments from hijacking deterministic device commands
+    // and links successful multimodal turns into Responses conversation state for
+    // grounded follow-up questions.
     // App open/minimize/close now share one deterministic local lifecycle router,
     // short follow-ups retain local app context, and terminal verification is fresh-state based.
     // Voice capture / Marin PCM / STOP acoustics remain inherited from v11.4.
@@ -5425,6 +5427,14 @@ class AyanaVoiceService : Service() {
                 append(window.optBoolean("focused", false))
                 append(" evidence_age=")
                 append(window.optLong("evidence_age_ms", -1L))
+                append(" content=")
+                append(window.optString("content_state"))
+                append(" live=")
+                append(window.optInt("live_readable_text_count", 0))
+                append(" evidence=")
+                append(window.optInt("evidence_readable_text_count", 0))
+                append(" acq=")
+                append(window.optString("acquisition_source"))
                 append(" text=")
                 append(
                     window.optJSONArray("visible_text")
@@ -8129,7 +8139,18 @@ class AyanaVoiceService : Service() {
                     "анализ"
                 )
 
+        val topicCount =
+            listOf(
+                hasPhoto,
+                hasVideo,
+                hasDocument
+            ).count { it }
+
         return when {
+            topicCount >= 2 &&
+                (asksUpload || asksAnalysis) ->
+                "Да. В текстовом режиме AYANA можно прикреплять фото, поддерживаемые документы/файлы и видео. Фото анализируются визуально, документы — как файловый ввод модели, а видео — по ограниченной выборке визуальных кадров. Звуковую дорожку видео текущая версия пока не анализирует."
+
             hasDocument &&
                 asksUpload ->
                 "Да. В текстовом режиме AYANA можно прикрепить PDF, текстовые и кодовые файлы, Word/ODT/RTF, PowerPoint и таблицы Excel/CSV. Файл проходит проверку типа и размера перед отправкой на анализ."
@@ -8137,16 +8158,6 @@ class AyanaVoiceService : Service() {
             hasDocument &&
                 asksAnalysis ->
                 "Да. Я могу анализировать поддерживаемые документы и файлы, которые вы прикрепите в текстовом режиме AYANA. Для PDF учитываются текст и страницы, для обычных документов — извлечённый текст, для таблиц — файловая обработка модели."
-
-            hasPhoto &&
-                hasVideo &&
-                asksUpload ->
-                "Да. В текстовом режиме AYANA можно прикрепить фото, поддерживаемый файл или видео. Фото анализируется напрямую, документы — как файловый ввод, а видео — по ограниченной выборке кадров без анализа звуковой дорожки."
-
-            hasPhoto &&
-                hasVideo &&
-                asksAnalysis ->
-                "Да. Фото я анализирую напрямую. Видео в текущем мультимодальном режиме анализирую визуально по выборке кадров; звуковую дорожку видео пока не анализирую."
 
             hasVideo &&
                 asksUpload ->
@@ -12929,16 +12940,15 @@ class AyanaVoiceService : Service() {
         activeCommandToken = ++commandGeneration
         val commandToken = activeCommandToken
 
-        activeCommandHistoryId =
-            commandHistoryStore.begin(
-                command = "$prompt [мультимодальное вложение]",
-                source = "text"
-            )
-
         val manifest =
             try {
                 JSONObject(manifestText)
             } catch (_: Exception) {
+                activeCommandHistoryId =
+                    commandHistoryStore.begin(
+                        command = "$prompt [мультимодальное вложение]",
+                        source = "text"
+                    )
                 respondAndResume(
                     "Вложение повреждено или уже недоступно.",
                     silent = true,
@@ -12947,6 +12957,41 @@ class AyanaVoiceService : Service() {
                 )
                 return
             }
+
+        // Defense in depth: MainActivity normally keeps an attachment pending when
+        // the typed command is clearly a deterministic Android/local command. If a
+        // malformed/old client still sends such a command through the multimodal
+        // action, never let the attachment bypass AYANA's execution router.
+        if (
+            !AyanaMultimodalAttachmentManager
+                .shouldUseAttachmentForCommand(
+                    prompt
+                )
+        ) {
+            try {
+                AyanaMultimodalAttachmentManager(applicationContext)
+                    .cleanupPrepared(manifest)
+            } catch (_: Exception) {
+            }
+            executeCommand(
+                originalCommand = prompt,
+                silent = true
+            )
+            return
+        }
+
+        // A newly attached artifact starts a fresh grounded multimodal context.
+        // On success the Worker returns a Responses response_id which becomes the
+        // next Agent Core previous_response_id. On failure/cancel we intentionally
+        // keep this null rather than leaking context from an older attachment.
+        agentPreviousResponseId =
+            null
+
+        activeCommandHistoryId =
+            commandHistoryStore.begin(
+                command = "$prompt [мультимодальное вложение]",
+                source = "text"
+            )
 
         val displayName =
             manifest.optString("display_name", "вложение")
@@ -12992,6 +13037,9 @@ class AyanaVoiceService : Service() {
                     }
 
                     val success = result.optBoolean("success", false)
+                    val responseId =
+                        result.optString("response_id")
+                            .trim()
                     val reply = result.optString(
                         "reply",
                         if (success) {
@@ -13007,6 +13055,22 @@ class AyanaVoiceService : Service() {
                             !shuttingDown &&
                             commandToken == activeCommandToken
                         ) {
+                            agentPreviousResponseId =
+                                if (success && responseId.isNotBlank()) {
+                                    responseId
+                                } else {
+                                    null
+                                }
+
+                            if (success && responseId.isNotBlank()) {
+                                commandHistoryStore.addEvent(
+                                    activeCommandHistoryId,
+                                    state = "multimodal_context_linked",
+                                    message = "Мультимодальный контекст сохранён для следующего вопроса",
+                                    details = "response_id=${responseId.take(120)}"
+                                )
+                            }
+
                             respondAndResume(
                                 reply.ifBlank {
                                     if (success) "Анализ завершён." else "Не удалось проанализировать вложение."
@@ -13147,6 +13211,7 @@ class AyanaVoiceService : Service() {
             return JSONObject()
                 .put("success", response.optBoolean("ok", reply.isNotBlank()))
                 .put("reply", reply)
+                .put("response_id", response.optString("response_id").trim())
                 .put("technical", "kind=$kind")
 
         } finally {
