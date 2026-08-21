@@ -11,10 +11,11 @@ import java.util.UUID
 
 /**
  * Persistent command/event history for AYANA diagnostics.
+ * v2.5: BLOCKED is a first-class terminal status for unsupported/capability-gated actions.
  * v2.4: per-record delete, compact terminal events, and agent-facing last-issue context.
  *
  * v2:
- * - SUCCESS / ERROR / CANCELLED are explicit statuses;
+ * - SUCCESS / ERROR / BLOCKED / CANCELLED are explicit statuses;
  * - copied diagnostics are compact (raw JSON is still stored internally);
  * - no result is classified by searching words such as "ошибка" inside a reply.
  */
@@ -289,6 +290,25 @@ class AyanaCommandHistoryStore(
                 },
             success =
                 success,
+            result =
+                result,
+            technical =
+                technical
+        )
+    }
+
+    fun finishBlocked(
+        id: String?,
+        result: String,
+        technical: String = ""
+    ) {
+
+        finishWithStatus(
+            id = id,
+            status =
+                STATUS_BLOCKED,
+            success =
+                false,
             result =
                 result,
             technical =
@@ -661,6 +681,9 @@ class AyanaCommandHistoryStore(
                         STATUS_ERROR ->
                             "ERROR"
 
+                        STATUS_BLOCKED ->
+                            "BLOCKED"
+
                         STATUS_CANCELLED ->
                             "CANCELLED"
 
@@ -969,6 +992,9 @@ class AyanaCommandHistoryStore(
                     STATUS_ERROR ->
                         "Команда завершилась ошибкой"
 
+                    STATUS_BLOCKED ->
+                        "Команда заблокирована возможностями устройства"
+
                     STATUS_CANCELLED ->
                         "Команда остановлена"
 
@@ -1038,6 +1064,7 @@ class AyanaCommandHistoryStore(
                 setOf(
                     STATUS_SUCCESS,
                     STATUS_ERROR,
+                    STATUS_BLOCKED,
                     STATUS_CANCELLED
                 )
 
@@ -1063,6 +1090,9 @@ class AyanaCommandHistoryStore(
 
                 STATUS_ERROR ->
                     "Команда завершилась ошибкой"
+
+                STATUS_BLOCKED ->
+                    "Команда заблокирована возможностями устройства"
 
                 STATUS_CANCELLED ->
                     "Команда остановлена"
@@ -1802,6 +1832,9 @@ class AyanaCommandHistoryStore(
 
         const val STATUS_ERROR =
             "error"
+
+        const val STATUS_BLOCKED =
+            "blocked"
 
         const val STATUS_CANCELLED =
             "cancelled"
