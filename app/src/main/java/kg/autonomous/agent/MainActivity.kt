@@ -21,6 +21,7 @@ import android.graphics.drawable.GradientDrawable
 import android.os.Build
 import android.os.Bundle
 import android.os.SystemClock
+import android.net.Uri
 import android.provider.Settings
 import android.view.Gravity
 import android.view.View
@@ -45,10 +46,11 @@ import androidx.core.view.WindowInsetsCompat
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
+import kotlin.concurrent.thread
 
 class MainActivity : AppCompatActivity() {
 
-    // UI generation: v6.6 EXTERNAL AUDIO VISUALIZER
+    // UI generation: v6.7 MULTIMODAL INTAKE (v6.6 visual design preserved)
 
     private enum class Page {
         HOME,
@@ -73,6 +75,13 @@ class MainActivity : AppCompatActivity() {
     private lateinit var textInput: EditText
     private lateinit var textAnswer: TextView
     private lateinit var answerCard: LinearLayout
+    private lateinit var attachmentInfo: TextView
+
+    private var pendingAttachment:
+        AyanaMultimodalAttachmentManager.PreparedAttachment? = null
+
+    @Volatile
+    private var attachmentPreparationGeneration = 0L
 
     private val navButtons =
         mutableMapOf<Page, TextView>()
@@ -91,6 +100,12 @@ class MainActivity : AppCompatActivity() {
 
     private val memoryStore by lazy {
         AyanaMemoryStore(
+            applicationContext
+        )
+    }
+
+    private val multimodalAttachmentManager by lazy {
+        AyanaMultimodalAttachmentManager(
             applicationContext
         )
     }
@@ -169,6 +184,15 @@ class MainActivity : AppCompatActivity() {
             }
 
             renderCurrentPage()
+        }
+
+    private val attachmentLauncher =
+        registerForActivityResult(
+            ActivityResultContracts.OpenDocument()
+        ) { uri ->
+            if (uri != null) {
+                prepareSelectedAttachment(uri)
+            }
         }
 
     private val statusReceiver =
@@ -5162,6 +5186,33 @@ class MainActivity : AppCompatActivity() {
                 }
             }
 
+        val attach =
+            TextView(this).apply {
+                text = "＋"
+                textSize = 26f
+                gravity = Gravity.CENTER
+                setTextColor(Color.parseColor("#C4B5FD"))
+                contentDescription = "Прикрепить фото, файл или видео"
+                background = softDrawable(
+                    "#0B1020",
+                    "#40366D",
+                    15
+                )
+                setOnClickListener {
+                    openAttachmentPicker()
+                }
+            }
+
+        inputRow.addView(
+            attach,
+            LinearLayout.LayoutParams(
+                dp(48),
+                dp(48)
+            ).apply {
+                marginEnd = dp(8)
+            }
+        )
+
         inputRow.addView(
             textInput,
             LinearLayout.LayoutParams(
@@ -5214,6 +5265,21 @@ class MainActivity : AppCompatActivity() {
 
         textPanel.addView(
             inputRow
+        )
+
+        attachmentInfo =
+            TextView(this).apply {
+                visibility = View.GONE
+                textSize = 13.5f
+                setTextColor(Color.parseColor("#A7B4C8"))
+                setPadding(dp(4), dp(8), dp(4), 0)
+                setOnClickListener {
+                    clearPendingAttachment(deleteFiles = true)
+                }
+            }
+
+        textPanel.addView(
+            attachmentInfo
         )
 
         answerCard =
@@ -5314,14 +5380,28 @@ class MainActivity : AppCompatActivity() {
 
     private fun sendTextCommand() {
 
-        val command =
+        val attachment =
+            pendingAttachment
+
+        val typedCommand =
             textInput
                 .text
                 .toString()
                 .trim()
 
+        val command =
+            if (
+                typedCommand.isBlank() &&
+                attachment != null
+            ) {
+                "Проанализируй это вложение и выдели главное."
+            } else {
+                typedCommand
+            }
+
         if (
-            command.isBlank()
+            command.isBlank() &&
+            attachment == null
         ) {
             return
         }
@@ -5338,8 +5418,18 @@ class MainActivity : AppCompatActivity() {
                 AyanaVoiceService::class.java
             ).apply {
 
-                action =
-                    AyanaVoiceService.ACTION_TEXT_COMMAND
+                if (attachment != null) {
+                    action =
+                        AyanaVoiceService.ACTION_MULTIMODAL_COMMAND
+
+                    putExtra(
+                        AyanaVoiceService.EXTRA_MULTIMODAL_MANIFEST,
+                        attachment.manifest.toString()
+                    )
+                } else {
+                    action =
+                        AyanaVoiceService.ACTION_TEXT_COMMAND
+                }
 
                 putExtra(
                     AyanaVoiceService.EXTRA_TEXT_COMMAND,
@@ -5352,59 +5442,152 @@ class MainActivity : AppCompatActivity() {
             if (
                 Build.VERSION.SDK_INT >= 26
             ) {
-
-                startForegroundService(
-                    intent
-                )
-
+                startForegroundService(intent)
             } else {
-
-                startService(
-                    intent
-                )
+                startService(intent)
             }
 
-            textInput
-                .setText(
-                    ""
-                )
+            textInput.setText("")
+
+            if (attachment != null) {
+                // The service owns cleanup after the request is completed/cancelled.
+                pendingAttachment = null
+                updateAttachmentInfo()
+            }
 
             answerCard.visibility =
                 View.VISIBLE
 
             textAnswer.text =
-                "AYANA думает…"
+                if (attachment != null) {
+                    "AYANA анализирует вложение…"
+                } else {
+                    "AYANA думает…"
+                }
 
             hideKeyboard()
 
         } catch (_: Exception) {
-
             showTextAnswer(
                 "Не удалось отправить команду."
             )
         }
     }
 
-    private fun showTextAnswer(
-        text: String
+    private fun openAttachmentPicker() {
+        hideKeyboard()
+        try {
+            attachmentLauncher.launch(
+                arrayOf(
+                    "image/*",
+                    "video/*",
+                    "application/pdf",
+                    "text/*",
+                    "application/json",
+                    "application/xml",
+                    "application/javascript",
+                    "application/typescript",
+                    "text/x-kotlin",
+                    "text/x-python",
+                    "text/x-yaml",
+                    "application/msword",
+                    "application/rtf",
+                    "application/vnd.oasis.opendocument.text",
+                    "application/vnd.ms-powerpoint",
+                    "application/vnd.ms-excel",
+                    "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                    "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+                    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+                )
+            )
+        } catch (_: Exception) {
+            showTextAnswer("Не удалось открыть выбор файла.")
+        }
+    }
+
+    private fun prepareSelectedAttachment(
+        uri: Uri
     ) {
+        val generation =
+            ++attachmentPreparationGeneration
 
-        if (
-            !textModeVisible
-        ) {
-
-            textModeVisible =
-                true
-
-            textPanel.visibility =
-                View.VISIBLE
+        if (::attachmentInfo.isInitialized) {
+            attachmentInfo.visibility = View.VISIBLE
+            attachmentInfo.text = "Подготавливаю вложение…"
         }
 
-        answerCard.visibility =
-            View.VISIBLE
+        thread(
+            start = true,
+            name = "AyanaAttachmentPrepare"
+        ) {
+            val result =
+                try {
+                    Result.success(
+                        multimodalAttachmentManager.prepare(uri)
+                    )
+                } catch (error: Exception) {
+                    Result.failure(error)
+                }
 
-        textAnswer.text =
-            text
+            runOnUiThread {
+                if (generation != attachmentPreparationGeneration) {
+                    result.getOrNull()?.let {
+                        multimodalAttachmentManager.cleanupPrepared(it.manifest)
+                    }
+                    return@runOnUiThread
+                }
+
+                result
+                    .onSuccess { prepared ->
+                        pendingAttachment?.let {
+                            multimodalAttachmentManager.cleanupPrepared(it.manifest)
+                        }
+                        pendingAttachment = prepared
+                        updateAttachmentInfo()
+                    }
+                    .onFailure { error ->
+                        pendingAttachment = null
+                        updateAttachmentInfo()
+                        showTextAnswer(
+                            error.message
+                                ?: "Не удалось подготовить вложение."
+                        )
+                    }
+            }
+        }
+    }
+
+    private fun clearPendingAttachment(
+        deleteFiles: Boolean
+    ) {
+        attachmentPreparationGeneration++
+        val old = pendingAttachment
+        pendingAttachment = null
+        if (deleteFiles && old != null) {
+            multimodalAttachmentManager.cleanupPrepared(old.manifest)
+        }
+        updateAttachmentInfo()
+    }
+
+    private fun updateAttachmentInfo() {
+        if (!::attachmentInfo.isInitialized) return
+        val attachment = pendingAttachment
+        if (attachment == null) {
+            attachmentInfo.visibility = View.GONE
+            attachmentInfo.text = ""
+            return
+        }
+
+        attachmentInfo.visibility = View.VISIBLE
+        attachmentInfo.text =
+            when (attachment.kind) {
+                AyanaMultimodalAttachmentManager.KIND_IMAGE ->
+                    "Фото: ${attachment.displayName}   ×"
+                AyanaMultimodalAttachmentManager.KIND_VIDEO_VISUAL ->
+                    "Видео: ${attachment.displayName} · визуальный анализ кадров   ×"
+                else ->
+                    "Файл: ${attachment.displayName}   ×"
+            }
     }
 
     private fun hideKeyboard() {
