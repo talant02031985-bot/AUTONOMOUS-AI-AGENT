@@ -20,11 +20,13 @@ import kotlin.math.max
 class AgentAccessibilityService :
     AccessibilityService() {
 
-    // AYANA Accessibility v5.0 — PERCEPTION TRUTH + HOT PATH RECOVERY.
+    // AYANA Accessibility v5.1 — SETTINGS PERCEPTION RECOVERY + HOT PATH INTEGRITY.
     // Every visible Android window is an independent context. Normal accessibility
-    // events stay lightweight; deep tree acquisition is reserved for structural
-    // changes and explicit screen reads. Fresh event evidence is merged only into
-    // the matching window.
+    // events stay lightweight. Samsung/Android Settings is the one bounded exception:
+    // sparse Settings roots can hide visible App Info / Notifications / Permissions
+    // content from normal window snapshots, so v5.1 captures a throttled descendant
+    // tree only for fresh structural com.android.settings events. Fresh event evidence
+    // is still merged only into the matching window.
     // Cross-window verification/clicking stays fail-closed in split-screen,
     // freeform, PiP, popup/dialog, Recents and overlay scenarios.
 
@@ -79,11 +81,16 @@ class AgentAccessibilityService :
     private val recentEventEvidence =
         ArrayDeque<EventEvidence>()
 
+    @Volatile
+    private var lastSettingsStructuralRecoveryAt =
+        0L
+
     // AccessibilityService callbacks run on the process main thread. v4.0/v4.1
     // accidentally performed descendant-prefetch tree walks from this hot path.
-    // Event handling is now deliberately O(1): metadata + one source node only.
-    // Full tree acquisition happens only when AYANA explicitly asks for a screen
-    // snapshot/action, never for every accessibility event.
+    // v5.1 therefore keeps the normal path O(1). Only structural events from the
+    // Android Settings package may take one bounded/throttled recovery snapshot.
+    // This restores truth for Samsung sparse Settings roots without reintroducing
+    // continuous descendant walks, Orb lag, or thermal/CPU regressions.
 
     override fun onServiceConnected() {
         super.onServiceConnected()
@@ -1422,9 +1429,11 @@ class AgentAccessibilityService :
             return
         }
 
-        // Keep only the event SOURCE node. Never climb to parents and never walk
-        // descendants here: this callback shares the same process main thread as
-        // EditText rendering and the floating Orb.
+        // Normal events keep only the SOURCE node. Android Settings is a bounded
+        // exception because Samsung One UI can expose a package-bearing shell while
+        // the real App Info/detail text exists only below the event source/parents.
+        // Recovery is structural-event-only and throttled; it never runs for AYANA,
+        // Chrome, launchers, normal text changes, or every accessibility callback.
         val source =
             try {
                 event.source
@@ -1436,19 +1445,68 @@ class AgentAccessibilityService :
             JSONArray()
 
         if (source != null) {
-            try {
-                nodes.put(
-                    nodeToJson(
-                        node = source,
-                        depth = 0,
-                        index = 1
-                    )
-                        .put(
-                            "evidence_source",
-                            "accessibility_event_source"
-                        )
+
+            val settingsRecovery =
+                shouldCaptureSettingsStructuralRecovery(
+                    eventPackage = eventPackage,
+                    eventType = event.eventType,
+                    now = now
                 )
-            } catch (_: Exception) {
+
+            if (settingsRecovery) {
+                lastSettingsStructuralRecoveryAt =
+                    now
+
+                val recoveryRoot =
+                    try {
+                        highestUsableEventRoot(
+                            source
+                        )
+                    } catch (_: Exception) {
+                        source
+                    }
+
+                val recoveredNodes =
+                    try {
+                        snapshotEventTree(
+                            root = recoveryRoot,
+                            maxNodes = SETTINGS_EVENT_RECOVERY_NODE_LIMIT,
+                            maxChars = SETTINGS_EVENT_RECOVERY_CHAR_LIMIT
+                        )
+                    } catch (_: Exception) {
+                        JSONArray()
+                    }
+
+                for (index in 0 until recoveredNodes.length()) {
+                    recoveredNodes
+                        .optJSONObject(index)
+                        ?.let { node ->
+                            nodes.put(
+                                JSONObject(node.toString())
+                                    .put(
+                                        "evidence_source",
+                                        "settings_structural_recovery"
+                                    )
+                            )
+                        }
+                }
+            }
+
+            if (nodes.length() == 0) {
+                try {
+                    nodes.put(
+                        nodeToJson(
+                            node = source,
+                            depth = 0,
+                            index = 1
+                        )
+                            .put(
+                                "evidence_source",
+                                "accessibility_event_source"
+                            )
+                    )
+                } catch (_: Exception) {
+                }
             }
         }
 
@@ -1600,6 +1658,33 @@ class AgentAccessibilityService :
                 recentEventEvidence.removeLast()
             }
         }
+    }
+
+
+    private fun shouldCaptureSettingsStructuralRecovery(
+        eventPackage: String,
+        eventType: Int,
+        now: Long
+    ): Boolean {
+
+        if (
+            eventPackage != SETTINGS_PACKAGE
+        ) {
+            return false
+        }
+
+        val structural =
+            eventType == AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED ||
+                eventType == AccessibilityEvent.TYPE_WINDOWS_CHANGED ||
+                eventType == AccessibilityEvent.TYPE_WINDOW_CONTENT_CHANGED
+
+        if (!structural) {
+            return false
+        }
+
+        return now -
+            lastSettingsStructuralRecoveryAt >=
+            SETTINGS_EVENT_RECOVERY_THROTTLE_MS
     }
 
     private fun highestUsableEventRoot(
@@ -3714,6 +3799,18 @@ class AgentAccessibilityService :
 
         private const val EVENT_EVIDENCE_PARENT_LIMIT =
             12
+
+        private const val SETTINGS_PACKAGE =
+            "com.android.settings"
+
+        private const val SETTINGS_EVENT_RECOVERY_THROTTLE_MS =
+            650L
+
+        private const val SETTINGS_EVENT_RECOVERY_NODE_LIMIT =
+            72
+
+        private const val SETTINGS_EVENT_RECOVERY_CHAR_LIMIT =
+            6500
 
         @Volatile
         var instance:
