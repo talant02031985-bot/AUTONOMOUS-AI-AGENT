@@ -50,7 +50,7 @@ import kotlin.concurrent.thread
 
 class MainActivity : AppCompatActivity() {
 
-    // UI generation: v6.7 MULTIMODAL INTAKE (v6.6 visual design preserved)
+    // UI generation: v6.8 MULTIMODAL ROUTING INTEGRITY (v6.6 visual design preserved)
 
     private enum class Page {
         HOME,
@@ -5406,6 +5406,18 @@ class MainActivity : AppCompatActivity() {
             return
         }
 
+        // MULTIMODAL ROUTING INTEGRITY v11.7
+        // A selected file must not steal deterministic Android/local commands.
+        // For example, «открой Chrome» with a PDF still selected must reach the
+        // normal execution router. In that case the attachment remains visibly
+        // pending for the next analytical question instead of being discarded.
+        val useAttachment =
+            attachment != null &&
+                AyanaMultimodalAttachmentManager
+                    .shouldUseAttachmentForCommand(
+                        command
+                    )
+
         if (
             !AyanaVoiceService.isRunning
         ) {
@@ -5418,13 +5430,13 @@ class MainActivity : AppCompatActivity() {
                 AyanaVoiceService::class.java
             ).apply {
 
-                if (attachment != null) {
+                if (useAttachment) {
                     action =
                         AyanaVoiceService.ACTION_MULTIMODAL_COMMAND
 
                     putExtra(
                         AyanaVoiceService.EXTRA_MULTIMODAL_MANIFEST,
-                        attachment.manifest.toString()
+                        attachment!!.manifest.toString()
                     )
                 } else {
                     action =
@@ -5449,7 +5461,7 @@ class MainActivity : AppCompatActivity() {
 
             textInput.setText("")
 
-            if (attachment != null) {
+            if (useAttachment) {
                 // The service owns cleanup after the request is completed/cancelled.
                 pendingAttachment = null
                 updateAttachmentInfo()
@@ -5459,7 +5471,7 @@ class MainActivity : AppCompatActivity() {
                 View.VISIBLE
 
             textAnswer.text =
-                if (attachment != null) {
+                if (useAttachment) {
                     "AYANA анализирует вложение…"
                 } else {
                     "AYANA думает…"
