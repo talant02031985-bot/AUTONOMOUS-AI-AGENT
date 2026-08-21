@@ -877,6 +877,42 @@ class AyanaCapabilityRegistry(
 
         capability(
             capabilities,
+            "unified_execution_session",
+            implemented = true,
+            available = true,
+            deviceConfirmed = false,
+            note = "v12.0 Execution Kernel unifies cancellation/terminal/evidence contracts across long-running lanes; awaiting device test"
+        )
+
+        capability(
+            capabilities,
+            "multimodal_stop_during_analysis",
+            implemented = true,
+            available = true,
+            deviceConfirmed = false,
+            note = "v12.0 arms the same voice cancel-listener used by Agent Core before multimodal network execution; awaiting device confirmation"
+        )
+
+        capability(
+            capabilities,
+            "goal_compiler_execution_contract",
+            implemented = true,
+            available = true,
+            deviceConfirmed = false,
+            note = "Goal Compiler v2 emits executor, terminal, verification and bounded-replan policy metadata"
+        )
+
+        capability(
+            capabilities,
+            "settings_intent_attestation",
+            implemented = true,
+            available = accessibilityConnected,
+            deviceConfirmed = false,
+            note = "v12.0 fuses exact Settings intent target with fresh same-window semantic surface evidence; no app-specific aliases"
+        )
+
+        capability(
+            capabilities,
             "external_mail_calendar_files",
             implemented = false,
             available = false,
@@ -1234,7 +1270,7 @@ class AyanaCapabilityRegistry(
     companion object {
 
         const val BUILD_LABEL =
-            "v11.6_multimodal_intake"
+            "v12.0_execution_perception_foundation"
 
         private const val PREFS_NAME =
             "ayana_capability_runtime_v11"
