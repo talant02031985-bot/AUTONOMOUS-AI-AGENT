@@ -54,6 +54,9 @@ import kotlin.math.abs
 
 class AyanaVoiceService : Service() {
 
+    // AYANA v11.4 EXECUTION INTEGRITY & SPEED.
+    // App lifecycle intents are now deterministic and goal-verified.
+    // Voice/TTS/STOP implementation remains inherited unchanged from v11.3.1.
     // AYANA v11.3 PERCEPTION, TRUTH & AUTONOMY CORE.
     // Built on v11.1.2 App Settings Integrity. v11.1.5 adds context-safe
     // terminal verification for multi-window / popup / PiP screens while preserving
@@ -2949,6 +2952,25 @@ class AyanaVoiceService : Service() {
             return
         }
 
+        // APP LIFECYCLE FAST-PATH v11.4
+        // «Сверни <app>» and «закрой <app>» are intentionally NOT equivalent.
+        // Minimize is allowed only when the requested app is verified foreground;
+        // true close is fail-closed until AYANA has a dedicated close/task-removal
+        // executor. Never substitute Home/Back and call that a successful close.
+        val lifecycleRequest =
+            extractLocalAppLifecycleRequest(
+                routingNormalized
+            )
+
+        if (lifecycleRequest != null) {
+            handleLocalAppLifecycleRequest(
+                action = lifecycleRequest.first,
+                requestedName = lifecycleRequest.second,
+                silent = silent
+            )
+            return
+        }
+
         // FAST APP DETAIL ROUTER v8.8
         // Common read-only app-settings destinations can be resolved locally even
         // when the user phrases them as two steps, e.g.
@@ -5837,6 +5859,415 @@ class AyanaVoiceService : Service() {
             }
     }
 
+    // =========================================================
+    // APP LIFECYCLE INTENT — v11.4
+    // =========================================================
+
+    private fun extractLocalAppLifecycleRequest(
+        command: String
+    ): Pair<String, String>? {
+
+        val clean =
+            command
+                .trim()
+                .trim(
+                    ' ',
+                    '"',
+                    '«',
+                    '»',
+                    '.',
+                    ',',
+                    '!',
+                    '?',
+                    ';',
+                    ':'
+                )
+                .replace(
+                    Regex("\\s+"),
+                    " "
+                )
+
+        if (clean.isBlank()) {
+            return null
+        }
+
+        // These phrases describe windows/dialogs/Recents or AYANA itself, not a
+        // named installed application lifecycle request. Leave them to their own
+        // routes instead of stealing them with a broad «закрой …» prefix.
+        val excludedPrefixes =
+            listOf(
+                "закрой все",
+                "закрой окно",
+                "закрой вкладку",
+                "закрой диалог",
+                "закрой меню",
+                "закрой клавиатуру",
+                "сверни все",
+                "сверни окно"
+            )
+
+        if (
+            excludedPrefixes.any {
+                clean.startsWith(it)
+            }
+        ) {
+            return null
+        }
+
+        val minimizePrefixes =
+            listOf(
+                "сверни приложение ",
+                "сверни "
+            )
+
+        for (prefix in minimizePrefixes) {
+            if (clean.startsWith(prefix)) {
+                val target =
+                    clean
+                        .removePrefix(prefix)
+                        .trim()
+                        .trim(
+                            ' ',
+                            '"',
+                            '«',
+                            '»',
+                            '.',
+                            ',',
+                            '!',
+                            '?',
+                            ';',
+                            ':'
+                        )
+
+                if (
+                    target.isBlank() ||
+                    target in setOf(
+                        "все",
+                        "все окна",
+                        "все приложения",
+                        "окно",
+                        "приложение"
+                    )
+                ) {
+                    return null
+                }
+
+                return "minimize" to target
+            }
+        }
+
+        val closePrefixes =
+            listOf(
+                "полностью закрой приложение ",
+                "полностью закрой ",
+                "закрой приложение ",
+                "заверши приложение ",
+                "закрой "
+            )
+
+        for (prefix in closePrefixes) {
+            if (clean.startsWith(prefix)) {
+                val target =
+                    clean
+                        .removePrefix(prefix)
+                        .trim()
+                        .trim(
+                            ' ',
+                            '"',
+                            '«',
+                            '»',
+                            '.',
+                            ',',
+                            '!',
+                            '?',
+                            ';',
+                            ':'
+                        )
+
+                if (
+                    target.isBlank() ||
+                    target in setOf(
+                        "все",
+                        "все окна",
+                        "все приложения",
+                        "окно",
+                        "приложение",
+                        "аяна",
+                        "аяну",
+                        "айана",
+                        "айану",
+                        "ayana"
+                    )
+                ) {
+                    return null
+                }
+
+                return "close" to target
+            }
+        }
+
+        return null
+    }
+
+    private fun isTrueAppCloseRequest(
+        command: String
+    ): Boolean =
+        extractLocalAppLifecycleRequest(
+            repairCommonRecognitionForRouting(
+                normalizeRecognitionText(
+                    command
+                )
+            )
+        )
+            ?.first ==
+            "close"
+
+    private fun handleLocalAppLifecycleRequest(
+        action: String,
+        requestedName: String,
+        silent: Boolean
+    ) {
+
+        val commandToken =
+            activeCommandToken
+
+        commandHistoryStore.addEvent(
+            activeCommandHistoryId,
+            state = "lifecycle_intent",
+            message =
+                if (action == "minimize") {
+                    "Локальная команда сворачивания приложения"
+                } else {
+                    "Локальная команда закрытия приложения"
+                },
+            details = "action=$action; app=${requestedName.take(160)}"
+        )
+
+        thread(
+            start = true,
+            name = "AyanaAppLifecycle"
+        ) {
+
+            val resolution =
+                try {
+                    appResolver.resolve(
+                        requestedName
+                    )
+                } catch (_: Exception) {
+                    null
+                }
+
+            if (
+                resolution == null ||
+                !resolution.success ||
+                resolution.packageName.isBlank()
+            ) {
+                mainHandler.post {
+                    if (
+                        commandToken == activeCommandToken &&
+                        !cancelRequested &&
+                        !shuttingDown
+                    ) {
+                        respondAndResume(
+                            "Не нашла установленное приложение $requestedName.",
+                            silent,
+                            success = false
+                        )
+                    }
+                }
+                return@thread
+            }
+
+            val label =
+                resolution.label
+                    .ifBlank {
+                        requestedName
+                    }
+
+            val packageName =
+                resolution.packageName
+
+            commandHistoryStore.addEvent(
+                activeCommandHistoryId,
+                state = "lifecycle_app_resolved",
+                message = "Приложение определено",
+                details =
+                    "label=${label.take(120)}; package=${packageName.take(180)}; " +
+                        "confidence=${resolution.confidence}; source=${resolution.source}"
+            )
+
+            if (action == "close") {
+                val message =
+                    "Надёжно закрыть процесс $label текущими средствами я пока не могу. " +
+                        "Команда «Домой» только свернула бы приложение, поэтому я не выдаю это за закрытие."
+
+                commandHistoryStore.addEvent(
+                    activeCommandHistoryId,
+                    state = "lifecycle_blocked",
+                    message = "Закрытие не подменено сворачиванием",
+                    details = "package=$packageName; reason=no_verified_close_executor"
+                )
+
+                mainHandler.post {
+                    if (
+                        commandToken == activeCommandToken &&
+                        !cancelRequested &&
+                        !shuttingDown
+                    ) {
+                        respondAndResume(
+                            message,
+                            silent,
+                            success = false
+                        )
+                    }
+                }
+                return@thread
+            }
+
+            val before =
+                try {
+                    screenIntelligence
+                        .getScreenState()
+                } catch (_: Exception) {
+                    JSONObject()
+                }
+
+            val beforePackage =
+                before.optString(
+                    "package"
+                )
+                    .trim()
+
+            if (beforePackage.isBlank()) {
+                mainHandler.post {
+                    if (
+                        commandToken == activeCommandToken &&
+                        !cancelRequested &&
+                        !shuttingDown
+                    ) {
+                        respondAndResume(
+                            "Не могу надёжно подтвердить, что $label сейчас на переднем плане, поэтому ничего не сворачиваю вслепую.",
+                            silent,
+                            success = false
+                        )
+                    }
+                }
+                return@thread
+            }
+
+            if (beforePackage != packageName) {
+                commandHistoryStore.addEvent(
+                    activeCommandHistoryId,
+                    state = "lifecycle_verified",
+                    message = "Целевое приложение уже не на переднем плане",
+                    details = "target=$packageName; foreground=$beforePackage"
+                )
+
+                mainHandler.post {
+                    if (
+                        commandToken == activeCommandToken &&
+                        !cancelRequested &&
+                        !shuttingDown
+                    ) {
+                        respondAndResume(
+                            "$label уже не находится на переднем плане.",
+                            silent,
+                            success = true
+                        )
+                    }
+                }
+                return@thread
+            }
+
+            if (
+                commandToken != activeCommandToken ||
+                cancelRequested ||
+                shuttingDown
+            ) {
+                return@thread
+            }
+
+            val homeResult =
+                try {
+                    screenIntelligence
+                        .pressHome()
+                } catch (_: Exception) {
+                    JSONObject()
+                        .put(
+                            "success",
+                            false
+                        )
+                }
+
+            val after =
+                homeResult
+                    .optJSONObject(
+                        "screen"
+                    )
+                    ?: try {
+                        screenIntelligence
+                            .getScreenState()
+                    } catch (_: Exception) {
+                        JSONObject()
+                    }
+
+            val afterPackage =
+                after.optString(
+                    "package"
+                )
+                    .trim()
+
+            val verified =
+                homeResult.optBoolean(
+                    "success",
+                    false
+                ) &&
+                    afterPackage.isNotBlank() &&
+                    afterPackage != packageName
+
+            commandHistoryStore.addEvent(
+                activeCommandHistoryId,
+                state =
+                    if (verified) {
+                        "lifecycle_verified"
+                    } else {
+                        "lifecycle_unverified"
+                    },
+                message =
+                    if (verified) {
+                        "Сворачивание подтверждено по foreground package"
+                    } else {
+                        "Сворачивание не удалось надёжно подтвердить"
+                    },
+                details =
+                    "target=$packageName; before=$beforePackage; after=$afterPackage; " +
+                        "home_success=${homeResult.optBoolean("success", false)}"
+            )
+
+            mainHandler.post {
+                if (
+                    commandToken == activeCommandToken &&
+                    !cancelRequested &&
+                    !shuttingDown
+                ) {
+                    if (verified) {
+                        respondAndResume(
+                            "$label свёрнут.",
+                            silent,
+                            success = true
+                        )
+                    } else {
+                        respondAndResume(
+                            "Команда «Домой» выполнена не была или результат сворачивания $label не удалось надёжно подтвердить.",
+                            silent,
+                            success = false
+                        )
+                    }
+                }
+            }
+        }
+    }
+
     private fun isVolumeUpCommand(
         command: String
     ): Boolean {
@@ -8167,6 +8598,53 @@ class AyanaVoiceService : Service() {
 
                                 finalAnswer =
                                     "Я не смогла определить следующее действие."
+
+                                finalSuccess =
+                                    false
+
+                                break
+                            }
+
+                            // GOAL SEMANTICS FIREWALL v11.4
+                            // A model must never convert «закрой приложение» into Home/Back.
+                            // Block BEFORE the tool call so even a future Worker regression
+                            // cannot minimize an app and then mark the close goal SUCCESS.
+                            if (
+                                toolName in
+                                setOf(
+                                    "press_home",
+                                    "press_back"
+                                ) &&
+                                isTrueAppCloseRequest(
+                                    originalGoal
+                                )
+                            ) {
+                                val semanticMessage =
+                                    "Надёжно закрыть приложение текущими средствами я пока не могу. Домой или Назад только меняют экран и не подтверждают закрытие процесса."
+
+                                commandHistoryStore.addEvent(
+                                    activeCommandHistoryId,
+                                    state = "goal_semantics_blocked",
+                                    message = "Подмена закрытия приложением Home/Back заблокирована",
+                                    details = "tool=$toolName; original_goal=${originalGoal.take(320)}"
+                                )
+
+                                if (currentDurableGoalId != null) {
+                                    try {
+                                        durableGoalStore
+                                            .markFailed(
+                                                currentDurableGoalId,
+                                                semanticMessage
+                                            )
+                                    } catch (_: Exception) {
+                                    }
+                                }
+
+                                agentPreviousResponseId =
+                                    null
+
+                                finalAnswer =
+                                    semanticMessage
 
                                 finalSuccess =
                                     false
@@ -11594,6 +12072,19 @@ class AyanaVoiceService : Service() {
         if (
             isMultiStepAgentCommand(
                 normalizedGoal
+            )
+        ) {
+            return false
+        }
+
+        if (
+            toolName in
+            setOf(
+                "press_home",
+                "press_back"
+            ) &&
+            isTrueAppCloseRequest(
+                originalGoal
             )
         ) {
             return false
@@ -17260,11 +17751,16 @@ class AyanaVoiceService : Service() {
         currentStatusState =
             state
 
-        commandHistoryStore.addEvent(
-            activeCommandHistoryId,
-            state = state,
-            message = text
-        )
+        // Command history is command-scoped. Background wake-listening can
+        // legitimately restart while another text/network path is still finishing,
+        // but that ambient state must not appear as an event inside the command.
+        if (state != STATE_LISTENING) {
+            commandHistoryStore.addEvent(
+                activeCommandHistoryId,
+                state = state,
+                message = text
+            )
+        }
 
         // STOPPED must never create/refresh an overlay. This is the critical
         // guard that prevents repeated STOP actions from multiplying Orbs.
