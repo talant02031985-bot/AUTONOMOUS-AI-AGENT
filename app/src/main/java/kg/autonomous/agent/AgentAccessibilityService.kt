@@ -457,22 +457,30 @@ class AgentAccessibilityService :
             )
         }
 
+        // Fail closed: inability to find a card is NOT proof that the target has
+        // no task anywhere in Recents. Gesture/scroll rejection can also look like
+        // an end-of-list condition on OEM launchers. v12.1 therefore requires at
+        // least one concrete card dismissal before SUCCESS. This prevents a false
+        // "already closed" result when the scan simply could not reach the target.
+        if (removedCount <= 0) {
+            return recentTaskResult(
+                success = false,
+                verified = false,
+                terminalStatus = "ERROR",
+                reason = "target_task_not_found_unverified",
+                message = "Карточка приложения не найдена; отсутствие задачи во всём списке недавних не доказано",
+                removedCount = removedCount,
+                scanCount = scanCount,
+                dismissMethod = dismissMethod
+            )
+        }
+
         return recentTaskResult(
             success = true,
             verified = true,
             terminalStatus = "SUCCESS",
-            reason =
-                if (removedCount > 0) {
-                    "verified_task_removed"
-                } else {
-                    "verified_task_already_absent"
-                },
-            message =
-                if (removedCount > 0) {
-                    "Задача приложения удалена из списка недавних"
-                } else {
-                    "Задача приложения уже отсутствует в списке недавних"
-                },
+            reason = "verified_task_removed",
+            message = "Задача приложения удалена из списка недавних",
             removedCount = removedCount,
             scanCount = scanCount,
             dismissMethod = dismissMethod
