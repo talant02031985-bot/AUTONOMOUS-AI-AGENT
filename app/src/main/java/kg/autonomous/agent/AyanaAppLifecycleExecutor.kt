@@ -3,7 +3,7 @@ package kg.autonomous.agent
 import org.json.JSONObject
 
 /**
- * AYANA App Lifecycle Executor v1.0 — verified user-task removal.
+ * AYANA App Lifecycle Executor v1.2 — verified task removal + failure-context restore.
  *
  * Android third-party apps cannot honestly claim cross-app force-stop/process kill.
  * This executor implements the user-visible close contract as removal of the app's
@@ -158,6 +158,28 @@ class AyanaAppLifecycleExecutor(
                 false
             )
         ) {
+            val context =
+                if (
+                    removalStatus !=
+                        "CANCELLED" &&
+                    !shouldCancel()
+                ) {
+                    restoreAfterFailedClose(
+                        originalForegroundPackage =
+                            sourcePackage
+                    )
+                } else {
+                    JSONObject()
+                        .put(
+                            "restored",
+                            false
+                        )
+                        .put(
+                            "mode",
+                            "cancelled"
+                        )
+                }
+
             return terminal(
                 status =
                     when (removalStatus) {
@@ -177,6 +199,15 @@ class AyanaAppLifecycleExecutor(
             ).put(
                 "removal",
                 removal
+            ).put(
+                "context_restored",
+                context.optBoolean(
+                    "restored",
+                    false
+                )
+            ).put(
+                "context",
+                context
             )
         }
 
@@ -191,6 +222,12 @@ class AyanaAppLifecycleExecutor(
                 "verified_task_removed"
 
         if (!concreteDismissal) {
+            val context =
+                restoreAfterFailedClose(
+                    originalForegroundPackage =
+                        sourcePackage
+                )
+
             return terminal(
                 status = "ERROR",
                 reason = "task_removal_without_concrete_dismissal",
@@ -198,6 +235,15 @@ class AyanaAppLifecycleExecutor(
             ).put(
                 "removal",
                 removal
+            ).put(
+                "context_restored",
+                context.optBoolean(
+                    "restored",
+                    false
+                )
+            ).put(
+                "context",
+                context
             )
         }
 
@@ -220,6 +266,129 @@ class AyanaAppLifecycleExecutor(
             .put("removal", removal)
             .put("context_restored", context.optBoolean("restored", false))
             .put("context", context)
+    }
+
+    private fun restoreAfterFailedClose(
+        originalForegroundPackage: String
+    ): JSONObject {
+
+        if (shouldCancel()) {
+            return JSONObject()
+                .put(
+                    "restored",
+                    false
+                )
+                .put(
+                    "mode",
+                    "cancelled"
+                )
+        }
+
+        val original =
+            originalForegroundPackage
+                .trim()
+
+        if (original.isBlank()) {
+            return JSONObject()
+                .put(
+                    "restored",
+                    false
+                )
+                .put(
+                    "mode",
+                    "original_foreground_unknown"
+                )
+        }
+
+        val observedBefore =
+            currentPackage()
+
+        if (
+            observedBefore ==
+                original
+        ) {
+            return JSONObject()
+                .put(
+                    "restored",
+                    true
+                )
+                .put(
+                    "mode",
+                    "already_on_original_foreground"
+                )
+                .put(
+                    "requested_package",
+                    original
+                )
+                .put(
+                    "observed_package",
+                    observedBefore
+                )
+        }
+
+        val launchAccepted =
+            try {
+                gateway.restorePackage(
+                    original
+                )
+            } catch (_: Exception) {
+                false
+            }
+
+        val restored =
+            launchAccepted &&
+                waitForPackage(
+                    original
+                )
+
+        if (restored) {
+            return JSONObject()
+                .put(
+                    "restored",
+                    true
+                )
+                .put(
+                    "mode",
+                    "restore_original_after_failed_close"
+                )
+                .put(
+                    "requested_package",
+                    original
+                )
+                .put(
+                    "observed_package",
+                    original
+                )
+        }
+
+        val homeAccepted =
+            try {
+                gateway.pressHome()
+            } catch (_: Exception) {
+                false
+            }
+
+        return JSONObject()
+            .put(
+                "restored",
+                false
+            )
+            .put(
+                "mode",
+                if (homeAccepted) {
+                    "home_fallback_after_failed_close"
+                } else {
+                    "restore_failed_after_failed_close"
+                }
+            )
+            .put(
+                "requested_package",
+                original
+            )
+            .put(
+                "observed_package",
+                currentPackage()
+            )
     }
 
     private fun restoreUserContext(
