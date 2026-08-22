@@ -3,13 +3,23 @@ package kg.autonomous.agent
 import org.json.JSONObject
 
 /**
- * AYANA App Lifecycle Executor v1.3 — verified task removal + cancellation commit integrity.
+ * AYANA App Lifecycle Executor v1.4 — destructive side-effect reconciliation.
  *
  * Android third-party apps cannot honestly claim cross-app force-stop/process kill.
- * This executor implements the user-visible close contract as removal of the app's
- * task card from Android Recents, then restores the user's prior foreground context.
- * SUCCESS is emitted only when the Recents layer reports verified task removal (or
- * verified absence after an exhaustive bounded scan). All uncertain topologies fail closed.
+ * The user-visible close contract remains exact Recents task-card removal with
+ * target-specific verification. v1.4 adds terminal-truth semantics around the
+ * irreversible dispatch boundary:
+ *
+ * 1) before dispatch, STOP may own the outcome and terminal CANCELLED is valid;
+ * 2) after an accepted destructive dispatch, CANCELLED is forbidden until the
+ *    real-world outcome has been reconciled;
+ * 3) verified removal -> SUCCESS even when STOP arrived after dispatch;
+ * 4) verified no-effect -> cancellation may be acknowledged;
+ * 5) unknown post-dispatch outcome -> ERROR/UNVERIFIED, never false CANCELLED.
+ *
+ * Samsung Recents identity and actual dispatch/verification remain owned by the
+ * Accessibility layer. This class owns lifecycle semantic terminal truth and
+ * foreground-context restoration policy.
  */
 class AyanaAppLifecycleExecutor(
     private val gateway: Gateway,
@@ -60,6 +70,12 @@ class AyanaAppLifecycleExecutor(
                 status = "CANCELLED",
                 reason = "cancelled_before_close",
                 message = "Закрытие отменено."
+            ).put(
+                "action_dispatched",
+                false
+            ).put(
+                "action_committed",
+                false
             )
         }
 
@@ -90,6 +106,12 @@ class AyanaAppLifecycleExecutor(
             ).put(
                 "topology",
                 topology
+            ).put(
+                "action_dispatched",
+                false
+            ).put(
+                "action_committed",
+                false
             )
         }
 
@@ -115,6 +137,9 @@ class AyanaAppLifecycleExecutor(
                     .put("verified", false)
                     .put("terminal_status", "ERROR")
                     .put("reason", "recents_executor_exception")
+                    .put("action_dispatched", false)
+                    .put("reconciliation_complete", true)
+                    .put("verified_not_committed", true)
                     .put(
                         "message",
                         error.message
@@ -137,9 +162,34 @@ class AyanaAppLifecycleExecutor(
                 }
             ).uppercase()
 
-        // A destructive task removal has a commit point. Once Recents has
-        // positively verified that the exact target card was dismissed, a late
-        // STOP must not rewrite the real-world result as CANCELLED.
+        val actionDispatched =
+            removal.optBoolean(
+                "action_dispatched",
+                false
+            ) ||
+                removal.optInt(
+                    "removed_count",
+                    0
+                ) > 0
+
+        val reconciliationComplete =
+            removal.optBoolean(
+                "reconciliation_complete",
+                !actionDispatched ||
+                    removal.optBoolean(
+                        "verified",
+                        false
+                    )
+            )
+
+        val verifiedNotCommitted =
+            removal.optBoolean(
+                "verified_not_committed",
+                false
+            )
+
+        // A destructive task removal is committed only when Recents positively
+        // verifies that the exact target card disappeared after accepted dispatch.
         val concreteDismissal =
             removalStatus == "SUCCESS" &&
                 removal.optBoolean(
@@ -161,7 +211,11 @@ class AyanaAppLifecycleExecutor(
 
         if (concreteDismissal) {
             val cancelAfterCommit =
-                shouldCancel()
+                shouldCancel() ||
+                    removal.optBoolean(
+                        "cancel_after_dispatch",
+                        false
+                    )
 
             val context =
                 if (cancelAfterCommit) {
@@ -186,26 +240,124 @@ class AyanaAppLifecycleExecutor(
                 .put("verified", true)
                 .put("terminal_status", "SUCCESS")
                 .put("status", "task_removed")
-                .put("reason", removal.optString("reason", "verified_task_removed"))
+                .put(
+                    "reason",
+                    removal.optString(
+                        "reason",
+                        "verified_task_removed"
+                    )
+                )
                 .put("message", "$label закрыт.")
                 .put("target_package", packageName)
                 .put("target_label", label)
                 .put("method", "verified_recents_task_removal")
+                .put("action_dispatched", true)
                 .put("action_committed", true)
+                .put("destructive_commit_pending", false)
+                .put("reconciliation_complete", true)
                 .put("cancel_after_commit", cancelAfterCommit)
                 .put("removal", removal)
-                .put("context_restored", context.optBoolean("restored", false))
+                .put(
+                    "context_restored",
+                    context.optBoolean(
+                        "restored",
+                        false
+                    )
+                )
                 .put("context", context)
         }
 
-        // Before the verified commit point, STOP owns the outcome.
-        if (shouldCancel()) {
+        // Point-of-no-return was crossed, but the Accessibility layer could not
+        // prove what happened. STOP cannot turn uncertainty into CANCELLED.
+        // Avoid context-restoration side effects while the destructive outcome
+        // itself is unknown; preserve the strongest available evidence instead.
+        if (
+            actionDispatched &&
+            !reconciliationComplete &&
+            !verifiedNotCommitted
+        ) {
+            return terminal(
+                status = "ERROR",
+                reason = "dispatch_outcome_unverified",
+                message = "Команда удаления была передана Android, но фактический результат не удалось надёжно подтвердить."
+            ).put(
+                "action_dispatched",
+                true
+            ).put(
+                "action_committed",
+                false
+            ).put(
+                "destructive_commit_pending",
+                true
+            ).put(
+                "cancel_after_dispatch",
+                shouldCancel() ||
+                    removal.optBoolean(
+                        "cancel_after_dispatch",
+                        false
+                    )
+            ).put(
+                "removal",
+                removal
+            ).put(
+                "context_restored",
+                false
+            ).put(
+                "context",
+                JSONObject()
+                    .put("restored", false)
+                    .put("mode", "dispatch_outcome_unverified")
+            )
+        }
+
+        // Accepted dispatch was reconciled and the exact target is proven still
+        // present. The destructive side effect did not commit, so a pending STOP
+        // may now legitimately own terminal CANCELLED.
+        if (
+            actionDispatched &&
+            reconciliationComplete &&
+            verifiedNotCommitted &&
+            shouldCancel()
+        ) {
+            return terminal(
+                status = "CANCELLED",
+                reason = "cancelled_after_verified_no_effect",
+                message = "Закрытие отменено; удаление карточки не произошло."
+            ).put(
+                "action_dispatched",
+                true
+            ).put(
+                "action_committed",
+                false
+            ).put(
+                "destructive_commit_pending",
+                false
+            ).put(
+                "verified_not_committed",
+                true
+            ).put(
+                "removal",
+                removal
+            )
+        }
+
+        // Before irreversible dispatch, STOP owns the outcome exactly as before.
+        if (
+            !actionDispatched &&
+            shouldCancel()
+        ) {
             return terminal(
                 status = "CANCELLED",
                 reason = "cancelled_during_close",
                 message = "Закрытие отменено."
             ).put(
+                "action_dispatched",
+                false
+            ).put(
                 "action_committed",
+                false
+            ).put(
+                "destructive_commit_pending",
                 false
             ).put(
                 "removal",
@@ -227,6 +379,16 @@ class AyanaAppLifecycleExecutor(
                 if (
                     removalStatus !=
                         "CANCELLED" &&
+                    !shouldCancel() &&
+                    !actionDispatched
+                ) {
+                    restoreAfterFailedClose(
+                        originalForegroundPackage =
+                            sourcePackage
+                    )
+                } else if (
+                    actionDispatched &&
+                    verifiedNotCommitted &&
                     !shouldCancel()
                 ) {
                     restoreAfterFailedClose(
@@ -241,29 +403,76 @@ class AyanaAppLifecycleExecutor(
                         )
                         .put(
                             "mode",
-                            "cancelled"
+                            if (actionDispatched) {
+                                "post_dispatch_failure"
+                            } else {
+                                "cancelled"
+                            }
                         )
                 }
 
+            val semanticStatus =
+                when {
+                    // Legacy/defensive rule: a lower layer is never allowed to
+                    // return CANCELLED after reporting accepted dispatch unless
+                    // it also proves the side effect did not commit.
+                    actionDispatched &&
+                        removalStatus == "CANCELLED" &&
+                        !verifiedNotCommitted ->
+                        "ERROR"
+
+                    removalStatus == "BLOCKED" ->
+                        "BLOCKED"
+
+                    removalStatus == "UNSUPPORTED" ->
+                        "UNSUPPORTED"
+
+                    removalStatus == "CANCELLED" ->
+                        "CANCELLED"
+
+                    else ->
+                        "ERROR"
+                }
+
+            val semanticReason =
+                if (
+                    actionDispatched &&
+                    removalStatus == "CANCELLED" &&
+                    !verifiedNotCommitted
+                ) {
+                    "dispatch_outcome_unverified"
+                } else {
+                    removal.optString(
+                        "reason",
+                        "task_removal_unverified"
+                    )
+                }
+
             return terminal(
-                status =
-                    when (removalStatus) {
-                        "BLOCKED" -> "BLOCKED"
-                        "UNSUPPORTED" -> "UNSUPPORTED"
-                        "CANCELLED" -> "CANCELLED"
-                        else -> "ERROR"
-                    },
-                reason = removal.optString(
-                    "reason",
-                    "task_removal_unverified"
-                ),
-                message = removal.optString(
-                    "message",
-                    "Удаление задачи приложения не подтверждено."
-                )
+                status = semanticStatus,
+                reason = semanticReason,
+                message =
+                    if (semanticReason == "dispatch_outcome_unverified") {
+                        "Команда удаления была передана Android, но её фактический результат не подтверждён."
+                    } else {
+                        removal.optString(
+                            "message",
+                            "Удаление задачи приложения не подтверждено."
+                        )
+                    }
+            ).put(
+                "action_dispatched",
+                actionDispatched
             ).put(
                 "action_committed",
                 false
+            ).put(
+                "destructive_commit_pending",
+                actionDispatched &&
+                    !verifiedNotCommitted
+            ).put(
+                "verified_not_committed",
+                verifiedNotCommitted
             ).put(
                 "removal",
                 removal
@@ -290,8 +499,14 @@ class AyanaAppLifecycleExecutor(
             reason = "task_removal_without_concrete_dismissal",
             message = "Закрытие не подтверждено фактическим удалением карточки приложения."
         ).put(
+            "action_dispatched",
+            actionDispatched
+        ).put(
             "action_committed",
             false
+        ).put(
+            "destructive_commit_pending",
+            actionDispatched
         ).put(
             "removal",
             removal
