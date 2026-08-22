@@ -20,8 +20,9 @@ import kotlin.math.max
 class AgentAccessibilityService :
     AccessibilityService() {
 
-    // AYANA Accessibility v5.5 — SAMSUNG RECENTS PERCEPTION + VERIFIED TASK REMOVAL.
-    // v5.4 adds a bounded, strict-label Recents executor for user-visible app-task removal.
+    // AYANA Accessibility v5.6 — VERIFIED FOREGROUND CURRENT-TASK REMOVAL.
+    // v5.6 keeps strict-label Recents scanning and adds one fail-closed positional lane only
+    // when the app being closed is provably the app that was foreground immediately before Recents.
     // It never uses “Close all”, never equates Home/Back with close, and fails closed when
     // the task card cannot be identified and verified. v5.3 same-window Settings perception remains.
     // Every visible Android window is an independent context. Normal accessibility
@@ -86,6 +87,13 @@ class AgentAccessibilityService :
         val cardNode: AccessibilityNodeInfo,
         val bounds: Rect,
         val score: Int
+    )
+
+    private data class RecentsStructuralState(
+        val fingerprint: String,
+        val overviewChildCount: Int,
+        val dismissableCount: Int,
+        val strongContextCount: Int
     )
 
     private val eventEvidenceLock =
@@ -332,6 +340,15 @@ class AgentAccessibilityService :
         val seenSignatures =
             linkedSetOf<String>()
 
+        val sourceIsTarget =
+            sourcePackageMatchesTargetLabel(
+                sourcePackage = sourcePackage,
+                normalizedTarget = normalizedTarget
+            )
+
+        var foregroundPositionalAttempted =
+            false
+
         while (
             scanCount < RECENTS_MAX_SCAN_STEPS &&
             !shouldCancel()
@@ -422,6 +439,67 @@ class AgentAccessibilityService :
                 // catches multiple task cards with the same application label.
                 seenSignatures.clear()
                 continue
+            }
+
+            if (
+                candidate == null &&
+                sourceIsTarget &&
+                !foregroundPositionalAttempted &&
+                scanCount == 1
+            ) {
+                foregroundPositionalAttempted =
+                    true
+
+                val positional =
+                    dismissForegroundCurrentTaskFromRecents(
+                        sourcePackage = sourcePackage,
+                        shouldCancel = shouldCancel
+                    )
+
+                if (
+                    positional.optBoolean(
+                        "success",
+                        false
+                    ) &&
+                    positional.optBoolean(
+                        "verified",
+                        false
+                    )
+                ) {
+                    // One-shot foreground lane: the current task identity is
+                    // proven by the entry context, so stop immediately after the
+                    // verified dismissal. Continuing a label-less carousel scan
+                    // could act on a different task after cards shift position.
+                    return positional
+                        .put(
+                            "removed_count",
+                            1
+                        )
+                        .put(
+                            "scan_count",
+                            scanCount
+                        )
+                }
+
+                if (
+                    positional.optString(
+                        "terminal_status"
+                    ) ==
+                    "CANCELLED"
+                ) {
+                    return positional
+                        .put(
+                            "removed_count",
+                            removedCount
+                        )
+                        .put(
+                            "scan_count",
+                            scanCount
+                        )
+                }
+                // Positional fallback is intentionally one-shot. If it cannot be
+                // verified, continue with ordinary bounded Recents scanning; do
+                // not claim success from an accepted gesture alone.
             }
 
             val moved =
@@ -844,6 +922,25 @@ class AgentAccessibilityService :
             "com.google.android.apps.nexuslauncher" ||
             normalized ==
             "com.android.systemui"
+    }
+
+    private fun isKnownLauncherPackage(
+        packageName: String
+    ): Boolean {
+
+        val normalized =
+            packageName
+                .trim()
+                .lowercase(
+                    Locale.ROOT
+                )
+
+        return normalized ==
+            "com.sec.android.app.launcher" ||
+            normalized ==
+            "com.android.launcher3" ||
+            normalized ==
+            "com.google.android.apps.nexuslauncher"
     }
 
     private fun isStrongRecentsWindowContext(
@@ -1349,6 +1446,536 @@ class AgentAccessibilityService :
         return false
     }
 
+    private fun sourcePackageMatchesTargetLabel(
+        sourcePackage: String,
+        normalizedTarget: String
+    ): Boolean {
+
+        val packageName =
+            sourcePackage.trim()
+
+        if (
+            packageName.isBlank() ||
+            normalizedTarget.isBlank() ||
+            packageName ==
+                this.packageName ||
+            isKnownRecentsHostPackage(
+                packageName
+            )
+        ) {
+            return false
+        }
+
+        // The lifecycle gateway currently passes the pre-Recents foreground
+        // package plus the resolver's canonical app label. Before using a
+        // position-only current-card gesture, prove that this label maps to one
+        // and only one visible launcher package and that package is sourcePackage.
+        // If two installed apps share a label, the positional lane is disabled.
+        val launcherIntent =
+            android.content.Intent(
+                android.content.Intent.ACTION_MAIN
+            ).apply {
+                addCategory(
+                    android.content.Intent.CATEGORY_LAUNCHER
+                )
+            }
+
+        val matchingPackages =
+            try {
+                packageManager
+                    .queryIntentActivities(
+                        launcherIntent,
+                        0
+                    )
+                    .mapNotNull { info ->
+                        val activityInfo =
+                            info.activityInfo
+                                ?: return@mapNotNull null
+
+                        val label =
+                            try {
+                                info
+                                    .loadLabel(
+                                        packageManager
+                                    )
+                                    ?.toString()
+                                    .orEmpty()
+                            } catch (_: Exception) {
+                                ""
+                            }
+
+                        if (
+                            normalize(
+                                label
+                            ) ==
+                            normalizedTarget
+                        ) {
+                            activityInfo.packageName
+                                ?.trim()
+                                ?.takeIf { value ->
+                                    value.isNotBlank()
+                                }
+                        } else {
+                            null
+                        }
+                    }
+                    .distinct()
+            } catch (_: Exception) {
+                emptyList()
+            }
+
+        return matchingPackages.size == 1 &&
+            matchingPackages[0] ==
+                packageName
+    }
+
+    private fun dismissForegroundCurrentTaskFromRecents(
+        sourcePackage: String,
+        shouldCancel: () -> Boolean
+    ): JSONObject {
+
+        if (shouldCancel()) {
+            return recentTaskResult(
+                success = false,
+                verified = false,
+                terminalStatus = "CANCELLED",
+                reason = "cancelled_before_foreground_task_dismiss",
+                message = "Удаление задачи отменено"
+            )
+        }
+
+        val contexts =
+            resolveWindowContexts()
+
+        val strongContexts =
+            contexts
+                .filter { context ->
+                    isStrongRecentsWindowContext(
+                        context
+                    )
+                }
+                .sortedByDescending { context ->
+                    context.rank
+                }
+
+        val primary =
+            primaryWindowContext(
+                contexts
+            )
+
+        if (
+            strongContexts.isEmpty() ||
+            primary == null ||
+            !isStrongRecentsWindowContext(
+                primary
+            )
+        ) {
+            return recentTaskResult(
+                success = false,
+                verified = false,
+                terminalStatus = "ERROR",
+                reason = "foreground_task_recents_context_unverified",
+                message = "Не удалось подтвердить активную карточку приложения в недавних"
+            )
+        }
+
+        val before =
+            captureRecentsStructuralState(
+                strongContexts
+            )
+
+        val width =
+            resources.displayMetrics.widthPixels
+                .coerceAtLeast(1)
+
+        val height =
+            resources.displayMetrics.heightPixels
+                .coerceAtLeast(1)
+
+        // Entry-context invariant: GLOBAL_ACTION_RECENTS was invoked directly
+        // from sourcePackage, and sourcePackage's installed application label was
+        // verified equal to the resolved target label. Therefore the initially
+        // selected/centred Recents card is the requested foreground task. This
+        // lane is never used for a background target or after carousel movement.
+        val accepted =
+            swipeCoordinates(
+                startX =
+                    (width * 0.50).toInt(),
+                startY =
+                    (height * 0.62).toInt(),
+                endX =
+                    (width * 0.50).toInt(),
+                endY =
+                    (height * 0.12).toInt(),
+                durationMs = 280L
+            )
+
+        if (!accepted) {
+            return recentTaskResult(
+                success = false,
+                verified = false,
+                terminalStatus = "ERROR",
+                reason = "foreground_task_swipe_rejected",
+                message = "Android не принял удаление текущей карточки приложения",
+                dismissMethod = "foreground_current_task_swipe_up"
+            )
+        }
+
+        val verification =
+            waitForForegroundCurrentTaskDismissal(
+                before = before,
+                sourcePackage = sourcePackage,
+                shouldCancel = shouldCancel
+            )
+
+        if (shouldCancel()) {
+            return recentTaskResult(
+                success = false,
+                verified = false,
+                terminalStatus = "CANCELLED",
+                reason = "cancelled_during_foreground_task_verify",
+                message = "Удаление задачи отменено",
+                dismissMethod = "foreground_current_task_swipe_up"
+            )
+        }
+
+        if (!verification.optBoolean("verified", false)) {
+            return recentTaskResult(
+                success = false,
+                verified = false,
+                terminalStatus = "ERROR",
+                reason = "foreground_task_dismiss_unverified",
+                message = "Удаление текущей карточки приложения не подтверждено",
+                dismissMethod = "foreground_current_task_swipe_up"
+            ).put(
+                "verification",
+                verification
+            )
+        }
+
+        return recentTaskResult(
+            success = true,
+            verified = true,
+            terminalStatus = "SUCCESS",
+            reason = "verified_task_removed",
+            message = "Текущая задача приложения удалена из списка недавних",
+            removedCount = 1,
+            scanCount = 1,
+            dismissMethod = "foreground_current_task_swipe_up"
+        ).put(
+            "verification",
+            verification
+        )
+    }
+
+    private fun waitForForegroundCurrentTaskDismissal(
+        before: RecentsStructuralState,
+        sourcePackage: String,
+        shouldCancel: () -> Boolean
+    ): JSONObject {
+
+        val deadline =
+            SystemClock.elapsedRealtime() +
+                RECENTS_DISMISS_VERIFY_TIMEOUT_MS
+
+        var stableFingerprint =
+            ""
+
+        var stableSamples =
+            0
+
+        do {
+            if (shouldCancel()) {
+                return JSONObject()
+                    .put("verified", false)
+                    .put("reason", "cancelled")
+            }
+
+            val contexts =
+                resolveWindowContexts()
+
+            val primary =
+                primaryWindowContext(
+                    contexts
+                )
+
+            val strongContexts =
+                contexts
+                    .filter { context ->
+                        isStrongRecentsWindowContext(
+                            context
+                        )
+                    }
+                    .sortedByDescending { context ->
+                        context.rank
+                    }
+
+            val stillOnSource =
+                primary
+                    ?.packageName
+                    ?.trim() ==
+                    sourcePackage.trim()
+
+            if (!stillOnSource) {
+                if (strongContexts.isNotEmpty()) {
+                    val after =
+                        captureRecentsStructuralState(
+                            strongContexts
+                        )
+
+                    val countDecreased =
+                        (
+                            before.overviewChildCount >= 0 &&
+                            after.overviewChildCount >= 0 &&
+                            after.overviewChildCount <
+                                before.overviewChildCount
+                            ) ||
+                            (
+                                before.dismissableCount > 0 &&
+                                after.dismissableCount <
+                                    before.dismissableCount
+                                )
+
+                    if (countDecreased) {
+                        return JSONObject()
+                            .put("verified", true)
+                            .put("reason", "recents_task_count_decreased")
+                            .put("before_overview_children", before.overviewChildCount)
+                            .put("after_overview_children", after.overviewChildCount)
+                            .put("before_dismissable", before.dismissableCount)
+                            .put("after_dismissable", after.dismissableCount)
+                    }
+
+                    val changed =
+                        after.fingerprint.isNotBlank() &&
+                            after.fingerprint !=
+                            before.fingerprint
+
+                    if (changed) {
+                        if (
+                            stableFingerprint ==
+                            after.fingerprint
+                        ) {
+                            stableSamples++
+                        } else {
+                            stableFingerprint =
+                                after.fingerprint
+                            stableSamples =
+                                1
+                        }
+
+                        if (stableSamples >= 2) {
+                            return JSONObject()
+                                .put("verified", true)
+                                .put("reason", "recents_viewport_changed_stably")
+                                .put("stable_samples", stableSamples)
+                        }
+                    } else {
+                        stableFingerprint =
+                            ""
+                        stableSamples =
+                            0
+                    }
+                } else if (
+                    primary != null &&
+                    isKnownRecentsHostPackage(
+                        primary.packageName
+                    )
+                ) {
+                    // Dismissing the last recent task can collapse Recents back
+                    // to the launcher. Source package must not be foreground.
+                    return JSONObject()
+                        .put("verified", true)
+                        .put("reason", "recents_collapsed_to_launcher")
+                        .put("package", primary.packageName)
+                }
+            }
+
+            try {
+                Thread.sleep(
+                    RECENTS_VERIFY_POLL_MS
+                )
+            } catch (_: InterruptedException) {
+                Thread.currentThread()
+                    .interrupt()
+                return JSONObject()
+                    .put("verified", false)
+                    .put("reason", "interrupted")
+            }
+        } while (
+            SystemClock.elapsedRealtime() <
+            deadline
+        )
+
+        return JSONObject()
+            .put("verified", false)
+            .put("reason", "foreground_task_postcondition_timeout")
+    }
+
+    private fun captureRecentsStructuralState(
+        contexts: List<WindowContext> =
+            recentsWindowContexts(
+                resolveWindowContexts()
+            )
+    ): RecentsStructuralState {
+
+        var overviewChildCount =
+            -1
+
+        var dismissableCount =
+            0
+
+        val parts =
+            ArrayList<String>()
+
+        var visited =
+            0
+
+        for (context in contexts) {
+            val root =
+                context.root
+                    ?: continue
+
+            val queue =
+                ArrayDeque<AccessibilityNodeInfo>()
+
+            queue.add(
+                root
+            )
+
+            while (
+                queue.isNotEmpty() &&
+                visited < RECENTS_CANDIDATE_NODE_LIMIT
+            ) {
+                val node =
+                    queue.removeFirst()
+
+                visited++
+
+                val visible =
+                    try {
+                        node.isVisibleToUser
+                    } catch (_: Exception) {
+                        false
+                    }
+
+                if (!visible) {
+                    continue
+                }
+
+                val bounds =
+                    Rect()
+
+                node.getBoundsInScreen(
+                    bounds
+                )
+
+                val rawViewId =
+                    node.viewIdResourceName
+                        .orEmpty()
+                        .lowercase(
+                            Locale.ROOT
+                        )
+
+                if (
+                    overviewChildCount < 0 &&
+                    rawViewId.endsWith(
+                        ":id/overview_panel"
+                    )
+                ) {
+                    overviewChildCount =
+                        try {
+                            node.childCount
+                        } catch (_: Exception) {
+                            -1
+                        }
+                }
+
+                if (
+                    node.actionList.any { action ->
+                        action.id ==
+                            AccessibilityNodeInfo.ACTION_DISMISS
+                    }
+                ) {
+                    dismissableCount++
+                }
+
+                if (parts.size < 140) {
+                    parts.add(
+                        buildString {
+                            append(
+                                normalize(
+                                    node.className
+                                        ?.toString()
+                                        .orEmpty()
+                                )
+                            )
+                            append('|')
+                            append(rawViewId.takeLast(80))
+                            append('|')
+                            append(
+                                normalize(
+                                    node.text
+                                        ?.toString()
+                                        .orEmpty()
+                                ).take(100)
+                            )
+                            append('|')
+                            append(
+                                normalize(
+                                    node.contentDescription
+                                        ?.toString()
+                                        .orEmpty()
+                                ).take(100)
+                            )
+                            append('|')
+                            append(bounds.left)
+                            append(',')
+                            append(bounds.top)
+                            append(',')
+                            append(bounds.right)
+                            append(',')
+                            append(bounds.bottom)
+                            append('|')
+                            append(node.childCount)
+                        }
+                    )
+                }
+
+                for (
+                    index in
+                    0 until node.childCount
+                ) {
+                    childWithPrefetch(
+                        node,
+                        index
+                    )?.let { child ->
+                        queue.add(
+                            child
+                        )
+                    }
+                }
+            }
+        }
+
+        val fingerprint =
+            if (parts.isEmpty()) {
+                ""
+            } else {
+                parts
+                    .joinToString("\n")
+                    .hashCode()
+                    .toString()
+            }
+
+        return RecentsStructuralState(
+            fingerprint = fingerprint,
+            overviewChildCount = overviewChildCount,
+            dismissableCount = dismissableCount,
+            strongContextCount = contexts.size
+        )
+    }
+
     private fun moveRecentsForward(): Boolean {
 
         if (
@@ -1368,7 +1995,14 @@ class AgentAccessibilityService :
                 .coerceAtLeast(1)
 
         val before =
-            screenSignature()
+            captureRecentsStructuralState()
+
+        if (
+            before.strongContextCount <= 0 ||
+            before.fingerprint.isBlank()
+        ) {
+            return false
+        }
 
         val accepted =
             swipeCoordinates(
@@ -1383,10 +2017,42 @@ class AgentAccessibilityService :
                 durationMs = 240L
             )
 
-        return accepted &&
-            waitForScreenChange(
-                before
-            )
+        if (!accepted) {
+            return false
+        }
+
+        val deadline =
+            SystemClock.elapsedRealtime() +
+                RECENTS_ENTER_TIMEOUT_MS
+
+        do {
+            val after =
+                captureRecentsStructuralState()
+
+            if (
+                after.strongContextCount > 0 &&
+                after.fingerprint.isNotBlank() &&
+                after.fingerprint !=
+                    before.fingerprint
+            ) {
+                return true
+            }
+
+            try {
+                Thread.sleep(
+                    RECENTS_VERIFY_POLL_MS
+                )
+            } catch (_: InterruptedException) {
+                Thread.currentThread()
+                    .interrupt()
+                return false
+            }
+        } while (
+            SystemClock.elapsedRealtime() <
+            deadline
+        )
+
+        return false
     }
 
     private fun swipeBoundsUp(
