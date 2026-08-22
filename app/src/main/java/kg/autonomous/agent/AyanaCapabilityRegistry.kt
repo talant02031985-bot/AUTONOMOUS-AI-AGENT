@@ -10,7 +10,7 @@ import org.json.JSONArray
 import org.json.JSONObject
 
 /**
- * AYANA Device Capability Registry v2.2 — MULTIMODAL DEVICE-CONFIRMED TRUTH.
+ * AYANA Device Capability Registry v2.4 — VERIFIED APP TASK REMOVAL TRUTH.
  *
  * Single machine-readable source of truth for:
  * 1) what this build implements;
@@ -740,6 +740,15 @@ class AyanaCapabilityRegistry(
             available = accessibilityConnected,
             deviceConfirmed = true,
             note = "multi-window/Recents container detection confirmed"
+        )
+
+        capability(
+            capabilities,
+            "app_task_removal",
+            implemented = true,
+            available = accessibilityConnected,
+            deviceConfirmed = false,
+            note = "v12.1 verified Recents task-removal executor; pending device confirmation; never claims force-stop/process kill"
         )
 
         capability(
