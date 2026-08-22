@@ -20,7 +20,7 @@ import kotlin.math.max
 class AgentAccessibilityService :
     AccessibilityService() {
 
-    // AYANA Accessibility v5.4 — VERIFIED RECENTS TASK REMOVAL + v5.3 PERCEPTION TRUTH.
+    // AYANA Accessibility v5.5 — SAMSUNG RECENTS PERCEPTION + VERIFIED TASK REMOVAL.
     // v5.4 adds a bounded, strict-label Recents executor for user-visible app-task removal.
     // It never uses “Close all”, never equates Home/Back with close, and fails closed when
     // the task card cannot be identified and verified. v5.3 same-window Settings perception remains.
@@ -311,6 +311,9 @@ class AgentAccessibilityService :
                     } else {
                         "Не удалось надёжно подтвердить экран недавних приложений"
                     }
+            ).put(
+                "recents_evidence",
+                recentsEvidenceSummary()
             )
         }
 
@@ -472,6 +475,9 @@ class AgentAccessibilityService :
                 removedCount = removedCount,
                 scanCount = scanCount,
                 dismissMethod = dismissMethod
+            ).put(
+                "recents_evidence",
+                recentsEvidenceSummary()
             )
         }
 
@@ -539,74 +545,82 @@ class AgentAccessibilityService :
         val contexts =
             resolveWindowContexts()
 
-        val primary =
-            primaryWindowContext(
-                contexts
-            )
-                ?: return false
-
-        val freshEventClass =
-            if (
-                lastEventPackage ==
-                    primary.packageName &&
-                System.currentTimeMillis() -
-                    lastEventTime <=
-                    RECENTS_EVENT_CLASS_FRESH_MS
-            ) {
-                lastEventClass
-            } else {
-                ""
-            }
-
-        val normalizedClass =
-            normalize(
-                primary.className +
-                    " " +
-                    primary.title +
-                    " " +
-                    freshEventClass
-            )
-
-        val explicitRecentsClass =
-            listOf(
-                "recents",
-                "overview",
-                "recent apps",
-                "recentapp",
-                "taskview",
-                "quickstep"
-            ).any { marker ->
-                normalizedClass.contains(
-                    marker
-                )
-            }
-
-        if (explicitRecentsClass) {
-            return true
+        if (contexts.isEmpty()) {
+            return false
         }
 
         val normalizedSource =
             sourcePackage.trim()
 
-        val packageTransition =
-            normalizedSource.isNotBlank() &&
-                primary.packageName.isNotBlank() &&
-                primary.packageName != normalizedSource
+        return contexts.any { context ->
 
-        val recentsStructure =
-            hasRecentsTaskStructure(
-                primary.root
-            )
+            val freshEventClass =
+                if (
+                    lastEventPackage ==
+                        context.packageName &&
+                    System.currentTimeMillis() -
+                        lastEventTime <=
+                        RECENTS_EVENT_CLASS_FRESH_MS
+                ) {
+                    lastEventClass
+                } else {
+                    ""
+                }
 
-        return recentsStructure &&
-            (
-                packageTransition ||
-                    normalizedSource.isBlank() ||
-                    normalize(primary.packageName)
-                        .contains("launcher") ||
-                    normalize(primary.packageName)
-                        .contains("systemui")
+            val normalizedClass =
+                normalize(
+                    context.className +
+                        " " +
+                        context.title +
+                        " " +
+                        freshEventClass
                 )
+
+            val explicitRecentsClass =
+                listOf(
+                    "recentsactivity",
+                    "recents",
+                    "overview",
+                    "recent apps",
+                    "recentapp",
+                    "taskview",
+                    "quickstep"
+                ).any { marker ->
+                    normalizedClass.contains(
+                        marker
+                    )
+                }
+
+            val strongHost =
+                isKnownRecentsHostPackage(
+                    context.packageName
+                )
+
+            if (
+                explicitRecentsClass &&
+                (
+                    strongHost ||
+                        normalizedSource.isBlank() ||
+                        context.packageName !=
+                            normalizedSource
+                    )
+            ) {
+                return@any true
+            }
+
+            val recentsStructure =
+                hasRecentsTaskStructure(
+                    context.root
+                )
+
+            recentsStructure &&
+                (
+                    strongHost ||
+                        normalizedSource.isBlank() ||
+                        context.packageName !=
+                            normalizedSource
+                    )
+        }
     }
 
     private fun hasRecentsTaskStructure(
@@ -636,6 +650,12 @@ class AgentAccessibilityService :
         var recentsMarkerFound =
             false
 
+        var strongRecentsViewIdFound =
+            false
+
+        var strongRecentsClassFound =
+            false
+
         val screenArea =
             resources.displayMetrics.widthPixels.toLong() *
                 resources.displayMetrics.heightPixels.toLong()
@@ -649,13 +669,68 @@ class AgentAccessibilityService :
 
             visited++
 
+            val visible =
+                try {
+                    node.isVisibleToUser
+                } catch (_: Exception) {
+                    false
+                }
+
             if (
+                visible &&
                 node.actionList.any { action ->
                     action.id ==
                         AccessibilityNodeInfo.ACTION_DISMISS
                 }
             ) {
                 dismissableCount++
+            }
+
+            val rawViewId =
+                node.viewIdResourceName
+                    .orEmpty()
+                    .lowercase(
+                        Locale.ROOT
+                    )
+
+            if (
+                visible &&
+                (
+                    rawViewId.endsWith(
+                        ":id/overview_panel"
+                    ) ||
+                        rawViewId.endsWith(
+                            ":id/clear_all"
+                        ) ||
+                        rawViewId.endsWith(
+                            ":id/clear_all_button"
+                        )
+                    )
+            ) {
+                strongRecentsViewIdFound =
+                    true
+            }
+
+            val nodeClass =
+                normalize(
+                    node.className
+                        ?.toString()
+                        .orEmpty()
+                )
+
+            if (
+                visible &&
+                (
+                    nodeClass.contains(
+                        "launcherrecentsview"
+                    ) ||
+                        nodeClass.contains(
+                            "recentsview"
+                        )
+                    )
+            ) {
+                strongRecentsClassFound =
+                    true
             }
 
             val nodeText =
@@ -670,6 +745,7 @@ class AgentAccessibilityService :
                 )
 
             if (
+                visible &&
                 listOf(
                     "закрыть все",
                     "очистить все",
@@ -689,7 +765,10 @@ class AgentAccessibilityService :
                     true
             }
 
-            if (node.isScrollable) {
+            if (
+                visible &&
+                node.isScrollable
+            ) {
                 val bounds =
                     Rect()
 
@@ -727,6 +806,18 @@ class AgentAccessibilityService :
             }
         }
 
+        // Samsung One UI exposes the Recents surface through One UI Home. On
+        // Galaxy builds the user-visible "Close all" text can be absent from the
+        // accessibility text stream while the Recents-only overview_panel id is
+        // present. A visible overview panel / RecentsView is therefore strong,
+        // OEM-specific evidence, not a generic launcher guess.
+        if (
+            strongRecentsViewIdFound ||
+            strongRecentsClassFound
+        ) {
+            return true
+        }
+
         return recentsMarkerFound &&
             (
                 dismissableCount > 0 ||
@@ -734,12 +825,117 @@ class AgentAccessibilityService :
                 )
     }
 
+    private fun isKnownRecentsHostPackage(
+        packageName: String
+    ): Boolean {
+
+        val normalized =
+            packageName
+                .trim()
+                .lowercase(
+                    Locale.ROOT
+                )
+
+        return normalized ==
+            "com.sec.android.app.launcher" ||
+            normalized ==
+            "com.android.launcher3" ||
+            normalized ==
+            "com.google.android.apps.nexuslauncher" ||
+            normalized ==
+            "com.android.systemui"
+    }
+
+    private fun isStrongRecentsWindowContext(
+        context: WindowContext
+    ): Boolean {
+
+        val freshEventClass =
+            if (
+                lastEventPackage ==
+                    context.packageName &&
+                System.currentTimeMillis() -
+                    lastEventTime <=
+                    RECENTS_EVENT_CLASS_FRESH_MS
+            ) {
+                lastEventClass
+            } else {
+                ""
+            }
+
+        val normalizedClass =
+            normalize(
+                context.className +
+                    " " +
+                    context.title +
+                    " " +
+                    freshEventClass
+            )
+
+        if (
+            listOf(
+                "recentsactivity",
+                "recents",
+                "overview",
+                "quickstep"
+            ).any { marker ->
+                normalizedClass.contains(
+                    marker
+                )
+            }
+        ) {
+            return true
+        }
+
+        return isKnownRecentsHostPackage(
+            context.packageName
+        ) &&
+            hasRecentsTaskStructure(
+                context.root
+            )
+    }
+
+    private fun recentsWindowContexts(
+        contexts: List<WindowContext>
+    ): List<WindowContext> {
+
+        if (contexts.isEmpty()) {
+            return emptyList()
+        }
+
+        val strong =
+            contexts
+                .filter {
+                    isStrongRecentsWindowContext(
+                        it
+                    )
+                }
+                .sortedByDescending {
+                    it.rank
+                }
+
+        if (strong.isNotEmpty()) {
+            return strong
+        }
+
+        val primary =
+            primaryWindowContext(
+                contexts
+            )
+
+        return if (primary != null) {
+            listOf(primary)
+        } else {
+            emptyList()
+        }
+    }
+
     private fun findRecentTaskCandidate(
         normalizedTarget: String
     ): RecentTaskCandidate? {
 
         val contexts =
-            interactionWindowContexts(
+            recentsWindowContexts(
                 resolveWindowContexts()
             )
 
@@ -880,15 +1076,50 @@ class AgentAccessibilityService :
                 }
 
         return values.any { value ->
-            value == normalizedTarget ||
+
+            if (
+                value == normalizedTarget ||
                 value ==
-                "$normalizedTarget приложение" ||
+                    "$normalizedTarget приложение" ||
                 value ==
-                "$normalizedTarget app" ||
+                    "$normalizedTarget app" ||
                 value ==
-                "приложение $normalizedTarget" ||
+                    "приложение $normalizedTarget" ||
                 value ==
-                "app $normalizedTarget"
+                    "app $normalizedTarget"
+            ) {
+                return@any true
+            }
+
+            // OEM task switchers can append a short accessibility role to the
+            // app label. Arbitrary suffixes remain rejected to avoid confusing
+            // snapshot content with the task-card identity.
+            if (
+                value.startsWith(
+                    "$normalizedTarget "
+                )
+            ) {
+                val suffix =
+                    value
+                        .removePrefix(
+                            "$normalizedTarget "
+                        )
+                        .trim()
+
+                return@any suffix in
+                    setOf(
+                        "приложение",
+                        "app",
+                        "кнопка",
+                        "button",
+                        "значок приложения",
+                        "app icon",
+                        "сведения о приложении",
+                        "app info"
+                    )
+            }
+
+            false
         }
     }
 
@@ -1251,6 +1482,68 @@ class AgentAccessibilityService :
             null,
             null
         )
+    }
+
+    private fun recentsEvidenceSummary(): JSONObject {
+
+        val contexts =
+            resolveWindowContexts()
+
+        val items =
+            JSONArray()
+
+        for (
+            context in
+            contexts.take(6)
+        ) {
+            items.put(
+                JSONObject()
+                    .put(
+                        "package",
+                        context.packageName.take(90)
+                    )
+                    .put(
+                        "class",
+                        context.className.take(120)
+                    )
+                    .put(
+                        "title",
+                        context.title.take(80)
+                    )
+                    .put(
+                        "active",
+                        context.active
+                    )
+                    .put(
+                        "focused",
+                        context.focused
+                    )
+                    .put(
+                        "rank",
+                        context.rank
+                    )
+                    .put(
+                        "recents",
+                        isStrongRecentsWindowContext(
+                            context
+                        )
+                    )
+            )
+        }
+
+        return JSONObject()
+            .put(
+                "event_package",
+                lastEventPackage.take(90)
+            )
+            .put(
+                "event_class",
+                lastEventClass.take(120)
+            )
+            .put(
+                "windows",
+                items
+            )
     }
 
     private fun recentTaskResult(
