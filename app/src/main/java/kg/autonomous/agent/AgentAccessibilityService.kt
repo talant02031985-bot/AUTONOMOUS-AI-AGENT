@@ -20,11 +20,13 @@ import kotlin.math.max
 class AgentAccessibilityService :
     AccessibilityService() {
 
-    // AYANA Accessibility v5.6 — VERIFIED FOREGROUND CURRENT-TASK REMOVAL.
-    // v5.6 keeps strict-label Recents scanning and adds one fail-closed positional lane only
-    // when the app being closed is provably the app that was foreground immediately before Recents.
-    // It never uses “Close all”, never equates Home/Back with close, and fails closed when
-    // the task card cannot be identified and verified. v5.3 same-window Settings perception remains.
+    // AYANA Accessibility v5.7 — SAFE RECENTS IDENTITY DIAGNOSTIC.
+    // v5.7 removes the unsafe position-only foreground-card dismissal lane discovered
+    // on Samsung One UI landscape Recents. A destructive dismiss is now reachable only
+    // after strict semantic task-card identity. If identity is unavailable, AYANA fails
+    // closed and records a bounded read-only task_identity_probe for device diagnosis.
+    // It never uses “Close all” and never equates Home/Back with close. v5.3 same-window
+    // Settings perception remains unchanged.
     // Every visible Android window is an independent context. Normal accessibility
     // events stay lightweight. Samsung/Android Settings is the one bounded exception:
     // sparse Settings roots can hide visible App Info / Notifications / Permissions
@@ -340,14 +342,12 @@ class AgentAccessibilityService :
         val seenSignatures =
             linkedSetOf<String>()
 
-        val sourceIsTarget =
-            sourcePackageMatchesTargetLabel(
-                sourcePackage = sourcePackage,
-                normalizedTarget = normalizedTarget
-            )
-
-        var foregroundPositionalAttempted =
-            false
+        // v5.7 SAFETY: never infer task identity from screen position. Samsung
+        // One UI landscape Recents can arrange tasks as a grid, so a centre/
+        // positional swipe can dismiss a different application. Only a concrete
+        // semantic task-card identity is allowed to reach a destructive action.
+        var firstIdentityProbe: JSONObject? =
+            null
 
         while (
             scanCount < RECENTS_MAX_SCAN_STEPS &&
@@ -443,63 +443,16 @@ class AgentAccessibilityService :
 
             if (
                 candidate == null &&
-                sourceIsTarget &&
-                !foregroundPositionalAttempted &&
-                scanCount == 1
+                firstIdentityProbe == null
             ) {
-                foregroundPositionalAttempted =
-                    true
-
-                val positional =
-                    dismissForegroundCurrentTaskFromRecents(
-                        sourcePackage = sourcePackage,
-                        shouldCancel = shouldCancel
+                // Diagnostic-only capture. This must not tap, swipe, dismiss or
+                // otherwise mutate Recents. It gives the next device test enough
+                // evidence to understand Samsung's accessibility tree without
+                // ever sacrificing another unrelated task.
+                firstIdentityProbe =
+                    buildRecentsTaskIdentityProbe(
+                        normalizedTarget
                     )
-
-                if (
-                    positional.optBoolean(
-                        "success",
-                        false
-                    ) &&
-                    positional.optBoolean(
-                        "verified",
-                        false
-                    )
-                ) {
-                    // One-shot foreground lane: the current task identity is
-                    // proven by the entry context, so stop immediately after the
-                    // verified dismissal. Continuing a label-less carousel scan
-                    // could act on a different task after cards shift position.
-                    return positional
-                        .put(
-                            "removed_count",
-                            1
-                        )
-                        .put(
-                            "scan_count",
-                            scanCount
-                        )
-                }
-
-                if (
-                    positional.optString(
-                        "terminal_status"
-                    ) ==
-                    "CANCELLED"
-                ) {
-                    return positional
-                        .put(
-                            "removed_count",
-                            removedCount
-                        )
-                        .put(
-                            "scan_count",
-                            scanCount
-                        )
-                }
-                // Positional fallback is intentionally one-shot. If it cannot be
-                // verified, continue with ordinary bounded Recents scanning; do
-                // not claim success from an accepted gesture alone.
             }
 
             val moved =
@@ -540,8 +493,8 @@ class AgentAccessibilityService :
 
         // Fail closed: inability to find a card is NOT proof that the target has
         // no task anywhere in Recents. Gesture/scroll rejection can also look like
-        // an end-of-list condition on OEM launchers. v12.1 therefore requires at
-        // least one concrete card dismissal before SUCCESS. This prevents a false
+        // an end-of-list condition on OEM launchers. v12.1.3 therefore requires at
+        // least one semantically identified card dismissal before SUCCESS. This prevents a false
         // "already closed" result when the scan simply could not reach the target.
         if (removedCount <= 0) {
             return recentTaskResult(
@@ -556,6 +509,12 @@ class AgentAccessibilityService :
             ).put(
                 "recents_evidence",
                 recentsEvidenceSummary()
+            ).put(
+                "task_identity_probe",
+                firstIdentityProbe
+                    ?: buildRecentsTaskIdentityProbe(
+                        normalizedTarget
+                    )
             )
         }
 
@@ -1446,370 +1405,341 @@ class AgentAccessibilityService :
         return false
     }
 
-    private fun sourcePackageMatchesTargetLabel(
-        sourcePackage: String,
+    /**
+     * Read-only Recents identity diagnostic. Never performs an Accessibility
+     * action or gesture. It records the small set of visible nodes most likely
+     * to carry OEM task identity (text/contentDescription, task/icon/thumbnail
+     * ids/classes, or ACTION_DISMISS) plus fuzzy target hits. The result is
+     * intentionally bounded so it is safe to persist in command history.
+     */
+    private fun buildRecentsTaskIdentityProbe(
         normalizedTarget: String
-    ): Boolean {
-
-        val packageName =
-            sourcePackage.trim()
-
-        if (
-            packageName.isBlank() ||
-            normalizedTarget.isBlank() ||
-            packageName ==
-                this.packageName ||
-            isKnownRecentsHostPackage(
-                packageName
-            )
-        ) {
-            return false
-        }
-
-        // The lifecycle gateway currently passes the pre-Recents foreground
-        // package plus the resolver's canonical app label. Before using a
-        // position-only current-card gesture, prove that this label maps to one
-        // and only one visible launcher package and that package is sourcePackage.
-        // If two installed apps share a label, the positional lane is disabled.
-        val launcherIntent =
-            android.content.Intent(
-                android.content.Intent.ACTION_MAIN
-            ).apply {
-                addCategory(
-                    android.content.Intent.CATEGORY_LAUNCHER
-                )
-            }
-
-        val matchingPackages =
-            try {
-                packageManager
-                    .queryIntentActivities(
-                        launcherIntent,
-                        0
-                    )
-                    .mapNotNull { info ->
-                        val activityInfo =
-                            info.activityInfo
-                                ?: return@mapNotNull null
-
-                        val label =
-                            try {
-                                info
-                                    .loadLabel(
-                                        packageManager
-                                    )
-                                    ?.toString()
-                                    .orEmpty()
-                            } catch (_: Exception) {
-                                ""
-                            }
-
-                        if (
-                            normalize(
-                                label
-                            ) ==
-                            normalizedTarget
-                        ) {
-                            activityInfo.packageName
-                                ?.trim()
-                                ?.takeIf { value ->
-                                    value.isNotBlank()
-                                }
-                        } else {
-                            null
-                        }
-                    }
-                    .distinct()
-            } catch (_: Exception) {
-                emptyList()
-            }
-
-        return matchingPackages.size == 1 &&
-            matchingPackages[0] ==
-                packageName
-    }
-
-    private fun dismissForegroundCurrentTaskFromRecents(
-        sourcePackage: String,
-        shouldCancel: () -> Boolean
     ): JSONObject {
-
-        if (shouldCancel()) {
-            return recentTaskResult(
-                success = false,
-                verified = false,
-                terminalStatus = "CANCELLED",
-                reason = "cancelled_before_foreground_task_dismiss",
-                message = "Удаление задачи отменено"
-            )
-        }
 
         val contexts =
-            resolveWindowContexts()
-
-        val strongContexts =
-            contexts
-                .filter { context ->
-                    isStrongRecentsWindowContext(
-                        context
-                    )
-                }
-                .sortedByDescending { context ->
-                    context.rank
-                }
-
-        val primary =
-            primaryWindowContext(
-                contexts
+            recentsWindowContexts(
+                resolveWindowContexts()
             )
 
-        if (
-            strongContexts.isEmpty() ||
-            primary == null ||
-            !isStrongRecentsWindowContext(
-                primary
-            )
-        ) {
-            return recentTaskResult(
-                success = false,
-                verified = false,
-                terminalStatus = "ERROR",
-                reason = "foreground_task_recents_context_unverified",
-                message = "Не удалось подтвердить активную карточку приложения в недавних"
-            )
-        }
+        val identityNodes =
+            JSONArray()
 
-        val before =
-            captureRecentsStructuralState(
-                strongContexts
-            )
+        val structuralNodes =
+            JSONArray()
 
-        val width =
-            resources.displayMetrics.widthPixels
-                .coerceAtLeast(1)
+        val targetHits =
+            JSONArray()
 
-        val height =
-            resources.displayMetrics.heightPixels
-                .coerceAtLeast(1)
-
-        // Entry-context invariant: GLOBAL_ACTION_RECENTS was invoked directly
-        // from sourcePackage, and sourcePackage's installed application label was
-        // verified equal to the resolved target label. Therefore the initially
-        // selected/centred Recents card is the requested foreground task. This
-        // lane is never used for a background target or after carousel movement.
-        val accepted =
-            swipeCoordinates(
-                startX =
-                    (width * 0.50).toInt(),
-                startY =
-                    (height * 0.62).toInt(),
-                endX =
-                    (width * 0.50).toInt(),
-                endY =
-                    (height * 0.12).toInt(),
-                durationMs = 280L
-            )
-
-        if (!accepted) {
-            return recentTaskResult(
-                success = false,
-                verified = false,
-                terminalStatus = "ERROR",
-                reason = "foreground_task_swipe_rejected",
-                message = "Android не принял удаление текущей карточки приложения",
-                dismissMethod = "foreground_current_task_swipe_up"
-            )
-        }
-
-        val verification =
-            waitForForegroundCurrentTaskDismissal(
-                before = before,
-                sourcePackage = sourcePackage,
-                shouldCancel = shouldCancel
-            )
-
-        if (shouldCancel()) {
-            return recentTaskResult(
-                success = false,
-                verified = false,
-                terminalStatus = "CANCELLED",
-                reason = "cancelled_during_foreground_task_verify",
-                message = "Удаление задачи отменено",
-                dismissMethod = "foreground_current_task_swipe_up"
-            )
-        }
-
-        if (!verification.optBoolean("verified", false)) {
-            return recentTaskResult(
-                success = false,
-                verified = false,
-                terminalStatus = "ERROR",
-                reason = "foreground_task_dismiss_unverified",
-                message = "Удаление текущей карточки приложения не подтверждено",
-                dismissMethod = "foreground_current_task_swipe_up"
-            ).put(
-                "verification",
-                verification
-            )
-        }
-
-        return recentTaskResult(
-            success = true,
-            verified = true,
-            terminalStatus = "SUCCESS",
-            reason = "verified_task_removed",
-            message = "Текущая задача приложения удалена из списка недавних",
-            removedCount = 1,
-            scanCount = 1,
-            dismissMethod = "foreground_current_task_swipe_up"
-        ).put(
-            "verification",
-            verification
-        )
-    }
-
-    private fun waitForForegroundCurrentTaskDismissal(
-        before: RecentsStructuralState,
-        sourcePackage: String,
-        shouldCancel: () -> Boolean
-    ): JSONObject {
-
-        val deadline =
-            SystemClock.elapsedRealtime() +
-                RECENTS_DISMISS_VERIFY_TIMEOUT_MS
-
-        var stableFingerprint =
-            ""
-
-        var stableSamples =
+        var visited =
             0
 
-        do {
-            if (shouldCancel()) {
-                return JSONObject()
-                    .put("verified", false)
-                    .put("reason", "cancelled")
-            }
+        fun nodeRecord(
+            node: AccessibilityNodeInfo,
+            depth: Int,
+            bounds: Rect,
+            normalizedText: String,
+            normalizedDescription: String,
+            rawViewId: String,
+            normalizedClass: String
+        ): JSONObject {
 
-            val contexts =
-                resolveWindowContexts()
+            val hasDismiss =
+                try {
+                    node.actionList.any { action ->
+                        action.id ==
+                            AccessibilityNodeInfo.ACTION_DISMISS
+                    }
+                } catch (_: Exception) {
+                    false
+                }
 
-            val primary =
-                primaryWindowContext(
-                    contexts
+            return JSONObject()
+                .put(
+                    "depth",
+                    depth
                 )
-
-            val strongContexts =
-                contexts
-                    .filter { context ->
-                        isStrongRecentsWindowContext(
-                            context
-                        )
+                .put(
+                    "text",
+                    normalizedText.take(100)
+                )
+                .put(
+                    "description",
+                    normalizedDescription.take(120)
+                )
+                .put(
+                    "view_id",
+                    rawViewId.takeLast(120)
+                )
+                .put(
+                    "class",
+                    normalizedClass.takeLast(120)
+                )
+                .put(
+                    "bounds",
+                    "${bounds.left},${bounds.top},${bounds.right},${bounds.bottom}"
+                )
+                .put(
+                    "dismiss",
+                    hasDismiss
+                )
+                .put(
+                    "clickable",
+                    try {
+                        node.isClickable
+                    } catch (_: Exception) {
+                        false
                     }
-                    .sortedByDescending { context ->
-                        context.rank
+                )
+                .put(
+                    "children",
+                    try {
+                        node.childCount
+                    } catch (_: Exception) {
+                        -1
+                    }
+                )
+        }
+
+        for (context in contexts.take(3)) {
+            val root =
+                context.root
+                    ?: continue
+
+            data class ProbeNode(
+                val node: AccessibilityNodeInfo,
+                val depth: Int
+            )
+
+            val queue =
+                ArrayDeque<ProbeNode>()
+
+            queue.add(
+                ProbeNode(
+                    node = root,
+                    depth = 0
+                )
+            )
+
+            while (
+                queue.isNotEmpty() &&
+                visited < RECENTS_IDENTITY_PROBE_NODE_LIMIT
+            ) {
+                val item =
+                    queue.removeFirst()
+
+                val node =
+                    item.node
+
+                visited++
+
+                val visible =
+                    try {
+                        node.isVisibleToUser
+                    } catch (_: Exception) {
+                        false
                     }
 
-            val stillOnSource =
-                primary
-                    ?.packageName
-                    ?.trim() ==
-                    sourcePackage.trim()
+                if (!visible) {
+                    continue
+                }
 
-            if (!stillOnSource) {
-                if (strongContexts.isNotEmpty()) {
-                    val after =
-                        captureRecentsStructuralState(
-                            strongContexts
-                        )
+                val bounds =
+                    Rect()
 
-                    val countDecreased =
-                        (
-                            before.overviewChildCount >= 0 &&
-                            after.overviewChildCount >= 0 &&
-                            after.overviewChildCount <
-                                before.overviewChildCount
-                            ) ||
-                            (
-                                before.dismissableCount > 0 &&
-                                after.dismissableCount <
-                                    before.dismissableCount
-                                )
-
-                    if (countDecreased) {
-                        return JSONObject()
-                            .put("verified", true)
-                            .put("reason", "recents_task_count_decreased")
-                            .put("before_overview_children", before.overviewChildCount)
-                            .put("after_overview_children", after.overviewChildCount)
-                            .put("before_dismissable", before.dismissableCount)
-                            .put("after_dismissable", after.dismissableCount)
-                    }
-
-                    val changed =
-                        after.fingerprint.isNotBlank() &&
-                            after.fingerprint !=
-                            before.fingerprint
-
-                    if (changed) {
-                        if (
-                            stableFingerprint ==
-                            after.fingerprint
-                        ) {
-                            stableSamples++
-                        } else {
-                            stableFingerprint =
-                                after.fingerprint
-                            stableSamples =
-                                1
-                        }
-
-                        if (stableSamples >= 2) {
-                            return JSONObject()
-                                .put("verified", true)
-                                .put("reason", "recents_viewport_changed_stably")
-                                .put("stable_samples", stableSamples)
-                        }
-                    } else {
-                        stableFingerprint =
-                            ""
-                        stableSamples =
-                            0
-                    }
-                } else if (
-                    primary != null &&
-                    isKnownRecentsHostPackage(
-                        primary.packageName
+                try {
+                    node.getBoundsInScreen(
+                        bounds
                     )
+                } catch (_: Exception) {
+                }
+
+                val normalizedText =
+                    normalize(
+                        try {
+                            node.text
+                                ?.toString()
+                                .orEmpty()
+                        } catch (_: Exception) {
+                            ""
+                        }
+                    )
+
+                val normalizedDescription =
+                    normalize(
+                        try {
+                            node.contentDescription
+                                ?.toString()
+                                .orEmpty()
+                        } catch (_: Exception) {
+                            ""
+                        }
+                    )
+
+                val rawViewId =
+                    try {
+                        node.viewIdResourceName
+                            .orEmpty()
+                            .lowercase(
+                                Locale.ROOT
+                            )
+                    } catch (_: Exception) {
+                        ""
+                    }
+
+                val normalizedClass =
+                    normalize(
+                        try {
+                            node.className
+                                ?.toString()
+                                .orEmpty()
+                        } catch (_: Exception) {
+                            ""
+                        }
+                    )
+
+                val hasDismiss =
+                    try {
+                        node.actionList.any { action ->
+                            action.id ==
+                                AccessibilityNodeInfo.ACTION_DISMISS
+                        }
+                    } catch (_: Exception) {
+                        false
+                    }
+
+                val identityMeaningful =
+                    normalizedText.isNotBlank() ||
+                        normalizedDescription.isNotBlank()
+
+                val structureMarker =
+                    listOf(
+                        "task",
+                        "recent",
+                        "overview",
+                        "snapshot",
+                        "thumbnail",
+                        "icon",
+                        "card",
+                        "dismiss"
+                    ).any { marker ->
+                        rawViewId.contains(
+                            marker
+                        ) ||
+                            normalizedClass.contains(
+                                marker
+                            )
+                    } ||
+                        hasDismiss
+
+                val fuzzyTargetHit =
+                    normalizedTarget.isNotBlank() &&
+                        (
+                            normalizedText.contains(
+                                normalizedTarget
+                            ) ||
+                                normalizedDescription.contains(
+                                    normalizedTarget
+                                )
+                            )
+
+                if (
+                    identityMeaningful &&
+                    identityNodes.length() <
+                    RECENTS_IDENTITY_PROBE_RECORD_LIMIT
                 ) {
-                    // Dismissing the last recent task can collapse Recents back
-                    // to the launcher. Source package must not be foreground.
-                    return JSONObject()
-                        .put("verified", true)
-                        .put("reason", "recents_collapsed_to_launcher")
-                        .put("package", primary.packageName)
+                    identityNodes.put(
+                        nodeRecord(
+                            node = node,
+                            depth = item.depth,
+                            bounds = bounds,
+                            normalizedText = normalizedText,
+                            normalizedDescription = normalizedDescription,
+                            rawViewId = rawViewId,
+                            normalizedClass = normalizedClass
+                        )
+                    )
+                }
+
+                if (
+                    structureMarker &&
+                    structuralNodes.length() <
+                    RECENTS_IDENTITY_PROBE_RECORD_LIMIT
+                ) {
+                    structuralNodes.put(
+                        nodeRecord(
+                            node = node,
+                            depth = item.depth,
+                            bounds = bounds,
+                            normalizedText = normalizedText,
+                            normalizedDescription = normalizedDescription,
+                            rawViewId = rawViewId,
+                            normalizedClass = normalizedClass
+                        )
+                    )
+                }
+
+                if (
+                    fuzzyTargetHit &&
+                    targetHits.length() <
+                    RECENTS_IDENTITY_PROBE_TARGET_HIT_LIMIT
+                ) {
+                    targetHits.put(
+                        nodeRecord(
+                            node = node,
+                            depth = item.depth,
+                            bounds = bounds,
+                            normalizedText = normalizedText,
+                            normalizedDescription = normalizedDescription,
+                            rawViewId = rawViewId,
+                            normalizedClass = normalizedClass
+                        )
+                    )
+                }
+
+                for (
+                    index in
+                    0 until node.childCount
+                ) {
+                    childWithPrefetch(
+                        node,
+                        index
+                    )?.let { child ->
+                        queue.add(
+                            ProbeNode(
+                                node = child,
+                                depth = item.depth + 1
+                            )
+                        )
+                    }
                 }
             }
-
-            try {
-                Thread.sleep(
-                    RECENTS_VERIFY_POLL_MS
-                )
-            } catch (_: InterruptedException) {
-                Thread.currentThread()
-                    .interrupt()
-                return JSONObject()
-                    .put("verified", false)
-                    .put("reason", "interrupted")
-            }
-        } while (
-            SystemClock.elapsedRealtime() <
-            deadline
-        )
+        }
 
         return JSONObject()
-            .put("verified", false)
-            .put("reason", "foreground_task_postcondition_timeout")
+            .put(
+                "target",
+                normalizedTarget.take(80)
+            )
+            .put(
+                "strong_contexts",
+                contexts.size
+            )
+            .put(
+                "visited",
+                visited
+            )
+            .put(
+                "target_hits",
+                targetHits
+            )
+            .put(
+                "identity_nodes",
+                identityNodes
+            )
+            .put(
+                "structural_nodes",
+                structuralNodes
+            )
     }
 
     private fun captureRecentsStructuralState(
@@ -6127,6 +6057,15 @@ class AgentAccessibilityService :
 
         private const val RECENTS_CARD_PARENT_HOPS =
             8
+
+        private const val RECENTS_IDENTITY_PROBE_NODE_LIMIT =
+            700
+
+        private const val RECENTS_IDENTITY_PROBE_RECORD_LIMIT =
+            48
+
+        private const val RECENTS_IDENTITY_PROBE_TARGET_HIT_LIMIT =
+            12
 
         private const val CLICK_VERIFY_TIMEOUT_MS =
             650L
