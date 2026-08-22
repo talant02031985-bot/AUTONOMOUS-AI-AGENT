@@ -795,7 +795,7 @@ class AyanaMiniOrbController(
 
             val idleCycleMs =
                 when (ayanaState) {
-                    AyanaVoiceService.STATE_LISTENING -> 3000f
+                    AyanaVoiceService.STATE_LISTENING -> 3400f
                     AyanaVoiceService.STATE_COMMAND -> 2300f
                     AyanaVoiceService.STATE_THINKING -> 2500f
                     AyanaVoiceService.STATE_EXECUTING -> 1900f
