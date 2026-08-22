@@ -20,11 +20,12 @@ import kotlin.math.max
 class AgentAccessibilityService :
     AccessibilityService() {
 
-    // AYANA Accessibility v5.7 — SAFE RECENTS IDENTITY DIAGNOSTIC.
-    // v5.7 removes the unsafe position-only foreground-card dismissal lane discovered
-    // on Samsung One UI landscape Recents. A destructive dismiss is now reachable only
-    // after strict semantic task-card identity. If identity is unavailable, AYANA fails
-    // closed and records a bounded read-only task_identity_probe for device diagnosis.
+    // AYANA Accessibility v5.8 — SAMSUNG TASKVIEW IDENTITY.
+    // v5.8 keeps the v5.7 ban on position-only Recents gestures and adds a device-proven
+    // Samsung One UI identity path: a visible One UI Home :id/taskview whose own
+    // contentDescription exactly equals the resolved app label is the task card itself.
+    // This path uses that concrete card bounds for dismissal and still verifies that the
+    // same semantic task identity disappears before SUCCESS. Unknown identity fails closed.
     // It never uses “Close all” and never equates Home/Back with close. v5.3 same-window
     // Settings perception remains unchanged.
     // Every visible Android window is an independent context. Normal accessibility
@@ -1031,6 +1032,12 @@ class AgentAccessibilityService :
                         normalizedTarget
                     )
                 ) {
+                    val directTaskView =
+                        isStrongDirectRecentTaskView(
+                            node = node,
+                            normalizedTarget = normalizedTarget
+                        )
+
                     val dismissable =
                         findActionableParent(
                             node,
@@ -1038,10 +1045,18 @@ class AgentAccessibilityService :
                         )
 
                     val card =
-                        dismissable
-                            ?: findRecentCardAncestor(
+                        when {
+                            directTaskView ->
                                 node
-                            )
+
+                            dismissable != null ->
+                                dismissable
+
+                            else ->
+                                findRecentCardAncestor(
+                                    node
+                                )
+                        }
 
                     if (card != null) {
                         val bounds =
@@ -1051,18 +1066,25 @@ class AgentAccessibilityService :
                             bounds
                         )
 
-                        if (
-                            isPlausibleRecentTaskCard(
-                                cardBounds = bounds,
-                                labelNode = node
-                            )
-                        ) {
+                        val plausible =
+                            if (directTaskView) {
+                                isPlausibleDirectTaskViewBounds(
+                                    bounds
+                                )
+                            } else {
+                                isPlausibleRecentTaskCard(
+                                    cardBounds = bounds,
+                                    labelNode = node
+                                )
+                            }
+
+                        if (plausible) {
                             val score =
                                 (
-                                    if (dismissable != null) {
-                                        1000
-                                    } else {
-                                        500
+                                    when {
+                                        directTaskView -> 2500
+                                        dismissable != null -> 1000
+                                        else -> 500
                                     }
                                     ) +
                                     bounds.width().coerceAtLeast(0) +
@@ -1075,7 +1097,16 @@ class AgentAccessibilityService :
                                 best =
                                     RecentTaskCandidate(
                                         labelNode = node,
-                                        actionNode = dismissable,
+                                        // A Samsung :id/taskview identity is already the
+                                        // concrete card. Do not climb to an ancestor
+                                        // ACTION_DISMISS because OEM containers can expose
+                                        // actions that are not scoped to this exact card.
+                                        actionNode =
+                                            if (directTaskView) {
+                                                null
+                                            } else {
+                                                dismissable
+                                            },
                                         cardNode = card,
                                         bounds = bounds,
                                         score = score
@@ -1177,6 +1208,110 @@ class AgentAccessibilityService :
 
             false
         }
+    }
+
+    private fun isStrongDirectRecentTaskView(
+        node: AccessibilityNodeInfo,
+        normalizedTarget: String
+    ): Boolean {
+
+        if (
+            normalizedTarget.isBlank() ||
+            !node.isVisibleToUser ||
+            !node.isEnabled ||
+            !node.isClickable
+        ) {
+            return false
+        }
+
+        val nodePackage =
+            node.packageName
+                ?.toString()
+                .orEmpty()
+                .trim()
+
+        if (
+            nodePackage !=
+            "com.sec.android.app.launcher"
+        ) {
+            return false
+        }
+
+        val viewId =
+            node.viewIdResourceName
+                .orEmpty()
+                .lowercase(
+                    Locale.ROOT
+                )
+
+        if (
+            !viewId.endsWith(
+                ":id/taskview"
+            )
+        ) {
+            return false
+        }
+
+        val description =
+            normalize(
+                node.contentDescription
+                    ?.toString()
+                    .orEmpty()
+            )
+
+        // Device evidence from Galaxy Tab S8 / One UI: the task card itself is a
+        // clickable FrameLayout with :id/taskview and contentDescription="YouTube".
+        // Require an exact canonical app-label match; snapshot text, icon menus and
+        // arbitrary suffixes are deliberately not accepted by this direct lane.
+        if (
+            description !=
+            normalizedTarget
+        ) {
+            return false
+        }
+
+        val nodeClass =
+            normalize(
+                node.className
+                    ?.toString()
+                    .orEmpty()
+            )
+
+        return nodeClass.contains(
+            "framelayout"
+        )
+    }
+
+    private fun isPlausibleDirectTaskViewBounds(
+        bounds: Rect
+    ): Boolean {
+
+        if (
+            bounds.width() <= 1 ||
+            bounds.height() <= 1
+        ) {
+            return false
+        }
+
+        val screenWidth =
+            resources.displayMetrics.widthPixels
+                .coerceAtLeast(1)
+
+        val screenHeight =
+            resources.displayMetrics.heightPixels
+                .coerceAtLeast(1)
+
+        val widthRatio =
+            bounds.width().toDouble() /
+                screenWidth.toDouble()
+
+        val heightRatio =
+            bounds.height().toDouble() /
+                screenHeight.toDouble()
+
+        // Wide enough to be a task preview, but never the full Recents surface.
+        return widthRatio in 0.16..0.95 &&
+            heightRatio in 0.14..0.95
     }
 
     private fun findRecentCardAncestor(
