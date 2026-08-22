@@ -20,15 +20,20 @@ import kotlin.math.max
 class AgentAccessibilityService :
     AccessibilityService() {
 
-    // AYANA Accessibility v5.3 — SEMANTIC SETTINGS SURFACE + EVIDENCE FUSION.
-    // Every visible Android window is an independent context. v5.3 adds generic same-window semantic surface classification for Settings without app-specific rules. Normal accessibility
+    // AYANA Accessibility v5.4 — VERIFIED RECENTS TASK REMOVAL + v5.3 PERCEPTION TRUTH.
+    // v5.4 adds a bounded, strict-label Recents executor for user-visible app-task removal.
+    // It never uses “Close all”, never equates Home/Back with close, and fails closed when
+    // the task card cannot be identified and verified. v5.3 same-window Settings perception remains.
+    // Every visible Android window is an independent context. Normal accessibility
     // events stay lightweight. Samsung/Android Settings is the one bounded exception:
     // sparse Settings roots can hide visible App Info / Notifications / Permissions
     // content from normal window snapshots, so v5.1 captures a throttled descendant
     // tree only for fresh structural com.android.settings events. Fresh event evidence
     // is still merged only into the matching window.
-    // Cross-window verification/clicking stays fail-closed in split-screen,
-    // freeform, PiP, popup/dialog, Recents and overlay scenarios.
+    // Ordinary semantic cross-window clicking stays fail-closed in split-screen,
+    // freeform, PiP, popup/dialog, Recents and overlay scenarios. The only Recents
+    // exception is the dedicated v5.4 task-removal routine above, with its own
+    // strict label identity, topology guards and post-action verification.
 
     data class NodeMatch(
         val node: AccessibilityNodeInfo,
@@ -73,6 +78,14 @@ class AgentAccessibilityService :
         val bounds: Rect,
         val nodes: JSONArray,
         val visibleText: List<String>
+    )
+
+    private data class RecentTaskCandidate(
+        val labelNode: AccessibilityNodeInfo,
+        val actionNode: AccessibilityNodeInfo?,
+        val cardNode: AccessibilityNodeInfo,
+        val bounds: Rect,
+        val score: Int
     )
 
     private val eventEvidenceLock =
@@ -219,6 +232,1039 @@ class AgentAccessibilityService :
             GLOBAL_ACTION_RECENTS
         )
     }
+
+    /**
+     * Removes one app task from Android Recents using a strict visible app-label
+     * match. This is intentionally task removal, NOT process kill / force-stop.
+     * The method scans a bounded Recents carousel, never touches “Close all”, and
+     * returns success only after a fresh tree no longer exposes the dismissed card.
+     */
+    fun removeRecentTaskByLabel(
+        targetLabel: String,
+        sourcePackage: String = "",
+        shouldCancel: () -> Boolean = { false }
+    ): JSONObject {
+
+        val normalizedTarget =
+            normalize(
+                targetLabel
+            )
+
+        if (normalizedTarget.isBlank()) {
+            return recentTaskResult(
+                success = false,
+                verified = false,
+                terminalStatus = "ERROR",
+                reason = "blank_target_label",
+                message = "Не указано приложение для удаления из недавних"
+            )
+        }
+
+        if (shouldCancel()) {
+            return recentTaskResult(
+                success = false,
+                verified = false,
+                terminalStatus = "CANCELLED",
+                reason = "cancelled_before_recents",
+                message = "Удаление задачи отменено"
+            )
+        }
+
+        val before =
+            screenSignature()
+
+        if (!pressRecents()) {
+            return recentTaskResult(
+                success = false,
+                verified = false,
+                terminalStatus = "UNSUPPORTED",
+                reason = "recents_global_action_rejected",
+                message = "Android не принял переход в список недавних"
+            )
+        }
+
+        if (
+            !waitForRecentsSurface(
+                beforeSignature = before,
+                sourcePackage = sourcePackage,
+                shouldCancel = shouldCancel
+            )
+        ) {
+            return recentTaskResult(
+                success = false,
+                verified = false,
+                terminalStatus =
+                    if (shouldCancel()) {
+                        "CANCELLED"
+                    } else {
+                        "UNSUPPORTED"
+                    },
+                reason =
+                    if (shouldCancel()) {
+                        "cancelled_entering_recents"
+                    } else {
+                        "recents_surface_not_verified"
+                    },
+                message =
+                    if (shouldCancel()) {
+                        "Удаление задачи отменено"
+                    } else {
+                        "Не удалось надёжно подтвердить экран недавних приложений"
+                    }
+            )
+        }
+
+        var removedCount =
+            0
+
+        var dismissMethod =
+            ""
+
+        var scanCount =
+            0
+
+        var reachedEnd =
+            false
+
+        val seenSignatures =
+            linkedSetOf<String>()
+
+        while (
+            scanCount < RECENTS_MAX_SCAN_STEPS &&
+            !shouldCancel()
+        ) {
+            scanCount++
+
+            val currentSignature =
+                screenSignature()
+
+            if (
+                currentSignature.isNotBlank() &&
+                !seenSignatures.add(
+                    currentSignature
+                )
+            ) {
+                reachedEnd =
+                    true
+                break
+            }
+
+            val candidate =
+                findRecentTaskCandidate(
+                    normalizedTarget
+                )
+
+            if (candidate != null) {
+                val beforeDismiss =
+                    screenSignature()
+
+                val actionResult =
+                    dismissRecentTaskCandidate(
+                        candidate
+                    )
+
+                if (!actionResult.first) {
+                    return recentTaskResult(
+                        success = false,
+                        verified = false,
+                        terminalStatus = "ERROR",
+                        reason = "task_dismiss_rejected",
+                        message = "Android не принял удаление найденной карточки приложения",
+                        removedCount = removedCount,
+                        scanCount = scanCount,
+                        dismissMethod = actionResult.second
+                    )
+                }
+
+                if (
+                    !waitForRecentTaskToDisappear(
+                        normalizedTarget = normalizedTarget,
+                        beforeSignature = beforeDismiss,
+                        shouldCancel = shouldCancel
+                    )
+                ) {
+                    return recentTaskResult(
+                        success = false,
+                        verified = false,
+                        terminalStatus =
+                            if (shouldCancel()) {
+                                "CANCELLED"
+                            } else {
+                                "ERROR"
+                            },
+                        reason =
+                            if (shouldCancel()) {
+                                "cancelled_during_task_verify"
+                            } else {
+                                "task_dismiss_unverified"
+                            },
+                        message =
+                            if (shouldCancel()) {
+                                "Удаление задачи отменено"
+                            } else {
+                                "Карточка приложения не исчезла после команды удаления"
+                            },
+                        removedCount = removedCount,
+                        scanCount = scanCount,
+                        dismissMethod = actionResult.second
+                    )
+                }
+
+                removedCount++
+                dismissMethod =
+                    actionResult.second
+
+                // Stay on the same Recents position: after a dismissal Android
+                // normally shifts the next task into the current slot. This also
+                // catches multiple task cards with the same application label.
+                seenSignatures.clear()
+                continue
+            }
+
+            val moved =
+                moveRecentsForward()
+
+            if (!moved) {
+                reachedEnd =
+                    true
+                break
+            }
+        }
+
+        if (shouldCancel()) {
+            return recentTaskResult(
+                success = false,
+                verified = false,
+                terminalStatus = "CANCELLED",
+                reason = "cancelled_during_recents_scan",
+                message = "Удаление задачи отменено",
+                removedCount = removedCount,
+                scanCount = scanCount,
+                dismissMethod = dismissMethod
+            )
+        }
+
+        if (!reachedEnd) {
+            return recentTaskResult(
+                success = false,
+                verified = false,
+                terminalStatus = "ERROR",
+                reason = "recents_scan_budget_exhausted",
+                message = "Не удалось полностью проверить список недавних в допустимом лимите",
+                removedCount = removedCount,
+                scanCount = scanCount,
+                dismissMethod = dismissMethod
+            )
+        }
+
+        return recentTaskResult(
+            success = true,
+            verified = true,
+            terminalStatus = "SUCCESS",
+            reason =
+                if (removedCount > 0) {
+                    "verified_task_removed"
+                } else {
+                    "verified_task_already_absent"
+                },
+            message =
+                if (removedCount > 0) {
+                    "Задача приложения удалена из списка недавних"
+                } else {
+                    "Задача приложения уже отсутствует в списке недавних"
+                },
+            removedCount = removedCount,
+            scanCount = scanCount,
+            dismissMethod = dismissMethod
+        )
+    }
+
+    private fun waitForRecentsSurface(
+        beforeSignature: String,
+        sourcePackage: String,
+        shouldCancel: () -> Boolean
+    ): Boolean {
+
+        val deadline =
+            SystemClock.elapsedRealtime() +
+                RECENTS_ENTER_TIMEOUT_MS
+
+        do {
+            if (shouldCancel()) {
+                return false
+            }
+
+            val changed =
+                screenSignature() !=
+                    beforeSignature
+
+            if (
+                changed &&
+                isLikelyRecentsSurface(
+                    sourcePackage
+                )
+            ) {
+                return true
+            }
+
+            try {
+                Thread.sleep(
+                    RECENTS_VERIFY_POLL_MS
+                )
+            } catch (_: InterruptedException) {
+                Thread.currentThread()
+                    .interrupt()
+                return false
+            }
+        } while (
+            SystemClock.elapsedRealtime() <
+            deadline
+        )
+
+        return false
+    }
+
+    private fun isLikelyRecentsSurface(
+        sourcePackage: String
+    ): Boolean {
+
+        val contexts =
+            resolveWindowContexts()
+
+        val primary =
+            primaryWindowContext(
+                contexts
+            )
+                ?: return false
+
+        val freshEventClass =
+            if (
+                lastEventPackage ==
+                    primary.packageName &&
+                System.currentTimeMillis() -
+                    lastEventTime <=
+                    RECENTS_EVENT_CLASS_FRESH_MS
+            ) {
+                lastEventClass
+            } else {
+                ""
+            }
+
+        val normalizedClass =
+            normalize(
+                primary.className +
+                    " " +
+                    primary.title +
+                    " " +
+                    freshEventClass
+            )
+
+        val explicitRecentsClass =
+            listOf(
+                "recents",
+                "overview",
+                "recent apps",
+                "recentapp",
+                "taskview",
+                "quickstep"
+            ).any { marker ->
+                normalizedClass.contains(
+                    marker
+                )
+            }
+
+        if (explicitRecentsClass) {
+            return true
+        }
+
+        val normalizedSource =
+            sourcePackage.trim()
+
+        val packageTransition =
+            normalizedSource.isNotBlank() &&
+                primary.packageName.isNotBlank() &&
+                primary.packageName != normalizedSource
+
+        val recentsStructure =
+            hasRecentsTaskStructure(
+                primary.root
+            )
+
+        return recentsStructure &&
+            (
+                packageTransition ||
+                    normalizedSource.isBlank() ||
+                    normalize(primary.packageName)
+                        .contains("launcher") ||
+                    normalize(primary.packageName)
+                        .contains("systemui")
+                )
+    }
+
+    private fun hasRecentsTaskStructure(
+        root: AccessibilityNodeInfo?
+    ): Boolean {
+
+        if (root == null) {
+            return false
+        }
+
+        val queue =
+            ArrayDeque<AccessibilityNodeInfo>()
+
+        queue.add(
+            root
+        )
+
+        var visited =
+            0
+
+        var dismissableCount =
+            0
+
+        var scrollableLargeContainer =
+            false
+
+        var recentsMarkerFound =
+            false
+
+        val screenArea =
+            resources.displayMetrics.widthPixels.toLong() *
+                resources.displayMetrics.heightPixels.toLong()
+
+        while (
+            queue.isNotEmpty() &&
+            visited < RECENTS_STRUCTURE_NODE_LIMIT
+        ) {
+            val node =
+                queue.removeFirst()
+
+            visited++
+
+            if (
+                node.actionList.any { action ->
+                    action.id ==
+                        AccessibilityNodeInfo.ACTION_DISMISS
+                }
+            ) {
+                dismissableCount++
+            }
+
+            val nodeText =
+                normalize(
+                    node.text
+                        ?.toString()
+                        .orEmpty() +
+                        " " +
+                        node.contentDescription
+                            ?.toString()
+                            .orEmpty()
+                )
+
+            if (
+                listOf(
+                    "закрыть все",
+                    "очистить все",
+                    "недавние приложения",
+                    "недавно использованные",
+                    "close all",
+                    "clear all",
+                    "recent apps",
+                    "recently used"
+                ).any { marker ->
+                    nodeText.contains(
+                        marker
+                    )
+                }
+            ) {
+                recentsMarkerFound =
+                    true
+            }
+
+            if (node.isScrollable) {
+                val bounds =
+                    Rect()
+
+                node.getBoundsInScreen(
+                    bounds
+                )
+
+                val area =
+                    bounds.width().coerceAtLeast(0).toLong() *
+                        bounds.height().coerceAtLeast(0).toLong()
+
+                if (
+                    screenArea > 0L &&
+                    area.toDouble() /
+                    screenArea.toDouble() >=
+                    0.25
+                ) {
+                    scrollableLargeContainer =
+                        true
+                }
+            }
+
+            for (
+                index in
+                0 until node.childCount
+            ) {
+                childWithPrefetch(
+                    node,
+                    index
+                )?.let { child ->
+                    queue.add(
+                        child
+                    )
+                }
+            }
+        }
+
+        return recentsMarkerFound &&
+            (
+                dismissableCount > 0 ||
+                    scrollableLargeContainer
+                )
+    }
+
+    private fun findRecentTaskCandidate(
+        normalizedTarget: String
+    ): RecentTaskCandidate? {
+
+        val contexts =
+            interactionWindowContexts(
+                resolveWindowContexts()
+            )
+
+        var best:
+            RecentTaskCandidate? =
+            null
+
+        for (context in contexts) {
+            val root =
+                context.root
+                    ?: continue
+
+            val queue =
+                ArrayDeque<AccessibilityNodeInfo>()
+
+            queue.add(
+                root
+            )
+
+            var visited =
+                0
+
+            while (
+                queue.isNotEmpty() &&
+                visited < RECENTS_CANDIDATE_NODE_LIMIT
+            ) {
+                val node =
+                    queue.removeFirst()
+
+                visited++
+
+                if (
+                    node.isVisibleToUser &&
+                    node.isEnabled &&
+                    isStrictRecentTaskLabel(
+                        node,
+                        normalizedTarget
+                    )
+                ) {
+                    val dismissable =
+                        findActionableParent(
+                            node,
+                            AccessibilityNodeInfo.ACTION_DISMISS
+                        )
+
+                    val card =
+                        dismissable
+                            ?: findRecentCardAncestor(
+                                node
+                            )
+
+                    if (card != null) {
+                        val bounds =
+                            Rect()
+
+                        card.getBoundsInScreen(
+                            bounds
+                        )
+
+                        if (
+                            isPlausibleRecentTaskCard(
+                                cardBounds = bounds,
+                                labelNode = node
+                            )
+                        ) {
+                            val score =
+                                (
+                                    if (dismissable != null) {
+                                        1000
+                                    } else {
+                                        500
+                                    }
+                                    ) +
+                                    bounds.width().coerceAtLeast(0) +
+                                    bounds.height().coerceAtLeast(0)
+
+                            if (
+                                best == null ||
+                                score > best.score
+                            ) {
+                                best =
+                                    RecentTaskCandidate(
+                                        labelNode = node,
+                                        actionNode = dismissable,
+                                        cardNode = card,
+                                        bounds = bounds,
+                                        score = score
+                                    )
+                            }
+                        }
+                    }
+                }
+
+                for (
+                    index in
+                    0 until node.childCount
+                ) {
+                    childWithPrefetch(
+                        node,
+                        index
+                    )?.let { child ->
+                        queue.add(
+                            child
+                        )
+                    }
+                }
+            }
+        }
+
+        return best
+    }
+
+    private fun isStrictRecentTaskLabel(
+        node: AccessibilityNodeInfo,
+        normalizedTarget: String
+    ): Boolean {
+
+        if (node.isPassword) {
+            return false
+        }
+
+        val values =
+            listOf(
+                node.text
+                    ?.toString()
+                    .orEmpty(),
+                node.contentDescription
+                    ?.toString()
+                    .orEmpty()
+            )
+                .map { value ->
+                    normalize(
+                        value
+                    )
+                }
+                .filter { value ->
+                    value.isNotBlank()
+                }
+
+        return values.any { value ->
+            value == normalizedTarget ||
+                value ==
+                "$normalizedTarget приложение" ||
+                value ==
+                "$normalizedTarget app" ||
+                value ==
+                "приложение $normalizedTarget" ||
+                value ==
+                "app $normalizedTarget"
+        }
+    }
+
+    private fun findRecentCardAncestor(
+        node: AccessibilityNodeInfo
+    ): AccessibilityNodeInfo? {
+
+        val screenWidth =
+            resources.displayMetrics.widthPixels
+                .coerceAtLeast(1)
+
+        val screenHeight =
+            resources.displayMetrics.heightPixels
+                .coerceAtLeast(1)
+
+        var current:
+            AccessibilityNodeInfo? =
+            node
+
+        var hops =
+            0
+
+        var best:
+            AccessibilityNodeInfo? =
+            null
+
+        var bestArea =
+            Long.MAX_VALUE
+
+        while (
+            current != null &&
+            hops < RECENTS_CARD_PARENT_HOPS
+        ) {
+            val bounds =
+                Rect()
+
+            current.getBoundsInScreen(
+                bounds
+            )
+
+            val widthRatio =
+                bounds.width().coerceAtLeast(0).toDouble() /
+                    screenWidth.toDouble()
+
+            val heightRatio =
+                bounds.height().coerceAtLeast(0).toDouble() /
+                    screenHeight.toDouble()
+
+            if (
+                widthRatio in 0.22..0.95 &&
+                heightRatio in 0.22..0.95
+            ) {
+                val area =
+                    bounds.width().coerceAtLeast(0).toLong() *
+                        bounds.height().coerceAtLeast(0).toLong()
+
+                if (area < bestArea) {
+                    best =
+                        current
+                    bestArea =
+                        area
+                }
+            }
+
+            current =
+                current.parent
+
+            hops++
+        }
+
+        return best
+    }
+
+    private fun isPlausibleRecentTaskCard(
+        cardBounds: Rect,
+        labelNode: AccessibilityNodeInfo
+    ): Boolean {
+
+        if (
+            cardBounds.width() <= 1 ||
+            cardBounds.height() <= 1
+        ) {
+            return false
+        }
+
+        val screenWidth =
+            resources.displayMetrics.widthPixels
+                .coerceAtLeast(1)
+
+        val screenHeight =
+            resources.displayMetrics.heightPixels
+                .coerceAtLeast(1)
+
+        val widthRatio =
+            cardBounds.width().toDouble() /
+                screenWidth.toDouble()
+
+        val heightRatio =
+            cardBounds.height().toDouble() /
+                screenHeight.toDouble()
+
+        if (
+            widthRatio !in 0.22..0.98 ||
+            heightRatio !in 0.22..0.98
+        ) {
+            return false
+        }
+
+        val labelBounds =
+            Rect()
+
+        labelNode.getBoundsInScreen(
+            labelBounds
+        )
+
+        if (
+            labelBounds.width() <= 0 ||
+            labelBounds.height() <= 0
+        ) {
+            return false
+        }
+
+        // A Recents app label/icon header is expected near the upper portion of
+        // its task card. This prevents exact app-name text inside another app's
+        // content snapshot from being treated as the card identity.
+        val headerLimit =
+            cardBounds.top +
+                maxOf(
+                    180,
+                    (
+                        cardBounds.height() *
+                            0.40
+                        ).toInt()
+                )
+
+        return labelBounds.centerY() <=
+            headerLimit
+    }
+
+    private fun dismissRecentTaskCandidate(
+        candidate: RecentTaskCandidate
+    ): Pair<Boolean, String> {
+
+        val actionNode =
+            candidate.actionNode
+
+        if (actionNode != null) {
+            val accepted =
+                try {
+                    actionNode.performAction(
+                        AccessibilityNodeInfo.ACTION_DISMISS
+                    )
+                } catch (_: Exception) {
+                    false
+                }
+
+            if (accepted) {
+                return true to
+                    "accessibility_action_dismiss"
+            }
+        }
+
+        val gestureAccepted =
+            swipeBoundsUp(
+                candidate.bounds
+            )
+
+        return gestureAccepted to
+            "gesture_swipe_up"
+    }
+
+    private fun waitForRecentTaskToDisappear(
+        normalizedTarget: String,
+        beforeSignature: String,
+        shouldCancel: () -> Boolean
+    ): Boolean {
+
+        val deadline =
+            SystemClock.elapsedRealtime() +
+                RECENTS_DISMISS_VERIFY_TIMEOUT_MS
+
+        var absentSamples =
+            0
+
+        do {
+            if (shouldCancel()) {
+                return false
+            }
+
+            val changed =
+                screenSignature() !=
+                    beforeSignature
+
+            val absent =
+                findRecentTaskCandidate(
+                    normalizedTarget
+                ) ==
+                    null
+
+            if (changed && absent) {
+                absentSamples++
+                if (
+                    absentSamples >=
+                    2
+                ) {
+                    return true
+                }
+            } else {
+                absentSamples =
+                    0
+            }
+
+            try {
+                Thread.sleep(
+                    RECENTS_VERIFY_POLL_MS
+                )
+            } catch (_: InterruptedException) {
+                Thread.currentThread()
+                    .interrupt()
+                return false
+            }
+        } while (
+            SystemClock.elapsedRealtime() <
+            deadline
+        )
+
+        return false
+    }
+
+    private fun moveRecentsForward(): Boolean {
+
+        if (
+            scroll(
+                "forward"
+            )
+        ) {
+            return true
+        }
+
+        val width =
+            resources.displayMetrics.widthPixels
+                .coerceAtLeast(1)
+
+        val height =
+            resources.displayMetrics.heightPixels
+                .coerceAtLeast(1)
+
+        val before =
+            screenSignature()
+
+        val accepted =
+            swipeCoordinates(
+                startX =
+                    (width * 0.78).toInt(),
+                startY =
+                    (height * 0.58).toInt(),
+                endX =
+                    (width * 0.22).toInt(),
+                endY =
+                    (height * 0.58).toInt(),
+                durationMs = 240L
+            )
+
+        return accepted &&
+            waitForScreenChange(
+                before
+            )
+    }
+
+    private fun swipeBoundsUp(
+        bounds: Rect
+    ): Boolean {
+
+        if (
+            bounds.width() <= 1 ||
+            bounds.height() <= 1
+        ) {
+            return false
+        }
+
+        val screenHeight =
+            resources.displayMetrics.heightPixels
+                .coerceAtLeast(1)
+
+        val startY =
+            bounds.centerY()
+                .coerceIn(
+                    1,
+                    screenHeight -
+                        1
+                )
+
+        val endY =
+            maxOf(
+                1,
+                bounds.top -
+                    maxOf(
+                        bounds.height() /
+                            2,
+                        220
+                    )
+            )
+
+        return swipeCoordinates(
+            startX = bounds.centerX(),
+            startY = startY,
+            endX = bounds.centerX(),
+            endY = endY,
+            durationMs = 260L
+        )
+    }
+
+    private fun swipeCoordinates(
+        startX: Int,
+        startY: Int,
+        endX: Int,
+        endY: Int,
+        durationMs: Long
+    ): Boolean {
+
+        if (
+            startX < 0 ||
+            startY < 0 ||
+            endX < 0 ||
+            endY < 0
+        ) {
+            return false
+        }
+
+        val path =
+            Path().apply {
+                moveTo(
+                    startX.toFloat(),
+                    startY.toFloat()
+                )
+                lineTo(
+                    endX.toFloat(),
+                    endY.toFloat()
+                )
+            }
+
+        val gesture =
+            GestureDescription
+                .Builder()
+                .addStroke(
+                    GestureDescription
+                        .StrokeDescription(
+                            path,
+                            0L,
+                            durationMs.coerceIn(
+                                120L,
+                                600L
+                            )
+                        )
+                )
+                .build()
+
+        return dispatchGesture(
+            gesture,
+            null,
+            null
+        )
+    }
+
+    private fun recentTaskResult(
+        success: Boolean,
+        verified: Boolean,
+        terminalStatus: String,
+        reason: String,
+        message: String,
+        removedCount: Int = 0,
+        scanCount: Int = 0,
+        dismissMethod: String = ""
+    ): JSONObject =
+        JSONObject()
+            .put("success", success)
+            .put("verified", verified)
+            .put("terminal_status", terminalStatus)
+            .put("status", reason)
+            .put("reason", reason)
+            .put("message", message)
+            .put("removed_count", removedCount)
+            .put("scan_count", scanCount)
+            .put("dismiss_method", dismissMethod)
 
     fun clickByText(
         target: String
@@ -4090,6 +5136,30 @@ class AgentAccessibilityService :
     }
 
     companion object {
+
+        private const val RECENTS_ENTER_TIMEOUT_MS =
+            1800L
+
+        private const val RECENTS_DISMISS_VERIFY_TIMEOUT_MS =
+            1500L
+
+        private const val RECENTS_VERIFY_POLL_MS =
+            120L
+
+        private const val RECENTS_EVENT_CLASS_FRESH_MS =
+            2200L
+
+        private const val RECENTS_MAX_SCAN_STEPS =
+            12
+
+        private const val RECENTS_STRUCTURE_NODE_LIMIT =
+            520
+
+        private const val RECENTS_CANDIDATE_NODE_LIMIT =
+            700
+
+        private const val RECENTS_CARD_PARENT_HOPS =
+            8
 
         private const val CLICK_VERIFY_TIMEOUT_MS =
             650L
