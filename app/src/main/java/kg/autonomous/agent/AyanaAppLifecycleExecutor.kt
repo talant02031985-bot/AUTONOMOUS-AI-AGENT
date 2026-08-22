@@ -180,6 +180,27 @@ class AyanaAppLifecycleExecutor(
             )
         }
 
+        val concreteDismissal =
+            removal.optInt(
+                "removed_count",
+                0
+            ) > 0 &&
+                removal.optString(
+                    "reason"
+                ) ==
+                "verified_task_removed"
+
+        if (!concreteDismissal) {
+            return terminal(
+                status = "ERROR",
+                reason = "task_removal_without_concrete_dismissal",
+                message = "Закрытие не подтверждено фактическим удалением карточки приложения."
+            ).put(
+                "removal",
+                removal
+            )
+        }
+
         val context =
             restoreUserContext(
                 targetPackage = packageName,
