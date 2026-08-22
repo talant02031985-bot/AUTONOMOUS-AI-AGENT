@@ -55,8 +55,8 @@ import kotlin.math.abs
 
 class AyanaVoiceService : Service() {
 
-    // AYANA v12.1 VERIFIED APP TASK REMOVAL.
-    // Dedicated App Lifecycle Executor removes verified app task cards from Android Recents,
+    // AYANA v12.2 CANCELLATION + TERMINAL + COMPLETION INTEGRITY.
+    // Preserves v12.1 verified app task removal while hardening STOP/terminal ownership.
     // restores the prior foreground context, and never claims process kill / force-stop.
     // Unified Execution Kernel owns cancellation/terminal/evidence state across long-running lanes.
     // Goal Compiler v2 provides executor/verification contracts and Settings verification can fuse
@@ -219,6 +219,29 @@ class AyanaVoiceService : Service() {
     private var activeCommandHistoryId:
         String? = null
 
+    // v12.2: semantic execution terminal is committed before optional Marin
+    // presentation. These fields let a later voice STOP cancel only speech
+    // without rewriting an already proven Android/Agent result.
+    @Volatile
+    private var pendingPresentationSuccess =
+        false
+
+    @Volatile
+    private var pendingPresentationResult =
+        ""
+
+    @Volatile
+    private var pendingPresentationTechnical =
+        ""
+
+    @Volatile
+    private var pendingPresentationTerminalStatus:
+        String? = null
+
+    @Volatile
+    private var pendingCancelSource =
+        ""
+
     // v11.5 local lifecycle continuity. A short clarification such as
     // «Что сделать с YouTube?» keeps only the resolved app target locally; the
     // next «открой / сверни / закрой» never needs an Agent Core round-trip.
@@ -317,6 +340,12 @@ class AyanaVoiceService : Service() {
         AyanaScreenIntelligence(
             applicationContext
         )
+    }
+
+    // v12.2: Agent Core "final" is not proof that explicitly requested
+    // deliverables actually exist.
+    private val completionContract by lazy {
+        AyanaCompletionContract()
     }
 
     // AYANA v12.1: user-visible close means verified removal of the app task
@@ -6829,10 +6858,31 @@ class AyanaVoiceService : Service() {
                 "action=$action; app=${requestedName.take(160)}"
         )
 
-        thread(
-            start = true,
-            name = "AyanaAppLifecycle"
+        if (
+            action == "close" &&
+            !silent
         ) {
+            executionPhase(
+                phase = "lifecycle_close_prepare",
+                executor = "app_task_removal_executor"
+            )
+
+            startCancelListening()
+
+            commandHistoryStore.addEvent(
+                activeCommandHistoryId,
+                state = "cancel_listener_armed",
+                message = "STOP активирован для App Lifecycle",
+                details =
+                    "lane=app_lifecycle; execution=${executionKernel.current()?.id.orEmpty()}"
+            )
+        }
+
+        val lifecycleWorker =
+            thread(
+                start = false,
+                name = "AyanaAppLifecycle"
+            ) {
 
             val foregroundMode =
                 requestedName ==
@@ -6932,6 +6982,22 @@ class AyanaVoiceService : Service() {
                 cancelRequested ||
                 shuttingDown
             ) {
+                if (
+                    action == "close" &&
+                    cancelRequested &&
+                    commandToken == activeCommandToken &&
+                    !shuttingDown
+                ) {
+                    mainHandler.post {
+                        finishDeferredCancellationFromExecutor(
+                            source =
+                                pendingCancelSource
+                                    .ifBlank {
+                                        "voice"
+                                    }
+                        )
+                    }
+                }
                 return@thread
             }
 
@@ -7105,7 +7171,6 @@ class AyanaVoiceService : Service() {
                 mainHandler.post {
                     if (
                         commandToken == activeCommandToken &&
-                        !cancelRequested &&
                         !shuttingDown
                     ) {
                         val technical =
@@ -7116,7 +7181,50 @@ class AyanaVoiceService : Service() {
                                 )
 
                         when {
-                            verified ->
+                            verified &&
+                                cancelRequested -> {
+                                commandHistoryStore.addEvent(
+                                    activeCommandHistoryId,
+                                    state = "cancel_after_commit",
+                                    message = "STOP получен после подтверждённого удаления задачи",
+                                    details =
+                                        "semantic_terminal=SUCCESS; source=${pendingCancelSource.ifBlank { "voice" }}"
+                                )
+
+                                finishActiveCommandHistory(
+                                    success = true,
+                                    result = "$label закрыт.",
+                                    technical = technical
+                                )
+
+                                broadcastStatus(
+                                    "$label закрыт.",
+                                    STATE_SUCCESS
+                                )
+
+                                updateNotification(
+                                    "$label закрыт • голосовой STOP получен после commit"
+                                )
+
+                                resumeAfterCancellation(
+                                    attempt = 0
+                                )
+                            }
+
+                            terminalStatus ==
+                                "CANCELLED" &&
+                                cancelRequested -> {
+                                finishDeferredCancellationFromExecutor(
+                                    source =
+                                        pendingCancelSource
+                                            .ifBlank {
+                                                "voice"
+                                            }
+                                )
+                            }
+
+                            !cancelRequested &&
+                                verified ->
                                 respondAndResume(
                                     "$label закрыт.",
                                     silent,
@@ -7124,7 +7232,8 @@ class AyanaVoiceService : Service() {
                                     technical = technical
                                 )
 
-                            terminalStatus ==
+                            !cancelRequested &&
+                                terminalStatus ==
                                 "BLOCKED" ->
                                 respondBlockedAndResume(
                                     text = closeResult.optString(
@@ -7135,7 +7244,8 @@ class AyanaVoiceService : Service() {
                                     technical = technical
                                 )
 
-                            terminalStatus ==
+                            !cancelRequested &&
+                                terminalStatus ==
                                 "UNSUPPORTED" ->
                                 respondUnsupportedAndResume(
                                     text = closeResult.optString(
@@ -7146,7 +7256,8 @@ class AyanaVoiceService : Service() {
                                     technical = technical
                                 )
 
-                            terminalStatus !=
+                            !cancelRequested &&
+                                terminalStatus !=
                                 "CANCELLED" ->
                                 respondAndResume(
                                     text = closeResult.optString(
@@ -7395,6 +7506,14 @@ class AyanaVoiceService : Service() {
                 }
             }
         }
+
+        if (action == "close") {
+            executionKernel.bindThread(
+                lifecycleWorker
+            )
+        }
+
+        lifecycleWorker.start()
     }
 
     private fun isVolumeUpCommand(
@@ -9253,9 +9372,25 @@ class AyanaVoiceService : Service() {
 
         } else {
 
-            // Keep the history record active through TTS. This is required for
-            // reliable SPEAKING diagnostics and for voice STOP to finish the same
-            // command as CANCELLED instead of losing activeCommandHistoryId.
+            // v12.2: semantic execution is committed BEFORE optional Marin
+            // presentation. A later STOP may cancel speech, but it must not
+            // rewrite an already proven SUCCESS/BLOCKED/UNSUPPORTED/ERROR.
+            commitExecutionTerminal(
+                success = success,
+                result = text,
+                technical = technical,
+                terminalStatus = terminalStatus
+            )
+
+            pendingPresentationSuccess =
+                success
+            pendingPresentationResult =
+                text
+            pendingPresentationTechnical =
+                technical
+            pendingPresentationTerminalStatus =
+                terminalStatus
+
             speakAndResume(
                 text = text,
                 historySuccess = success,
@@ -9364,7 +9499,7 @@ class AyanaVoiceService : Service() {
 
         val worker =
             thread(
-                start = true,
+                start = false,
                 name = "AyanaAgentCore"
             ) {
 
@@ -11022,9 +11157,49 @@ class AyanaVoiceService : Service() {
                     }
                 }
 
-                val answer =
+                var answer =
                     finalAnswer
-                        ?: "Готово."
+                        ?.trim()
+                        .orEmpty()
+                        .ifBlank {
+                            "Не удалось подтвердить результат выполнения."
+                        }
+
+                if (finalSuccess) {
+                    val completion =
+                        completionContract.validate(
+                            request = message,
+                            reply = answer,
+                            artifactReferences = emptyList()
+                        )
+
+                    if (completion.expected.isNotEmpty()) {
+                        commandHistoryStore.addEvent(
+                            activeCommandHistoryId,
+                            state = "completion_contract",
+                            message =
+                                if (completion.satisfied) {
+                                    "Запрошенные результаты подтверждены"
+                                } else {
+                                    "Запрошенные результаты не подтверждены"
+                                },
+                            details =
+                                (
+                                    "reason=${completion.reason}; " +
+                                        "expected=${completion.expected.joinToString(",")}; " +
+                                        "missing=${completion.missing.joinToString(",")}"
+                                    ).take(900)
+                        )
+                    }
+
+                    if (!completion.satisfied) {
+                        finalSuccess =
+                            false
+
+                        answer =
+                            completion.message
+                    }
+                }
 
                 if (
                     finalSuccess &&
@@ -11208,6 +11383,7 @@ class AyanaVoiceService : Service() {
         currentAgentThread =
             worker
         executionKernel.bindThread(worker)
+        worker.start()
     }
 
     // =========================================================
@@ -17899,9 +18075,12 @@ class AyanaVoiceService : Service() {
         bargeInAudioDiagnosticLogged =
             false
 
-        executionPhase(
-            phase = "tts_stream",
-            executor = "tts_executor"
+        commandHistoryStore.addEvent(
+            activeCommandHistoryId,
+            state = "presentation_phase",
+            message = "tts_stream",
+            details =
+                "executor=tts_executor; semantic_terminal=${executionKernel.current()?.terminalStatus?.name.orEmpty()}"
         )
 
         enterCommunicationAudioMode()
@@ -18334,15 +18513,31 @@ class AyanaVoiceService : Service() {
                         !cancelRequested &&
                         !shuttingDown
                     ) {
+                        commandHistoryStore.addEvent(
+                            activeCommandHistoryId,
+                            state = "presentation_error",
+                            message = "Marin недоступен после semantic terminal",
+                            details = technical
+                        )
+
                         finishActiveCommandHistory(
-                            success = false,
-                            result = "Голос временно недоступен",
-                            technical = technical
+                            success = historySuccess,
+                            result = text,
+                            technical = historyTechnical,
+                            terminalStatus = historyTerminalStatus
                         )
 
                         broadcastStatus(
-                            "Голос временно недоступен",
-                            STATE_ERROR
+                            if (historySuccess) {
+                                text
+                            } else {
+                                "Голос временно недоступен"
+                            },
+                            if (historySuccess) {
+                                STATE_SUCCESS
+                            } else {
+                                STATE_ERROR
+                            }
                         )
 
                         mainHandler.postDelayed(
@@ -18954,25 +19149,50 @@ class AyanaVoiceService : Service() {
     // COMMAND HISTORY / DIAGNOSTICS
     // =========================================================
 
-    private fun finishActiveCommandHistory(
+    private fun kernelStatusFor(
+        success: Boolean,
+        terminalStatus: String?
+    ): AyanaExecutionKernel.TerminalStatus =
+        when {
+            terminalStatus == AyanaCommandHistoryStore.STATUS_BLOCKED ->
+                AyanaExecutionKernel.TerminalStatus.BLOCKED
+
+            terminalStatus == AyanaCommandHistoryStore.STATUS_UNSUPPORTED ->
+                AyanaExecutionKernel.TerminalStatus.UNSUPPORTED
+
+            success ->
+                AyanaExecutionKernel.TerminalStatus.SUCCESS
+
+            else ->
+                AyanaExecutionKernel.TerminalStatus.ERROR
+        }
+
+    private fun commitExecutionTerminal(
         success: Boolean,
         result: String,
         technical: String = "",
         terminalStatus: String? = null
     ) {
-        val id = activeCommandHistoryId ?: return
+        val id =
+            activeCommandHistoryId
+                ?: return
+
+        val current =
+            executionKernel.current()
+
+        if (
+            current != null &&
+            current.terminalStatus !=
+            AyanaExecutionKernel.TerminalStatus.RUNNING
+        ) {
+            return
+        }
 
         val kernelStatus =
-            when {
-                terminalStatus == AyanaCommandHistoryStore.STATUS_BLOCKED ->
-                    AyanaExecutionKernel.TerminalStatus.BLOCKED
-                terminalStatus == AyanaCommandHistoryStore.STATUS_UNSUPPORTED ->
-                    AyanaExecutionKernel.TerminalStatus.UNSUPPORTED
-                success ->
-                    AyanaExecutionKernel.TerminalStatus.SUCCESS
-                else ->
-                    AyanaExecutionKernel.TerminalStatus.ERROR
-            }
+            kernelStatusFor(
+                success = success,
+                terminalStatus = terminalStatus
+            )
 
         executionKernel.complete(
             status = kernelStatus,
@@ -18984,6 +19204,24 @@ class AyanaVoiceService : Service() {
             state = "execution_terminal",
             message = kernelStatus.name,
             details = executionKernel.diagnosticSummary().take(1000)
+        )
+    }
+
+    private fun finishActiveCommandHistory(
+        success: Boolean,
+        result: String,
+        technical: String = "",
+        terminalStatus: String? = null
+    ) {
+        val id =
+            activeCommandHistoryId
+                ?: return
+
+        commitExecutionTerminal(
+            success = success,
+            result = result,
+            technical = technical,
+            terminalStatus = terminalStatus
         )
 
         when (terminalStatus) {
@@ -19010,7 +19248,71 @@ class AyanaVoiceService : Service() {
                 )
         }
 
-        activeCommandHistoryId = null
+        activeCommandHistoryId =
+            null
+
+        pendingPresentationSuccess =
+            false
+        pendingPresentationResult =
+            ""
+        pendingPresentationTechnical =
+            ""
+        pendingPresentationTerminalStatus =
+            null
+        pendingCancelSource =
+            ""
+    }
+
+    private fun finishDeferredCancellationFromExecutor(
+        source: String
+    ) {
+        val id =
+            activeCommandHistoryId
+                ?: run {
+                    cancelRequested =
+                        false
+                    startWakeListening()
+                    return
+                }
+
+        executionKernel.complete(
+            status =
+                AyanaExecutionKernel.TerminalStatus.CANCELLED,
+            reason =
+                "cancel_source=$source"
+        )
+
+        commandHistoryStore.addEvent(
+            id,
+            state = "execution_terminal",
+            message = "CANCELLED",
+            details =
+                executionKernel
+                    .diagnosticSummary()
+                    .take(1000)
+        )
+
+        commandHistoryStore.finishCancelled(
+            id = id,
+            result = "Команда остановлена пользователем",
+            source = source
+        )
+
+        activeCommandHistoryId =
+            null
+
+        broadcastStatus(
+            "Команда остановлена",
+            STATE_CANCELLED
+        )
+
+        updateNotification(
+            "Команда остановлена • AYANA остаётся активной"
+        )
+
+        resumeAfterCancellation(
+            attempt = 0
+        )
     }
 
     private fun isCommandCancelled(
@@ -19393,29 +19695,126 @@ class AyanaVoiceService : Service() {
                     STATE_COMMAND
                 )
 
-        if (
-            !hadActiveCommand
-        ) {
+        if (!hadActiveCommand) {
             return
         }
 
+        val executionSnapshot =
+            executionKernel.current()
+
+        val semanticAlreadyTerminal =
+            executionSnapshot != null &&
+                executionSnapshot.terminalStatus !=
+                AyanaExecutionKernel.TerminalStatus.RUNNING
+
+        // v12.2 terminal ownership: once semantic execution is terminal,
+        // spoken STOP owns presentation only.
+        if (
+            currentStatusState ==
+            STATE_SPEAKING &&
+            semanticAlreadyTerminal &&
+            activeCommandHistoryId !=
+            null
+        ) {
+            commandHistoryStore.addEvent(
+                activeCommandHistoryId,
+                state = "presentation_cancelled",
+                message = "Marin остановлен пользователем после semantic terminal",
+                details =
+                    "source=$source; semantic_terminal=${executionSnapshot?.terminalStatus?.name.orEmpty()}"
+            )
+
+            stopCancelListenerWatchdog()
+            stopCurrentAudio()
+            stopSherpaListening()
+
+            val semanticSuccess =
+                pendingPresentationSuccess
+            val semanticResult =
+                pendingPresentationResult
+                    .ifBlank {
+                        "Команда завершена"
+                    }
+            val semanticTechnical =
+                pendingPresentationTechnical
+            val semanticTerminalStatus =
+                pendingPresentationTerminalStatus
+
+            finishActiveCommandHistory(
+                success = semanticSuccess,
+                result = semanticResult,
+                technical = semanticTechnical,
+                terminalStatus = semanticTerminalStatus
+            )
+
+            broadcastStatus(
+                semanticResult,
+                if (semanticSuccess) {
+                    STATE_SUCCESS
+                } else {
+                    STATE_ERROR
+                }
+            )
+
+            updateNotification(
+                "Голос остановлен • результат команды сохранён"
+            )
+
+            mainHandler.postDelayed(
+                {
+                    if (
+                        !shuttingDown &&
+                        isRunning
+                    ) {
+                        startWakeListening()
+                    }
+                },
+                180L
+            )
+            return
+        }
+
+        val deferTerminalToLifecycleExecutor =
+            executionSnapshot?.terminalStatus ==
+                AyanaExecutionKernel.TerminalStatus.RUNNING &&
+                executionSnapshot.executor ==
+                "app_task_removal_executor"
+
         cancelRequested =
             true
+        pendingCancelSource =
+            source
 
         val cancelledExecution =
-            executionKernel.cancel(
-                reason = "cancel_source=$source"
-            )
+            if (deferTerminalToLifecycleExecutor) {
+                executionKernel.requestCancel(
+                    reason = "cancel_source=$source"
+                )
+            } else {
+                executionKernel.cancel(
+                    reason = "cancel_source=$source"
+                )
+            }
 
         commandHistoryStore.addEvent(
             activeCommandHistoryId,
-            state = "execution_cancelled",
-            message = "Execution Session остановлена",
+            state =
+                if (deferTerminalToLifecycleExecutor) {
+                    "execution_cancel_requested"
+                } else {
+                    "execution_cancelled"
+                },
+            message =
+                if (deferTerminalToLifecycleExecutor) {
+                    "STOP передан App Lifecycle; ожидаю фактический terminal"
+                } else {
+                    "Execution Session остановлена"
+                },
             details =
-                "execution_id=${cancelledExecution?.id.orEmpty()}; lane=${cancelledExecution?.lane.orEmpty()}; source=$source".take(900)
+                "execution_id=${cancelledExecution?.id.orEmpty()}; " +
+                    "lane=${cancelledExecution?.lane.orEmpty()}; " +
+                    "executor=${cancelledExecution?.executor.orEmpty()}; source=$source"
         )
-
-        commandGeneration++
 
         try {
             currentAgentConnection
@@ -19433,6 +19832,21 @@ class AyanaVoiceService : Service() {
         stopCurrentAudio()
         stopSherpaListening()
 
+        if (deferTerminalToLifecycleExecutor) {
+            broadcastStatus(
+                "Останавливаю выполнение…",
+                STATE_EXECUTING
+            )
+
+            updateNotification(
+                "Останавливаю Android-действие"
+            )
+
+            return
+        }
+
+        commandGeneration++
+
         val durableId =
             currentDurableGoalId
 
@@ -19444,8 +19858,6 @@ class AyanaVoiceService : Service() {
                         "Команда остановлена пользователем ($source)"
                     )
             } catch (error: Exception) {
-                // STOP always wins over persistence. A broken goal checkpoint
-                // must never prevent immediate Agent/TTS cancellation.
                 commandHistoryStore.addEvent(
                     activeCommandHistoryId,
                     state = "goal_store_error",
@@ -19461,18 +19873,11 @@ class AyanaVoiceService : Service() {
         val historyId =
             activeCommandHistoryId
 
-        if (
-            historyId !=
-            null
-        ) {
-
+        if (historyId != null) {
             commandHistoryStore.finishCancelled(
-                id =
-                    historyId,
-                result =
-                    "Команда остановлена пользователем",
-                source =
-                    source
+                id = historyId,
+                result = "Команда остановлена пользователем",
+                source = source
             )
 
             activeCommandHistoryId =
@@ -19529,6 +19934,8 @@ class AyanaVoiceService : Service() {
 
         cancelRequested =
             false
+        pendingCancelSource =
+            ""
 
         mainHandler.postDelayed(
             {
