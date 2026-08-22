@@ -4,17 +4,15 @@ import java.net.HttpURLConnection
 import java.util.UUID
 
 /**
- * AYANA Execution Kernel v1.1 â€” unified execution/cancellation/terminal contract.
+ * AYANA Execution Kernel v1.2.1 â€” side-effect reconciliation + terminal truth.
  *
- * Design goals:
- * - every long-running lane is represented by one execution session;
- * - STOP is lane-agnostic: Agent Core, multimodal, Android executor and future
- *   integrations can bind their thread/connection to the same session;
- * - cancellation request and semantic terminal acknowledgement are distinct;
- * - terminal state is explicit and fail-closed;
- * - evidence is bounded and structured.
+ * Core invariant:
+ * Once an irreversible/state-changing dispatch has crossed its atomic dispatch
+ * boundary, user cancellation may request STOP but may not produce semantic
+ * CANCELLED until the executor reconciles the real-world outcome.
  *
- * This class deliberately has no Android framework dependency.
+ * This is deliberately framework-agnostic so Android, artifact and future
+ * integration executors can share the same ownership contract.
  */
 class AyanaExecutionKernel {
 
@@ -25,6 +23,16 @@ class AyanaExecutionKernel {
         UNSUPPORTED,
         CANCELLED,
         ERROR
+    }
+
+    enum class SideEffectState {
+        NONE,
+        PREPARING,
+        DISPATCHING,
+        DISPATCHED,
+        RECONCILING,
+        VERIFIED_COMMITTED,
+        VERIFIED_NOT_COMMITTED
     }
 
     data class Evidence(
@@ -46,6 +54,8 @@ class AyanaExecutionKernel {
         val terminalStatus: TerminalStatus,
         val reason: String,
         val cancelled: Boolean,
+        val sideEffectState: SideEffectState,
+        val sideEffectKind: String,
         val evidence: List<Evidence>
     )
 
@@ -60,6 +70,8 @@ class AyanaExecutionKernel {
         var terminalStatus: TerminalStatus = TerminalStatus.RUNNING,
         var reason: String = "",
         var cancelled: Boolean = false,
+        var sideEffectState: SideEffectState = SideEffectState.NONE,
+        var sideEffectKind: String = "",
         var thread: Thread? = null,
         var connection: HttpURLConnection? = null,
         val evidence: MutableList<Evidence> = mutableListOf()
@@ -149,34 +161,286 @@ class AyanaExecutionKernel {
         }
     }
 
+    /** Marks that a state-changing operation is being prepared, but no
+     * irreversible platform dispatch has happened yet. STOP still owns the
+     * outcome in this state. */
+    fun beginSideEffect(
+        kind: String,
+        detail: String = ""
+    ): Boolean = synchronized(lock) {
+        val session = active ?: return@synchronized false
+        if (session.terminalStatus != TerminalStatus.RUNNING) {
+            return@synchronized false
+        }
+        if (session.cancelled) {
+            return@synchronized false
+        }
+
+        session.sideEffectKind = kind.trim().take(96)
+        session.sideEffectState = SideEffectState.PREPARING
+        session.phase = "side_effect_preparing"
+        addEvidenceLocked(
+            session,
+            Evidence(
+                type = "side_effect_preparing",
+                source = "execution_kernel",
+                detail = detail.trim().ifBlank { session.sideEffectKind }
+                    .take(MAX_EVIDENCE_DETAIL_CHARS),
+                confidence = 100
+            )
+        )
+        true
+    }
+
     /**
-     * Requests cancellation and releases bound resources, but intentionally
-     * keeps the semantic terminal RUNNING until the executor acknowledges the
-     * actual outcome. This prevents a late STOP from rewriting an already
-     * committed state-changing action as CANCELLED.
+     * Atomic point-of-no-return gate.
+     *
+     * The executor MUST call this immediately before invoking the irreversible
+     * Android/API action while STOP uses the same kernel lock via requestCancel().
+     * Therefore exactly one side wins:
+     * - STOP first -> false, dispatch must not happen;
+     * - dispatch gate first -> true, later STOP is deferred to reconciliation.
+     */
+    fun tryBeginIrreversibleDispatch(
+        kind: String,
+        detail: String = ""
+    ): Boolean = synchronized(lock) {
+        val session = active ?: return@synchronized false
+        if (session.terminalStatus != TerminalStatus.RUNNING) {
+            return@synchronized false
+        }
+        if (session.cancelled) {
+            addEvidenceLocked(
+                session,
+                Evidence(
+                    type = "side_effect_dispatch_rejected",
+                    source = "execution_kernel",
+                    detail = "cancel_already_requested",
+                    confidence = 100
+                )
+            )
+            return@synchronized false
+        }
+
+        session.sideEffectKind = kind.trim().take(96)
+        session.sideEffectState = SideEffectState.DISPATCHING
+        session.phase = "side_effect_dispatching"
+        addEvidenceLocked(
+            session,
+            Evidence(
+                type = "side_effect_dispatch_boundary",
+                source = "execution_kernel",
+                detail = detail.trim().ifBlank { session.sideEffectKind }
+                    .take(MAX_EVIDENCE_DETAIL_CHARS),
+                confidence = 100
+            )
+        )
+        true
+    }
+
+    /** Call immediately after the platform accepted the irreversible action. */
+    fun markIrreversibleDispatchAccepted(
+        detail: String = ""
+    ): Boolean = synchronized(lock) {
+        val session = active ?: return@synchronized false
+        if (session.terminalStatus != TerminalStatus.RUNNING) {
+            return@synchronized false
+        }
+        if (
+            session.sideEffectState != SideEffectState.DISPATCHING &&
+            session.sideEffectState != SideEffectState.DISPATCHED
+        ) {
+            return@synchronized false
+        }
+
+        session.sideEffectState = SideEffectState.DISPATCHED
+        session.phase = "side_effect_dispatched"
+        addEvidenceLocked(
+            session,
+            Evidence(
+                type = "side_effect_dispatched",
+                source = "execution_kernel",
+                detail = detail.trim().ifBlank { session.sideEffectKind }
+                    .take(MAX_EVIDENCE_DETAIL_CHARS),
+                confidence = 100
+            )
+        )
+        true
+    }
+
+    /** Enter bounded post-dispatch observation. User STOP must not interrupt
+     * this verification path. */
+    fun markSideEffectReconciliationStarted(
+        detail: String = ""
+    ): Boolean = synchronized(lock) {
+        val session = active ?: return@synchronized false
+        if (session.terminalStatus != TerminalStatus.RUNNING) {
+            return@synchronized false
+        }
+        if (!requiresReconciliationLocked(session)) {
+            return@synchronized false
+        }
+
+        session.sideEffectState = SideEffectState.RECONCILING
+        session.phase =
+            if (session.cancelled) {
+                "side_effect_reconciling_after_cancel"
+            } else {
+                "side_effect_reconciling"
+            }
+        addEvidenceLocked(
+            session,
+            Evidence(
+                type = "side_effect_reconciliation_started",
+                source = "execution_kernel",
+                detail = detail.trim().ifBlank { session.sideEffectKind }
+                    .take(MAX_EVIDENCE_DETAIL_CHARS),
+                confidence = 100
+            )
+        )
+        true
+    }
+
+    /**
+     * Records factual outcome after a dispatch. committed=true means the real
+     * side effect is proven. committed=false means bounded verification proves
+     * it did not take effect. Unknown outcomes should not call this method and
+     * should finish ERROR with dispatch metadata preserved.
+     */
+    fun markSideEffectReconciled(
+        committed: Boolean,
+        detail: String = ""
+    ): Boolean = synchronized(lock) {
+        val session = active ?: return@synchronized false
+        if (session.terminalStatus != TerminalStatus.RUNNING) {
+            return@synchronized false
+        }
+        if (!requiresReconciliationLocked(session)) {
+            return@synchronized false
+        }
+
+        session.sideEffectState =
+            if (committed) {
+                SideEffectState.VERIFIED_COMMITTED
+            } else {
+                SideEffectState.VERIFIED_NOT_COMMITTED
+            }
+        session.phase =
+            if (committed) {
+                "side_effect_verified_committed"
+            } else {
+                "side_effect_verified_not_committed"
+            }
+        addEvidenceLocked(
+            session,
+            Evidence(
+                type =
+                    if (committed) {
+                        "side_effect_verified_committed"
+                    } else {
+                        "side_effect_verified_not_committed"
+                    },
+                source = "execution_kernel",
+                detail = detail.trim().ifBlank { session.sideEffectKind }
+                    .take(MAX_EVIDENCE_DETAIL_CHARS),
+                confidence = 100
+            )
+        )
+        true
+    }
+
+    /** True after the point-of-no-return until factual reconciliation exists. */
+    fun requiresSideEffectReconciliation(): Boolean = synchronized(lock) {
+        active?.let(::requiresReconciliationLocked) ?: false
+    }
+
+    fun sideEffectState(): SideEffectState = synchronized(lock) {
+        active?.sideEffectState ?: SideEffectState.NONE
+    }
+
+    /**
+     * Requests cancellation. If an irreversible dispatch is in flight, bound
+     * execution resources are intentionally left alive so the executor can
+     * reconcile terminal truth. Otherwise cancellation remains interruptive.
      */
     fun requestCancel(reason: String): SessionSnapshot? = synchronized(lock) {
         val session = active ?: return@synchronized null
         if (session.terminalStatus != TerminalStatus.RUNNING) {
             return@synchronized snapshotLocked(session)
         }
+
         session.cancelled = true
-        session.phase = "cancelling"
         session.reason = reason.trim().take(MAX_REASON_CHARS)
-        cancelResourcesLocked(session)
+
+        if (protectsTerminalTruthLocked(session)) {
+            session.phase =
+                if (requiresReconciliationLocked(session)) {
+                    "side_effect_reconciling_after_cancel"
+                } else {
+                    "side_effect_committed_cancel_deferred"
+                }
+            addEvidenceLocked(
+                session,
+                Evidence(
+                    type =
+                        if (requiresReconciliationLocked(session)) {
+                            "cancel_deferred_for_reconciliation"
+                        } else {
+                            "cancel_deferred_after_verified_commit"
+                        },
+                    source = "execution_kernel",
+                    detail = session.reason,
+                    confidence = 100
+                )
+            )
+            // Do NOT interrupt the worker/connection here. After dispatch it
+            // owns factual reconciliation; after VERIFIED_COMMITTED it owns the
+            // short handoff to semantic terminal so STOP cannot rewrite truth.
+        } else {
+            session.phase = "cancelling"
+            cancelResourcesLocked(session)
+        }
+
         snapshotLocked(session)
     }
 
     /**
-     * Immediate cancellation terminal for lanes whose cancellation itself is
-     * authoritative (for example network/model work with no committed side
-     * effect to reconcile).
+     * Immediate cancellation for lanes with no irreversible side effect.
+     * If called after the point-of-no-return, it automatically degrades to a
+     * deferred cancel request instead of lying about terminal state.
      */
     fun cancel(reason: String): SessionSnapshot? = synchronized(lock) {
         val session = active ?: return@synchronized null
         if (session.terminalStatus != TerminalStatus.RUNNING) {
             return@synchronized snapshotLocked(session)
         }
+
+        if (protectsTerminalTruthLocked(session)) {
+            session.cancelled = true
+            session.reason = reason.trim().take(MAX_REASON_CHARS)
+            session.phase =
+                if (requiresReconciliationLocked(session)) {
+                    "side_effect_reconciling_after_cancel"
+                } else {
+                    "side_effect_committed_cancel_deferred"
+                }
+            addEvidenceLocked(
+                session,
+                Evidence(
+                    type =
+                        if (requiresReconciliationLocked(session)) {
+                            "cancel_terminal_deferred_for_reconciliation"
+                        } else {
+                            "cancel_terminal_deferred_after_verified_commit"
+                        },
+                    source = "execution_kernel",
+                    detail = session.reason,
+                    confidence = 100
+                )
+            )
+            return@synchronized snapshotLocked(session)
+        }
+
         session.cancelled = true
         session.phase = "cancelling"
         session.terminalStatus = TerminalStatus.CANCELLED
@@ -193,6 +457,35 @@ class AyanaExecutionKernel {
         if (session.terminalStatus != TerminalStatus.RUNNING) {
             return@synchronized snapshotLocked(session)
         }
+
+        // Hard terminal-truth invariant: semantic CANCELLED is impossible
+        // after the point-of-no-return until reconciliation, and remains
+        // impossible after a side effect has been VERIFIED_COMMITTED even if
+        // semantic terminal handoff has not happened yet.
+        if (
+            status == TerminalStatus.CANCELLED &&
+            protectsTerminalTruthLocked(session)
+        ) {
+            session.cancelled = true
+            session.phase =
+                if (requiresReconciliationLocked(session)) {
+                    "side_effect_reconciliation_required"
+                } else {
+                    "side_effect_committed_terminal_required"
+                }
+            session.reason = reason.trim().take(MAX_REASON_CHARS)
+            addEvidenceLocked(
+                session,
+                Evidence(
+                    type = "cancel_terminal_rejected_after_dispatch",
+                    source = "execution_kernel",
+                    detail = session.reason.ifBlank { session.sideEffectKind },
+                    confidence = 100
+                )
+            )
+            return@synchronized snapshotLocked(session)
+        }
+
         session.terminalStatus = status
         session.phase = "terminal"
         session.reason = reason.trim().take(MAX_REASON_CHARS)
@@ -223,14 +516,29 @@ class AyanaExecutionKernel {
             append(session.terminalStatus.name)
             append("; cancelled=")
             append(session.cancelled)
+            append("; side_effect_state=")
+            append(session.sideEffectState.name)
+            if (session.sideEffectKind.isNotBlank()) {
+                append("; side_effect_kind=")
+                append(session.sideEffectKind)
+            }
             append("; evidence_count=")
             append(session.evidence.size)
             if (session.reason.isNotBlank()) {
                 append("; reason=")
                 append(session.reason)
             }
-        }.take(1200)
+        }.take(1400)
     }
+
+    private fun requiresReconciliationLocked(session: MutableSession): Boolean =
+        session.sideEffectState == SideEffectState.DISPATCHING ||
+            session.sideEffectState == SideEffectState.DISPATCHED ||
+            session.sideEffectState == SideEffectState.RECONCILING
+
+    private fun protectsTerminalTruthLocked(session: MutableSession): Boolean =
+        requiresReconciliationLocked(session) ||
+            session.sideEffectState == SideEffectState.VERIFIED_COMMITTED
 
     private fun addEvidenceLocked(session: MutableSession, evidence: Evidence) {
         if (session.evidence.size >= MAX_EVIDENCE_ITEMS) {
@@ -273,6 +581,8 @@ class AyanaExecutionKernel {
             terminalStatus = session.terminalStatus,
             reason = session.reason,
             cancelled = session.cancelled,
+            sideEffectState = session.sideEffectState,
+            sideEffectKind = session.sideEffectKind,
             evidence = session.evidence.toList()
         )
 
@@ -280,6 +590,6 @@ class AyanaExecutionKernel {
         private const val MAX_OBJECTIVE_CHARS = 1200
         private const val MAX_REASON_CHARS = 600
         private const val MAX_EVIDENCE_DETAIL_CHARS = 900
-        private const val MAX_EVIDENCE_ITEMS = 24
+        private const val MAX_EVIDENCE_ITEMS = 28
     }
 }
