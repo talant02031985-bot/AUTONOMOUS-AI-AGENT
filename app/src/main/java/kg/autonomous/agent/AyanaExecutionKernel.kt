@@ -4,18 +4,17 @@ import java.net.HttpURLConnection
 import java.util.UUID
 
 /**
- * AYANA Execution Kernel v1.0 â€” unified execution/cancellation/terminal contract.
+ * AYANA Execution Kernel v1.1 â€” unified execution/cancellation/terminal contract.
  *
  * Design goals:
  * - every long-running lane is represented by one execution session;
  * - STOP is lane-agnostic: Agent Core, multimodal, Android executor and future
  *   integrations can bind their thread/connection to the same session;
+ * - cancellation request and semantic terminal acknowledgement are distinct;
  * - terminal state is explicit and fail-closed;
- * - evidence is bounded and structured so Planner/Diagnostics can reason about
- *   why verification passed or failed without scraping free-form messages.
+ * - evidence is bounded and structured.
  *
- * This class deliberately has no Android framework dependency. It can therefore
- * be unit-tested on the JVM and reused by future executors.
+ * This class deliberately has no Android framework dependency.
  */
 class AyanaExecutionKernel {
 
@@ -75,9 +74,6 @@ class AyanaExecutionKernel {
         lane: String,
         executor: String = lane
     ): SessionSnapshot = synchronized(lock) {
-        // One command at a time is AYANA's current execution invariant. If an
-        // old session somehow survived without a terminal state, retire it as
-        // ERROR instead of silently reusing its cancellation resources.
         active?.let { previous ->
             if (previous.terminalStatus == TerminalStatus.RUNNING) {
                 previous.terminalStatus = TerminalStatus.ERROR
@@ -153,6 +149,29 @@ class AyanaExecutionKernel {
         }
     }
 
+    /**
+     * Requests cancellation and releases bound resources, but intentionally
+     * keeps the semantic terminal RUNNING until the executor acknowledges the
+     * actual outcome. This prevents a late STOP from rewriting an already
+     * committed state-changing action as CANCELLED.
+     */
+    fun requestCancel(reason: String): SessionSnapshot? = synchronized(lock) {
+        val session = active ?: return@synchronized null
+        if (session.terminalStatus != TerminalStatus.RUNNING) {
+            return@synchronized snapshotLocked(session)
+        }
+        session.cancelled = true
+        session.phase = "cancelling"
+        session.reason = reason.trim().take(MAX_REASON_CHARS)
+        cancelResourcesLocked(session)
+        snapshotLocked(session)
+    }
+
+    /**
+     * Immediate cancellation terminal for lanes whose cancellation itself is
+     * authoritative (for example network/model work with no committed side
+     * effect to reconcile).
+     */
     fun cancel(reason: String): SessionSnapshot? = synchronized(lock) {
         val session = active ?: return@synchronized null
         if (session.terminalStatus != TerminalStatus.RUNNING) {
