@@ -3,7 +3,7 @@ package kg.autonomous.agent
 import org.json.JSONObject
 
 /**
- * AYANA App Lifecycle Executor v1.2 — verified task removal + failure-context restore.
+ * AYANA App Lifecycle Executor v1.3 — verified task removal + cancellation commit integrity.
  *
  * Android third-party apps cannot honestly claim cross-app force-stop/process kill.
  * This executor implements the user-visible close contract as removal of the app's
@@ -122,17 +122,6 @@ class AyanaAppLifecycleExecutor(
                     )
             }
 
-        if (shouldCancel()) {
-            return terminal(
-                status = "CANCELLED",
-                reason = "cancelled_during_close",
-                message = "Закрытие отменено."
-            ).put(
-                "removal",
-                removal
-            )
-        }
-
         val removalStatus =
             removal.optString(
                 "terminal_status",
@@ -147,6 +136,82 @@ class AyanaAppLifecycleExecutor(
                     "ERROR"
                 }
             ).uppercase()
+
+        // A destructive task removal has a commit point. Once Recents has
+        // positively verified that the exact target card was dismissed, a late
+        // STOP must not rewrite the real-world result as CANCELLED.
+        val concreteDismissal =
+            removalStatus == "SUCCESS" &&
+                removal.optBoolean(
+                    "success",
+                    false
+                ) &&
+                removal.optBoolean(
+                    "verified",
+                    false
+                ) &&
+                removal.optInt(
+                    "removed_count",
+                    0
+                ) > 0 &&
+                removal.optString(
+                    "reason"
+                ) ==
+                "verified_task_removed"
+
+        if (concreteDismissal) {
+            val cancelAfterCommit =
+                shouldCancel()
+
+            val context =
+                if (cancelAfterCommit) {
+                    JSONObject()
+                        .put(
+                            "restored",
+                            false
+                        )
+                        .put(
+                            "mode",
+                            "cancel_after_commit"
+                        )
+                } else {
+                    restoreUserContext(
+                        targetPackage = packageName,
+                        originalForegroundPackage = sourcePackage
+                    )
+                }
+
+            return JSONObject()
+                .put("success", true)
+                .put("verified", true)
+                .put("terminal_status", "SUCCESS")
+                .put("status", "task_removed")
+                .put("reason", removal.optString("reason", "verified_task_removed"))
+                .put("message", "$label закрыт.")
+                .put("target_package", packageName)
+                .put("target_label", label)
+                .put("method", "verified_recents_task_removal")
+                .put("action_committed", true)
+                .put("cancel_after_commit", cancelAfterCommit)
+                .put("removal", removal)
+                .put("context_restored", context.optBoolean("restored", false))
+                .put("context", context)
+        }
+
+        // Before the verified commit point, STOP owns the outcome.
+        if (shouldCancel()) {
+            return terminal(
+                status = "CANCELLED",
+                reason = "cancelled_during_close",
+                message = "Закрытие отменено."
+            ).put(
+                "action_committed",
+                false
+            ).put(
+                "removal",
+                removal
+            )
+        }
 
         if (
             !removal.optBoolean(
@@ -197,41 +262,8 @@ class AyanaAppLifecycleExecutor(
                     "Удаление задачи приложения не подтверждено."
                 )
             ).put(
-                "removal",
-                removal
-            ).put(
-                "context_restored",
-                context.optBoolean(
-                    "restored",
-                    false
-                )
-            ).put(
-                "context",
-                context
-            )
-        }
-
-        val concreteDismissal =
-            removal.optInt(
-                "removed_count",
-                0
-            ) > 0 &&
-                removal.optString(
-                    "reason"
-                ) ==
-                "verified_task_removed"
-
-        if (!concreteDismissal) {
-            val context =
-                restoreAfterFailedClose(
-                    originalForegroundPackage =
-                        sourcePackage
-                )
-
-            return terminal(
-                status = "ERROR",
-                reason = "task_removal_without_concrete_dismissal",
-                message = "Закрытие не подтверждено фактическим удалением карточки приложения."
+                "action_committed",
+                false
             ).put(
                 "removal",
                 removal
@@ -248,24 +280,31 @@ class AyanaAppLifecycleExecutor(
         }
 
         val context =
-            restoreUserContext(
-                targetPackage = packageName,
-                originalForegroundPackage = sourcePackage
+            restoreAfterFailedClose(
+                originalForegroundPackage =
+                    sourcePackage
             )
 
-        return JSONObject()
-            .put("success", true)
-            .put("verified", true)
-            .put("terminal_status", "SUCCESS")
-            .put("status", "task_removed")
-            .put("reason", removal.optString("reason", "verified_task_removed"))
-            .put("message", "$label закрыт.")
-            .put("target_package", packageName)
-            .put("target_label", label)
-            .put("method", "verified_recents_task_removal")
-            .put("removal", removal)
-            .put("context_restored", context.optBoolean("restored", false))
-            .put("context", context)
+        return terminal(
+            status = "ERROR",
+            reason = "task_removal_without_concrete_dismissal",
+            message = "Закрытие не подтверждено фактическим удалением карточки приложения."
+        ).put(
+            "action_committed",
+            false
+        ).put(
+            "removal",
+            removal
+        ).put(
+            "context_restored",
+            context.optBoolean(
+                "restored",
+                false
+            )
+        ).put(
+            "context",
+            context
+        )
     }
 
     private fun restoreAfterFailedClose(
