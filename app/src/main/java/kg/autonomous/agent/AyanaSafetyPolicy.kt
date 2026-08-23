@@ -4,7 +4,7 @@ import org.json.JSONObject
 import java.util.Locale
 
 /**
- * AYANA Safety Policy v1.2 — Agent Intelligence Core.
+ * AYANA Safety Policy v1.3 — ARTIFACT SAFE WRITE.
  *
  * Local fail-closed guard executed immediately before Agent Core device tools.
  * It is intentionally independent from model instructions: a model mistake must
@@ -188,6 +188,7 @@ class AyanaSafetyPolicy {
                 )
 
             "forget_memory",
+            "create_artifact",
             "create_reminder",
             "delete_reminder",
             "update_reminder",
@@ -196,7 +197,11 @@ class AyanaSafetyPolicy {
             "cancel_goal" ->
                 allow(
                     RISK_SAFE_ACTION,
-                    "local_user_data_action"
+                    if (name == "create_artifact") {
+                        "safe_scoped_artifact_write"
+                    } else {
+                        "local_user_data_action"
+                    }
                 )
 
             else ->
