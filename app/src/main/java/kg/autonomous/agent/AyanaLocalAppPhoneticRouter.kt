@@ -4,7 +4,7 @@ import java.util.Locale
 import kotlin.math.max
 
 /**
- * AYANA Local App Phonetic Router v1.0 — SAFE LOCAL ROUTING.
+ * AYANA Local App Phonetic Router v1.1 — CANONICAL SOUND ROUTING.
  *
  * Ranks short ASR-distorted app names against the already-approved local alias
  * vocabulary. It does NOT launch anything and does NOT trust a package name.
@@ -12,9 +12,11 @@ import kotlin.math.max
  * candidates by the actually observed launcher package, and fail closed on
  * ambiguity before any launch.
  *
- * This is a general phonetic layer, not an app-specific patch. The normalizer
- * handles common Russian ASR sound collapses (for example "дж" -> "д") and
- * compares both literal and phonetic forms using bounded Levenshtein similarity.
+ * This is a general phonetic layer, not an app-specific patch. The canonical
+ * sound key handles common Russian ASR sound collapses (for example "дж" ->
+ * "д") and repeated-grapheme stretching (for example "питти" -> "пити").
+ * That repairs device-observed short-name variants such as «чат де питти»
+ * without weakening the fail-closed launcher-package verification.
  * Pure Kotlin; intentionally JVM-testable.
  */
 class AyanaLocalAppPhoneticRouter {
@@ -218,14 +220,45 @@ class AyanaLocalAppPhoneticRouter {
 
     private fun phoneticCompact(
         value: String
-    ): String =
-        normalize(value)
-            .replace("дж", "д")
-            .replace("дз", "з")
-            .replace("тс", "ц")
-            .replace("ь", "")
-            .replace("ъ", "")
-            .replace(" ", "")
+    ): String {
+        val compact =
+            normalize(value)
+                .replace("дж", "д")
+                .replace("дз", "з")
+                .replace("тс", "ц")
+                .replace("ь", "")
+                .replace("ъ", "")
+                .replace(" ", "")
+
+        return collapseRepeatedGraphemes(
+            compact
+        )
+    }
+
+    private fun collapseRepeatedGraphemes(
+        value: String
+    ): String {
+        if (value.length < 2) {
+            return value
+        }
+
+        val result =
+            StringBuilder(
+                value.length
+            )
+
+        var previous: Char? =
+            null
+
+        for (char in value) {
+            if (char != previous) {
+                result.append(char)
+                previous = char
+            }
+        }
+
+        return result.toString()
+    }
 
     private fun compact(
         value: String
