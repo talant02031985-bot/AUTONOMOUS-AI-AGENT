@@ -55,12 +55,13 @@ import kotlin.math.abs
 
 class AyanaVoiceService : Service() {
 
-    // AYANA v12.5.1 VOICE CONTROL + LOCAL ROUTING INTEGRITY.
-    // v12.5.1 fixes TTS latency telemetry variable scope from the v12.5 build candidate.
-    // Preserves device-confirmed v12.3 terminal-truth reconciliation and v12.4
-    // Russian Marin pronunciation / artifact completion truth. v12.5 centralizes
-    // echo-safe STOP recognition and adds fail-closed phonetic local app routing;
-    // every app candidate is still resolved through the observed launcher map.
+    // AYANA v12.6 VOICE RESOLUTION + COMPLETION TRUTH.
+    // Preserves device-confirmed v12.3 terminal-truth reconciliation, v12.4
+    // Russian Marin pronunciation, and v12.5 echo-safe STOP semantics. v12.6
+    // strengthens short-name phonetic canonicalization, upgrades Completion Contract
+    // evidence from untyped references to typed artifact truth, and lets fully consumed
+    // TTS responses return their HTTPS transport to Android's keep-alive pool.
+    // Every app candidate is still resolved through the observed launcher map.
     // Preserves v12.1 verified app task removal while hardening STOP/terminal ownership.
     // restores the prior foreground context, and never claims process kill / force-stop.
     // Unified Execution Kernel owns cancellation/terminal/evidence state across long-running lanes.
@@ -9863,11 +9864,16 @@ class AyanaVoiceService : Service() {
                             .orEmpty()
                     )
 
-                // v12.4: only structured execution-layer artifact references may
-                // satisfy file/document/image completion. Natural-language mentions
-                // such as "report.pdf" are not accepted as proof.
-                val completionArtifactReferences =
-                    linkedSetOf<String>()
+                // v12.6: completion evidence preserves reference + optional
+                // filename/MIME/declared type. A structured reference proves that an
+                // artifact exists; a more specific request (PDF/XLSX/PPTX/image/etc.)
+                // additionally requires compatible type evidence. Natural-language
+                // filename mentions are never accepted as proof.
+                val completionArtifactEvidence =
+                    linkedMapOf<
+                        String,
+                        AyanaCompletionContract.ArtifactEvidence
+                    >()
 
                 // Keep only the freshest screen snapshot separately from the
                 // action trace. This lets the model continue from the real
@@ -10067,11 +10073,12 @@ class AyanaVoiceService : Service() {
                                 }
                         )
 
-                    collectCompletionArtifactReferences(
+                    collectCompletionArtifactEvidence(
                         response
-                    ).forEach { reference ->
-                        completionArtifactReferences.add(
-                            reference
+                    ).forEach { evidence ->
+                        mergeCompletionArtifactEvidence(
+                            completionArtifactEvidence,
+                            evidence
                         )
                     }
 
@@ -10521,11 +10528,12 @@ class AyanaVoiceService : Service() {
                                     arguments
                                 )
 
-                            collectCompletionArtifactReferences(
+                            collectCompletionArtifactEvidence(
                                 result
-                            ).forEach { reference ->
-                                completionArtifactReferences.add(
-                                    reference
+                            ).forEach { evidence ->
+                                mergeCompletionArtifactEvidence(
+                                    completionArtifactEvidence,
+                                    evidence
                                 )
                             }
 
@@ -11426,11 +11434,12 @@ class AyanaVoiceService : Service() {
 
                 if (finalSuccess) {
                     val completion =
-                        completionContract.validate(
+                        completionContract.validateEvidence(
                             request = message,
                             reply = answer,
-                            artifactReferences =
-                                completionArtifactReferences
+                            artifactEvidence =
+                                completionArtifactEvidence
+                                    .values
                                     .toList()
                         )
 
@@ -18283,50 +18292,109 @@ class AyanaVoiceService : Service() {
     }
 
     /**
-     * v12.4 completion evidence collector.
+     * v12.6 completion evidence collector.
      *
      * Only explicitly named OUTPUT-artifact fields are inspected. We do not scan
      * arbitrary reply text or generic input attachment fields, because a model
      * mentioning a filename or echoing an uploaded input must never prove that a
-     * new deliverable was created.
+     * new deliverable was created. Metadata is preserved so Completion Contract
+     * can verify requested artifact TYPE as well as existence.
      */
-    private fun collectCompletionArtifactReferences(
+    private fun collectCompletionArtifactEvidence(
         payload: JSONObject
-    ): List<String> {
-        val result = linkedSetOf<String>()
+    ): List<AyanaCompletionContract.ArtifactEvidence> {
+        val result =
+            linkedMapOf<
+                String,
+                AyanaCompletionContract.ArtifactEvidence
+            >()
 
         val singularKeys =
-            listOf(
-                "artifact_reference",
-                "artifact_ref",
-                "artifact_uri",
-                "generated_artifact",
-                "generated_file",
-                "output_artifact",
-                "output_file",
-                "created_artifact",
-                "created_file"
+            linkedMapOf(
+                "artifact_reference" to "artifact",
+                "artifact_ref" to "artifact",
+                "artifact_uri" to "artifact",
+                "generated_artifact" to "generated_artifact",
+                "generated_file" to "file",
+                "output_artifact" to "output_artifact",
+                "output_file" to "file",
+                "created_artifact" to "created_artifact",
+                "created_file" to "file"
             )
 
         val pluralKeys =
-            listOf(
-                "artifact_references",
-                "generated_artifacts",
-                "generated_files",
-                "output_artifacts",
-                "output_files",
-                "created_artifacts",
-                "created_files"
+            linkedMapOf(
+                "artifact_references" to "artifact",
+                "generated_artifacts" to "generated_artifact",
+                "generated_files" to "file",
+                "output_artifacts" to "output_artifact",
+                "output_files" to "file",
+                "created_artifacts" to "created_artifact",
+                "created_files" to "file"
             )
+
+        fun mergeEvidence(
+            evidence: AyanaCompletionContract.ArtifactEvidence
+        ) {
+            val reference =
+                evidence.reference
+                    .trim()
+                    .take(2048)
+
+            if (reference.isBlank()) {
+                return
+            }
+
+            val incoming =
+                evidence.copy(
+                    reference = reference,
+                    name = evidence.name.trim().take(512),
+                    mimeType = evidence.mimeType.trim().take(160),
+                    declaredKind = evidence.declaredKind.trim().take(160)
+                )
+
+            val previous =
+                result[reference]
+
+            result[reference] =
+                if (previous == null) {
+                    incoming
+                } else {
+                    AyanaCompletionContract.ArtifactEvidence(
+                        reference = reference,
+                        name = incoming.name.ifBlank { previous.name },
+                        mimeType = incoming.mimeType.ifBlank { previous.mimeType },
+                        declaredKind = incoming.declaredKind.ifBlank { previous.declaredKind }
+                    )
+                }
+        }
+
+        fun firstString(
+            value: JSONObject,
+            keys: List<String>
+        ): String {
+            for (key in keys) {
+                val candidate =
+                    value.optString(key)
+                        .trim()
+
+                if (candidate.isNotBlank()) {
+                    return candidate
+                }
+            }
+
+            return ""
+        }
 
         fun addValue(
             value: Any?,
+            declaredHint: String,
             depth: Int = 0
         ) {
             if (
                 value == null ||
                 value === JSONObject.NULL ||
-                depth > 3 ||
+                depth > 4 ||
                 result.size >= 24
             ) {
                 return
@@ -18334,39 +18402,96 @@ class AyanaVoiceService : Service() {
 
             when (value) {
                 is String -> {
-                    val clean =
-                        value
-                            .trim()
-                            .take(2048)
-
-                    if (clean.isNotBlank()) {
-                        result.add(clean)
-                    }
+                    mergeEvidence(
+                        AyanaCompletionContract.ArtifactEvidence(
+                            reference = value,
+                            declaredKind = declaredHint
+                        )
+                    )
                 }
 
                 is JSONArray -> {
                     for (index in 0 until value.length()) {
                         if (result.size >= 24) break
+
                         addValue(
                             value.opt(index),
+                            declaredHint,
                             depth + 1
                         )
                     }
                 }
 
                 is JSONObject -> {
+                    val reference =
+                        firstString(
+                            value,
+                            listOf(
+                                "reference",
+                                "ref",
+                                "uri",
+                                "artifact_uri",
+                                "file_uri",
+                                "content_uri",
+                                "path"
+                            )
+                        )
+
+                    if (reference.isNotBlank()) {
+                        mergeEvidence(
+                            AyanaCompletionContract.ArtifactEvidence(
+                                reference = reference,
+                                name =
+                                    firstString(
+                                        value,
+                                        listOf(
+                                            "filename",
+                                            "file_name",
+                                            "display_name",
+                                            "name"
+                                        )
+                                    ),
+                                mimeType =
+                                    firstString(
+                                        value,
+                                        listOf(
+                                            "mime_type",
+                                            "mime",
+                                            "content_type"
+                                        )
+                                    ),
+                                declaredKind =
+                                    firstString(
+                                        value,
+                                        listOf(
+                                            "artifact_type",
+                                            "file_type",
+                                            "kind",
+                                            "type"
+                                        )
+                                    )
+                                        .ifBlank { declaredHint }
+                            )
+                        )
+                    }
+
+                    // Some execution layers wrap the actual output object/array
+                    // one level below an explicitly output-named field. Recurse
+                    // only inside that already-trusted output envelope.
                     listOf(
-                        "reference",
-                        "ref",
-                        "uri",
-                        "artifact_uri",
-                        "file_uri",
-                        "content_uri",
-                        "path"
+                        "artifact",
+                        "file",
+                        "output",
+                        "result",
+                        "data",
+                        "items",
+                        "files",
+                        "artifacts"
                     ).forEach { key ->
                         if (value.has(key)) {
                             addValue(
                                 value.opt(key),
+                                declaredHint,
                                 depth + 1
                             )
                         }
@@ -18375,23 +18500,56 @@ class AyanaVoiceService : Service() {
             }
         }
 
-        singularKeys.forEach { key ->
+        singularKeys.forEach { (key, hint) ->
             if (payload.has(key)) {
                 addValue(
-                    payload.opt(key)
+                    payload.opt(key),
+                    hint
                 )
             }
         }
 
-        pluralKeys.forEach { key ->
+        pluralKeys.forEach { (key, hint) ->
             if (payload.has(key)) {
                 addValue(
-                    payload.opt(key)
+                    payload.opt(key),
+                    hint
                 )
             }
         }
 
-        return result.toList()
+        return result.values.toList()
+    }
+
+    private fun mergeCompletionArtifactEvidence(
+        target: MutableMap<
+            String,
+            AyanaCompletionContract.ArtifactEvidence
+        >,
+        incoming: AyanaCompletionContract.ArtifactEvidence
+    ) {
+        val reference =
+            incoming.reference
+                .trim()
+
+        if (reference.isBlank()) {
+            return
+        }
+
+        val previous =
+            target[reference]
+
+        target[reference] =
+            if (previous == null) {
+                incoming
+            } else {
+                AyanaCompletionContract.ArtifactEvidence(
+                    reference = reference,
+                    name = incoming.name.ifBlank { previous.name },
+                    mimeType = incoming.mimeType.ifBlank { previous.mimeType },
+                    declaredKind = incoming.declaredKind.ifBlank { previous.declaredKind }
+                )
+            }
     }
 
     // =========================================================
@@ -18532,6 +18690,13 @@ class AyanaVoiceService : Service() {
         var completedNormally =
             false
 
+        // Android HttpsURLConnection can pool a fully consumed response
+        // transport. Explicit disconnect on every successful Marin turn
+        // defeats that reuse and forces avoidable TLS/connect work. Cancellation,
+        // errors and partial streams still disconnect immediately.
+        var transportReusable =
+            false
+
         var totalBytes =
             0L
 
@@ -18601,14 +18766,25 @@ class AyanaVoiceService : Service() {
                     )
                 }
 
+            val requestBytes =
+                requestJson
+                    .toString()
+                    .toByteArray(
+                        Charsets.UTF_8
+                    )
+
+            // v12.6: the request body size is known before connect. Avoid
+            // chunked request framing so the Worker can begin processing as soon
+            // as the fixed body is written. The dominant latency remains server/
+            // transport response-header wait and is measured below.
+            connection.setFixedLengthStreamingMode(
+                requestBytes.size
+            )
+
             connection.outputStream
                 .use { output ->
                     output.write(
-                        requestJson
-                            .toString()
-                            .toByteArray(
-                                Charsets.UTF_8
-                            )
+                        requestBytes
                     )
                 }
 
@@ -18914,6 +19090,12 @@ class AyanaVoiceService : Service() {
                     totalBytes,
                     token
                 )
+
+                // The response reached EOF and the stream was closed normally.
+                // Do not call disconnect(): allow the platform connection pool to
+                // reuse the authenticated HTTPS transport for the next Marin turn.
+                transportReusable =
+                    true
             }
 
         } catch (error: Exception) {
@@ -18993,9 +19175,11 @@ class AyanaVoiceService : Service() {
 
             executionKernel.clearConnection(connection)
 
-            try {
-                connection?.disconnect()
-            } catch (_: Exception) {
+            if (!transportReusable) {
+                try {
+                    connection?.disconnect()
+                } catch (_: Exception) {
+                }
             }
 
             releaseAudioTrack(
@@ -19015,7 +19199,9 @@ class AyanaVoiceService : Service() {
                 activeCommandHistoryId,
                 state = "tts_complete",
                 message = "Marin: поток полностью воспроизведён",
-                details = "pcm_bytes=$totalBytes"
+                details =
+                    "pcm_bytes=$totalBytes; " +
+                        "https_pool_reusable=$transportReusable"
             )
 
             capabilityRegistry.recordTtsResult(
