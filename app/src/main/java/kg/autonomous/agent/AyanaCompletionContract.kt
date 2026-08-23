@@ -3,12 +3,15 @@ package kg.autonomous.agent
 import java.util.Locale
 
 /**
- * AYANA Completion Contract v1.1 — artifact truth + fail-closed deliverables.
+ * AYANA Completion Contract v1.2 — TYPED ARTIFACT TRUTH.
  *
  * A model saying "готово" or merely mentioning a filename is not proof that a
- * requested artifact exists. Textual deliverables may be validated from the
- * substantive reply, while file-like deliverables require a structured artifact
- * reference supplied by the execution layer.
+ * requested artifact exists. v1.2 also prevents a real but wrong-type artifact
+ * from satisfying a more specific request (for example TXT cannot prove PDF).
+ *
+ * Textual deliverables may be validated from substantive reply text. File-like
+ * deliverables require a structured execution-layer reference. Specific artifact
+ * kinds additionally require compatible filename/MIME/declared-kind evidence.
  *
  * This class has no Android dependencies and is intentionally JVM-testable.
  */
@@ -33,6 +36,13 @@ class AyanaCompletionContract {
         val requiresValidation: Boolean
             get() = kinds.isNotEmpty()
     }
+
+    data class ArtifactEvidence(
+        val reference: String,
+        val name: String = "",
+        val mimeType: String = "",
+        val declaredKind: String = ""
+    )
 
     data class Validation(
         val satisfied: Boolean,
@@ -175,10 +185,31 @@ class AyanaCompletionContract {
         return ExpectedOutputs(expected)
     }
 
+    /**
+     * Backward-compatible entry point for callers that only have references.
+     * Such generic evidence can prove FILE, but cannot prove a specific type
+     * unless the reference itself carries a recognizable extension.
+     */
     fun validate(
         request: String,
         reply: String,
         artifactReferences: List<String> = emptyList()
+    ): Validation =
+        validateEvidence(
+            request = request,
+            reply = reply,
+            artifactEvidence =
+                artifactReferences.map {
+                    ArtifactEvidence(
+                        reference = it
+                    )
+                }
+        )
+
+    fun validateEvidence(
+        request: String,
+        reply: String,
+        artifactEvidence: List<ArtifactEvidence> = emptyList()
     ): Validation {
         val expected = inspectRequest(request).kinds
 
@@ -198,21 +229,44 @@ class AyanaCompletionContract {
             !genericOnly &&
                 normalizedReply.length >= MIN_SUBSTANTIVE_TEXT_CHARS
 
-        val verifiedArtifacts =
-            artifactReferences
+        val verifiedEvidence =
+            artifactEvidence
                 .asSequence()
-                .map { it.trim() }
-                .filter { it.isNotBlank() }
-                .filter(::isStructuredArtifactReference)
-                .distinct()
+                .map(::sanitizeEvidence)
+                .filter { it.reference.isNotBlank() }
+                .filter { isStructuredArtifactReference(it.reference) }
+                .distinctBy {
+                    listOf(
+                        it.reference,
+                        it.name,
+                        it.mimeType,
+                        it.declaredKind
+                    ).joinToString("|")
+                }
                 .take(MAX_ARTIFACT_REFERENCES)
                 .toList()
 
+        val verifiedArtifacts =
+            verifiedEvidence
+                .map { it.reference }
+                .distinct()
+
+        val evidenceKinds =
+            verifiedEvidence
+                .map { evidence ->
+                    evidence to classifyArtifact(evidence)
+                }
+
         val hasArtifact =
-            verifiedArtifacts.isNotEmpty()
+            verifiedEvidence.isNotEmpty()
 
         val hasInlineTable =
             looksLikeInlineTable(reply)
+
+        fun hasKind(kind: DeliverableKind): Boolean =
+            evidenceKinds.any { (_, kinds) ->
+                kind in kinds
+            }
 
         val missing = linkedSetOf<DeliverableKind>()
 
@@ -222,22 +276,37 @@ class AyanaCompletionContract {
                     DeliverableKind.ANALYSIS ->
                         substantiveText
 
-                    DeliverableKind.GRAPH,
-                    DeliverableKind.FILE,
-                    DeliverableKind.DOCUMENT,
-                    DeliverableKind.PDF,
-                    DeliverableKind.SPREADSHEET,
-                    DeliverableKind.PRESENTATION,
-                    DeliverableKind.IMAGE ->
+                    DeliverableKind.FILE ->
                         hasArtifact
+
+                    DeliverableKind.DOCUMENT ->
+                        hasKind(DeliverableKind.DOCUMENT)
+
+                    DeliverableKind.PDF ->
+                        hasKind(DeliverableKind.PDF)
+
+                    DeliverableKind.SPREADSHEET ->
+                        hasKind(DeliverableKind.SPREADSHEET)
+
+                    DeliverableKind.PRESENTATION ->
+                        hasKind(DeliverableKind.PRESENTATION)
+
+                    DeliverableKind.IMAGE ->
+                        hasKind(DeliverableKind.IMAGE)
+
+                    DeliverableKind.GRAPH ->
+                        hasKind(DeliverableKind.GRAPH)
 
                     DeliverableKind.TABLE ->
                         hasInlineTable ||
-                            hasArtifact
+                            hasKind(DeliverableKind.TABLE) ||
+                            hasKind(DeliverableKind.SPREADSHEET)
 
                     DeliverableKind.REPORT ->
                         substantiveText ||
-                            hasArtifact
+                            hasKind(DeliverableKind.REPORT) ||
+                            hasKind(DeliverableKind.DOCUMENT) ||
+                            hasKind(DeliverableKind.PDF)
                 }
 
             if (!satisfied) {
@@ -263,6 +332,10 @@ class AyanaCompletionContract {
                     genericOnly ->
                         "generic_final_without_deliverable"
 
+                    missing.any(::requiresTypedArtifactProof) &&
+                        hasArtifact ->
+                        "requested_artifact_type_not_verified"
+
                     missing.any(::requiresArtifactProof) ->
                         "requested_artifact_not_verified"
 
@@ -276,12 +349,158 @@ class AyanaCompletionContract {
         )
     }
 
+    private fun sanitizeEvidence(
+        evidence: ArtifactEvidence
+    ): ArtifactEvidence =
+        ArtifactEvidence(
+            reference = evidence.reference.trim().take(MAX_ARTIFACT_REFERENCE_CHARS),
+            name = evidence.name.trim().take(MAX_ARTIFACT_NAME_CHARS),
+            mimeType = evidence.mimeType.trim().lowercase(Locale.ROOT).take(MAX_ARTIFACT_MIME_CHARS),
+            declaredKind = evidence.declaredKind.trim().lowercase(Locale.ROOT).take(MAX_DECLARED_KIND_CHARS)
+        )
+
+    private fun classifyArtifact(
+        evidence: ArtifactEvidence
+    ): Set<DeliverableKind> {
+        val result = linkedSetOf<DeliverableKind>()
+        result += DeliverableKind.FILE
+
+        val extension = artifactExtension(evidence)
+        val mime = evidence.mimeType
+        val declared = normalizeKindToken(evidence.declaredKind)
+
+        val declaredGraph =
+            declared.contains("graph") ||
+                declared.contains("chart") ||
+                declared.contains("diagram") ||
+                declared.contains("график") ||
+                declared.contains("диаграм")
+
+        val declaredTable =
+            declared.contains("table") ||
+                declared.contains("таблиц")
+
+        val declaredReport =
+            declared.contains("report") ||
+                declared.contains("отчет") ||
+                declared.contains("отчёт")
+
+        if (
+            extension in DOCUMENT_EXTENSIONS ||
+            mime in DOCUMENT_MIME_TYPES ||
+            declared.contains("document") ||
+            declared.contains("документ")
+        ) {
+            result += DeliverableKind.DOCUMENT
+        }
+
+        if (
+            extension == "pdf" ||
+            mime == "application/pdf" ||
+            declared == "pdf" ||
+            declared.contains("pdf")
+        ) {
+            result += DeliverableKind.PDF
+            result += DeliverableKind.DOCUMENT
+        }
+
+        if (
+            extension in SPREADSHEET_EXTENSIONS ||
+            mime in SPREADSHEET_MIME_TYPES ||
+            declared.contains("spreadsheet") ||
+            declared.contains("excel")
+        ) {
+            result += DeliverableKind.SPREADSHEET
+            result += DeliverableKind.TABLE
+        }
+
+        if (
+            extension in PRESENTATION_EXTENSIONS ||
+            mime in PRESENTATION_MIME_TYPES ||
+            declared.contains("presentation") ||
+            declared.contains("powerpoint") ||
+            declared.contains("slide")
+        ) {
+            result += DeliverableKind.PRESENTATION
+        }
+
+        if (
+            extension in IMAGE_EXTENSIONS ||
+            mime.startsWith("image/") ||
+            declared.contains("image") ||
+            declared.contains("picture") ||
+            declared.contains("изображ")
+        ) {
+            result += DeliverableKind.IMAGE
+        }
+
+        if (declaredGraph) {
+            result += DeliverableKind.GRAPH
+        }
+
+        if (declaredTable) {
+            result += DeliverableKind.TABLE
+        }
+
+        if (declaredReport) {
+            result += DeliverableKind.REPORT
+        }
+
+        return result
+    }
+
+    private fun artifactExtension(
+        evidence: ArtifactEvidence
+    ): String {
+        val source =
+            evidence.name
+                .ifBlank {
+                    evidence.reference
+                        .substringBefore('?')
+                        .substringBefore('#')
+                        .substringAfterLast('/')
+                }
+                .trim()
+
+        val dot = source.lastIndexOf('.')
+        if (dot < 0 || dot == source.lastIndex) {
+            return ""
+        }
+
+        return source
+            .substring(dot + 1)
+            .lowercase(Locale.ROOT)
+            .take(12)
+    }
+
+    private fun normalizeKindToken(
+        value: String
+    ): String =
+        value
+            .lowercase(Locale.ROOT)
+            .replace('ё', 'е')
+            .replace(Regex("[^a-zа-я0-9]+"), " ")
+            .replace(Regex("\\s+"), " ")
+            .trim()
+
     private fun requiresArtifactProof(
         kind: DeliverableKind
     ): Boolean =
         kind in setOf(
             DeliverableKind.GRAPH,
             DeliverableKind.FILE,
+            DeliverableKind.DOCUMENT,
+            DeliverableKind.PDF,
+            DeliverableKind.SPREADSHEET,
+            DeliverableKind.PRESENTATION,
+            DeliverableKind.IMAGE
+        )
+
+    private fun requiresTypedArtifactProof(
+        kind: DeliverableKind
+    ): Boolean =
+        kind in setOf(
+            DeliverableKind.GRAPH,
             DeliverableKind.DOCUMENT,
             DeliverableKind.PDF,
             DeliverableKind.SPREADSHEET,
@@ -313,7 +532,7 @@ class AyanaCompletionContract {
 
         return if (artifactMissing) {
             "Запрос выполнен не полностью: не подтверждено создание ${names.joinToString(", ")}. " +
-                "AYANA не отмечает такую команду как SUCCESS без фактической ссылки на созданный результат."
+                "AYANA не отмечает такую команду как SUCCESS без фактически подтверждённого результата нужного типа."
         } else {
             "Запрос выполнен не полностью: отсутствует ${names.joinToString(", ")}. " +
                 "AYANA не отмечает такую команду как SUCCESS."
@@ -418,5 +637,73 @@ class AyanaCompletionContract {
         private const val MIN_SUBSTANTIVE_TEXT_CHARS = 80
         private const val MAX_ARTIFACT_REFERENCES = 24
         private const val MAX_ARTIFACT_REFERENCE_CHARS = 2048
+        private const val MAX_ARTIFACT_NAME_CHARS = 512
+        private const val MAX_ARTIFACT_MIME_CHARS = 160
+        private const val MAX_DECLARED_KIND_CHARS = 160
+
+        private val DOCUMENT_EXTENSIONS =
+            setOf(
+                "doc",
+                "docx",
+                "odt",
+                "rtf",
+                "txt",
+                "md",
+                "pdf"
+            )
+
+        private val SPREADSHEET_EXTENSIONS =
+            setOf(
+                "xls",
+                "xlsx",
+                "xlsm",
+                "csv",
+                "ods"
+            )
+
+        private val PRESENTATION_EXTENSIONS =
+            setOf(
+                "ppt",
+                "pptx",
+                "odp"
+            )
+
+        private val IMAGE_EXTENSIONS =
+            setOf(
+                "png",
+                "jpg",
+                "jpeg",
+                "webp",
+                "gif",
+                "bmp",
+                "svg"
+            )
+
+        private val DOCUMENT_MIME_TYPES =
+            setOf(
+                "application/msword",
+                "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                "application/vnd.oasis.opendocument.text",
+                "application/rtf",
+                "text/rtf",
+                "text/plain",
+                "text/markdown",
+                "application/pdf"
+            )
+
+        private val SPREADSHEET_MIME_TYPES =
+            setOf(
+                "application/vnd.ms-excel",
+                "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                "application/vnd.oasis.opendocument.spreadsheet",
+                "text/csv"
+            )
+
+        private val PRESENTATION_MIME_TYPES =
+            setOf(
+                "application/vnd.ms-powerpoint",
+                "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+                "application/vnd.oasis.opendocument.presentation"
+            )
     }
 }
