@@ -31,7 +31,7 @@ import kotlin.math.max
 import kotlin.math.min
 
 /**
- * AYANA Artifact Engine v1.3 — CONTENT-VERIFIED PUBLISH + TRI-STATE RECONCILIATION.
+ * AYANA Artifact Engine v1.4 — TYPED XLSX CELLS + CONTENT-VERIFIED PUBLISH.
  *
  * Reliability contract:
  * - generate into AYANA private cache first;
@@ -42,8 +42,9 @@ import kotlin.math.min
  * - return a structured content:// reference + typed metadata only after publish verification;
  * - unsupported/invalid requests fail closed and never return fake SUCCESS.
  *
- * Supported v1 formats:
+ * Supported formats:
  * TXT, DOCX, PDF, XLSX, JPEG and GRAPH (JPEG chart).
+ * XLSX supports explicit per-column cell semantics: text, number, boolean, auto.
  * No external Office/PDF dependency is required.
  */
 class AyanaArtifactEngine(
@@ -81,10 +82,24 @@ class AyanaArtifactEngine(
         val content = arguments.optString("content").take(MAX_CONTENT_CHARS)
         val columns = jsonStringArray(arguments.optJSONArray("columns"), MAX_COLUMNS)
         val rows = jsonRows(arguments.optJSONArray("rows"), MAX_ROWS, MAX_COLUMNS)
+        val columnTypes = jsonColumnTypes(arguments.optJSONArray("column_types"), MAX_COLUMNS)
         val chartType = arguments.optString("chart_type", "none")
             .trim()
             .lowercase(Locale.ROOT)
             .let { value -> if (value == "line") "line" else "bar" }
+
+        if (kind == Kind.XLSX && columnTypes.isNotEmpty()) {
+            val expectedWidth = max(
+                columns.size,
+                rows.maxOfOrNull { it.size } ?: 0
+            )
+            if (columnTypes.size != expectedWidth) {
+                return failure(
+                    "Типы столбцов XLSX не соответствуют ширине таблицы.",
+                    "xlsx_column_types_mismatch"
+                )
+            }
+        }
 
         if (
             content.isBlank() &&
@@ -120,7 +135,7 @@ class AyanaArtifactEngine(
                 Kind.TXT -> writeTxt(tempFile, title, content, columns, rows)
                 Kind.DOCX -> writeDocx(tempFile, title, content, columns, rows)
                 Kind.PDF -> writePdf(tempFile, title, content, columns, rows)
-                Kind.XLSX -> writeXlsx(tempFile, title, content, columns, rows)
+                Kind.XLSX -> writeXlsx(tempFile, title, content, columns, rows, columnTypes)
                 Kind.JPEG -> writeJpeg(tempFile, title, content, columns, rows)
                 Kind.GRAPH -> writeGraphJpeg(tempFile, title, columns, rows, chartType)
             }
@@ -486,7 +501,8 @@ class AyanaArtifactEngine(
         title: String,
         content: String,
         columns: List<String>,
-        rows: List<List<String>>
+        rows: List<List<String>>,
+        columnTypes: List<SpreadsheetCellType>
     ) {
         val sheetRows = mutableListOf<List<String>>()
         if (title.isNotBlank()) sheetRows += listOf(title)
@@ -494,6 +510,7 @@ class AyanaArtifactEngine(
             content.lines().filter { it.isNotBlank() }.forEach { sheetRows += listOf(it) }
         }
         if (columns.isNotEmpty()) sheetRows += columns
+        val dataStartIndex = sheetRows.size
         sheetRows += rows
 
         ZipOutputStream(BufferedOutputStream(FileOutputStream(file))).use { zip ->
@@ -540,12 +557,16 @@ class AyanaArtifactEngine(
             sheetXml.append("<dimension ref=\"").append(dimensionRef).append("\"/><sheetData>")
             boundedRows.forEachIndexed { rowIndex, row ->
                 val excelRow = rowIndex + 1
+                val isDataRow = rowIndex >= dataStartIndex
                 sheetXml.append("<row r=\"").append(excelRow).append("\">")
                 row.take(MAX_COLUMNS).forEachIndexed { columnIndex, value ->
                     val ref = excelColumn(columnIndex) + excelRow
-                    sheetXml.append("<c r=\"").append(ref).append("\" t=\"inlineStr\"><is><t xml:space=\"preserve\">")
-                    sheetXml.append(xml(value.take(MAX_CELL_CHARS)))
-                    sheetXml.append("</t></is></c>")
+                    val type = if (isDataRow) {
+                        columnTypes.getOrNull(columnIndex) ?: SpreadsheetCellType.AUTO
+                    } else {
+                        SpreadsheetCellType.TEXT
+                    }
+                    sheetXml.append(xlsxCellXml(ref, value.take(MAX_CELL_CHARS), type))
                 }
                 sheetXml.append("</row>")
             }
@@ -1164,6 +1185,96 @@ class AyanaArtifactEngine(
         return result
     }
 
+    private fun jsonColumnTypes(array: JSONArray?, limit: Int): List<SpreadsheetCellType> {
+        if (array == null) return emptyList()
+        val result = ArrayList<SpreadsheetCellType>(min(array.length(), limit))
+        for (i in 0 until min(array.length(), limit)) {
+            result += when (array.optString(i).trim().lowercase(Locale.ROOT)) {
+                "text" -> SpreadsheetCellType.TEXT
+                "number" -> SpreadsheetCellType.NUMBER
+                "boolean" -> SpreadsheetCellType.BOOLEAN
+                else -> SpreadsheetCellType.AUTO
+            }
+        }
+        return result
+    }
+
+    private fun xlsxCellXml(
+        ref: String,
+        rawValue: String,
+        type: SpreadsheetCellType
+    ): String {
+        if (rawValue.isEmpty()) {
+            return "<c r=\"${xml(ref)}\"/>"
+        }
+        return when (type) {
+            SpreadsheetCellType.TEXT -> xlsxTextCell(ref, rawValue)
+            SpreadsheetCellType.NUMBER -> {
+                if (rawValue.isBlank()) return "<c r=\"${xml(ref)}\"/>"
+                val number = strictSpreadsheetNumber(rawValue)
+                    ?: throw IllegalArgumentException(
+                        "Значение «${rawValue.take(80)}» в числовом столбце не является корректным числом."
+                    )
+                "<c r=\"${xml(ref)}\"><v>${xml(number)}</v></c>"
+            }
+            SpreadsheetCellType.BOOLEAN -> {
+                if (rawValue.isBlank()) return "<c r=\"${xml(ref)}\"/>"
+                val booleanValue = when (rawValue.trim().lowercase(Locale.ROOT)) {
+                    "true", "1", "да", "yes" -> "1"
+                    "false", "0", "нет", "no" -> "0"
+                    else -> throw IllegalArgumentException(
+                        "Значение «${rawValue.take(80)}» в логическом столбце не является true/false."
+                    )
+                }
+                "<c r=\"${xml(ref)}\" t=\"b\"><v>$booleanValue</v></c>"
+            }
+            SpreadsheetCellType.AUTO -> {
+                val automaticNumber = safeAutoSpreadsheetNumber(rawValue)
+                if (automaticNumber != null) {
+                    "<c r=\"${xml(ref)}\"><v>${xml(automaticNumber)}</v></c>"
+                } else {
+                    xlsxTextCell(ref, rawValue)
+                }
+            }
+        }
+    }
+
+    private fun xlsxTextCell(ref: String, value: String): String =
+        "<c r=\"${xml(ref)}\" t=\"inlineStr\"><is><t xml:space=\"preserve\">${xml(value)}</t></is></c>"
+
+    /**
+     * Explicit NUMBER columns are allowed to normalize a decimal comma to '.'
+     * because the caller has already declared numeric intent.
+     */
+    private fun strictSpreadsheetNumber(value: String): String? {
+        val trimmed = value.trim().replace(" ", "")
+        if (!trimmed.matches(Regex("[+-]?(?:\\d+(?:[.,]\\d+)?|[.,]\\d+)(?:[eE][+-]?\\d+)?"))) {
+            return null
+        }
+        val normalized = trimmed.replace(',', '.')
+        val parsed = normalized.toDoubleOrNull() ?: return null
+        if (!parsed.isFinite()) return null
+        return normalized
+    }
+
+    /**
+     * AUTO is intentionally conservative so identifiers such as 00125 remain text.
+     * Numeric typing that must be guaranteed should be supplied through column_types=number.
+     */
+    private fun safeAutoSpreadsheetNumber(value: String): String? {
+        val trimmed = value.trim()
+        if (!trimmed.matches(Regex("[+-]?(?:0|[1-9]\\d*)(?:\\.\\d+)?(?:[eE][+-]?\\d+)?"))) {
+            return null
+        }
+        val unsigned = trimmed.removePrefix("+").removePrefix("-")
+        if (unsigned.length > 1 && unsigned.startsWith("0") && !unsigned.startsWith("0.")) {
+            return null
+        }
+        val parsed = trimmed.toDoubleOrNull() ?: return null
+        if (!parsed.isFinite()) return null
+        return trimmed.removePrefix("+")
+    }
+
     private fun sanitizeFileName(requested: String, fallbackBase: String, extension: String): String {
         val raw = requested.ifBlank { fallbackBase }
             .substringAfterLast('/')
@@ -1236,6 +1347,13 @@ class AyanaArtifactEngine(
         XLSX,
         JPEG,
         GRAPH
+    }
+
+    private enum class SpreadsheetCellType {
+        TEXT,
+        NUMBER,
+        BOOLEAN,
+        AUTO
     }
 
     private data class Spec(
