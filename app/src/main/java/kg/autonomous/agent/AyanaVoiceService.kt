@@ -55,7 +55,8 @@ import kotlin.math.abs
 
 class AyanaVoiceService : Service() {
 
-    // AYANA v12.5 VOICE CONTROL + LOCAL ROUTING INTEGRITY.
+    // AYANA v12.5.1 VOICE CONTROL + LOCAL ROUTING INTEGRITY.
+    // v12.5.1 fixes TTS latency telemetry variable scope from the v12.5 build candidate.
     // Preserves device-confirmed v12.3 terminal-truth reconciliation and v12.4
     // Russian Marin pronunciation / artifact completion truth. v12.5 centralizes
     // echo-safe STOP recognition and adds fail-closed phonetic local app routing;
@@ -14207,12 +14208,6 @@ class AyanaVoiceService : Service() {
         val requestStartedAt =
             SystemClock.elapsedRealtime()
 
-        var requestBodySentAt =
-            requestStartedAt
-
-        var responseHeadersAt =
-            requestStartedAt
-
         try {
 
             val url =
@@ -18545,6 +18540,12 @@ class AyanaVoiceService : Service() {
 
         val requestStartedAt =
             SystemClock.elapsedRealtime()
+
+        var requestBodySentAt =
+            requestStartedAt
+
+        var responseHeadersAt =
+            requestStartedAt
 
         try {
             val url =
