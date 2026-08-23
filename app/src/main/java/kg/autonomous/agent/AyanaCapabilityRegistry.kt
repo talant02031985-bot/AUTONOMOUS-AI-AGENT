@@ -10,7 +10,7 @@ import org.json.JSONArray
 import org.json.JSONObject
 
 /**
- * AYANA Device Capability Registry v2.4 — VERIFIED APP TASK REMOVAL TRUTH.
+ * AYANA Device Capability Registry v2.5 — ARTIFACT ENGINE TRUTH.
  *
  * Single machine-readable source of truth for:
  * 1) what this build implements;
@@ -886,6 +886,33 @@ class AyanaCapabilityRegistry(
 
         capability(
             capabilities,
+            "artifact_generation",
+            implemented = true,
+            available = true,
+            deviceConfirmed = false,
+            note = "v12.7 creates and verifies TXT/DOCX/PDF/XLSX/JPEG and graph-JPEG files locally, then publishes only to Downloads/AYANA; pending device acceptance"
+        )
+
+        capability(
+            capabilities,
+            "docx_style_preserving_transform",
+            implemented = true,
+            available = true,
+            deviceConfirmed = false,
+            note = "v12.7 translates staged DOCX by preserving the original OOXML package and replacing only validated Word text nodes; output is re-opened, verified and published to Downloads/AYANA; pending device acceptance"
+        )
+
+        capability(
+            capabilities,
+            "docx_translation",
+            implemented = true,
+            available = true,
+            deviceConfirmed = false,
+            note = "v12.7 style-preserving DOCX translation supports ru/en/ky/de/fr/es/tr target languages through bounded validated translation batches; pending device acceptance"
+        )
+
+        capability(
+            capabilities,
             "unified_execution_session",
             implemented = true,
             available = true,
@@ -1002,7 +1029,7 @@ class AyanaCapabilityRegistry(
             )
 
             append(
-                "document_understanding=true; external_mail_calendar_files=false; offline_llm=false; broad_proactivity=false; "
+                "document_understanding=true; artifact_generation=true; artifact_formats=txt,docx,pdf,xlsx,jpeg,graph_jpeg; docx_style_preserving_transform=true; docx_translation=true; docx_translation_targets=ru,en,ky,de,fr,es,tr; external_mail_calendar_files=false; offline_llm=false; broad_proactivity=false; "
             )
 
             append(
@@ -1279,7 +1306,7 @@ class AyanaCapabilityRegistry(
     companion object {
 
         const val BUILD_LABEL =
-            "v12.0_execution_perception_foundation"
+            "v12.7_file_document_engine_build_candidate"
 
         private const val PREFS_NAME =
             "ayana_capability_runtime_v11"
