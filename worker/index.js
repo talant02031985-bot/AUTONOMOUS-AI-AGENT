@@ -1,4 +1,4 @@
-// AYANA Worker v10.6 — File & Document Engine; Artifact Generation + DOCX translation
+// AYANA Worker v10.6.1 — Typed XLSX Cells; File & Document Engine
 const ANDROID_GOAL_TOOL = {
   type: "function",
   name: "execute_android_goal",
@@ -665,7 +665,15 @@ const DEVICE_TOOLS = [
             type: "array",
             items: { type: "string" }
           },
-          description: "Tabular rows for XLSX/graph. Values are strings; graph must contain at least one numeric column."
+          description: "Tabular rows for XLSX/graph. Transport values remain strings; XLSX semantic types are declared separately in column_types. Graph must contain at least one numeric column."
+        },
+        column_types: {
+          type: "array",
+          items: {
+            type: "string",
+            enum: ["text", "number", "boolean", "auto"]
+          },
+          description: "Per-column XLSX semantic type in the same order as columns. Use number for quantitative values that must behave as Excel numbers, text for labels/IDs/codes (especially leading zeros), boolean for true/false data, and auto only when semantics are genuinely unknown. Use [] when not creating XLSX."
         },
         chart_type: {
           type: "string",
@@ -673,7 +681,7 @@ const DEVICE_TOOLS = [
           description: "Use bar/line only for kind=graph; otherwise none."
         }
       },
-      required: ["kind", "filename", "title", "content", "columns", "rows", "chart_type"],
+      required: ["kind", "filename", "title", "content", "columns", "rows", "column_types", "chart_type"],
       additionalProperties: false
     }
   }
@@ -695,7 +703,8 @@ ARTIFACT EXECUTION CONTRACT v1:
 - Текст «Готово», название файла в ответе или Markdown-таблица НЕ доказывают создание файла. Успех есть только после success=true + artifact_reference от Android executor.
 - Для Word DOCX используй kind=docx, для Excel XLSX kind=xlsx, для PDF kind=pdf, для TXT kind=txt, для JPEG/JPG kind=jpeg, для графика/диаграммы kind=graph.
 - Не подменяй явно запрошенный неподдерживаемый формат другим. В этом build создание PPTX/ODT/RTF/CSV/PNG пока не реализовано: если пользователь требует именно такой формат, честно сообщи UNSUPPORTED/ограничение вместо создания DOCX/XLSX/JPEG под другим расширением.
-- Для graph передай columns + rows с реальными данными и chart_type=bar или line. Не выдумывай данные: сначала рассчитай/проанализируй их из запроса и доступного контекста.
+- Для XLSX обязательно передай column_types в том же порядке, что columns: числовые показатели -> number; подписи, коды, номера с ведущими нулями -> text; логические значения -> boolean; auto только при реально неизвестной семантике. Значения rows остаются строками транспорта, но Android запишет ячейки с реальным Excel-типом.
+- Для graph передай columns + rows с реальными данными, column_types=[] и chart_type=bar или line. Не выдумывай данные: сначала рассчитай/проанализируй их из запроса и доступного контекста.
 - Если пользователь просит и анализ, и файл/график, создай запрошенный артефакт И обязательно передай содержательный анализ (не менее нескольких полноценных предложений) в поле content вызова create_artifact. Android использует это как проверяемый финальный текст без второго Agent Core хода.
 - После успешного create_artifact сообщи фактическое имя и что файл сохранён в Downloads/AYANA. При ошибке честно сообщи об ошибке, не говори «создан».
 - PPTX пока не создаётся через create_artifact. Перевод прикреплённого DOCX с сохранением OOXML-оформления выполняется отдельным Android document_translation executor, а не create_artifact.
@@ -1884,7 +1893,7 @@ export default {
         ok: true,
         service: "AYANA AI",
         ai: "ready",
-        agent_core: "v10.6-file-document-engine",
+        agent_core: "v10.6.1-typed-xlsx-cells",
         voice: "marin"
       });
     }
