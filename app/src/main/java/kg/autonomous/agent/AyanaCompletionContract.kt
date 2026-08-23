@@ -3,13 +3,14 @@ package kg.autonomous.agent
 import java.util.Locale
 
 /**
- * AYANA Completion Contract v1.0 — fail-closed deliverable integrity.
+ * AYANA Completion Contract v1.1 — artifact truth + fail-closed deliverables.
  *
- * Agent Core "final" is not proof that every requested output exists.
- * This validator derives explicit expected outputs from the user's request and
- * blocks SUCCESS when the final reply does not contain the requested result.
+ * A model saying "готово" or merely mentioning a filename is not proof that a
+ * requested artifact exists. Textual deliverables may be validated from the
+ * substantive reply, while file-like deliverables require a structured artifact
+ * reference supplied by the execution layer.
  *
- * The class has no Android dependencies and is intentionally JVM-testable.
+ * This class has no Android dependencies and is intentionally JVM-testable.
  */
 class AyanaCompletionContract {
 
@@ -19,7 +20,9 @@ class AyanaCompletionContract {
         TABLE,
         FILE,
         DOCUMENT,
+        PDF,
         SPREADSHEET,
+        PRESENTATION,
         IMAGE,
         REPORT
     }
@@ -36,7 +39,8 @@ class AyanaCompletionContract {
         val reason: String,
         val message: String,
         val expected: Set<DeliverableKind>,
-        val missing: Set<DeliverableKind>
+        val missing: Set<DeliverableKind>,
+        val verifiedArtifactReferences: List<String> = emptyList()
     )
 
     fun inspectRequest(request: String): ExpectedOutputs {
@@ -98,10 +102,23 @@ class AyanaCompletionContract {
                 "документ",
                 "docx",
                 "word",
+                "odt",
+                "rtf",
                 " document "
             )
         ) {
             expected += DeliverableKind.DOCUMENT
+        }
+
+        if (
+            containsAny(
+                text,
+                " pdf ",
+                ".pdf",
+                "пдф"
+            )
+        ) {
+            expected += DeliverableKind.PDF
         }
 
         if (
@@ -115,6 +132,20 @@ class AyanaCompletionContract {
             )
         ) {
             expected += DeliverableKind.SPREADSHEET
+        }
+
+        if (
+            containsAny(
+                text,
+                "презентац",
+                "powerpoint",
+                "pptx",
+                "слайды",
+                "slide deck",
+                "presentation"
+            )
+        ) {
+            expected += DeliverableKind.PRESENTATION
         }
 
         if (
@@ -167,14 +198,18 @@ class AyanaCompletionContract {
             !genericOnly &&
                 normalizedReply.length >= MIN_SUBSTANTIVE_TEXT_CHARS
 
-        val validArtifacts =
+        val verifiedArtifacts =
             artifactReferences
+                .asSequence()
                 .map { it.trim() }
                 .filter { it.isNotBlank() }
+                .filter(::isStructuredArtifactReference)
+                .distinct()
+                .take(MAX_ARTIFACT_REFERENCES)
+                .toList()
 
         val hasArtifact =
-            validArtifacts.isNotEmpty() ||
-                containsArtifactReference(reply)
+            verifiedArtifacts.isNotEmpty()
 
         val hasInlineTable =
             looksLikeInlineTable(reply)
@@ -190,7 +225,9 @@ class AyanaCompletionContract {
                     DeliverableKind.GRAPH,
                     DeliverableKind.FILE,
                     DeliverableKind.DOCUMENT,
+                    DeliverableKind.PDF,
                     DeliverableKind.SPREADSHEET,
+                    DeliverableKind.PRESENTATION,
                     DeliverableKind.IMAGE ->
                         hasArtifact
 
@@ -214,23 +251,43 @@ class AyanaCompletionContract {
                 reason = "deliverables_verified",
                 message = reply,
                 expected = expected,
-                missing = emptySet()
+                missing = emptySet(),
+                verifiedArtifactReferences = verifiedArtifacts
             )
         }
 
         return Validation(
             satisfied = false,
             reason =
-                if (genericOnly) {
-                    "generic_final_without_deliverable"
-                } else {
-                    "requested_deliverable_missing"
+                when {
+                    genericOnly ->
+                        "generic_final_without_deliverable"
+
+                    missing.any(::requiresArtifactProof) ->
+                        "requested_artifact_not_verified"
+
+                    else ->
+                        "requested_deliverable_missing"
                 },
             message = buildFailureMessage(missing),
             expected = expected,
-            missing = missing
+            missing = missing,
+            verifiedArtifactReferences = verifiedArtifacts
         )
     }
+
+    private fun requiresArtifactProof(
+        kind: DeliverableKind
+    ): Boolean =
+        kind in setOf(
+            DeliverableKind.GRAPH,
+            DeliverableKind.FILE,
+            DeliverableKind.DOCUMENT,
+            DeliverableKind.PDF,
+            DeliverableKind.SPREADSHEET,
+            DeliverableKind.PRESENTATION,
+            DeliverableKind.IMAGE
+        )
 
     private fun buildFailureMessage(
         missing: Set<DeliverableKind>
@@ -243,14 +300,24 @@ class AyanaCompletionContract {
                     DeliverableKind.TABLE -> "таблица"
                     DeliverableKind.FILE -> "файл"
                     DeliverableKind.DOCUMENT -> "документ"
+                    DeliverableKind.PDF -> "PDF-файл"
                     DeliverableKind.SPREADSHEET -> "таблица Excel"
+                    DeliverableKind.PRESENTATION -> "презентация"
                     DeliverableKind.IMAGE -> "изображение"
                     DeliverableKind.REPORT -> "отчёт"
                 }
             }
 
-        return "Запрос выполнен не полностью: отсутствует ${names.joinToString(", ")}. " +
-            "AYANA не отмечает такую команду как SUCCESS."
+        val artifactMissing =
+            missing.any(::requiresArtifactProof)
+
+        return if (artifactMissing) {
+            "Запрос выполнен не полностью: не подтверждено создание ${names.joinToString(", ")}. " +
+                "AYANA не отмечает такую команду как SUCCESS без фактической ссылки на созданный результат."
+        } else {
+            "Запрос выполнен не полностью: отсутствует ${names.joinToString(", ")}. " +
+                "AYANA не отмечает такую команду как SUCCESS."
+        }
     }
 
     private fun isGenericCompletion(
@@ -278,27 +345,28 @@ class AyanaCompletionContract {
             )
     }
 
-    private fun containsArtifactReference(
-        reply: String
+    /**
+     * Only explicit execution-layer references are accepted. A filename typed in
+     * natural-language text (for example "report.pdf") is deliberately NOT proof.
+     */
+    private fun isStructuredArtifactReference(
+        reference: String
     ): Boolean {
         val lower =
-            reply.lowercase(Locale.ROOT)
+            reference
+                .trim()
+                .lowercase(Locale.ROOT)
 
-        return listOf(
-            "sandbox:/",
-            "content://",
-            "file://",
-            ".png",
-            ".jpg",
-            ".jpeg",
-            ".webp",
-            ".pdf",
-            ".docx",
-            ".xlsx",
-            ".csv"
-        ).any {
-            lower.contains(it)
+        if (lower.length !in 4..MAX_ARTIFACT_REFERENCE_CHARS) {
+            return false
         }
+
+        return lower.startsWith("sandbox:/") ||
+            lower.startsWith("content://") ||
+            lower.startsWith("file://") ||
+            lower.startsWith("artifact://") ||
+            lower.startsWith("attachment://") ||
+            lower.startsWith("openai-file://")
     }
 
     private fun looksLikeInlineTable(
@@ -322,12 +390,9 @@ class AyanaCompletionContract {
             return true
         }
 
-        return lines.any {
+        return lines.count {
             it.contains('\t')
-        } &&
-            lines.count {
-                it.contains('\t')
-            } >= 2
+        } >= 2
     }
 
     private fun containsAny(
@@ -351,5 +416,7 @@ class AyanaCompletionContract {
 
     companion object {
         private const val MIN_SUBSTANTIVE_TEXT_CHARS = 80
+        private const val MAX_ARTIFACT_REFERENCES = 24
+        private const val MAX_ARTIFACT_REFERENCE_CHARS = 2048
     }
 }
