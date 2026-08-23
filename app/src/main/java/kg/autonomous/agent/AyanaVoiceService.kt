@@ -56,7 +56,11 @@ import kotlin.math.abs
 
 class AyanaVoiceService : Service() {
 
-    // AYANA v12.7 FILE & DOCUMENT ENGINE + COMPLETION TRUTH.
+    // AYANA v12.8 UNIVERSAL PERCEPTION & ACTION ENGINE — semantic action routing slice.
+    // All ordinary semantic click lanes now converge on AyanaScreenIntelligence v4,
+    // which resolves one factual Accessibility target before Android dispatch and
+    // returns explicit acceptance/verification/terminal evidence. File & Document
+    // Engine v12.7.x remains unchanged and protected as a regression baseline.
     // Preserves device-confirmed v12.3 terminal-truth reconciliation, v12.4
     // Russian Marin pronunciation, and v12.5 echo-safe STOP semantics. v12.6
     // strengthens short-name phonetic canonicalization, upgrades Completion Contract
@@ -3693,21 +3697,31 @@ class AyanaVoiceService : Service() {
                 routingNormalized ==
                 "вернись назад" -> {
 
-                val ok =
-                    AgentAccessibilityService
-                        .instance
-                        ?.pressBack() == true
+                val result =
+                    screenIntelligence
+                        .pressBack()
 
-                if (ok) {
+                result.optJSONObject("screen")?.let { screen ->
+                    capabilityRegistry.recordScreenObservation(screen)
+                }
+
+                if (result.optBoolean("success", false)) {
                     finishLocalCommand(
                         "Назад",
                         silent
                     )
                 } else {
                     respondAndResume(
-                        "Включите мой доступ в специальных возможностях.",
+                        result.optString("message")
+                            .ifBlank { "Не удалось выполнить Назад." },
                         silent,
-                        success = false
+                        success = false,
+                        terminalStatus =
+                            when (result.optString("terminal_status")) {
+                                "BLOCKED" -> AyanaCommandHistoryStore.STATUS_BLOCKED
+                                "UNSUPPORTED" -> AyanaCommandHistoryStore.STATUS_UNSUPPORTED
+                                else -> null
+                            }
                     )
                 }
 
@@ -3721,21 +3735,31 @@ class AyanaVoiceService : Service() {
                 routingNormalized ==
                 "главный экран" -> {
 
-                val ok =
-                    AgentAccessibilityService
-                        .instance
-                        ?.pressHome() == true
+                val result =
+                    screenIntelligence
+                        .pressHome()
 
-                if (ok) {
+                result.optJSONObject("screen")?.let { screen ->
+                    capabilityRegistry.recordScreenObservation(screen)
+                }
+
+                if (result.optBoolean("success", false)) {
                     finishLocalCommand(
                         "Главный экран",
                         silent
                     )
                 } else {
                     respondAndResume(
-                        "Включите мой доступ в специальных возможностях.",
+                        result.optString("message")
+                            .ifBlank { "Не удалось открыть главный экран." },
                         silent,
-                        success = false
+                        success = false,
+                        terminalStatus =
+                            when (result.optString("terminal_status")) {
+                                "BLOCKED" -> AyanaCommandHistoryStore.STATUS_BLOCKED
+                                "UNSUPPORTED" -> AyanaCommandHistoryStore.STATUS_UNSUPPORTED
+                                else -> null
+                            }
                     )
                 }
 
@@ -8324,27 +8348,32 @@ class AyanaVoiceService : Service() {
             return
         }
 
-        val service =
-            AgentAccessibilityService
-                .instance
-
-        if (service == null) {
-
-            respondAndResume(
-                "Включите мой доступ в специальных возможностях.",
-                silent,
-                success = false
+        // v12.8: local voice click no longer bypasses Screen Intelligence.
+        // The universal semantic resolver owns identity/ambiguity before Android
+        // receives input; low-level Accessibility remains the physical executor.
+        val result =
+            screenIntelligence.click(
+                target = target,
+                confirmed = false
             )
 
-            return
+        commandHistoryStore.addEvent(
+            activeCommandHistoryId,
+            state = "semantic_action",
+            message = result.optString("reason", "click_text"),
+            details =
+                "requested=${target.take(140)}; " +
+                    "resolved=${result.optString("resolved_target").take(140)}; " +
+                    "accepted=${result.optBoolean("action_accepted", false)}; " +
+                    "verified=${result.optBoolean("verified", false)}; " +
+                    "terminal=${result.optString("terminal_status").take(32)}"
+        )
+
+        result.optJSONObject("screen")?.let { screen ->
+            capabilityRegistry.recordScreenObservation(screen)
         }
 
-        val success =
-            service.clickByText(
-                target
-            )
-
-        if (success) {
+        if (result.optBoolean("success", false)) {
 
             finishLocalCommand(
                 "Нажимаю: $target",
@@ -8354,9 +8383,18 @@ class AyanaVoiceService : Service() {
         } else {
 
             respondAndResume(
-                "Я не нашла на экране элемент $target.",
+                result.optString("message")
+                    .ifBlank {
+                        "Я не смогла надёжно подтвердить элемент $target."
+                    },
                 silent,
-                success = false
+                success = false,
+                terminalStatus =
+                    when (result.optString("terminal_status")) {
+                        "BLOCKED" -> AyanaCommandHistoryStore.STATUS_BLOCKED
+                        "UNSUPPORTED" -> AyanaCommandHistoryStore.STATUS_UNSUPPORTED
+                        else -> null
+                    }
             )
         }
     }
@@ -15719,38 +15757,14 @@ class AyanaVoiceService : Service() {
 
                 "press_back" -> {
 
-                    val success =
-                        AgentAccessibilityService
-                            .instance
-                            ?.pressBack() ==
-                            true
-
-                    toolResult(
-                        success,
-                        if (success) {
-                            "Нажато Назад"
-                        } else {
-                            "Accessibility AYANA недоступен"
-                        }
-                    )
+                    screenIntelligence
+                        .pressBack()
                 }
 
                 "press_home" -> {
 
-                    val success =
-                        AgentAccessibilityService
-                            .instance
-                            ?.pressHome() ==
-                            true
-
-                    toolResult(
-                        success,
-                        if (success) {
-                            "Открыт главный экран"
-                        } else {
-                            "Accessibility AYANA недоступен"
-                        }
-                    )
+                    screenIntelligence
+                        .pressHome()
                 }
 
                 "change_volume" -> {
@@ -15772,23 +15786,24 @@ class AyanaVoiceService : Service() {
                             )
                             .trim()
 
-                    val success =
-                        target.isNotBlank() &&
-                            AgentAccessibilityService
-                                .instance
-                                ?.clickByText(
-                                    target
-                                ) ==
-                            true
+                    if (target.isBlank()) {
+                        toolResult(
+                            false,
+                            "Не указан элемент для нажатия"
+                        )
+                    } else {
+                        val result =
+                            screenIntelligence.click(
+                                target = target,
+                                confirmed = false
+                            )
 
-                    toolResult(
-                        success,
-                        if (success) {
-                            "Нажат элемент: $target"
-                        } else {
-                            "Элемент не найден или Accessibility недоступен: $target"
+                        result.optJSONObject("screen")?.let { screen ->
+                            capabilityRegistry.recordScreenObservation(screen)
                         }
-                    )
+
+                        result
+                    }
                 }
 
                 "youtube_search" -> {
