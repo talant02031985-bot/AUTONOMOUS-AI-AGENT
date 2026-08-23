@@ -55,7 +55,11 @@ import kotlin.math.abs
 
 class AyanaVoiceService : Service() {
 
-    // AYANA v12.3 SIDE-EFFECT RECONCILIATION + TERMINAL TRUTH.
+    // AYANA v12.4 VOICE + COMPLETION + RELIABILITY.
+    // Preserves device-confirmed v12.3 terminal-truth reconciliation for destructive
+    // Android side effects. v12.4 adds presentation-only Russian pronunciation for
+    // Marin and strengthens deliverable completion so textual filename claims cannot
+    // masquerade as verified artifacts.
     // Preserves v12.1 verified app task removal while hardening STOP/terminal ownership.
     // restores the prior foreground context, and never claims process kill / force-stop.
     // Unified Execution Kernel owns cancellation/terminal/evidence state across long-running lanes.
@@ -346,6 +350,12 @@ class AyanaVoiceService : Service() {
     // deliverables actually exist.
     private val completionContract by lazy {
         AyanaCompletionContract()
+    }
+
+    // v12.4 presentation-only Russian pronunciation. Semantic text stored in
+    // history/UI is never rewritten; only the text sent to Marin is prepared.
+    private val russianSpeechNormalizer by lazy {
+        AyanaRussianSpeechNormalizer()
     }
 
     // AYANA v12.1: user-visible close means verified removal of the app task
@@ -9704,6 +9714,12 @@ class AyanaVoiceService : Service() {
                             .orEmpty()
                     )
 
+                // v12.4: only structured execution-layer artifact references may
+                // satisfy file/document/image completion. Natural-language mentions
+                // such as "report.pdf" are not accepted as proof.
+                val completionArtifactReferences =
+                    linkedSetOf<String>()
+
                 // Keep only the freshest screen snapshot separately from the
                 // action trace. This lets the model continue from the real
                 // current UI without spending another Agent Core turn just to
@@ -9901,6 +9917,14 @@ class AyanaVoiceService : Service() {
                                     "voice"
                                 }
                         )
+
+                    collectCompletionArtifactReferences(
+                        response
+                    ).forEach { reference ->
+                        completionArtifactReferences.add(
+                            reference
+                        )
+                    }
 
                     commandHistoryStore.addEvent(
                         activeCommandHistoryId,
@@ -10347,6 +10371,14 @@ class AyanaVoiceService : Service() {
                                     toolName,
                                     arguments
                                 )
+
+                            collectCompletionArtifactReferences(
+                                result
+                            ).forEach { reference ->
+                                completionArtifactReferences.add(
+                                    reference
+                                )
+                            }
 
                             commandHistoryStore.addEvent(
                                 activeCommandHistoryId,
@@ -11248,7 +11280,9 @@ class AyanaVoiceService : Service() {
                         completionContract.validate(
                             request = message,
                             reply = answer,
-                            artifactReferences = emptyList()
+                            artifactReferences =
+                                completionArtifactReferences
+                                    .toList()
                         )
 
                     if (completion.expected.isNotEmpty()) {
@@ -11265,7 +11299,8 @@ class AyanaVoiceService : Service() {
                                 (
                                     "reason=${completion.reason}; " +
                                         "expected=${completion.expected.joinToString(",")}; " +
-                                        "missing=${completion.missing.joinToString(",")}"
+                                        "missing=${completion.missing.joinToString(",")}; " +
+                                        "verified_artifacts=${completion.verifiedArtifactReferences.size}"
                                     ).take(900)
                         )
                     }
@@ -18098,6 +18133,118 @@ class AyanaVoiceService : Service() {
         }
     }
 
+    /**
+     * v12.4 completion evidence collector.
+     *
+     * Only explicitly named OUTPUT-artifact fields are inspected. We do not scan
+     * arbitrary reply text or generic input attachment fields, because a model
+     * mentioning a filename or echoing an uploaded input must never prove that a
+     * new deliverable was created.
+     */
+    private fun collectCompletionArtifactReferences(
+        payload: JSONObject
+    ): List<String> {
+        val result = linkedSetOf<String>()
+
+        val singularKeys =
+            listOf(
+                "artifact_reference",
+                "artifact_ref",
+                "artifact_uri",
+                "generated_artifact",
+                "generated_file",
+                "output_artifact",
+                "output_file",
+                "created_artifact",
+                "created_file"
+            )
+
+        val pluralKeys =
+            listOf(
+                "artifact_references",
+                "generated_artifacts",
+                "generated_files",
+                "output_artifacts",
+                "output_files",
+                "created_artifacts",
+                "created_files"
+            )
+
+        fun addValue(
+            value: Any?,
+            depth: Int = 0
+        ) {
+            if (
+                value == null ||
+                value === JSONObject.NULL ||
+                depth > 3 ||
+                result.size >= 24
+            ) {
+                return
+            }
+
+            when (value) {
+                is String -> {
+                    val clean =
+                        value
+                            .trim()
+                            .take(2048)
+
+                    if (clean.isNotBlank()) {
+                        result.add(clean)
+                    }
+                }
+
+                is JSONArray -> {
+                    for (index in 0 until value.length()) {
+                        if (result.size >= 24) break
+                        addValue(
+                            value.opt(index),
+                            depth + 1
+                        )
+                    }
+                }
+
+                is JSONObject -> {
+                    listOf(
+                        "reference",
+                        "ref",
+                        "uri",
+                        "artifact_uri",
+                        "file_uri",
+                        "content_uri",
+                        "path"
+                    ).forEach { key ->
+                        if (value.has(key)) {
+                            addValue(
+                                value.opt(key),
+                                depth + 1
+                            )
+                        }
+                    }
+                }
+            }
+        }
+
+        singularKeys.forEach { key ->
+            if (payload.has(key)) {
+                addValue(
+                    payload.opt(key)
+                )
+            }
+        }
+
+        pluralKeys.forEach { key ->
+            if (payload.has(key)) {
+                addValue(
+                    payload.opt(key)
+                )
+            }
+        }
+
+        return result.toList()
+    }
+
     // =========================================================
     // MARIN TTS
     // =========================================================
@@ -18120,6 +18267,18 @@ class AyanaVoiceService : Service() {
             startFollowUpOrWake()
             return
         }
+
+        val speechPreparation =
+            russianSpeechNormalizer
+                .prepare(
+                    text
+                )
+
+        val spokenText =
+            speechPreparation.text
+                .ifBlank {
+                    text
+                }
 
         stopSherpaListening()
 
@@ -18147,8 +18306,21 @@ class AyanaVoiceService : Service() {
 
         activeTtsTextNormalized =
             normalizeRecognitionText(
-                text
+                spokenText
             )
+
+        if (speechPreparation.changed) {
+            commandHistoryStore.addEvent(
+                activeCommandHistoryId,
+                state = "speech_normalization",
+                message = "Русское произношение подготовлено для Marin",
+                details =
+                    (
+                        "rules=${speechPreparation.appliedRules.joinToString(",")}; " +
+                            "semantic_chars=${text.length}; spoken_chars=${spokenText.length}"
+                        ).take(900)
+            )
+        }
 
         bargeInAudioDiagnosticLogged =
             false
@@ -18174,7 +18346,8 @@ class AyanaVoiceService : Service() {
             details =
                 "voice=$TTS_EXPECTED_VOICE; " +
                     "profile=$TTS_VOICE_PROFILE; " +
-                    "speed=$TTS_EXPECTED_SPEED"
+                    "speed=$TTS_EXPECTED_SPEED; " +
+                    "speech_normalized=${speechPreparation.changed}"
         )
 
         thread(
@@ -18182,7 +18355,8 @@ class AyanaVoiceService : Service() {
             name = "AyanaTTSStream"
         ) {
             streamTtsPcmAndPlay(
-                text = text,
+                semanticText = text,
+                spokenText = spokenText,
                 token = token,
                 historySuccess = historySuccess,
                 historyTerminalStatus = historyTerminalStatus,
@@ -18192,7 +18366,8 @@ class AyanaVoiceService : Service() {
     }
 
     private fun streamTtsPcmAndPlay(
-        text: String,
+        semanticText: String,
+        spokenText: String,
         token: Long,
         historySuccess: Boolean,
         historyTerminalStatus: String? = null,
@@ -18257,7 +18432,7 @@ class AyanaVoiceService : Service() {
                 JSONObject().apply {
                     put(
                         "text",
-                        text
+                        spokenText
                     )
 
                     put(
@@ -18600,14 +18775,14 @@ class AyanaVoiceService : Service() {
 
                         finishActiveCommandHistory(
                             success = historySuccess,
-                            result = text,
+                            result = semanticText,
                             technical = historyTechnical,
                             terminalStatus = historyTerminalStatus
                         )
 
                         broadcastStatus(
                             if (historySuccess) {
-                                text
+                                semanticText
                             } else {
                                 "Голос временно недоступен"
                             },
@@ -18677,7 +18852,7 @@ class AyanaVoiceService : Service() {
                 ) {
                     finishActiveCommandHistory(
                         success = historySuccess,
-                        result = text,
+                        result = semanticText,
                         technical = historyTechnical,
                         terminalStatus = historyTerminalStatus
                     )
@@ -18950,12 +19125,22 @@ class AyanaVoiceService : Service() {
             connection.doOutput =
                 true
 
+            val spokenText =
+                russianSpeechNormalizer
+                    .prepare(
+                        text
+                    )
+                    .text
+                    .ifBlank {
+                        text
+                    }
+
             val requestJson =
                 JSONObject().apply {
 
                     put(
                         "text",
-                        text
+                        spokenText
                     )
 
                     // Wake acknowledgement is intentionally cached as MP3,
