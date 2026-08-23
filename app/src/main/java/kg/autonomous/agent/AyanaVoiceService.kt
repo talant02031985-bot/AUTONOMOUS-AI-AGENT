@@ -55,11 +55,11 @@ import kotlin.math.abs
 
 class AyanaVoiceService : Service() {
 
-    // AYANA v12.4 VOICE + COMPLETION + RELIABILITY.
-    // Preserves device-confirmed v12.3 terminal-truth reconciliation for destructive
-    // Android side effects. v12.4 adds presentation-only Russian pronunciation for
-    // Marin and strengthens deliverable completion so textual filename claims cannot
-    // masquerade as verified artifacts.
+    // AYANA v12.5 VOICE CONTROL + LOCAL ROUTING INTEGRITY.
+    // Preserves device-confirmed v12.3 terminal-truth reconciliation and v12.4
+    // Russian Marin pronunciation / artifact completion truth. v12.5 centralizes
+    // echo-safe STOP recognition and adds fail-closed phonetic local app routing;
+    // every app candidate is still resolved through the observed launcher map.
     // Preserves v12.1 verified app task removal while hardening STOP/terminal ownership.
     // restores the prior foreground context, and never claims process kill / force-stop.
     // Unified Execution Kernel owns cancellation/terminal/evidence state across long-running lanes.
@@ -356,6 +356,20 @@ class AyanaVoiceService : Service() {
     // history/UI is never rewritten; only the text sent to Marin is prepared.
     private val russianSpeechNormalizer by lazy {
         AyanaRussianSpeechNormalizer()
+    }
+
+    // v12.5: one echo-aware STOP grammar owns both ordinary cancellation and
+    // Marin barge-in. This prevents self-echo from bypassing the speech guard.
+    private val cancelPhraseDetector by lazy {
+        AyanaCancelPhraseDetector(
+            WAKE_VARIANTS
+        )
+    }
+
+    // v12.5: phonetic matching only ranks known local aliases. Actual package
+    // identity remains owned by AyanaAppResolver and the observed launcher map.
+    private val localAppPhoneticRouter by lazy {
+        AyanaLocalAppPhoneticRouter()
     }
 
     // AYANA v12.1: user-visible close means verified removal of the app task
@@ -2082,17 +2096,36 @@ class AyanaVoiceService : Service() {
                             break
                         }
 
-                        if (
-                            text.isNotBlank() &&
-                            (
-                                isBargeInCancelPhrase(
-                                    text
-                                ) ||
-                                isCancelCommandPhrase(
-                                    text
+                        val cancelMatch =
+                            if (text.isNotBlank()) {
+                                cancelPhraseDetector.detect(
+                                    value = text,
+                                    speaking =
+                                        currentStatusState ==
+                                            STATE_SPEAKING,
+                                    activeSpokenText =
+                                        activeTtsTextNormalized
                                 )
+                            } else {
+                                AyanaCancelPhraseDetector.Match(
+                                    matched = false
+                                )
+                            }
+
+                        if (cancelMatch.matched) {
+
+                            commandHistoryStore.addEvent(
+                                activeCommandHistoryId,
+                                state = "cancel_match",
+                                message = "STOP распознан локальным детектором",
+                                details =
+                                    (
+                                        "reason=${cancelMatch.reason}; " +
+                                            "token=${cancelMatch.token}; " +
+                                            "speaking=${currentStatusState == STATE_SPEAKING}; " +
+                                            "heard=${cancelMatch.normalized.take(160)}"
+                                        ).take(420)
                             )
-                        ) {
 
                             isRecording =
                                 false
@@ -4428,16 +4461,35 @@ class AyanaVoiceService : Service() {
                     )
 
                 } else if (
-                    isAppLaunchCommand(
-                        routingNormalized
-                    ) ||
                     target in
                         KNOWN_LOCAL_LAUNCH_ALIASES
                 ) {
 
-                    // v11.1.1: known aliases may be spoken as a bare follow-up
-                    // («телеграм», «чат жпт», «спотифай»). Unknown phrases still
-                    // go to Agent Core; we never fuzzy-launch an arbitrary sentence.
+                    // Exact known aliases stay on the zero-fuzz deterministic path.
+                    openInstalledAppByName(
+                        target,
+                        silent
+                    )
+
+                } else if (
+                    tryOpenPhoneticInstalledApp(
+                        target = target,
+                        wholeCommand = routingNormalized,
+                        silent = silent
+                    )
+                ) {
+                    // v12.5: a short ASR-distorted app name may stay local only
+                    // after phonetic ranking AND device-observed package resolution.
+                    Unit
+
+                } else if (
+                    isAppLaunchCommand(
+                        routingNormalized
+                    )
+                ) {
+
+                    // Explicit launches that are not safe phonetic matches still
+                    // use the normal App Resolver and fail honestly if unresolved.
                     openInstalledAppByName(
                         target,
                         silent
@@ -7677,6 +7729,102 @@ class AyanaVoiceService : Service() {
                 command.contains("звук")
             ) ||
             command.contains("верни звук")
+    }
+
+    private fun tryOpenPhoneticInstalledApp(
+        target: String,
+        wholeCommand: String,
+        silent: Boolean
+    ): Boolean {
+
+        val explicitLaunch =
+            isAppLaunchCommand(
+                wholeCommand
+            )
+
+        val candidates =
+            localAppPhoneticRouter
+                .rank(
+                    query = target,
+                    aliases = KNOWN_LOCAL_LAUNCH_ALIASES,
+                    explicitLaunch = explicitLaunch
+                )
+
+        if (candidates.isEmpty()) {
+            return false
+        }
+
+        val selection =
+            localAppPhoneticRouter
+                .selectResolved(
+                    candidates = candidates,
+                    resolver = { alias ->
+                        val resolution =
+                            try {
+                                appResolver.resolve(
+                                    alias
+                                )
+                            } catch (_: Exception) {
+                                null
+                            }
+
+                        if (
+                            resolution == null ||
+                            !resolution.success ||
+                            resolution.packageName.isBlank()
+                        ) {
+                            null
+                        } else {
+                            AyanaLocalAppPhoneticRouter.ResolvedTarget(
+                                packageName = resolution.packageName,
+                                label = resolution.label
+                            )
+                        }
+                    }
+                )
+
+        if (selection.ambiguous) {
+            val runnerUp =
+                selection.runnerUp
+
+            commandHistoryStore.addEvent(
+                activeCommandHistoryId,
+                state = "local_app_phonetic_ambiguous",
+                message = "Фонетическое имя приложения неоднозначно",
+                details =
+                    (
+                        "target=${target.take(100)}; " +
+                            "runner_up=${runnerUp?.alias.orEmpty()}:" +
+                            "${runnerUp?.packageName.orEmpty()}:" +
+                            "${runnerUp?.score ?: 0}"
+                        ).take(500)
+            )
+            return false
+        }
+
+        val best =
+            selection.selected
+                ?: return false
+
+        commandHistoryStore.addEvent(
+            activeCommandHistoryId,
+            state = "local_app_phonetic_match",
+            message = "Короткая команда приложения распознана локально",
+            details =
+                (
+                    "target=${target.take(100)}; alias=${best.alias}; " +
+                        "label=${best.label.take(100)}; package=${best.packageName}; " +
+                        "score=${best.score}; literal=${best.literalScore}; " +
+                        "phonetic=${best.phoneticScore}; explicit_launch=$explicitLaunch"
+                    ).take(700)
+        )
+
+        openInstalledAppByName(
+            requestedName = best.alias,
+            silent = silent
+        )
+
+        return true
     }
 
     private fun openInstalledAppByName(
@@ -14059,6 +14207,12 @@ class AyanaVoiceService : Service() {
         val requestStartedAt =
             SystemClock.elapsedRealtime()
 
+        var requestBodySentAt =
+            requestStartedAt
+
+        var responseHeadersAt =
+            requestStartedAt
+
         try {
 
             val url =
@@ -18457,8 +18611,14 @@ class AyanaVoiceService : Service() {
                     )
                 }
 
+            requestBodySentAt =
+                SystemClock.elapsedRealtime()
+
             val responseCode =
                 connection.responseCode
+
+            responseHeadersAt =
+                SystemClock.elapsedRealtime()
 
             if (
                 responseCode !in
@@ -18660,11 +18820,30 @@ class AyanaVoiceService : Service() {
                             firstByteLatencyMs =
                                 firstByteMs
 
+                            val requestWriteMs =
+                                (requestBodySentAt - requestStartedAt)
+                                    .coerceAtLeast(0L)
+
+                            val responseHeaderWaitMs =
+                                (responseHeadersAt - requestBodySentAt)
+                                    .coerceAtLeast(0L)
+
+                            val firstChunkAfterHeadersMs =
+                                (
+                                    SystemClock.elapsedRealtime() -
+                                        responseHeadersAt
+                                    )
+                                    .coerceAtLeast(0L)
+
                             commandHistoryStore.addEvent(
                                 activeCommandHistoryId,
                                 state = "tts_first_byte",
                                 message = "Marin: первый PCM-байт получен",
-                                details = "latency_ms=$firstByteMs"
+                                details =
+                                    "latency_ms=$firstByteMs; " +
+                                        "request_write_ms=$requestWriteMs; " +
+                                        "response_header_wait_ms=$responseHeaderWaitMs; " +
+                                        "first_chunk_after_headers_ms=$firstChunkAfterHeadersMs"
                             )
 
                             builtTrack.play()
@@ -19634,238 +19813,29 @@ class AyanaVoiceService : Service() {
     }
 
     /**
-     * While Marin is speaking, Sherpa can hear a mixture of AYANA's own voice
-     * plus the user's "стоп". In that case the transcript may be a long phrase,
-     * so the normal <=5-word cancel filter intentionally rejects it.
-     *
-     * For SPEAKING only, accept a recognized cancel keyword anywhere in the
-     * mixed transcript when that keyword is not present in the text AYANA is
-     * currently speaking. This tolerates speaker echo that can be appended after
-     * the user's word without turning arbitrary speech into a cancel command.
+     * v12.5 compatibility wrappers. The actual grammar lives in
+     * AyanaCancelPhraseDetector so SPEAKING and non-SPEAKING paths cannot drift.
      */
     private fun isBargeInCancelPhrase(
         value: String
-    ): Boolean {
-
-        if (
-            currentStatusState !=
-            STATE_SPEAKING
-        ) {
-            return false
-        }
-
-        val normalized =
-            normalizeRecognitionText(
-                value
+    ): Boolean =
+        cancelPhraseDetector
+            .detect(
+                value = value,
+                speaking = true,
+                activeSpokenText = activeTtsTextNormalized
             )
-                .trim()
-
-        if (
-            normalized.isBlank()
-        ) {
-            return false
-        }
-
-        val words =
-            normalized
-                .split(
-                    " "
-                )
-                .filter {
-                    it.isNotBlank()
-                }
-
-        if (
-            words.isEmpty()
-        ) {
-            return false
-        }
-
-        val spoken =
-            activeTtsTextNormalized
-
-        val shortKeywords =
-            listOf(
-                "стоп",
-                "отмена",
-                "отмени",
-                "хватит"
-            )
-
-        for (
-            keyword in
-            shortKeywords
-        ) {
-
-            // Sherpa may append AYANA's echo after the user's word, so requiring
-            // the cancel token to remain in the last four words is too strict.
-            // Accept it anywhere in the mixed transcript as long as AYANA's own
-            // current TTS text does not contain that token.
-            val heardAnywhere =
-                words.any {
-                    it ==
-                        keyword
-                }
-
-            if (
-                heardAnywhere &&
-                !containsWholeWord(
-                    spoken,
-                    keyword
-                )
-            ) {
-                return true
-            }
-        }
-
-        val longPhrases =
-            listOf(
-                "прекрати",
-                "останови команд",
-                "останови выполн"
-            )
-
-        for (
-            phrase in
-            longPhrases
-        ) {
-
-            if (
-                normalized.contains(
-                    phrase
-                ) &&
-                !spoken.contains(
-                    phrase
-                )
-            ) {
-                return true
-            }
-        }
-
-        // If AYANA herself is currently saying one of the stop words, require
-        // the user to include the wake name as an extra disambiguation signal.
-        if (
-            containsWakeWord(
-                normalized
-            )
-        ) {
-
-            val withoutWake =
-                removeLeadingWakeWord(
-                    normalized
-                )
-                    .trim()
-
-            return isCancelCommandPhrase(
-                withoutWake
-            )
-        }
-
-        return false
-    }
-
-    private fun containsWholeWord(
-        value: String,
-        word: String
-    ): Boolean {
-
-        if (
-            value.isBlank() ||
-            word.isBlank()
-        ) {
-            return false
-        }
-
-        return value
-            .split(
-                Regex("\\s+")
-            )
-            .any {
-                it ==
-                    word
-            }
-    }
+            .matched
 
     private fun isCancelCommandPhrase(
         value: String
-    ): Boolean {
-
-        val normalized =
-            normalizeRecognitionText(
-                value
+    ): Boolean =
+        cancelPhraseDetector
+            .detect(
+                value = value,
+                speaking = false
             )
-                .trim()
-
-        val withoutWake =
-            removeLeadingWakeWord(
-                normalized
-            )
-                .trim()
-
-        if (
-            withoutWake.isBlank()
-        ) {
-            return false
-        }
-
-        val exact =
-            setOf(
-                "стоп",
-                "отмена",
-                "отмени",
-                "прекрати",
-                "прекрати выполнение",
-                "останови",
-                "останови команду",
-                "останови выполнение",
-                "хватит",
-                "все хватит",
-                "всё хватит"
-            )
-
-        if (
-            withoutWake in
-            exact
-        ) {
-            return true
-        }
-
-        val words =
-            withoutWake
-                .split(
-                    " "
-                )
-                .filter {
-                    it.isNotBlank()
-                }
-
-        if (
-            words.size >
-            MAX_CANCEL_PHRASE_WORDS
-        ) {
-            return false
-        }
-
-        return words.any {
-            it ==
-                "стоп" ||
-                it ==
-                "отмена" ||
-                it ==
-                "отмени" ||
-                it ==
-                "хватит"
-        } ||
-            withoutWake.startsWith(
-                "прекрати"
-            ) ||
-            withoutWake.startsWith(
-                "останови команд"
-            ) ||
-            withoutWake.startsWith(
-                "останови выполн"
-            )
-    }
+            .matched
 
     private fun isShutdownAyanaPhrase(
         value: String
@@ -20602,9 +20572,6 @@ class AyanaVoiceService : Service() {
 
         private const val CANCEL_MODE_TRANSITION_MS =
             140L
-
-        private const val MAX_CANCEL_PHRASE_WORDS =
-            5
 
         private const val BARGE_IN_TTS_VOLUME =
             0.48f
