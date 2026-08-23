@@ -49,13 +49,14 @@ import java.time.LocalDateTime
 import java.time.ZoneId
 import java.time.format.DateTimeFormatter
 import java.util.Locale
+import java.util.UUID
 import javax.net.ssl.HttpsURLConnection
 import kotlin.concurrent.thread
 import kotlin.math.abs
 
 class AyanaVoiceService : Service() {
 
-    // AYANA v12.6 VOICE RESOLUTION + COMPLETION TRUTH.
+    // AYANA v12.7 FILE & DOCUMENT ENGINE + COMPLETION TRUTH.
     // Preserves device-confirmed v12.3 terminal-truth reconciliation, v12.4
     // Russian Marin pronunciation, and v12.5 echo-safe STOP semantics. v12.6
     // strengthens short-name phonetic canonicalization, upgrades Completion Contract
@@ -352,6 +353,18 @@ class AyanaVoiceService : Service() {
     // deliverables actually exist.
     private val completionContract by lazy {
         AyanaCompletionContract()
+    }
+
+    // v12.7: real local deliverable executor. Artifacts are generated in AYANA's
+    // private cache, verified, and only then published to Downloads/AYANA.
+    private val artifactEngine by lazy {
+        AyanaArtifactEngine(applicationContext)
+    }
+
+    // v12.7: DOCX translation does not rebuild Word from plain text. It keeps
+    // the original OOXML package and replaces only validated w:t text nodes.
+    private val docxTranslationEngine by lazy {
+        AyanaDocxTranslationEngine()
     }
 
     // v12.4 presentation-only Russian pronunciation. Semantic text stored in
@@ -8910,6 +8923,19 @@ class AyanaVoiceService : Service() {
                     "анализ"
                 )
 
+        val asksCreation =
+            normalized.contains("созд") ||
+                normalized.contains("сдел") ||
+                normalized.contains("сгенер") ||
+                normalized.contains("экспорт") ||
+                normalized.contains("сохран")
+
+        val asksTranslation =
+            normalized.contains("перевед") ||
+                normalized.contains("перевести") ||
+                normalized.contains("перевод") ||
+                normalized.contains("translate")
+
         val topicCount =
             listOf(
                 hasPhoto,
@@ -8918,6 +8944,14 @@ class AyanaVoiceService : Service() {
             ).count { it }
 
         return when {
+            hasDocument &&
+                asksTranslation ->
+                "Да. DOCX можно прикрепить в текстовом режиме и попросить перевести на русский, английский, кыргызский, немецкий, французский, испанский или турецкий. AYANA сохраняет исходный OOXML-пакет Word и меняет только текстовые узлы, затем проверяет новый DOCX и сохраняет его в Downloads/AYANA. До device-теста эту возможность считаю реализованной, но ещё не подтверждённой на планшете."
+
+            hasDocument &&
+                asksCreation ->
+                "Да. В v12.7 AYANA создаёт реальные TXT, Word DOCX, PDF, Excel XLSX, JPEG и JPEG-графики, проверяет файл и только после этого сохраняет его в Downloads/AYANA. PPTX пока не создаётся."
+
             topicCount >= 2 &&
                 (asksUpload || asksAnalysis) ->
                 "Да. В текстовом режиме AYANA можно прикреплять фото, поддерживаемые документы/файлы и видео. Фото анализируются визуально, документы — как файловый ввод модели, а видео — по ограниченной выборке визуальных кадров. Звуковую дорожку видео текущая версия пока не анализирует."
@@ -9927,6 +9961,12 @@ class AyanaVoiceService : Service() {
                 var finalSuccess =
                     true
 
+                // v12.7: create_artifact is a locally verified terminal tool. Once it
+                // returns, a second Agent Core turn is unnecessary and would create a
+                // STOP race after the irreversible publish boundary.
+                var artifactToolTerminalReached =
+                    false
+
                 var step =
                     resumeGoal
                         ?.optInt(
@@ -10704,6 +10744,106 @@ class AyanaVoiceService : Service() {
                                 break
                             }
 
+                            // FILE & DOCUMENT ENGINE v12.7: create_artifact is a
+                            // complete local transaction. ArtifactEngine already generated,
+                            // published, reopened and byte/hash-verified the output. Do NOT
+                            // spend another model turn merely to say that the file exists.
+                            if (
+                                toolName ==
+                                "create_artifact"
+                            ) {
+                                agentPreviousResponseId =
+                                    null
+
+                                artifactToolTerminalReached =
+                                    true
+
+                                val artifactSucceeded =
+                                    result.optBoolean(
+                                        "success",
+                                        false
+                                    ) &&
+                                        result.optBoolean(
+                                            "verified",
+                                            false
+                                        )
+
+                                finalSuccess =
+                                    artifactSucceeded
+
+                                val artifactMessage =
+                                    result
+                                        .optString(
+                                            "message",
+                                            if (artifactSucceeded) {
+                                                "Файл создан."
+                                            } else {
+                                                "Файл не создан."
+                                            }
+                                        )
+                                        .trim()
+                                        .ifBlank {
+                                            if (artifactSucceeded) {
+                                                "Файл создан."
+                                            } else {
+                                                "Файл не создан."
+                                            }
+                                        }
+
+                                val expectedOutputs =
+                                    completionContract
+                                        .inspectRequest(
+                                            originalGoal
+                                        )
+                                        .kinds
+
+                                val requestedAnalysis =
+                                    AyanaCompletionContract
+                                        .DeliverableKind
+                                        .ANALYSIS in
+                                        expectedOutputs
+
+                                val artifactAnalysis =
+                                    arguments
+                                        .optString(
+                                            "content"
+                                        )
+                                        .trim()
+
+                                finalAnswer =
+                                    if (
+                                        artifactSucceeded &&
+                                        requestedAnalysis &&
+                                        artifactAnalysis.length >=
+                                        80
+                                    ) {
+                                        artifactAnalysis +
+                                            "\n\n" +
+                                            artifactMessage
+                                    } else {
+                                        artifactMessage
+                                    }
+
+                                commandHistoryStore.addEvent(
+                                    activeCommandHistoryId,
+                                    state =
+                                        if (artifactSucceeded) {
+                                            "artifact_verified"
+                                        } else {
+                                            "artifact_failed"
+                                        },
+                                    message = artifactMessage,
+                                    details =
+                                        result
+                                            .toString()
+                                            .take(
+                                                1800
+                                            )
+                                )
+
+                                break
+                            }
+
                             // ANDROID GOAL v7: execute_android_goal is a complete
                             // local transaction. Goal Compiler + Task Engine already
                             // planned, executed and verified the Android navigation.
@@ -11396,7 +11536,8 @@ class AyanaVoiceService : Service() {
                 if (
                     isCommandCancelled(
                         commandToken
-                    )
+                    ) &&
+                    !artifactToolTerminalReached
                 ) {
                     return@thread
                 }
@@ -11470,6 +11611,127 @@ class AyanaVoiceService : Service() {
                         answer =
                             completion.message
                     }
+                }
+
+                // create_artifact owns a locally proven terminal. Handle it here
+                // before the generic mainHandler path, because STOP may arrive in the
+                // tiny interval after ArtifactEngine returns but before UI finalization.
+                if (artifactToolTerminalReached) {
+                    val artifactFinalAnswer =
+                        answer
+                    val artifactFinalSuccess =
+                        finalSuccess
+
+                    mainHandler.post {
+                        if (
+                            commandToken !=
+                            activeCommandToken ||
+                            shuttingDown
+                        ) {
+                            return@post
+                        }
+
+                        if (cancelRequested) {
+                            val sideEffectState =
+                                executionKernel
+                                    .sideEffectState()
+
+                            when {
+                                sideEffectState ==
+                                    AyanaExecutionKernel
+                                        .SideEffectState
+                                        .VERIFIED_NOT_COMMITTED -> {
+                                    finishDeferredCancellationFromExecutor(
+                                        source =
+                                            pendingCancelSource
+                                                .ifBlank {
+                                                    "voice"
+                                                }
+                                    )
+                                }
+
+                                sideEffectState ==
+                                    AyanaExecutionKernel
+                                        .SideEffectState
+                                        .VERIFIED_COMMITTED -> {
+                                    commandHistoryStore.addEvent(
+                                        activeCommandHistoryId,
+                                        state = "cancel_after_commit",
+                                        message =
+                                            "STOP получен после подтверждённой публикации артефакта",
+                                        details =
+                                            "semantic_terminal=${if (artifactFinalSuccess) "SUCCESS" else "ERROR"}; " +
+                                                "source=${pendingCancelSource.ifBlank { "voice" }}"
+                                    )
+
+                                    finishActiveCommandHistory(
+                                        success =
+                                            artifactFinalSuccess,
+                                        result =
+                                            artifactFinalAnswer,
+                                        technical =
+                                            "artifact_publish_verified; stop_after_commit=true"
+                                    )
+
+                                    broadcastStatus(
+                                        artifactFinalAnswer,
+                                        if (artifactFinalSuccess) {
+                                            STATE_SUCCESS
+                                        } else {
+                                            STATE_ERROR
+                                        }
+                                    )
+
+                                    updateNotification(
+                                        if (artifactFinalSuccess) {
+                                            "Файл сохранён • STOP после commit"
+                                        } else {
+                                            "Файл сохранён, но запрос выполнен не полностью"
+                                        }
+                                    )
+
+                                    resumeAfterCancellation(
+                                        attempt = 0
+                                    )
+                                }
+
+                                else -> {
+                                    // Side-effect outcome is unknown or publication failed
+                                    // without a proven rollback. Preserve factual ERROR;
+                                    // never rewrite this state to CANCELLED.
+                                    finishActiveCommandHistory(
+                                        success = false,
+                                        result = artifactFinalAnswer,
+                                        technical =
+                                            "artifact_publish_terminal_uncertain; " +
+                                                "side_effect=${sideEffectState.name}"
+                                    )
+
+                                    broadcastStatus(
+                                        artifactFinalAnswer,
+                                        STATE_ERROR
+                                    )
+
+                                    updateNotification(
+                                        "Результат сохранения файла требует проверки"
+                                    )
+
+                                    resumeAfterCancellation(
+                                        attempt = 0
+                                    )
+                                }
+                            }
+                        } else {
+                            respondAndResume(
+                                artifactFinalAnswer,
+                                silent,
+                                success =
+                                    artifactFinalSuccess
+                            )
+                        }
+                    }
+
+                    return@thread
                 }
 
                 if (
@@ -13920,6 +14182,22 @@ class AyanaVoiceService : Service() {
             return
         }
 
+        // FILE & DOCUMENT ENGINE v12.7: a DOCX translation request is an output
+        // transformation, not an ordinary multimodal Q&A turn. Route it to the
+        // style-preserving OOXML executor so success requires a real new DOCX.
+        if (
+            isStylePreservingDocxTranslationRequest(
+                prompt = prompt,
+                manifest = manifest
+            )
+        ) {
+            executeDocxTranslationCommand(
+                prompt = prompt,
+                manifest = manifest
+            )
+            return
+        }
+
         // A newly attached artifact starts a fresh grounded multimodal context.
         // On success the Worker returns a Responses response_id which becomes the
         // next Agent Core previous_response_id. On failure/cancel we intentionally
@@ -14075,6 +14353,604 @@ class AyanaVoiceService : Service() {
         currentAgentThread = worker
         executionKernel.bindThread(worker)
         worker.start()
+    }
+
+
+    private data class DocxTranslationTarget(
+        val code: String,
+        val label: String
+    )
+
+    private fun isStylePreservingDocxTranslationRequest(
+        prompt: String,
+        manifest: JSONObject
+    ): Boolean {
+        val normalized = normalizeRecognitionText(prompt)
+        val asksTranslation =
+            normalized.contains("перевед") ||
+                normalized.contains("перевести") ||
+                normalized.contains("перевод документа") ||
+                normalized.contains("translate") ||
+                normalized.contains("translation")
+
+        if (!asksTranslation) {
+            return false
+        }
+
+        val displayName = manifest
+            .optString("display_name")
+            .trim()
+            .lowercase(Locale.ROOT)
+        val mime = manifest
+            .optString("mime_type")
+            .trim()
+            .lowercase(Locale.ROOT)
+
+        return displayName.endsWith(".docx") ||
+            mime == "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+    }
+
+    private fun resolveDocxTranslationTarget(
+        prompt: String
+    ): DocxTranslationTarget? {
+        val text = normalizeRecognitionText(prompt)
+
+        return when {
+            Regex("(?:на|в)\\s+(?:русск(?:ий|ого|ом)|русский язык)|по[-\\s]?русски")
+                .containsMatchIn(text) ->
+                DocxTranslationTarget("ru", "русский")
+
+            Regex("(?:на|в)\\s+(?:английск(?:ий|ого|ом)|английский язык)|по[-\\s]?английски")
+                .containsMatchIn(text) ->
+                DocxTranslationTarget("en", "английский")
+
+            Regex("(?:на|в)\\s+(?:кыргызск(?:ий|ого|ом)|киргизск(?:ий|ого|ом)|кыргызский язык|киргизский язык)|по[-\\s]?(?:кыргызски|киргизски)")
+                .containsMatchIn(text) ->
+                DocxTranslationTarget("ky", "кыргызский")
+
+            Regex("(?:на|в)\\s+(?:немецк(?:ий|ого|ом)|немецкий язык)|по[-\\s]?немецки")
+                .containsMatchIn(text) ->
+                DocxTranslationTarget("de", "немецкий")
+
+            Regex("(?:на|в)\\s+(?:французск(?:ий|ого|ом)|французский язык)|по[-\\s]?французски")
+                .containsMatchIn(text) ->
+                DocxTranslationTarget("fr", "французский")
+
+            Regex("(?:на|в)\\s+(?:испанск(?:ий|ого|ом)|испанский язык)|по[-\\s]?испански")
+                .containsMatchIn(text) ->
+                DocxTranslationTarget("es", "испанский")
+
+            Regex("(?:на|в)\\s+(?:турецк(?:ий|ого|ом)|турецкий язык)|по[-\\s]?турецки")
+                .containsMatchIn(text) ->
+                DocxTranslationTarget("tr", "турецкий")
+
+            else -> null
+        }
+    }
+
+    private fun executeDocxTranslationCommand(
+        prompt: String,
+        manifest: JSONObject
+    ) {
+        val commandToken = activeCommandToken
+        val displayName = manifest
+            .optString("display_name", "document.docx")
+            .trim()
+            .take(160)
+            .ifBlank { "document.docx" }
+
+        activeCommandHistoryId =
+            commandHistoryStore.begin(
+                command = "$prompt [DOCX перевод: $displayName]",
+                source = "text"
+            )
+
+        beginExecutionSession(
+            objective = prompt,
+            source = "text",
+            lane = "document_translation",
+            executor = "docx_translation_executor"
+        )
+
+        val target = resolveDocxTranslationTarget(prompt)
+        if (target == null) {
+            try {
+                AyanaMultimodalAttachmentManager(applicationContext)
+                    .cleanupPrepared(manifest)
+            } catch (_: Exception) {
+            }
+            respondAndResume(
+                "Укажите язык перевода, например: «переведи документ на русский».",
+                silent = true,
+                success = false,
+                technical = "docx_translation_target_missing"
+            )
+            return
+        }
+
+        capabilityRegistry.recordCommandContext(
+            source = "text",
+            ttsExpected = false
+        )
+
+        broadcastStatus(
+            "Перевожу $displayName на ${target.label}…",
+            STATE_THINKING
+        )
+        updateNotification(
+            "AYANA переводит Word-документ…"
+        )
+
+        executionPhase(
+            phase = "docx_inspect",
+            executor = "docx_translation_executor"
+        )
+
+        startCancelListening()
+        commandHistoryStore.addEvent(
+            activeCommandHistoryId,
+            state = "cancel_listener_armed",
+            message = "STOP активирован для перевода DOCX",
+            details = "lane=document_translation; execution=${executionKernel.current()?.id.orEmpty()}"
+        )
+
+        val worker =
+            thread(
+                start = false,
+                name = "AyanaDocxTranslation"
+            ) {
+                var outputFile: File? = null
+                try {
+                    val sourceFile = validatedMultimodalCacheFile(
+                        manifest.optString("path")
+                    )
+
+                    val inspection = docxTranslationEngine.inspect(sourceFile)
+                    if (!inspection.valid) {
+                        mainHandler.post {
+                            if (
+                                commandToken == activeCommandToken &&
+                                !shuttingDown &&
+                                !cancelRequested
+                            ) {
+                                respondAndResume(
+                                    "Не удалось подготовить Word-документ к переводу.",
+                                    silent = true,
+                                    success = false,
+                                    technical = "docx_inspect=${inspection.reason}"
+                                )
+                            }
+                        }
+                        return@thread
+                    }
+
+                    commandHistoryStore.addEvent(
+                        activeCommandHistoryId,
+                        state = "docx_translation_plan",
+                        message = "DOCX разобран без изменения структуры",
+                        details =
+                            "segments=${inspection.segments.size}; " +
+                                "inflated_bytes=${inspection.inflatedBytes}; entries=${inspection.sourceEntries}; " +
+                                "target=${target.code}"
+                    )
+
+                    val translated = linkedMapOf<String, String>()
+                    val batches = buildDocxTranslationBatches(inspection.segments)
+                    executionPhase(
+                        phase = "docx_translate_batches",
+                        executor = "docx_translation_executor"
+                    )
+
+                    for ((batchIndex, batch) in batches.withIndex()) {
+                        if (isCommandCancelled(commandToken)) {
+                            return@thread
+                        }
+
+                        var result = callDocxTranslationBatch(
+                            userRequest = prompt,
+                            target = target,
+                            segments = batch
+                        )
+
+                        if (
+                            !result.optBoolean("success", false) &&
+                            !isCommandCancelled(commandToken)
+                        ) {
+                            // One bounded retry for malformed/partial structured output.
+                            result = callDocxTranslationBatch(
+                                userRequest = prompt,
+                                target = target,
+                                segments = batch
+                            )
+                        }
+
+                        if (!result.optBoolean("success", false)) {
+                            if (isCommandCancelled(commandToken)) {
+                                return@thread
+                            }
+                            val technical = result
+                                .optString("technical", "docx_translation_batch_failed")
+                                .take(700)
+                            mainHandler.post {
+                                if (
+                                    commandToken == activeCommandToken &&
+                                    !shuttingDown &&
+                                    !cancelRequested
+                                ) {
+                                    respondAndResume(
+                                        "Перевод Word-документа не завершён: один из фрагментов не прошёл проверку.",
+                                        silent = true,
+                                        success = false,
+                                        technical = technical
+                                    )
+                                }
+                            }
+                            return@thread
+                        }
+
+                        val items = result.optJSONArray("translations") ?: JSONArray()
+                        for (i in 0 until items.length()) {
+                            val item = items.optJSONObject(i) ?: continue
+                            val id = item.optString("id").trim()
+                            val text = item.optString("text")
+                            if (id.isNotBlank()) {
+                                translated[id] = text
+                            }
+                        }
+
+                        val expectedIds = batch.map { it.id }.toSet()
+                        if (!translated.keys.containsAll(expectedIds)) {
+                            mainHandler.post {
+                                if (
+                                    commandToken == activeCommandToken &&
+                                    !shuttingDown &&
+                                    !cancelRequested
+                                ) {
+                                    respondAndResume(
+                                        "Перевод Word-документа остановлен: ответ перевода оказался неполным.",
+                                        silent = true,
+                                        success = false,
+                                        technical = "translation_ids_missing_batch_${batchIndex + 1}"
+                                    )
+                                }
+                            }
+                            return@thread
+                        }
+
+                        commandHistoryStore.addEvent(
+                            activeCommandHistoryId,
+                            state = "docx_translation_progress",
+                            message = "Переведён пакет ${batchIndex + 1} из ${batches.size}",
+                            details = "segments=${batch.size}; translated_total=${translated.size}"
+                        )
+                    }
+
+                    if (isCommandCancelled(commandToken)) {
+                        return@thread
+                    }
+
+                    executionPhase(
+                        phase = "docx_transform",
+                        executor = "docx_translation_executor"
+                    )
+
+                    // Never reuse user-controlled displayName as a filesystem path.
+                    // The visible output name is sanitized separately by ArtifactEngine;
+                    // the private transform target is an opaque AYANA-owned cache path.
+                    outputFile = File(
+                        File(cacheDir, "ayana_docx_translation").apply { mkdirs() },
+                        "${UUID.randomUUID()}.docx"
+                    )
+
+                    val transform = docxTranslationEngine.transform(
+                        sourceFile = sourceFile,
+                        outputFile = outputFile!!,
+                        segments = inspection.segments,
+                        translatedById = translated
+                    )
+
+                    if (!transform.success || isCommandCancelled(commandToken)) {
+                        if (!isCommandCancelled(commandToken)) {
+                            mainHandler.post {
+                                if (
+                                    commandToken == activeCommandToken &&
+                                    !shuttingDown &&
+                                    !cancelRequested
+                                ) {
+                                    respondAndResume(
+                                        "Перевод выполнен, но новый Word-файл не прошёл проверку целостности.",
+                                        silent = true,
+                                        success = false,
+                                        technical = "docx_transform=${transform.reason}"
+                                    )
+                                }
+                            }
+                        }
+                        return@thread
+                    }
+
+                    executionPhase(
+                        phase = "artifact_publish",
+                        executor = "docx_translation_executor"
+                    )
+
+                    val outputName = docxTranslationEngine.translatedFileName(
+                        sourceName = displayName,
+                        targetLanguageCode = target.code
+                    )
+
+                    val published = artifactEngine.publishPreparedFile(
+                        sourceFile = outputFile!!,
+                        kind = "docx",
+                        filename = outputName,
+                        declaredKindOverride = "document",
+                        tryBeginPublish = { detail ->
+                            executionKernel.tryBeginIrreversibleDispatch(
+                                kind = "artifact_publish",
+                                detail = detail
+                            )
+                        },
+                        onPublishAccepted = { detail ->
+                            executionKernel.markIrreversibleDispatchAccepted(detail)
+                        },
+                        onPublishReconciliationStarted = { detail ->
+                            executionKernel.markSideEffectReconciliationStarted(detail)
+                        },
+                        onPublishReconciled = { committed, detail ->
+                            executionKernel.markSideEffectReconciled(
+                                committed = committed,
+                                detail = detail
+                            )
+                        }
+                    )
+
+                    val publishedSuccess = published.optBoolean("success", false)
+                    val technical = published.toString().take(1800)
+
+                    mainHandler.post {
+                        if (
+                            commandToken != activeCommandToken ||
+                            shuttingDown
+                        ) {
+                            return@post
+                        }
+
+                        if (publishedSuccess) {
+                            val finalName = published
+                                .optString("name", outputName)
+                                .ifBlank { outputName }
+                            val finalMessage =
+                                "Перевод готов. Word-файл сохранён в Downloads/AYANA: $finalName"
+
+                            commandHistoryStore.addEvent(
+                                activeCommandHistoryId,
+                                state = "artifact_verified",
+                                message = "Переведённый DOCX создан и проверен",
+                                details = technical
+                            )
+
+                            if (cancelRequested) {
+                                // STOP arrived after actual publication. Preserve factual
+                                // SUCCESS and cancel only the remaining presentation path.
+                                commandHistoryStore.addEvent(
+                                    activeCommandHistoryId,
+                                    state = "cancel_after_commit",
+                                    message = "STOP получен после подтверждённой публикации DOCX",
+                                    details = "semantic_terminal=SUCCESS; source=${pendingCancelSource.ifBlank { "voice" }}"
+                                )
+                                finishActiveCommandHistory(
+                                    success = true,
+                                    result = finalMessage,
+                                    technical = technical
+                                )
+                                broadcastStatus(finalMessage, STATE_SUCCESS)
+                                updateNotification("Перевод сохранён • STOP после commit")
+                                resumeAfterCancellation(attempt = 0)
+                            } else {
+                                respondAndResume(
+                                    finalMessage,
+                                    silent = true,
+                                    success = true,
+                                    technical = technical
+                                )
+                            }
+                        } else if (cancelRequested) {
+                            val state = executionKernel.sideEffectState()
+                            if (
+                                state == AyanaExecutionKernel.SideEffectState.VERIFIED_NOT_COMMITTED ||
+                                published.optString("reason") == "cancelled_before_artifact_publish"
+                            ) {
+                                finishDeferredCancellationFromExecutor(
+                                    source = pendingCancelSource.ifBlank { "voice" }
+                                )
+                            } else {
+                                val message = published.optString(
+                                    "message",
+                                    "Переведённый Word-файл не удалось сохранить."
+                                )
+                                finishActiveCommandHistory(
+                                    success = false,
+                                    result = message,
+                                    technical = technical
+                                )
+                                broadcastStatus(message, STATE_ERROR)
+                                updateNotification("Ошибка сохранения перевода")
+                                resumeAfterCancellation(attempt = 0)
+                            }
+                        } else {
+                            respondAndResume(
+                                published.optString(
+                                    "message",
+                                    "Переведённый Word-файл не удалось сохранить."
+                                ),
+                                silent = true,
+                                success = false,
+                                technical = technical
+                            )
+                        }
+                    }
+                } catch (error: Exception) {
+                    if (!isCommandCancelled(commandToken)) {
+                        mainHandler.post {
+                            if (
+                                commandToken == activeCommandToken &&
+                                !shuttingDown &&
+                                !cancelRequested
+                            ) {
+                                respondAndResume(
+                                    "Не удалось перевести Word-документ: ${error.message ?: "ошибка обработки"}.",
+                                    silent = true,
+                                    success = false,
+                                    technical = error.javaClass.simpleName
+                                )
+                            }
+                        }
+                    }
+                } finally {
+                    try {
+                        outputFile?.delete()
+                    } catch (_: Exception) {
+                    }
+                    try {
+                        AyanaMultimodalAttachmentManager(applicationContext)
+                            .cleanupPrepared(manifest)
+                    } catch (_: Exception) {
+                    }
+                    if (Thread.currentThread() === currentAgentThread) {
+                        currentAgentThread = null
+                    }
+                }
+            }
+
+        currentAgentThread = worker
+        executionKernel.bindThread(worker)
+        worker.start()
+    }
+
+    private fun buildDocxTranslationBatches(
+        segments: List<AyanaDocxTranslationEngine.Segment>
+    ): List<List<AyanaDocxTranslationEngine.Segment>> {
+        val result = ArrayList<List<AyanaDocxTranslationEngine.Segment>>()
+        var current = ArrayList<AyanaDocxTranslationEngine.Segment>()
+        var currentChars = 0
+
+        fun flush() {
+            if (current.isNotEmpty()) {
+                result += current.toList()
+                current = ArrayList()
+                currentChars = 0
+            }
+        }
+
+        for (segment in segments) {
+            val chars = segment.translatableText.length
+            if (
+                current.isNotEmpty() &&
+                (current.size >= MAX_DOCX_TRANSLATION_SEGMENTS_PER_BATCH ||
+                    currentChars + chars > MAX_DOCX_TRANSLATION_CHARS_PER_BATCH)
+            ) {
+                flush()
+            }
+            current += segment
+            currentChars += chars
+        }
+        flush()
+        return result
+    }
+
+    private fun callDocxTranslationBatch(
+        userRequest: String,
+        target: DocxTranslationTarget,
+        segments: List<AyanaDocxTranslationEngine.Segment>
+    ): JSONObject {
+        var connection: HttpsURLConnection? = null
+
+        try {
+            val items = JSONArray()
+            segments.forEach { segment ->
+                items.put(
+                    JSONObject()
+                        .put("id", segment.id)
+                        .put("text", segment.translatableText)
+                )
+            }
+
+            val requestJson = JSONObject()
+                .put("user_request", userRequest.take(1800))
+                .put("target_language_code", target.code)
+                .put("target_language", target.label)
+                .put("segments", items)
+
+            connection =
+                URL("$WORKER_URL/translate-docx-batch")
+                    .openConnection() as HttpsURLConnection
+
+            currentAgentConnection = connection
+            executionKernel.bindConnection(connection)
+            connection.requestMethod = "POST"
+            connection.setRequestProperty("Content-Type", "application/json")
+            connection.connectTimeout = DOCX_TRANSLATION_CONNECT_TIMEOUT_MS
+            connection.readTimeout = DOCX_TRANSLATION_READ_TIMEOUT_MS
+            connection.doOutput = true
+
+            connection.outputStream.use { output ->
+                output.write(requestJson.toString().toByteArray(Charsets.UTF_8))
+            }
+
+            val code = connection.responseCode
+            val stream = if (code in 200..299) connection.inputStream else connection.errorStream
+            val raw = stream?.bufferedReader(Charsets.UTF_8)?.use { it.readText() }.orEmpty()
+            val response = try { JSONObject(raw) } catch (_: Exception) { JSONObject() }
+
+            if (code !in 200..299) {
+                return JSONObject()
+                    .put("success", false)
+                    .put("technical", "http=$code; ${response.optString("error").take(260)}")
+            }
+
+            val translations = response.optJSONArray("translations") ?: JSONArray()
+            val expectedIds = segments.map { it.id }.toSet()
+            val returnedIds = mutableSetOf<String>()
+            var invalid = false
+
+            for (i in 0 until translations.length()) {
+                val item = translations.optJSONObject(i)
+                if (item == null) {
+                    invalid = true
+                    continue
+                }
+                val id = item.optString("id").trim()
+                if (
+                    id.isBlank() ||
+                    id !in expectedIds ||
+                    !returnedIds.add(id) ||
+                    !item.has("text")
+                ) {
+                    invalid = true
+                }
+            }
+
+            if (
+                invalid ||
+                returnedIds != expectedIds ||
+                translations.length() != segments.size
+            ) {
+                return JSONObject()
+                    .put("success", false)
+                    .put("technical", "translation_batch_contract_mismatch")
+            }
+
+            return JSONObject()
+                .put("success", true)
+                .put("translations", translations)
+                .put("technical", "segments=${segments.size}; target=${target.code}")
+        } finally {
+            if (currentAgentConnection === connection) {
+                currentAgentConnection = null
+            }
+            executionKernel.clearConnection(connection)
+            try { connection?.disconnect() } catch (_: Exception) { }
+        }
     }
 
     private fun callMultimodalCore(
@@ -14493,6 +15369,9 @@ class AyanaVoiceService : Service() {
 
             "create_reminder" ->
                 "Создаю напоминание…"
+
+            "create_artifact" ->
+                "Создаю файл…"
 
             "list_reminders" ->
                 "Проверяю напоминания…"
@@ -15037,6 +15916,36 @@ class AyanaVoiceService : Service() {
                 "list_reminders" -> {
 
                     agentListReminders()
+                }
+
+                "create_artifact" -> {
+
+                    artifactEngine
+                        .create(
+                            arguments = arguments,
+                            tryBeginPublish = { detail ->
+                                executionKernel.tryBeginIrreversibleDispatch(
+                                    kind = "artifact_publish",
+                                    detail = detail
+                                )
+                            },
+                            onPublishAccepted = { detail ->
+                                executionKernel.markIrreversibleDispatchAccepted(
+                                    detail
+                                )
+                            },
+                            onPublishReconciliationStarted = { detail ->
+                                executionKernel.markSideEffectReconciliationStarted(
+                                    detail
+                                )
+                            },
+                            onPublishReconciled = { committed, detail ->
+                                executionKernel.markSideEffectReconciled(
+                                    committed = committed,
+                                    detail = detail
+                                )
+                            }
+                        )
                 }
 
                 "delete_reminder" -> {
@@ -18466,6 +19375,7 @@ class AyanaVoiceService : Service() {
                                         listOf(
                                             "artifact_type",
                                             "file_type",
+                                            "declared_kind",
                                             "kind",
                                             "type"
                                         )
@@ -20194,11 +21104,20 @@ class AyanaVoiceService : Service() {
             return
         }
 
-        val deferTerminalToLifecycleExecutor =
+        val deferTerminalToSideEffectExecutor =
             executionSnapshot?.terminalStatus ==
                 AyanaExecutionKernel.TerminalStatus.RUNNING &&
-                executionSnapshot.executor ==
-                "app_task_removal_executor"
+                (
+                    executionSnapshot.executor ==
+                        "app_task_removal_executor" ||
+                        executionSnapshot.sideEffectState in
+                        setOf(
+                            AyanaExecutionKernel.SideEffectState.DISPATCHING,
+                            AyanaExecutionKernel.SideEffectState.DISPATCHED,
+                            AyanaExecutionKernel.SideEffectState.RECONCILING,
+                            AyanaExecutionKernel.SideEffectState.VERIFIED_COMMITTED
+                        )
+                    )
 
         cancelRequested =
             true
@@ -20206,7 +21125,7 @@ class AyanaVoiceService : Service() {
             source
 
         val cancelledExecution =
-            if (deferTerminalToLifecycleExecutor) {
+            if (deferTerminalToSideEffectExecutor) {
                 executionKernel.requestCancel(
                     reason = "cancel_source=$source"
                 )
@@ -20219,14 +21138,14 @@ class AyanaVoiceService : Service() {
         commandHistoryStore.addEvent(
             activeCommandHistoryId,
             state =
-                if (deferTerminalToLifecycleExecutor) {
+                if (deferTerminalToSideEffectExecutor) {
                     "execution_cancel_requested"
                 } else {
                     "execution_cancelled"
                 },
             message =
-                if (deferTerminalToLifecycleExecutor) {
-                    "STOP передан App Lifecycle; ожидаю фактический terminal"
+                if (deferTerminalToSideEffectExecutor) {
+                    "STOP принят после side-effect boundary; ожидаю фактический terminal"
                 } else {
                     "Execution Session остановлена"
                 },
@@ -20240,11 +21159,11 @@ class AyanaVoiceService : Service() {
         stopCurrentAudio()
         stopSherpaListening()
 
-        if (deferTerminalToLifecycleExecutor) {
+        if (deferTerminalToSideEffectExecutor) {
             commandHistoryStore.addEvent(
                 activeCommandHistoryId,
                 state = "side_effect_reconciliation_wait",
-                message = "STOP принят; ожидаю фактический результат Android-действия",
+                message = "STOP принят; ожидаю фактический результат side-effect executor",
                 details =
                     "execution_id=${cancelledExecution?.id.orEmpty()}; " +
                         "side_effect=${cancelledExecution?.sideEffectState?.name.orEmpty()}"
@@ -20256,7 +21175,7 @@ class AyanaVoiceService : Service() {
             )
 
             updateNotification(
-                "Останавливаю Android-действие • проверяю фактический результат"
+                "Останавливаю действие • проверяю фактический результат"
             )
 
             return
@@ -20728,6 +21647,11 @@ class AyanaVoiceService : Service() {
 
         const val EXTRA_STATUS_STATE =
             "status_state"
+
+        private const val MAX_DOCX_TRANSLATION_SEGMENTS_PER_BATCH = 64
+        private const val MAX_DOCX_TRANSLATION_CHARS_PER_BATCH = 5500
+        private const val DOCX_TRANSLATION_CONNECT_TIMEOUT_MS = 15000
+        private const val DOCX_TRANSLATION_READ_TIMEOUT_MS = 90000
 
         // Agent turns include both real actions and screen inspections.
         // Complex Android Settings flows can legitimately need more than 12.
