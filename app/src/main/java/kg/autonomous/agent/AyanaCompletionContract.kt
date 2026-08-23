@@ -3,10 +3,10 @@ package kg.autonomous.agent
 import java.util.Locale
 
 /**
- * AYANA Completion Contract v1.2 — TYPED ARTIFACT TRUTH.
+ * AYANA Completion Contract v1.3 — FORMAT TRUTH.
  *
  * A model saying "готово" or merely mentioning a filename is not proof that a
- * requested artifact exists. v1.2 also prevents a real but wrong-type artifact
+ * requested artifact exists. v1.3 also prevents a real but wrong-type artifact
  * from satisfying a more specific request (for example TXT cannot prove PDF).
  *
  * Textual deliverables may be validated from substantive reply text. File-like
@@ -22,6 +22,7 @@ class AyanaCompletionContract {
         GRAPH,
         TABLE,
         FILE,
+        TEXT_FILE,
         DOCUMENT,
         PDF,
         SPREADSHEET,
@@ -109,6 +110,20 @@ class AyanaCompletionContract {
         if (
             containsAny(
                 text,
+                " txt ",
+                ".txt",
+                "txt файл",
+                "txt-файл",
+                "текстовый файл",
+                "plain text file"
+            )
+        ) {
+            expected += DeliverableKind.TEXT_FILE
+        }
+
+        if (
+            containsAny(
+                text,
                 "документ",
                 "docx",
                 "word",
@@ -165,7 +180,13 @@ class AyanaCompletionContract {
                 "картинк",
                 "рисунок",
                 " image ",
-                " picture "
+                " picture ",
+                " jpeg ",
+                " jpg ",
+                " png ",
+                ".jpeg",
+                ".jpg",
+                ".png"
             )
         ) {
             expected += DeliverableKind.IMAGE
@@ -279,6 +300,9 @@ class AyanaCompletionContract {
                     DeliverableKind.FILE ->
                         hasArtifact
 
+                    DeliverableKind.TEXT_FILE ->
+                        hasKind(DeliverableKind.TEXT_FILE)
+
                     DeliverableKind.DOCUMENT ->
                         hasKind(DeliverableKind.DOCUMENT)
 
@@ -385,6 +409,20 @@ class AyanaCompletionContract {
                 declared.contains("отчет") ||
                 declared.contains("отчёт")
 
+        val declaredTextFile =
+            declared == "txt" ||
+                declared.contains("text file") ||
+                declared.contains("текстовый файл")
+
+        if (
+            extension == "txt" ||
+            mime == "text/plain" ||
+            declaredTextFile
+        ) {
+            result += DeliverableKind.TEXT_FILE
+            result += DeliverableKind.DOCUMENT
+        }
+
         if (
             extension in DOCUMENT_EXTENSIONS ||
             mime in DOCUMENT_MIME_TYPES ||
@@ -489,6 +527,7 @@ class AyanaCompletionContract {
         kind in setOf(
             DeliverableKind.GRAPH,
             DeliverableKind.FILE,
+            DeliverableKind.TEXT_FILE,
             DeliverableKind.DOCUMENT,
             DeliverableKind.PDF,
             DeliverableKind.SPREADSHEET,
@@ -501,6 +540,7 @@ class AyanaCompletionContract {
     ): Boolean =
         kind in setOf(
             DeliverableKind.GRAPH,
+            DeliverableKind.TEXT_FILE,
             DeliverableKind.DOCUMENT,
             DeliverableKind.PDF,
             DeliverableKind.SPREADSHEET,
@@ -518,6 +558,7 @@ class AyanaCompletionContract {
                     DeliverableKind.GRAPH -> "график"
                     DeliverableKind.TABLE -> "таблица"
                     DeliverableKind.FILE -> "файл"
+                    DeliverableKind.TEXT_FILE -> "TXT-файл"
                     DeliverableKind.DOCUMENT -> "документ"
                     DeliverableKind.PDF -> "PDF-файл"
                     DeliverableKind.SPREADSHEET -> "таблица Excel"
