@@ -20,8 +20,10 @@ import kotlin.math.max
 class AgentAccessibilityService :
     AccessibilityService() {
 
-    // AYANA Accessibility v6.0 — VERIFIED VIEWPORT SCROLL + SAMSUNG TASKVIEW TRUTH.
-    // v6.0 preserves the v5.9/v5.8 ban on position-only Recents gestures and adds verified
+    // AYANA Accessibility v6.1 — UNIVERSAL FOREGROUND PERCEPTION + VERIFIED VIEWPORT TRUTH.
+    // v6.1 preserves the v6.0/v5.9/v5.8 ban on position-only Recents gestures and adds
+    // bounded exact-window semantic recovery for sparse foreground application roots.
+    // v6.0 adds verified
     // viewport scroll fallback while retaining the device-proven Samsung One UI identity path:
     // a visible One UI Home :id/taskview whose contentDescription exactly equals the app label is the task card.
     // This path uses that concrete card bounds for dismissal and still verifies that the
@@ -81,7 +83,8 @@ class AgentAccessibilityService :
         val eventType: Int,
         val bounds: Rect,
         val nodes: JSONArray,
-        val visibleText: List<String>
+        val visibleText: List<String>,
+        val origin: String
     )
 
     /**
@@ -110,6 +113,13 @@ class AgentAccessibilityService :
         val viewportChanged: Boolean,
         val scrollEventObserved: Boolean,
         val proofLevel: String
+    )
+
+    private data class RootSemanticProbe(
+        val nodeCount: Int,
+        val readableTextCount: Int,
+        val editableCount: Int,
+        val clickableCount: Int
     )
 
     private data class RecentTaskCandidate(
@@ -146,6 +156,14 @@ class AgentAccessibilityService :
     @Volatile
     private var lastSettingsSnapshotRecoveryAt =
         0L
+
+    @Volatile
+    private var lastForegroundSnapshotRecoveryAt =
+        0L
+
+    @Volatile
+    private var lastForegroundSnapshotRecoveryKey =
+        ""
 
     @Volatile
     private var lastScrollEventState:
@@ -2598,6 +2616,53 @@ class AgentAccessibilityService :
         )
     }
 
+    private fun semanticRootsForContext(
+        context: WindowContext
+    ): List<AccessibilityNodeInfo> {
+
+        val roots =
+            mutableListOf<AccessibilityNodeInfo>()
+
+        context.root
+            ?.let {
+                roots.add(
+                    it
+                )
+            }
+
+        val recovered =
+            try {
+                recoveredRootForContext(
+                    context
+                )
+            } catch (_: Exception) {
+                null
+            }
+
+        if (
+            recovered != null &&
+            roots.none { root ->
+                root === recovered
+            }
+        ) {
+            roots.add(
+                recovered
+            )
+        }
+
+        return roots
+            .distinctBy { root ->
+                val windowId =
+                    try {
+                        root.windowId
+                    } catch (_: Exception) {
+                        -1
+                    }
+
+                "$windowId|${System.identityHashCode(root)}"
+            }
+    }
+
     fun clickElement(
         target: String
     ): Boolean {
@@ -2619,33 +2684,36 @@ class AgentAccessibilityService :
         var best: ContextNodeMatch? = null
 
         for (context in interactionContexts) {
-            val root =
-                context.root
-                    ?: continue
-
-            val candidate =
-                findBestNode(
-                    root = root,
-                    target = target,
-                    requireEditable = false,
-                    requireClickable = false
+            for (
+                root in
+                semanticRootsForContext(
+                    context
                 )
-                    ?: continue
-
-            val totalScore =
-                candidate.score * 1000 +
-                    context.rank
-
-            if (
-                best == null ||
-                totalScore > best.totalScore
             ) {
-                best =
-                    ContextNodeMatch(
-                        context = context,
-                        match = candidate,
-                        totalScore = totalScore
+                val candidate =
+                    findBestNode(
+                        root = root,
+                        target = target,
+                        requireEditable = false,
+                        requireClickable = false
                     )
+                        ?: continue
+
+                val totalScore =
+                    candidate.score * 1000 +
+                        context.rank
+
+                if (
+                    best == null ||
+                    totalScore > best.totalScore
+                ) {
+                    best =
+                        ContextNodeMatch(
+                            context = context,
+                            match = candidate,
+                            totalScore = totalScore
+                        )
+                }
             }
         }
 
@@ -2678,6 +2746,9 @@ class AgentAccessibilityService :
                     )
 
                 if (actionable != null) {
+                    val dispatchStartedWallAt =
+                        System.currentTimeMillis()
+
                     val accepted =
                         try {
                             actionable.performAction(
@@ -2687,6 +2758,13 @@ class AgentAccessibilityService :
                             false
                         }
 
+                    if (accepted) {
+                        invalidateSemanticEvidenceAfterNodeMutation(
+                            node = actionable,
+                            dispatchStartedWallAt = dispatchStartedWallAt
+                        )
+                    }
+
                     if (
                         accepted &&
                         waitForScreenChange(before)
@@ -2695,10 +2773,20 @@ class AgentAccessibilityService :
                     }
                 }
 
+                val semanticTapStartedWallAt =
+                    System.currentTimeMillis()
+
                 val semanticTapAccepted =
                     tapNodeCenter(
                         match.node
                     )
+
+                if (semanticTapAccepted) {
+                    invalidateSemanticEvidenceAfterNodeMutation(
+                        node = match.node,
+                        dispatchStartedWallAt = semanticTapStartedWallAt
+                    )
+                }
 
                 if (
                     semanticTapAccepted &&
@@ -2725,10 +2813,20 @@ class AgentAccessibilityService :
                             allContexts = allContexts
                         )
                     ) {
+                        val rowTapStartedWallAt =
+                            System.currentTimeMillis()
+
                         val rowTapAccepted =
                             tapNodeCenter(
                                 actionable
                             )
+
+                        if (rowTapAccepted) {
+                            invalidateSemanticEvidenceAfterNodeMutation(
+                                node = actionable,
+                                dispatchStartedWallAt = rowTapStartedWallAt
+                            )
+                        }
 
                         if (
                             rowTapAccepted &&
@@ -2768,13 +2866,29 @@ class AgentAccessibilityService :
                     y = centerY,
                     target = targetContext,
                     allContexts = allContexts
-                ) &&
-                tapBoundsCenter(
-                    eventTarget.bounds
-                ) &&
-                waitForScreenChange(before)
+                )
             ) {
-                return true
+                val eventTapStartedWallAt =
+                    System.currentTimeMillis()
+
+                val eventTapAccepted =
+                    tapBoundsCenter(
+                        eventTarget.bounds
+                    )
+
+                if (eventTapAccepted) {
+                    invalidateSemanticEvidenceAfterViewportChange(
+                        context = targetContext,
+                        dispatchStartedWallAt = eventTapStartedWallAt
+                    )
+                }
+
+                if (
+                    eventTapAccepted &&
+                    waitForScreenChange(before)
+                ) {
+                    return true
+                }
             }
         }
 
@@ -2837,41 +2951,63 @@ class AgentAccessibilityService :
             if (target.isNullOrBlank()) {
                 contexts
                     .asSequence()
-                    .mapNotNull { context ->
-                        context.root
-                            ?.let { root ->
-                                findFocusedEditable(root)
-                            }
+                    .flatMap { context ->
+                        semanticRootsForContext(
+                            context
+                        ).asSequence()
+                    }
+                    .mapNotNull { root ->
+                        findFocusedEditable(
+                            root
+                        )
                     }
                     .firstOrNull()
                     ?: contexts
                         .asSequence()
-                        .mapNotNull { context ->
-                            context.root
-                                ?.let { root ->
-                                    findFirstEditable(root)
-                                }
+                        .flatMap { context ->
+                            semanticRootsForContext(
+                                context
+                            ).asSequence()
+                        }
+                        .mapNotNull { root ->
+                            findFirstEditable(
+                                root
+                            )
                         }
                         .firstOrNull()
             } else {
                 var best: ContextNodeMatch? = null
 
                 for (context in contexts) {
-                    val root = context.root ?: continue
-                    val candidate =
-                        findBestNode(
-                            root = root,
-                            target = target,
-                            requireEditable = true,
-                            requireClickable = false
-                        ) ?: continue
+                    for (
+                        root in
+                        semanticRootsForContext(
+                            context
+                        )
+                    ) {
+                        val candidate =
+                            findBestNode(
+                                root = root,
+                                target = target,
+                                requireEditable = true,
+                                requireClickable = false
+                            ) ?: continue
 
-                    val totalScore =
-                        candidate.score * 1000 +
-                            context.rank
+                        val totalScore =
+                            candidate.score * 1000 +
+                                context.rank
 
-                    if (best == null || totalScore > best.totalScore) {
-                        best = ContextNodeMatch(context, candidate, totalScore)
+                        if (
+                            best == null ||
+                            totalScore > best.totalScore
+                        ) {
+                            best =
+                                ContextNodeMatch(
+                                    context,
+                                    candidate,
+                                    totalScore
+                                )
+                        }
                     }
                 }
 
@@ -2895,10 +3031,27 @@ class AgentAccessibilityService :
                 )
             }
 
-        return node.performAction(
-            AccessibilityNodeInfo.ACTION_SET_TEXT,
-            arguments
-        )
+        val dispatchStartedWallAt =
+            System.currentTimeMillis()
+
+        val accepted =
+            try {
+                node.performAction(
+                    AccessibilityNodeInfo.ACTION_SET_TEXT,
+                    arguments
+                )
+            } catch (_: Exception) {
+                false
+            }
+
+        if (accepted) {
+            invalidateSemanticEvidenceAfterNodeMutation(
+                node = node,
+                dispatchStartedWallAt = dispatchStartedWallAt
+            )
+        }
+
+        return accepted
     }
 
     /**
@@ -3074,6 +3227,9 @@ class AgentAccessibilityService :
             val dispatchStartedAt =
                 SystemClock.elapsedRealtime()
 
+            val dispatchStartedWallAt =
+                System.currentTimeMillis()
+
             val accepted =
                 try {
                     semanticCandidate.node.performAction(
@@ -3092,6 +3248,13 @@ class AgentAccessibilityService :
                         beforeEvent = beforeEvent,
                         dispatchStartedAt = dispatchStartedAt
                     )
+
+                if (progress.verified) {
+                    invalidateSemanticEvidenceAfterViewportChange(
+                        context = semanticCandidate.context,
+                        dispatchStartedWallAt = dispatchStartedWallAt
+                    )
+                }
 
                 // An accepted semantic scroll with unknown physical outcome must
                 // not be followed by a second blind gesture: it may already have
@@ -3151,6 +3314,9 @@ class AgentAccessibilityService :
         val dispatchStartedAt =
             SystemClock.elapsedRealtime()
 
+        val dispatchStartedWallAt =
+            System.currentTimeMillis()
+
         val gestureAccepted =
             dispatchVerticalScrollGesture(
                 context = gestureContext,
@@ -3176,6 +3342,13 @@ class AgentAccessibilityService :
                 beforeEvent = beforeEvent,
                 dispatchStartedAt = dispatchStartedAt
             )
+
+        if (progress.verified) {
+            invalidateSemanticEvidenceAfterViewportChange(
+                context = gestureContext,
+                dispatchStartedWallAt = dispatchStartedWallAt
+            )
+        }
 
         return scrollResult(
             accepted = true,
@@ -3247,6 +3420,130 @@ class AgentAccessibilityService :
                 context?.packageName
                     .orEmpty()
             )
+    }
+
+    private fun invalidateSemanticEvidenceForWindow(
+        windowId: Int,
+        targetPackage: String,
+        recoveryKey: String,
+        dispatchStartedWallAt: Long
+    ) {
+
+        synchronized(
+            eventEvidenceLock
+        ) {
+            val retained =
+                ArrayDeque<EventEvidence>()
+
+            while (
+                recentEventEvidence.isNotEmpty()
+            ) {
+                val evidence =
+                    recentEventEvidence.removeFirst()
+
+                val sameWindow =
+                    windowId >= 0 &&
+                        evidence.windowId ==
+                        windowId
+
+                val samePackageFallback =
+                    windowId < 0 &&
+                        evidence.windowId < 0 &&
+                        evidence.packageName ==
+                        targetPackage
+
+                val staleForMutation =
+                    (
+                        sameWindow ||
+                            samePackageFallback
+                        ) &&
+                        evidence.at <
+                        dispatchStartedWallAt
+
+                if (!staleForMutation) {
+                    retained.addLast(
+                        evidence
+                    )
+                }
+            }
+
+            while (
+                retained.isNotEmpty()
+            ) {
+                recentEventEvidence.addLast(
+                    retained.removeFirst()
+                )
+            }
+        }
+
+        if (
+            targetPackage ==
+            SETTINGS_PACKAGE
+        ) {
+            lastSettingsSnapshotRecoveryAt =
+                0L
+        }
+
+        if (
+            recoveryKey.isNotBlank() &&
+            recoveryKey ==
+            lastForegroundSnapshotRecoveryKey
+        ) {
+            lastForegroundSnapshotRecoveryAt =
+                0L
+        }
+    }
+
+    private fun invalidateSemanticEvidenceAfterViewportChange(
+        context: WindowContext,
+        dispatchStartedWallAt: Long
+    ) {
+
+        invalidateSemanticEvidenceForWindow(
+            windowId = context.windowId,
+            targetPackage = context.packageName,
+            recoveryKey = "${context.contextId}|${context.packageName}",
+            dispatchStartedWallAt = dispatchStartedWallAt
+        )
+    }
+
+    private fun invalidateSemanticEvidenceAfterNodeMutation(
+        node: AccessibilityNodeInfo,
+        dispatchStartedWallAt: Long
+    ) {
+
+        val windowId =
+            try {
+                node.windowId
+            } catch (_: Exception) {
+                -1
+            }
+
+        val targetPackage =
+            try {
+                node.packageName
+                    ?.toString()
+                    .orEmpty()
+            } catch (_: Exception) {
+                ""
+            }
+
+        val recoveryKey =
+            if (
+                windowId >= 0 &&
+                targetPackage.isNotBlank()
+            ) {
+                "w:$windowId:$targetPackage|$targetPackage"
+            } else {
+                ""
+            }
+
+        invalidateSemanticEvidenceForWindow(
+            windowId = windowId,
+            targetPackage = targetPackage,
+            recoveryKey = recoveryKey,
+            dispatchStartedWallAt = dispatchStartedWallAt
+        )
     }
 
     private fun waitForScrollProgress(
@@ -3960,6 +4257,15 @@ class AgentAccessibilityService :
         // sparse we may do one throttled API-33 descendant prefetch and inject the
         // resulting evidence into that SAME window context.
         maybeCaptureSettingsOnDemandEvidence(
+            liveContexts
+        )
+
+        // v6.1: Universal Perception must not rely on Settings-only recovery.
+        // Samsung/Android may also return a sparse focused root for AYANA itself
+        // or another foreground app. Recover one bounded descendant snapshot for
+        // that exact focused application window only when the ordinary root is
+        // semantically sparse.
+        maybeCaptureForegroundOnDemandEvidence(
             liveContexts
         )
 
@@ -4909,7 +5215,9 @@ class AgentAccessibilityService :
                     texts
                         .take(
                             EVENT_EVIDENCE_TEXT_LIMIT
-                        )
+                        ),
+                origin =
+                    "accessibility_event"
             )
 
         synchronized(
@@ -5364,11 +5672,7 @@ class AgentAccessibilityService :
         }
 
         val activeRoot =
-            try {
-                rootInActiveWindow
-            } catch (_: Exception) {
-                null
-            }
+            prefetchedActiveWindowRoot()
 
         if (activeRoot != null) {
             val activeWindowId =
@@ -5694,6 +5998,371 @@ class AgentAccessibilityService :
             area.toDouble() / screenArea.toDouble() <= OWN_OVERLAY_MAX_AREA_RATIO
     }
 
+    /**
+     * v6.1 Universal Perception recovery.
+     *
+     * Some Samsung/Android windows expose a valid focused application shell while
+     * ordinary Accessibility traversal contains only a title or a few structural
+     * nodes. Settings already had a dedicated recovery lane; v6.1 extends the
+     * same bounded idea to the current foreground application without broadening
+     * evidence across packages/windows.
+     *
+     * This path runs only for a semantically sparse focused application root and
+     * is throttled. AYANA's own overlay events remain ignored; self-package
+     * evidence is admitted only when it was generated here for the exact live
+     * application window.
+     */
+    private fun maybeCaptureForegroundOnDemandEvidence(
+        liveContexts: List<WindowContext>
+    ) {
+
+        if (
+            Build.VERSION.SDK_INT <
+            Build.VERSION_CODES.TIRAMISU
+        ) {
+            return
+        }
+
+        val target =
+            primaryWindowContext(
+                liveContexts
+            )
+                ?.takeIf { context ->
+                    context.packageName.isNotBlank() &&
+                        context.packageName != SETTINGS_PACKAGE &&
+                        context.type == AccessibilityWindowInfo.TYPE_APPLICATION &&
+                        (
+                            context.active ||
+                                context.focused
+                            )
+                }
+                ?: return
+
+        val probe =
+            rootSemanticProbe(
+                target.root
+            )
+
+        if (
+            probe.readableTextCount >= 2 &&
+            (
+                probe.nodeCount >= 6 ||
+                    probe.editableCount > 0 ||
+                    probe.clickableCount > 0
+                )
+        ) {
+            return
+        }
+
+        val nowElapsed =
+            SystemClock.elapsedRealtime()
+
+        val recoveryKey =
+            "${target.contextId}|${target.packageName}"
+
+        if (
+            recoveryKey == lastForegroundSnapshotRecoveryKey &&
+            nowElapsed -
+                lastForegroundSnapshotRecoveryAt <
+                FOREGROUND_SNAPSHOT_RECOVERY_THROTTLE_MS
+        ) {
+            return
+        }
+
+        val nowWall =
+            System.currentTimeMillis()
+
+        val alreadyFresh =
+            synchronized(
+                eventEvidenceLock
+            ) {
+                recentEventEvidence.any { evidence ->
+                    evidence.origin ==
+                        "foreground_on_demand_prefetch" &&
+                        evidence.packageName ==
+                        target.packageName &&
+                        evidence.windowId ==
+                        target.windowId &&
+                        nowWall - evidence.at <=
+                        FOREGROUND_SNAPSHOT_FRESH_EVIDENCE_MS &&
+                        (
+                            evidence.visibleText.size >= 2 ||
+                                evidence.nodes.length() >=
+                                FOREGROUND_SNAPSHOT_FRESH_MIN_NODES
+                            )
+                }
+            }
+
+        if (alreadyFresh) {
+            return
+        }
+
+        lastForegroundSnapshotRecoveryAt =
+            nowElapsed
+
+        lastForegroundSnapshotRecoveryKey =
+            recoveryKey
+
+        val strategy =
+            AccessibilityNodeInfo.FLAG_PREFETCH_DESCENDANTS_DEPTH_FIRST or
+                AccessibilityNodeInfo.FLAG_PREFETCH_UNINTERRUPTIBLE
+
+        val candidates =
+            mutableListOf<AccessibilityNodeInfo>()
+
+        try {
+            windows
+                .firstOrNull { window ->
+                    try {
+                        window.id == target.windowId
+                    } catch (_: Exception) {
+                        false
+                    }
+                }
+                ?.getRoot(
+                    strategy
+                )
+                ?.let { root ->
+                    val rootPackage =
+                        root.packageName
+                            ?.toString()
+                            .orEmpty()
+
+                    if (
+                        rootPackage ==
+                        target.packageName
+                    ) {
+                        candidates.add(
+                            root
+                        )
+                    }
+                }
+        } catch (_: Exception) {
+        }
+
+        try {
+            getRootInActiveWindow(
+                strategy
+            )
+                ?.let { root ->
+                    val rootPackage =
+                        root.packageName
+                            ?.toString()
+                            .orEmpty()
+
+                    val rootWindowId =
+                        try {
+                            root.windowId
+                        } catch (_: Exception) {
+                            -1
+                        }
+
+                    if (
+                        rootPackage ==
+                        target.packageName &&
+                        (
+                            target.windowId < 0 ||
+                                rootWindowId < 0 ||
+                                rootWindowId ==
+                                target.windowId
+                            )
+                    ) {
+                        candidates.add(
+                            root
+                        )
+                    }
+                }
+        } catch (_: Exception) {
+        }
+
+        target.root
+            ?.let { root ->
+                if (
+                    root.packageName
+                        ?.toString()
+                        .orEmpty() ==
+                    target.packageName
+                ) {
+                    candidates.add(
+                        root
+                    )
+                }
+            }
+
+        var bestNodes =
+            JSONArray()
+
+        var bestTexts =
+            emptyList<String>()
+
+        var bestScore =
+            -1
+
+        for (
+            root in
+            candidates.distinctBy { candidate ->
+                val id =
+                    try {
+                        candidate.windowId
+                    } catch (_: Exception) {
+                        -1
+                    }
+
+                "$id|${System.identityHashCode(candidate)}"
+            }
+        ) {
+            val nodes =
+                try {
+                    snapshotEventTree(
+                        root = root,
+                        maxNodes = FOREGROUND_SNAPSHOT_RECOVERY_NODE_LIMIT,
+                        maxChars = FOREGROUND_SNAPSHOT_RECOVERY_CHAR_LIMIT
+                    )
+                } catch (_: Exception) {
+                    JSONArray()
+                }
+
+            val textArray =
+                collectVisibleTexts(
+                    nodes
+                )
+
+            val texts =
+                mutableListOf<String>()
+
+            for (
+                index in
+                0 until textArray.length()
+            ) {
+                val value =
+                    safeText(
+                        textArray.optString(
+                            index
+                        )
+                    )
+
+                if (
+                    value.isNotBlank() &&
+                    value !in texts
+                ) {
+                    texts.add(
+                        value
+                    )
+                }
+
+                if (
+                    texts.size >=
+                    EVENT_EVIDENCE_TEXT_LIMIT
+                ) {
+                    break
+                }
+            }
+
+            var editableCount =
+                0
+
+            var clickableCount =
+                0
+
+            for (
+                index in
+                0 until nodes.length()
+            ) {
+                val node =
+                    nodes.optJSONObject(
+                        index
+                    )
+                        ?: continue
+
+                if (
+                    node.optBoolean(
+                        "editable",
+                        false
+                    )
+                ) {
+                    editableCount++
+                }
+
+                if (
+                    node.optBoolean(
+                        "clickable",
+                        false
+                    )
+                ) {
+                    clickableCount++
+                }
+            }
+
+            val score =
+                texts.size * 100 +
+                    editableCount * 30 +
+                    clickableCount * 8 +
+                    nodes.length()
+
+            if (score > bestScore) {
+                bestScore =
+                    score
+                bestNodes =
+                    nodes
+                bestTexts =
+                    texts
+            }
+        }
+
+        if (
+            bestNodes.length() == 0 &&
+            bestTexts.isEmpty()
+        ) {
+            return
+        }
+
+        for (
+            index in
+            0 until bestNodes.length()
+        ) {
+            bestNodes
+                .optJSONObject(
+                    index
+                )
+                ?.put(
+                    "evidence_source",
+                    "foreground_on_demand_prefetch"
+                )
+        }
+
+        val evidence =
+            EventEvidence(
+                at = nowWall,
+                windowId = target.windowId,
+                packageName = target.packageName,
+                className = target.className,
+                eventType = AccessibilityEvent.TYPE_WINDOW_CONTENT_CHANGED,
+                bounds = Rect(target.bounds),
+                nodes = bestNodes,
+                visibleText = bestTexts,
+                origin = "foreground_on_demand_prefetch"
+            )
+
+        synchronized(
+            eventEvidenceLock
+        ) {
+            pruneEventEvidenceLocked(
+                nowWall
+            )
+
+            recentEventEvidence.addFirst(
+                evidence
+            )
+
+            while (
+                recentEventEvidence.size >
+                EVENT_EVIDENCE_MAX_RECORDS
+            ) {
+                recentEventEvidence.removeLast()
+            }
+        }
+    }
+
     private fun maybeCaptureSettingsOnDemandEvidence(
         liveContexts: List<WindowContext>
     ) {
@@ -5931,7 +6600,8 @@ class AgentAccessibilityService :
                 eventType = AccessibilityEvent.TYPE_WINDOW_CONTENT_CHANGED,
                 bounds = Rect(target.bounds),
                 nodes = bestNodes,
-                visibleText = bestTexts
+                visibleText = bestTexts,
+                origin = "settings_on_demand_prefetch"
             )
 
         synchronized(
@@ -5962,6 +6632,24 @@ class AgentAccessibilityService :
         val liveIds = liveContexts.map { it.windowId }.filter { it >= 0 }.toSet()
         val livePackages = liveContexts.map { it.packageName }.filter { it.isNotBlank() }.toSet()
 
+        val ownRecoveryWindowIds =
+            liveContexts
+                .filter { context ->
+                    context.packageName == packageName &&
+                        context.type == AccessibilityWindowInfo.TYPE_APPLICATION &&
+                        (
+                            context.active ||
+                                context.focused
+                            )
+                }
+                .map { context ->
+                    context.windowId
+                }
+                .filter { windowId ->
+                    windowId >= 0
+                }
+                .toSet()
+
         synchronized(eventEvidenceLock) {
             pruneEventEvidenceLocked(now)
 
@@ -5969,12 +6657,30 @@ class AgentAccessibilityService :
                 recentEventEvidence
                     .filter { evidence ->
                         val age = now - evidence.at
+
+                        val ownOnDemandRecovery =
+                            evidence.packageName == packageName &&
+                                evidence.origin ==
+                                    "foreground_on_demand_prefetch" &&
+                                evidence.windowId >= 0 &&
+                                evidence.windowId in ownRecoveryWindowIds
+
+                        val externalEvidence =
+                            evidence.packageName != packageName
+
                         age <= EVENT_EVIDENCE_TTL_MS &&
-                            evidence.packageName != packageName &&
+                            (
+                                externalEvidence ||
+                                    ownOnDemandRecovery
+                                ) &&
                             (
                                 (evidence.windowId >= 0 && evidence.windowId in liveIds) ||
-                                    evidence.packageName in livePackages ||
                                     (
+                                        externalEvidence &&
+                                        evidence.packageName in livePackages
+                                        ) ||
+                                    (
+                                        externalEvidence &&
                                         liveContexts.isEmpty() &&
                                         evidence.packageName == lastEventPackage &&
                                         age <= EVENT_EVIDENCE_ORPHAN_TTL_MS
@@ -6979,134 +7685,370 @@ class AgentAccessibilityService :
      * describe the same Android window. It never combines evidence from
      * different windows and therefore preserves strict verification isolation.
      */
+    private fun rootSemanticProbe(
+        root: AccessibilityNodeInfo?,
+        maxNodes: Int = ROOT_SEMANTIC_PROBE_NODE_LIMIT
+    ): RootSemanticProbe {
+
+        if (root == null) {
+            return RootSemanticProbe(
+                nodeCount = 0,
+                readableTextCount = 0,
+                editableCount = 0,
+                clickableCount = 0
+            )
+        }
+
+        val queue =
+            ArrayDeque<AccessibilityNodeInfo>()
+
+        queue.add(
+            root
+        )
+
+        val seenTexts =
+            linkedSetOf<String>()
+
+        var nodeCount =
+            0
+
+        var editableCount =
+            0
+
+        var clickableCount =
+            0
+
+        while (
+            queue.isNotEmpty() &&
+            nodeCount < maxNodes
+        ) {
+            val node =
+                queue.removeFirst()
+
+            nodeCount++
+
+            val visible =
+                try {
+                    node.isVisibleToUser
+                } catch (_: Exception) {
+                    true
+                }
+
+            if (visible) {
+                val password =
+                    try {
+                        node.isPassword
+                    } catch (_: Exception) {
+                        false
+                    }
+
+                if (!password) {
+                    val text =
+                        safeText(
+                            try {
+                                node.text
+                                    ?.toString()
+                                    .orEmpty()
+                            } catch (_: Exception) {
+                                ""
+                            }
+                        )
+
+                    val description =
+                        safeText(
+                            try {
+                                node.contentDescription
+                                    ?.toString()
+                                    .orEmpty()
+                            } catch (_: Exception) {
+                                ""
+                            }
+                        )
+
+                    if (text.isNotBlank()) {
+                        seenTexts.add(
+                            text
+                        )
+                    }
+
+                    if (description.isNotBlank()) {
+                        seenTexts.add(
+                            description
+                        )
+                    }
+                }
+
+                if (
+                    try {
+                        node.isEditable
+                    } catch (_: Exception) {
+                        false
+                    }
+                ) {
+                    editableCount++
+                }
+
+                if (
+                    try {
+                        node.isClickable
+                    } catch (_: Exception) {
+                        false
+                    }
+                ) {
+                    clickableCount++
+                }
+            }
+
+            val childCount =
+                try {
+                    node.childCount
+                } catch (_: Exception) {
+                    0
+                }
+
+            for (
+                index in
+                0 until childCount
+            ) {
+                childWithPrefetch(
+                    node,
+                    index
+                )?.let { child ->
+                    queue.add(
+                        child
+                    )
+                }
+            }
+        }
+
+        return RootSemanticProbe(
+            nodeCount = nodeCount,
+            readableTextCount = seenTexts.size,
+            editableCount = editableCount,
+            clickableCount = clickableCount
+        )
+    }
+
+    /**
+     * Bounded semantic richness score used only to choose between roots that
+     * describe the SAME Android window. Unlike v5/v6.0's first-level probe, this
+     * sees enough descendants to distinguish a package-bearing shell from a real
+     * AYANA/Settings content tree without doing an unbounded walk.
+     */
     private fun rootContentScore(
         root: AccessibilityNodeInfo?
     ): Int {
 
-        if (root == null) {
-            return 0
-        }
+        val probe =
+            rootSemanticProbe(
+                root
+            )
 
-        var score = 1
+        return probe.nodeCount +
+            probe.readableTextCount * 30 +
+            probe.editableCount * 18 +
+            probe.clickableCount * 6
+    }
 
-        val childCount =
-            try {
-                root.childCount
-            } catch (_: Exception) {
-                0
-            }
+    private fun rootLooksSemanticallyRich(
+        root: AccessibilityNodeInfo?
+    ): Boolean {
 
-        score +=
-            childCount
-                .coerceAtMost(12) *
-                4
+        val probe =
+            rootSemanticProbe(
+                root
+            )
 
-        val text =
-            try {
-                safeText(
-                    root.text
-                        ?.toString()
-                        .orEmpty()
+        return probe.readableTextCount >= 2 &&
+            (
+                probe.nodeCount >= 6 ||
+                    probe.editableCount > 0 ||
+                    probe.clickableCount > 0
                 )
-            } catch (_: Exception) {
-                ""
-            }
+    }
 
-        val description =
+    private fun prefetchedActiveWindowRoot():
+        AccessibilityNodeInfo? {
+
+        val legacy =
             try {
-                safeText(
-                    root.contentDescription
-                        ?.toString()
-                        .orEmpty()
-                )
+                rootInActiveWindow
             } catch (_: Exception) {
-                ""
+                null
             }
 
-        if (text.isNotBlank()) {
-            score += 8
+        if (
+            Build.VERSION.SDK_INT <
+            Build.VERSION_CODES.TIRAMISU
+        ) {
+            return legacy
         }
 
-        if (description.isNotBlank()) {
-            score += 6
+        if (
+            rootLooksSemanticallyRich(
+                legacy
+            )
+        ) {
+            return legacy
         }
 
-        // Probe only the first level. Full traversal happens later in the
-        // snapshot builder and is intentionally not duplicated here.
-        val probeCount =
-            childCount
-                .coerceAtMost(6)
+        val candidates =
+            mutableListOf<AccessibilityNodeInfo>()
 
-        for (index in 0 until probeCount) {
-            val child =
-                try {
-                    root.getChild(index)
-                } catch (_: Exception) {
-                    null
+        legacy?.let {
+            candidates.add(
+                it
+            )
+        }
+
+        val strategies =
+            listOf(
+                AccessibilityNodeInfo.FLAG_PREFETCH_DESCENDANTS_HYBRID,
+                AccessibilityNodeInfo.FLAG_PREFETCH_DESCENDANTS_DEPTH_FIRST or
+                    AccessibilityNodeInfo.FLAG_PREFETCH_UNINTERRUPTIBLE
+            )
+
+        for (
+            strategy in
+            strategies
+        ) {
+            try {
+                getRootInActiveWindow(
+                    strategy
+                )
+                    ?.let { root ->
+                        candidates.add(
+                            root
+                        )
+                    }
+            } catch (_: Exception) {
+            }
+        }
+
+        return candidates
+            .maxByOrNull { root ->
+                rootContentScore(
+                    root
+                )
+            }
+            ?: legacy
+    }
+
+    private fun recoveredRootForContext(
+        context: WindowContext
+    ): AccessibilityNodeInfo? {
+
+        if (
+            Build.VERSION.SDK_INT <
+            Build.VERSION_CODES.TIRAMISU ||
+            context.type !=
+            AccessibilityWindowInfo.TYPE_APPLICATION ||
+            context.packageName.isBlank()
+        ) {
+            return context.root
+        }
+
+        val candidates =
+            mutableListOf<AccessibilityNodeInfo>()
+
+        context.root?.let {
+            candidates.add(
+                it
+            )
+        }
+
+        val strategy =
+            AccessibilityNodeInfo.FLAG_PREFETCH_DESCENDANTS_DEPTH_FIRST or
+                AccessibilityNodeInfo.FLAG_PREFETCH_UNINTERRUPTIBLE
+
+        try {
+            windows
+                .firstOrNull { window ->
+                    try {
+                        window.id == context.windowId
+                    } catch (_: Exception) {
+                        false
+                    }
                 }
-                    ?: continue
-
-            score += 2
-
-            val childText =
-                try {
-                    safeText(
-                        child.text
+                ?.getRoot(
+                    strategy
+                )
+                ?.let { root ->
+                    val rootPackage =
+                        root.packageName
                             ?.toString()
                             .orEmpty()
-                    )
-                } catch (_: Exception) {
-                    ""
+
+                    if (
+                        rootPackage ==
+                        context.packageName
+                    ) {
+                        candidates.add(
+                            root
+                        )
+                    }
                 }
+        } catch (_: Exception) {
+        }
 
-            val childDescription =
-                try {
-                    safeText(
-                        child.contentDescription
-                            ?.toString()
-                            .orEmpty()
-                    )
-                } catch (_: Exception) {
-                    ""
-                }
+        if (
+            context.active ||
+            context.focused
+        ) {
+            try {
+                getRootInActiveWindow(
+                    strategy
+                )
+                    ?.let { root ->
+                        val rootPackage =
+                            root.packageName
+                                ?.toString()
+                                .orEmpty()
 
-            if (childText.isNotBlank()) {
-                score += 5
-            }
+                        val rootWindowId =
+                            try {
+                                root.windowId
+                            } catch (_: Exception) {
+                                -1
+                            }
 
-            if (childDescription.isNotBlank()) {
-                score += 4
+                        if (
+                            rootPackage ==
+                            context.packageName &&
+                            (
+                                context.windowId < 0 ||
+                                    rootWindowId < 0 ||
+                                    rootWindowId ==
+                                    context.windowId
+                                )
+                        ) {
+                            candidates.add(
+                                root
+                            )
+                        }
+                    }
+            } catch (_: Exception) {
             }
         }
 
-        return score
+        return candidates
+            .maxByOrNull { root ->
+                rootContentScore(
+                    root
+                )
+            }
     }
 
     private fun prefetchedWindowRoot(
         window: AccessibilityWindowInfo
     ): AccessibilityNodeInfo? {
 
-        // Fast path first. In v4.0/v4.1 we tried several descendant-prefetch
-        // strategies before even checking the ordinary root. That multiplies IPC
-        // work across every visible window and did not restore Chrome/Settings
-        // content on the device. Prefer the stable legacy root and only attempt
-        // ONE bounded prefetch for the active/focused sparse window.
         val legacy =
             try {
                 window.root
             } catch (_: Exception) {
                 null
             }
-
-        if (
-            legacy !=
-            null &&
-            rootLooksPopulated(
-                legacy
-            )
-        ) {
-            return legacy
-        }
 
         val foregroundCandidate =
             try {
@@ -7116,37 +8058,75 @@ class AgentAccessibilityService :
                 false
             }
 
+        // Non-foreground windows stay on the cheapest path. A populated
+        // background root is useful for topology but must not trigger expensive
+        // descendant IPC.
         if (
-            foregroundCandidate &&
-            Build.VERSION.SDK_INT >=
+            !foregroundCandidate &&
+            legacy != null &&
+            rootLooksPopulated(
+                legacy
+            )
+        ) {
+            return legacy
+        }
+
+        if (
+            !foregroundCandidate ||
+            Build.VERSION.SDK_INT <
             Build.VERSION_CODES.TIRAMISU
         ) {
-            val prefetched =
-                try {
-                    window.getRoot(
-                        AccessibilityNodeInfo.FLAG_PREFETCH_DESCENDANTS_HYBRID
-                    )
-                } catch (_: Exception) {
-                    null
-                }
+            return legacy
+        }
 
-            if (
-                prefetched !=
-                null &&
-                rootLooksPopulated(
-                    prefetched
+        if (
+            rootLooksSemanticallyRich(
+                legacy
+            )
+        ) {
+            return legacy
+        }
+
+        val candidates =
+            mutableListOf<AccessibilityNodeInfo>()
+
+        legacy?.let {
+            candidates.add(
+                it
+            )
+        }
+
+        val strategies =
+            listOf(
+                AccessibilityNodeInfo.FLAG_PREFETCH_DESCENDANTS_HYBRID,
+                AccessibilityNodeInfo.FLAG_PREFETCH_DESCENDANTS_DEPTH_FIRST or
+                    AccessibilityNodeInfo.FLAG_PREFETCH_UNINTERRUPTIBLE
+            )
+
+        for (
+            strategy in
+            strategies
+        ) {
+            try {
+                window.getRoot(
+                    strategy
                 )
-            ) {
-                return prefetched
-            }
-
-            if (legacy == null) {
-                return prefetched
+                    ?.let { root ->
+                        candidates.add(
+                            root
+                        )
+                    }
+            } catch (_: Exception) {
             }
         }
 
-        // A sparse root is still valid window identity, but never content proof.
-        return legacy
+        return candidates
+            .maxByOrNull { root ->
+                rootContentScore(
+                    root
+                )
+            }
+            ?: legacy
     }
 
     private fun rootLooksPopulated(
@@ -7277,12 +8257,26 @@ class AgentAccessibilityService :
         val titleN = normalize(title)
 
         return when {
-            titleN.contains("уведом") || titleN.contains("notification") ||
-                n.contains("категории уведом") || n.contains("notification categories") ->
+            titleN.contains("уведом") ||
+                titleN.contains("notification") ||
+                n.contains("уведомления приложений") ||
+                n.contains("разрешение уведомлений") ||
+                n.contains("категории уведом") ||
+                n.contains("app notifications") ||
+                n.contains("allow notifications") ||
+                n.contains("notification categories") ->
                 "app_notifications"
 
-            titleN.contains("разреш") || titleN.contains("permission") ||
-                n.contains("разрешено") || n.contains("не разрешено") ->
+            titleN.contains("разреш") ||
+                titleN.contains("permission") ||
+                n.contains("разрешения приложений") ||
+                n.contains("разрешения для") ||
+                n.contains("app permissions") ||
+                n.contains("permissions for") ||
+                n.contains("разрешено") ||
+                n.contains("не разрешено") ||
+                n.contains("allowed") ||
+                n.contains("not allowed") ->
                 "app_permissions"
 
             titleN.contains("батар") || titleN.contains("аккумуля") || titleN.contains("battery") ->
@@ -7464,6 +8458,24 @@ class AgentAccessibilityService :
 
         private const val SETTINGS_PACKAGE =
             "com.android.settings"
+
+        private const val ROOT_SEMANTIC_PROBE_NODE_LIMIT =
+            48
+
+        private const val FOREGROUND_SNAPSHOT_RECOVERY_THROTTLE_MS =
+            650L
+
+        private const val FOREGROUND_SNAPSHOT_FRESH_EVIDENCE_MS =
+            900L
+
+        private const val FOREGROUND_SNAPSHOT_FRESH_MIN_NODES =
+            6
+
+        private const val FOREGROUND_SNAPSHOT_RECOVERY_NODE_LIMIT =
+            96
+
+        private const val FOREGROUND_SNAPSHOT_RECOVERY_CHAR_LIMIT =
+            8200
 
         private const val SETTINGS_EVENT_RECOVERY_THROTTLE_MS =
             650L
