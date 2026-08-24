@@ -56,7 +56,11 @@ import kotlin.concurrent.thread
 
 class MainActivity : AppCompatActivity() {
 
-    // UI generation: v7.0 OWN-APP IN-PROCESS SEMANTIC BRIDGE (v6.8 visuals/routing preserved)
+    // UI generation: v7.1 EXACT EDITABLE VALUE TRUTH (v7.0 visuals/routing preserved)
+    // Editable own-app controls expose a separate factual value_text field.
+    // Resolver-facing text remains the semantic accessibility label, while
+    // Screen Intelligence can verify the exact post-input value without
+    // weakening target identity or leaking password contents.
 
     private enum class Page {
         HOME,
@@ -7539,6 +7543,17 @@ class MainActivity : AppCompatActivity() {
                         .put("text", resolverText.take(700))
                         .put("description", description.take(700))
                         .put("visual_text", text.take(700))
+                        .put(
+                            "value_text",
+                            if (
+                                editable &&
+                                !isPassword
+                            ) {
+                                text.take(700)
+                            } else {
+                                ""
+                            }
+                        )
                         .put("view_id", viewId.take(300))
                         .put("class", view.javaClass.name)
                         .put("package", packageName)
