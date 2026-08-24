@@ -5,7 +5,7 @@ import org.json.JSONObject
 import java.util.Locale
 
 /**
- * AYANA Android Goal Compiler v2.0 — execution contract foundation
+ * AYANA Android Goal Compiler v2.1 — schema compatibility + settings-item goals
  *
  * Architecture:
  * 1) Agent Core understands the user's natural-language intent.
@@ -26,12 +26,38 @@ class AyanaAndroidGoalCompiler {
         goal: JSONObject
     ): JSONObject {
 
-        val type =
+        val explicitType =
             normalize(
                 goal.optString(
                     "type"
                 )
             )
+
+        val goalType =
+            normalize(
+                goal.optString(
+                    "goal_type"
+                )
+            )
+
+        if (
+            explicitType.isNotBlank() &&
+            goalType.isNotBlank() &&
+            explicitType != goalType
+        ) {
+            return failure(
+                "Конфликт Android goal schema: type=$explicitType, goal_type=$goalType"
+            )
+        }
+
+        // Worker contract has used goal_type since v8.x, while an older Android
+        // compiler revision still expected type. Accept both at the boundary and
+        // canonicalize once; never make the executor depend on model wording.
+        val type =
+            goalType
+                .ifBlank {
+                    explicitType
+                }
 
         val app =
             goal.optString(
@@ -59,6 +85,17 @@ class AyanaAndroidGoalCompiler {
                 )
             )
 
+        val target =
+            goal.optString(
+                "target"
+            ).trim()
+
+        val stopIfMissing =
+            goal.optBoolean(
+                "stop_if_missing",
+                false
+            )
+
         val changeState =
             goal.optBoolean(
                 "change_state",
@@ -78,7 +115,7 @@ class AyanaAndroidGoalCompiler {
 
         if (type.isBlank()) {
             return failure(
-                "Не указан type Android-цели"
+                "Не указан type/goal_type Android-цели"
             )
         }
 
@@ -121,6 +158,25 @@ class AyanaAndroidGoalCompiler {
                         maxActions = maxActions
                     )
 
+                "settings_item" ->
+                    compileSettingsItem(
+                        settingsSection =
+                            settingsSection
+                                .ifBlank {
+                                    section
+                                },
+                        target = target,
+                        maxActions = maxActions
+                    )
+
+                "app_settings_item" ->
+                    compileAppSettingsItem(
+                        app = app,
+                        section = section,
+                        target = target,
+                        maxActions = maxActions
+                    )
+
                 "accessibility_service_page" ->
                     compileAccessibilityServicePage(
                         app = app,
@@ -158,11 +214,19 @@ class AyanaAndroidGoalCompiler {
             )
             .put(
                 "compiler_version",
-                "2.0"
+                "2.1"
             )
             .put(
                 "goal_type",
                 type
+            )
+            .put(
+                "compiled_target",
+                target
+            )
+            .put(
+                "stop_if_missing",
+                stopIfMissing
             )
             .put(
                 "execution_contract",
@@ -359,6 +423,179 @@ class AyanaAndroidGoalCompiler {
                         targets = targets,
                         scrollIfMissing = true,
                         maxScrolls = 2,
+                        terminal = true,
+                        requireScreenChange = true
+                    )
+                )
+        )
+    }
+
+    /**
+     * A final item inside Android Settings. The Worker intentionally emits one
+     * observable goal instead of a click-by-click route. When the target itself
+     * maps to a first-class Settings section (for example "Приложения"), compile
+     * directly to that section. Otherwise open the declared parent and perform
+     * one bounded semantic target search.
+     */
+    private fun compileSettingsItem(
+        settingsSection: String,
+        target: String,
+        maxActions: Int
+    ): JSONObject? {
+
+        if (target.isBlank()) {
+            return null
+        }
+
+        val parent =
+            canonicalSettingsSection(
+                settingsSection
+            )
+
+        val directTarget =
+            canonicalSettingsSection(
+                target
+            )
+
+        if (
+            directTarget != null &&
+            (
+                parent == null ||
+                    parent == "general" ||
+                    parent == directTarget
+                )
+        ) {
+            return plan(
+                goal =
+                    "Открыть системный пункт $target",
+                maxActions =
+                    minOf(
+                        maxActions,
+                        2
+                    ),
+                steps =
+                    listOf(
+                        step(
+                            id = "open_settings_target",
+                            action = "open_settings",
+                            section = directTarget,
+                            terminal = true,
+                            requireScreenChange = true
+                        )
+                    )
+            )
+        }
+
+        val safeParent =
+            parent
+                ?: return null
+
+        return plan(
+            goal =
+                "Открыть пункт $target в системном разделе $safeParent",
+            maxActions =
+                minOf(
+                    maxActions,
+                    6
+                ),
+            steps =
+                listOf(
+                    step(
+                        id = "open_settings_parent",
+                        action = "open_settings",
+                        section = safeParent,
+                        requireScreenChange = true
+                    ),
+                    step(
+                        id = "open_settings_item",
+                        action = "click_any",
+                        targets =
+                            listOf(
+                                target
+                            ),
+                        scrollIfMissing = true,
+                        maxScrolls = 3,
+                        terminal = true,
+                        requireScreenChange = true
+                    )
+                )
+        )
+    }
+
+    /**
+     * A final visible item inside settings for one concrete app. App identity is
+     * resolved by the existing gateway; this compiler only builds a bounded,
+     * generic route and never guesses a package.
+     */
+    private fun compileAppSettingsItem(
+        app: String,
+        section: String,
+        target: String,
+        maxActions: Int
+    ): JSONObject? {
+
+        if (
+            app.isBlank() ||
+            target.isBlank()
+        ) {
+            return null
+        }
+
+        val canonicalParent =
+            canonicalDirectAppSettings(
+                section
+            )
+
+        val firstStep =
+            if (
+                canonicalParent != null &&
+                canonicalParent != "info"
+            ) {
+                step(
+                    id = "open_app_settings_parent",
+                    action = "open_app_settings",
+                    name = app,
+                    section = canonicalParent,
+                    requireScreenChange = true
+                )
+            } else {
+                step(
+                    id = "open_app_info",
+                    action = "open_app_info",
+                    name = app,
+                    requireScreenChange = true,
+                    expectAny =
+                        listOf(
+                            "Информация о приложении",
+                            "App info"
+                        ),
+                    expectAll =
+                        listOf(
+                            app
+                        )
+                )
+            }
+
+        return plan(
+            goal =
+                "Открыть пункт $target в настройках приложения $app",
+            maxActions =
+                minOf(
+                    maxActions,
+                    7
+                ),
+            steps =
+                listOf(
+                    firstStep,
+                    step(
+                        id = "open_app_settings_item",
+                        action = "click_any",
+                        targets =
+                            listOf(
+                                target
+                            ),
+                        scrollIfMissing = true,
+                        maxScrolls = 3,
                         terminal = true,
                         requireScreenChange = true
                     )
@@ -951,7 +1188,7 @@ class AyanaAndroidGoalCompiler {
         targets: List<String> = emptyList(),
         scrollIfMissing: Boolean = false,
         maxScrolls: Int = 0,
-        scrollDirection: String = "down",
+        scrollDirection: String = "auto",
         direction: String = "down",
         target: String = "",
         text: String = "",
@@ -1079,6 +1316,8 @@ class AyanaAndroidGoalCompiler {
                         "language" -> "app_language_executor"
                         else -> "app_detail_executor"
                     }
+                "settings_item" -> "settings_item_executor"
+                "app_settings_item" -> "app_settings_item_executor"
                 "accessibility_service_page" -> "accessibility_settings_executor"
                 "default_app_category" -> "default_apps_executor"
                 else -> "unsupported_executor"
@@ -1087,8 +1326,8 @@ class AyanaAndroidGoalCompiler {
         val verificationPolicy =
             when (goalType) {
                 "open_app" -> "fresh_foreground_package"
-                "app_info", "app_detail_section" -> "settings_intent_attestation_plus_same_window_evidence"
-                "open_settings_section", "accessibility_service_page", "default_app_category" -> "fresh_same_window_terminal_evidence"
+                "app_info", "app_detail_section", "app_settings_item" -> "settings_intent_attestation_plus_same_window_evidence"
+                "open_settings_section", "settings_item", "accessibility_service_page", "default_app_category" -> "fresh_same_window_terminal_evidence"
                 else -> "fail_closed"
             }
 
@@ -1112,11 +1351,13 @@ class AyanaAndroidGoalCompiler {
                 2
 
             "app_detail_section",
+            "settings_item",
             "default_app_category" ->
-                5
-
-            "accessibility_service_page" ->
                 6
+
+            "app_settings_item",
+            "accessibility_service_page" ->
+                7
 
             else ->
                 DEFAULT_MAX_ACTIONS
