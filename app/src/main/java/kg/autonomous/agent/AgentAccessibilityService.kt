@@ -20,14 +20,14 @@ import kotlin.math.max
 class AgentAccessibilityService :
     AccessibilityService() {
 
-    // AYANA Accessibility v5.9 — SAMSUNG TASKVIEW IDENTITY + SIDE-EFFECT RECONCILIATION.
-    // v5.8 keeps the v5.7 ban on position-only Recents gestures and adds a device-proven
-    // Samsung One UI identity path: a visible One UI Home :id/taskview whose own
-    // contentDescription exactly equals the resolved app label is the task card itself.
+    // AYANA Accessibility v6.0 — VERIFIED VIEWPORT SCROLL + SAMSUNG TASKVIEW TRUTH.
+    // v6.0 preserves the v5.9/v5.8 ban on position-only Recents gestures and adds verified
+    // viewport scroll fallback while retaining the device-proven Samsung One UI identity path:
+    // a visible One UI Home :id/taskview whose contentDescription exactly equals the app label is the task card.
     // This path uses that concrete card bounds for dismissal and still verifies that the
     // same semantic task identity disappears before SUCCESS. Unknown identity fails closed.
-    // It never uses “Close all” and never equates Home/Back with close. v5.3 same-window
-    // Settings perception remains unchanged.
+    // It never uses “Close all” and never equates Home/Back with close. The v5.3 same-window
+    // Settings isolation contract remains unchanged.
     // Every visible Android window is an independent context. Normal accessibility
     // events stay lightweight. Samsung/Android Settings is the one bounded exception:
     // sparse Settings roots can hide visible App Info / Notifications / Permissions
@@ -84,6 +84,34 @@ class AgentAccessibilityService :
         val visibleText: List<String>
     )
 
+    /**
+     * O(1) metadata for the newest Android scroll event. This is deliberately
+     * separate from EventEvidence: a Samsung sparse Settings root may emit a
+     * valid TYPE_VIEW_SCROLLED event even when event.source has little or no
+     * readable text. Scroll truth must therefore not depend on text capture.
+     */
+    private data class ScrollEventState(
+        val sequence: Long,
+        val atElapsed: Long,
+        val windowId: Int,
+        val packageName: String,
+        val deltaX: Int,
+        val deltaY: Int,
+        val scrollX: Int,
+        val scrollY: Int,
+        val fromIndex: Int,
+        val toIndex: Int,
+        val itemCount: Int
+    )
+
+    private data class ScrollProgressEvidence(
+        val verified: Boolean,
+        val signatureChanged: Boolean,
+        val viewportChanged: Boolean,
+        val scrollEventObserved: Boolean,
+        val proofLevel: String
+    )
+
     private data class RecentTaskCandidate(
         val labelNode: AccessibilityNodeInfo,
         val actionNode: AccessibilityNodeInfo?,
@@ -118,6 +146,11 @@ class AgentAccessibilityService :
     @Volatile
     private var lastSettingsSnapshotRecoveryAt =
         0L
+
+    @Volatile
+    private var lastScrollEventState:
+        ScrollEventState? =
+        null
 
     // AccessibilityService callbacks run on the process main thread. v4.0/v4.1
     // accidentally performed descendant-prefetch tree walks from this hot path.
@@ -192,6 +225,53 @@ class AgentAccessibilityService :
             } catch (_: Exception) {
                 -1
             }
+
+        if (
+            event.eventType ==
+            AccessibilityEvent.TYPE_VIEW_SCROLLED
+        ) {
+            val previousSequence =
+                lastScrollEventState
+                    ?.sequence
+                    ?: 0L
+
+            val deltaX =
+                if (Build.VERSION.SDK_INT >= 28) {
+                    try {
+                        event.scrollDeltaX
+                    } catch (_: Exception) {
+                        0
+                    }
+                } else {
+                    0
+                }
+
+            val deltaY =
+                if (Build.VERSION.SDK_INT >= 28) {
+                    try {
+                        event.scrollDeltaY
+                    } catch (_: Exception) {
+                        0
+                    }
+                } else {
+                    0
+                }
+
+            lastScrollEventState =
+                ScrollEventState(
+                    sequence = previousSequence + 1L,
+                    atElapsed = SystemClock.elapsedRealtime(),
+                    windowId = lastEventWindowId,
+                    packageName = eventPackage,
+                    deltaX = deltaX,
+                    deltaY = deltaY,
+                    scrollX = try { event.scrollX } catch (_: Exception) { -1 },
+                    scrollY = try { event.scrollY } catch (_: Exception) { -1 },
+                    fromIndex = try { event.fromIndex } catch (_: Exception) { -1 },
+                    toIndex = try { event.toIndex } catch (_: Exception) { -1 },
+                    itemCount = try { event.itemCount } catch (_: Exception) { -1 }
+                )
+        }
 
         // Text editing/selection events are deliberately metadata-only. They can
         // fire for every keystroke (including IME activity) and must never trigger
@@ -2821,9 +2901,39 @@ class AgentAccessibilityService :
         )
     }
 
+    /**
+     * Compatibility Boolean used by older call sites (including the dedicated
+     * Recents scanner). True means physical viewport progress was verified, not
+     * merely that Android accepted ACTION_SCROLL / dispatchGesture.
+     */
     fun scroll(
         direction: String
-    ): Boolean {
+    ): Boolean =
+        scrollDetailed(
+            direction
+        )
+            .optBoolean(
+                "verified",
+                false
+            )
+
+    /**
+     * AYANA Accessibility v6.0 — VERIFIED VIEWPORT SCROLL.
+     *
+     * Normal path: use a real Accessibility scrollable node.
+     * Recovery path: when the current interaction surface is valid but Samsung
+     * exposes no scrollable descendant (typical sparse App Info detail pane),
+     * perform one bounded vertical gesture inside that SAME verified window.
+     *
+     * A dispatched gesture is never success by itself. Progress requires either
+     * a post-dispatch TYPE_VIEW_SCROLLED event with factual movement metadata or
+     * a changed bounded visible-node fingerprint in the same window context.
+     * This preserves terminal truth at list boundaries and prevents unrelated
+     * window changes from being mistaken for scroll progress.
+     */
+    fun scrollDetailed(
+        direction: String
+    ): JSONObject {
 
         val allContexts =
             resolveWindowContexts()
@@ -2834,86 +2944,929 @@ class AgentAccessibilityService :
             )
 
         if (contexts.isEmpty()) {
-            return false
+            return scrollResult(
+                accepted = false,
+                verified = false,
+                direction = direction,
+                method = "none",
+                reason = "interaction_context_unavailable"
+            )
         }
 
         val normalized =
             normalize(direction)
 
-        val preferredAction =
-            when {
-                normalized.contains("вверх") ||
-                    normalized.contains("up") ||
-                    normalized.contains("назад") ||
-                    normalized.contains("back") ->
-                    AccessibilityNodeInfo.ACTION_SCROLL_BACKWARD
+        val backward =
+            normalized.contains("вверх") ||
+                normalized.contains("up") ||
+                normalized.contains("назад") ||
+                normalized.contains("back")
 
-                else ->
-                    AccessibilityNodeInfo.ACTION_SCROLL_FORWARD
+        val preferredAction =
+            if (backward) {
+                AccessibilityNodeInfo.ACTION_SCROLL_BACKWARD
+            } else {
+                AccessibilityNodeInfo.ACTION_SCROLL_FORWARD
             }
 
         data class ScrollCandidate(
             val context: WindowContext,
             val node: AccessibilityNodeInfo,
+            val bounds: Rect,
             val score: Long
         )
 
-        var best: ScrollCandidate? = null
+        var best:
+            ScrollCandidate? =
+            null
 
         for (context in contexts) {
-            val root = context.root ?: continue
+            val root =
+                context.root
+                    ?: continue
+
             val scrollable =
                 findBestScrollable(root)
                     ?: continue
 
-            val bounds = Rect()
-            scrollable.getBoundsInScreen(bounds)
+            val bounds =
+                Rect()
+
+            try {
+                scrollable.getBoundsInScreen(
+                    bounds
+                )
+            } catch (_: Exception) {
+                continue
+            }
+
+            if (
+                !isSuitableSemanticScrollCandidate(
+                    context = context,
+                    bounds = bounds
+                )
+            ) {
+                continue
+            }
 
             val area =
                 bounds.width().coerceAtLeast(0).toLong() *
                     bounds.height().coerceAtLeast(0).toLong()
 
             val score =
-                area + context.rank.toLong() * 100L
+                area +
+                    context.rank.toLong() *
+                        100L
 
-            if (best == null || score > best.score) {
-                best = ScrollCandidate(context, scrollable, score)
+            if (
+                best == null ||
+                score > best.score
+            ) {
+                best =
+                    ScrollCandidate(
+                        context = context,
+                        node = scrollable,
+                        bounds = bounds,
+                        score = score
+                    )
             }
         }
 
-        val candidate =
+        val semanticCandidate =
             best
-                ?: return false
 
-        val center =
-            nodeCenter(candidate.node)
+        if (semanticCandidate != null) {
+            val center =
+                nodeCenter(
+                    semanticCandidate.node
+                )
+
+            if (
+                center != null &&
+                isPointOccludedForContext(
+                    x = center.first,
+                    y = center.second,
+                    target = semanticCandidate.context,
+                    allContexts = allContexts
+                )
+            ) {
+                return scrollResult(
+                    accepted = false,
+                    verified = false,
+                    direction = direction,
+                    method = "accessibility_action_scroll",
+                    reason = "scroll_target_occluded",
+                    context = semanticCandidate.context
+                )
+            }
+
+            val beforeSignature =
+                screenSignature()
+
+            val beforeFingerprint =
+                viewportFingerprint(
+                    semanticCandidate.context
+                )
+
+            val beforeEvent =
+                lastScrollEventState
+
+            val dispatchStartedAt =
+                SystemClock.elapsedRealtime()
+
+            val accepted =
+                try {
+                    semanticCandidate.node.performAction(
+                        preferredAction
+                    )
+                } catch (_: Exception) {
+                    false
+                }
+
+            if (accepted) {
+                val progress =
+                    waitForScrollProgress(
+                        context = semanticCandidate.context,
+                        beforeSignature = beforeSignature,
+                        beforeFingerprint = beforeFingerprint,
+                        beforeEvent = beforeEvent,
+                        dispatchStartedAt = dispatchStartedAt
+                    )
+
+                // An accepted semantic scroll with unknown physical outcome must
+                // not be followed by a second blind gesture: it may already have
+                // moved while Samsung withheld observable evidence. Fail closed.
+                return scrollResult(
+                    accepted = true,
+                    verified = progress.verified,
+                    direction = direction,
+                    method = "accessibility_action_scroll",
+                    reason =
+                        if (progress.verified) {
+                            "scroll_progress_verified"
+                        } else {
+                            "scroll_dispatch_outcome_unverified"
+                        },
+                    context = semanticCandidate.context,
+                    progress = progress
+                )
+            }
+        }
+
+        val gestureContext =
+            safeGestureScrollContext(
+                contexts = contexts,
+                allContexts = allContexts,
+                preferred = semanticCandidate?.context
+            )
+                ?: return scrollResult(
+                    accepted = false,
+                    verified = false,
+                    direction = direction,
+                    method =
+                        if (semanticCandidate == null) {
+                            "none"
+                        } else {
+                            "accessibility_action_scroll"
+                        },
+                    reason =
+                        if (semanticCandidate == null) {
+                            "scrollable_target_unavailable"
+                        } else {
+                            "scroll_action_rejected_no_safe_gesture_fallback"
+                        }
+                )
+
+        val beforeSignature =
+            screenSignature()
+
+        val beforeFingerprint =
+            viewportFingerprint(
+                gestureContext
+            )
+
+        val beforeEvent =
+            lastScrollEventState
+
+        val dispatchStartedAt =
+            SystemClock.elapsedRealtime()
+
+        val gestureAccepted =
+            dispatchVerticalScrollGesture(
+                context = gestureContext,
+                backward = backward
+            )
+
+        if (!gestureAccepted) {
+            return scrollResult(
+                accepted = false,
+                verified = false,
+                direction = direction,
+                method = "gesture_vertical_scroll",
+                reason = "gesture_scroll_rejected",
+                context = gestureContext
+            )
+        }
+
+        val progress =
+            waitForScrollProgress(
+                context = gestureContext,
+                beforeSignature = beforeSignature,
+                beforeFingerprint = beforeFingerprint,
+                beforeEvent = beforeEvent,
+                dispatchStartedAt = dispatchStartedAt
+            )
+
+        return scrollResult(
+            accepted = true,
+            verified = progress.verified,
+            direction = direction,
+            method = "gesture_vertical_scroll",
+            reason =
+                if (progress.verified) {
+                    "scroll_progress_verified"
+                } else {
+                    "gesture_scroll_no_verified_progress"
+                },
+            context = gestureContext,
+            progress = progress
+        )
+    }
+
+    private fun scrollResult(
+        accepted: Boolean,
+        verified: Boolean,
+        direction: String,
+        method: String,
+        reason: String,
+        context: WindowContext? = null,
+        progress: ScrollProgressEvidence? = null
+    ): JSONObject {
+
+        val signatureChanged =
+            progress?.signatureChanged
+                ?: false
+
+        val viewportChanged =
+            progress?.viewportChanged
+                ?: false
+
+        val scrollEventObserved =
+            progress?.scrollEventObserved
+                ?: false
+
+        return JSONObject()
+            .put("success", verified)
+            .put("verified", verified)
+            .put("action_accepted", accepted)
+            .put("terminal_status", if (verified) "SUCCESS" else "ERROR")
+            .put("status", reason)
+            .put("reason", reason)
+            .put("direction", direction)
+            .put("dispatch_method", method)
+            .put("signature_changed", signatureChanged)
+            .put("viewport_changed", viewportChanged)
+            .put("scroll_event_observed", scrollEventObserved)
+            .put(
+                "proof_level",
+                progress?.proofLevel
+                    ?: "none"
+            )
+            .put(
+                "target_context_id",
+                context?.contextId
+                    .orEmpty()
+            )
+            .put(
+                "target_window_id",
+                context?.windowId
+                    ?: -1
+            )
+            .put(
+                "target_package",
+                context?.packageName
+                    .orEmpty()
+            )
+    }
+
+    private fun waitForScrollProgress(
+        context: WindowContext,
+        beforeSignature: String,
+        beforeFingerprint: String,
+        beforeEvent: ScrollEventState?,
+        dispatchStartedAt: Long
+    ): ScrollProgressEvidence {
+
+        val deadline =
+            SystemClock.elapsedRealtime() +
+                SCROLL_VERIFY_TIMEOUT_MS
+
+        var signatureChanged =
+            false
+
+        do {
+            try {
+                Thread.sleep(
+                    SCROLL_VERIFY_POLL_MS
+                )
+            } catch (_: InterruptedException) {
+                Thread.currentThread()
+                    .interrupt()
+
+                return ScrollProgressEvidence(
+                    verified = false,
+                    signatureChanged = signatureChanged,
+                    viewportChanged = false,
+                    scrollEventObserved = false,
+                    proofLevel = "none"
+                )
+            }
+
+            val currentSignature =
+                screenSignature()
+
+            if (
+                beforeSignature.isNotBlank() &&
+                currentSignature.isNotBlank() &&
+                currentSignature != beforeSignature
+            ) {
+                signatureChanged =
+                    true
+            }
+
+            val afterEvent =
+                lastScrollEventState
+
+            if (
+                scrollEventProvesProgress(
+                    before = beforeEvent,
+                    after = afterEvent,
+                    context = context,
+                    dispatchStartedAt = dispatchStartedAt
+                )
+            ) {
+                return ScrollProgressEvidence(
+                    verified = true,
+                    signatureChanged = signatureChanged,
+                    viewportChanged = true,
+                    scrollEventObserved = true,
+                    proofLevel = "accessibility_scroll_event"
+                )
+            }
+
+            val currentContext =
+                findSameWindowContext(
+                    original = context,
+                    contexts = interactionWindowContexts(
+                        resolveWindowContexts()
+                    )
+                )
+
+            if (currentContext != null) {
+                val currentFingerprint =
+                    viewportFingerprint(
+                        currentContext
+                    )
+
+                if (
+                    beforeFingerprint.isNotBlank() &&
+                    currentFingerprint.isNotBlank() &&
+                    currentFingerprint != beforeFingerprint
+                ) {
+                    return ScrollProgressEvidence(
+                        verified = true,
+                        signatureChanged = signatureChanged,
+                        viewportChanged = true,
+                        scrollEventObserved = false,
+                        proofLevel = "same_window_viewport_structure_change"
+                    )
+                }
+            }
+        } while (
+            SystemClock.elapsedRealtime() <
+            deadline
+        )
+
+        return ScrollProgressEvidence(
+            verified = false,
+            signatureChanged = signatureChanged,
+            viewportChanged = false,
+            scrollEventObserved = false,
+            proofLevel =
+                if (signatureChanged) {
+                    "signature_change_without_scroll_proof"
+                } else {
+                    "none"
+                }
+        )
+    }
+
+    private fun scrollEventProvesProgress(
+        before: ScrollEventState?,
+        after: ScrollEventState?,
+        context: WindowContext,
+        dispatchStartedAt: Long
+    ): Boolean {
 
         if (
-            center != null &&
-            isPointOccludedForContext(
-                x = center.first,
-                y = center.second,
-                target = candidate.context,
-                allContexts = allContexts
+            after == null ||
+            after.atElapsed < dispatchStartedAt ||
+            !scrollEventBelongsToContext(
+                event = after,
+                context = context
             )
         ) {
             return false
         }
 
-        val before =
-            screenSignature()
+        // beforeEvent is sampled immediately before dispatch. A non-zero delta
+        // from that SAME event must never be reused as post-dispatch proof, even
+        // when elapsedRealtime() happens to have the same millisecond value.
+        if (
+            before != null &&
+            before.sequence == after.sequence
+        ) {
+            return false
+        }
 
-        val accepted =
-            try {
-                candidate.node.performAction(
-                    preferredAction
+        if (
+            after.deltaX != 0 ||
+            after.deltaY != 0
+        ) {
+            return true
+        }
+
+        if (
+            before == null ||
+            !scrollEventBelongsToContext(
+                event = before,
+                context = context
+            )
+        ) {
+            return false
+        }
+
+        val axisChanged =
+            (
+                before.scrollX >= 0 &&
+                    after.scrollX >= 0 &&
+                    before.scrollX != after.scrollX
+                ) ||
+                (
+                    before.scrollY >= 0 &&
+                        after.scrollY >= 0 &&
+                        before.scrollY != after.scrollY
+                    )
+
+        if (axisChanged) {
+            return true
+        }
+
+        return before.fromIndex >= 0 &&
+            after.fromIndex >= 0 &&
+            (
+                before.fromIndex != after.fromIndex ||
+                    before.toIndex != after.toIndex ||
+                    before.itemCount != after.itemCount
                 )
-            } catch (_: Exception) {
-                false
+    }
+
+    private fun scrollEventBelongsToContext(
+        event: ScrollEventState,
+        context: WindowContext
+    ): Boolean {
+
+        if (
+            event.packageName.isBlank() ||
+            context.packageName.isBlank() ||
+            event.packageName != context.packageName
+        ) {
+            return false
+        }
+
+        return if (
+            event.windowId >= 0 &&
+            context.windowId >= 0
+        ) {
+            event.windowId == context.windowId
+        } else {
+            true
+        }
+    }
+
+    private fun findSameWindowContext(
+        original: WindowContext,
+        contexts: List<WindowContext>
+    ): WindowContext? {
+
+        if (contexts.isEmpty()) {
+            return null
+        }
+
+        if (original.windowId >= 0) {
+            contexts
+                .firstOrNull { context ->
+                    context.windowId == original.windowId &&
+                        context.packageName == original.packageName
+                }
+                ?.let {
+                    return it
+                }
+        }
+
+        return contexts
+            .firstOrNull { context ->
+                context.packageName == original.packageName &&
+                    overlapRatio(
+                        context.bounds,
+                        original.bounds
+                    ) >= 0.70
+            }
+    }
+
+    /**
+     * Bounded fingerprint of visible nodes in exactly one Android window. It is
+     * intentionally independent from verification_text TTL, so expiring event
+     * evidence cannot manufacture scroll progress.
+     */
+    private fun viewportFingerprint(
+        context: WindowContext
+    ): String {
+
+        val root =
+            context.root
+                ?: return ""
+
+        val queue =
+            ArrayDeque<AccessibilityNodeInfo>()
+
+        queue.add(
+            root
+        )
+
+        val parts =
+            ArrayList<String>()
+
+        var visited =
+            0
+
+        while (
+            queue.isNotEmpty() &&
+            visited < SCROLL_FINGERPRINT_NODE_LIMIT
+        ) {
+            val node =
+                queue.removeFirst()
+
+            visited++
+
+            val visible =
+                try {
+                    node.isVisibleToUser
+                } catch (_: Exception) {
+                    false
+                }
+
+            if (visible) {
+                val bounds =
+                    Rect()
+
+                try {
+                    node.getBoundsInScreen(
+                        bounds
+                    )
+                } catch (_: Exception) {
+                }
+
+                val text =
+                    normalize(
+                        try {
+                            node.text
+                                ?.toString()
+                                .orEmpty()
+                        } catch (_: Exception) {
+                            ""
+                        }
+                    )
+
+                val description =
+                    normalize(
+                        try {
+                            node.contentDescription
+                                ?.toString()
+                                .orEmpty()
+                        } catch (_: Exception) {
+                            ""
+                        }
+                    )
+
+                val viewId =
+                    try {
+                        node.viewIdResourceName
+                            .orEmpty()
+                    } catch (_: Exception) {
+                        ""
+                    }
+
+                if (
+                    text.isNotBlank() ||
+                    description.isNotBlank() ||
+                    viewId.isNotBlank() ||
+                    node.isScrollable
+                ) {
+                    parts.add(
+                        buildString {
+                            append(text.take(100))
+                            append('|')
+                            append(description.take(100))
+                            append('|')
+                            append(viewId.takeLast(100))
+                            append('|')
+                            append(bounds.left)
+                            append(',')
+                            append(bounds.top)
+                            append(',')
+                            append(bounds.right)
+                            append(',')
+                            append(bounds.bottom)
+                            append('|')
+                            append(node.childCount)
+                        }
+                    )
+                }
             }
 
-        return accepted &&
-            waitForScreenChange(before)
+            val childCount =
+                try {
+                    node.childCount
+                } catch (_: Exception) {
+                    0
+                }
+
+            for (index in 0 until childCount) {
+                childWithPrefetch(
+                    node,
+                    index
+                )?.let { child ->
+                    queue.add(
+                        child
+                    )
+                }
+            }
+        }
+
+        return if (parts.isEmpty()) {
+            ""
+        } else {
+            parts
+                .joinToString("\n")
+                .hashCode()
+                .toString()
+        }
+    }
+
+    /**
+     * Samsung tablet Settings is commonly two-pane in landscape. A sparse
+     * App-Info detail tree may expose only the LEFT navigation list as
+     * Accessibility-scrollable. Scrolling that list is real movement but it is
+     * movement in the wrong pane. Reject such a semantic candidate so the
+     * verified right-detail gesture fallback can own the scroll instead.
+     *
+     * Full-width/single-pane Settings and all non-Settings apps keep the normal
+     * semantic scroll path.
+     */
+    private fun isSuitableSemanticScrollCandidate(
+        context: WindowContext,
+        bounds: Rect
+    ): Boolean {
+
+        if (
+            context.packageName != SETTINGS_PACKAGE ||
+            resources.displayMetrics.widthPixels <=
+                resources.displayMetrics.heightPixels
+        ) {
+            return true
+        }
+
+        val contextWidth =
+            context.bounds.width()
+
+        if (
+            contextWidth <= 1 ||
+            bounds.width() <= 1
+        ) {
+            return true
+        }
+
+        val detailThresholdX =
+            context.bounds.left +
+                (
+                    contextWidth *
+                        SETTINGS_LANDSCAPE_DETAIL_MIN_CENTER_RATIO
+                    )
+                    .toInt()
+
+        return bounds.centerX() >=
+            detailThresholdX
+    }
+
+    private fun safeGestureScrollContext(
+        contexts: List<WindowContext>,
+        allContexts: List<WindowContext>,
+        preferred: WindowContext?
+    ): WindowContext? {
+
+        // Recents has its own horizontal scanner and verified task identity path.
+        // Never inject this generic vertical recovery gesture into that surface.
+        if (
+            contexts.any { context ->
+                isStrongRecentsWindowContext(
+                    context
+                )
+            }
+        ) {
+            return null
+        }
+
+        val candidates =
+            contexts
+                .filter { context ->
+                    context.type == AccessibilityWindowInfo.TYPE_APPLICATION &&
+                        context.packageName.isNotBlank() &&
+                        !context.pictureInPicture &&
+                        isLargeEnoughForScrollGesture(
+                            context.bounds
+                        ) &&
+                        contextOcclusionRatio(
+                            context,
+                            allContexts
+                        ) < SCROLL_GESTURE_MAX_OCCLUSION_RATIO
+                }
+
+        if (candidates.isEmpty()) {
+            return null
+        }
+
+        if (
+            preferred != null
+        ) {
+            findSameWindowContext(
+                original = preferred,
+                contexts = candidates
+            )?.let {
+                return it
+            }
+        }
+
+        return candidates
+            .maxByOrNull { context ->
+                val area =
+                    context.bounds.width().coerceAtLeast(0).toLong() *
+                        context.bounds.height().coerceAtLeast(0).toLong()
+
+                area +
+                    context.rank.toLong() *
+                        100L
+            }
+    }
+
+    private fun isLargeEnoughForScrollGesture(
+        bounds: Rect
+    ): Boolean {
+
+        if (
+            bounds.width() < SCROLL_GESTURE_MIN_WIDTH_PX ||
+            bounds.height() < SCROLL_GESTURE_MIN_HEIGHT_PX
+        ) {
+            return false
+        }
+
+        val screenArea =
+            resources.displayMetrics.widthPixels
+                .coerceAtLeast(1)
+                .toLong() *
+                resources.displayMetrics.heightPixels
+                    .coerceAtLeast(1)
+                    .toLong()
+
+        val area =
+            bounds.width().coerceAtLeast(0).toLong() *
+                bounds.height().coerceAtLeast(0).toLong()
+
+        return screenArea > 0L &&
+            area.toDouble() /
+                screenArea.toDouble() >=
+            SCROLL_GESTURE_MIN_AREA_RATIO
+    }
+
+    private fun dispatchVerticalScrollGesture(
+        context: WindowContext,
+        backward: Boolean
+    ): Boolean {
+
+        val bounds =
+            Rect(
+                context.bounds
+            )
+
+        if (!isLargeEnoughForScrollGesture(bounds)) {
+            return false
+        }
+
+        val width =
+            bounds.width()
+                .coerceAtLeast(1)
+
+        val height =
+            bounds.height()
+                .coerceAtLeast(1)
+
+        val landscape =
+            resources.displayMetrics.widthPixels >
+                resources.displayMetrics.heightPixels
+
+        // Samsung tablet Settings commonly renders navigation at the left and
+        // the app-detail list at the right inside one full-width application
+        // window. Bias the recovery gesture into the detail pane only for that
+        // package/layout; normal apps remain centered.
+        val xFraction =
+            if (
+                context.packageName == SETTINGS_PACKAGE &&
+                landscape
+            ) {
+                0.70
+            } else {
+                0.50
+            }
+
+        val x =
+            (
+                bounds.left +
+                    width * xFraction
+                )
+                .toInt()
+                .coerceIn(
+                    bounds.left + 1,
+                    bounds.right - 1
+                )
+
+        val upperY =
+            (
+                bounds.top +
+                    height * 0.32
+                )
+                .toInt()
+                .coerceIn(
+                    bounds.top + 1,
+                    bounds.bottom - 1
+                )
+
+        val lowerY =
+            (
+                bounds.top +
+                    height * 0.72
+                )
+                .toInt()
+                .coerceIn(
+                    bounds.top + 1,
+                    bounds.bottom - 1
+                )
+
+        if (
+            isPointOccludedForContext(
+                x = x,
+                y = upperY,
+                target = context,
+                allContexts = resolveWindowContexts()
+            ) ||
+            isPointOccludedForContext(
+                x = x,
+                y = lowerY,
+                target = context,
+                allContexts = resolveWindowContexts()
+            )
+        ) {
+            return false
+        }
+
+        return if (backward) {
+            // Content moves toward the beginning: finger moves downward.
+            swipeCoordinates(
+                startX = x,
+                startY = upperY,
+                endX = x,
+                endY = lowerY,
+                durationMs = SCROLL_GESTURE_DURATION_MS
+            )
+        } else {
+            // Content moves toward the end: finger moves upward.
+            swipeCoordinates(
+                startX = x,
+                startY = lowerY,
+                endX = x,
+                endY = upperY,
+                durationMs = SCROLL_GESTURE_DURATION_MS
+            )
+        }
     }
 
     private fun tapNodeCenter(
@@ -3996,7 +4949,8 @@ class AgentAccessibilityService :
         val structural =
             eventType == AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED ||
                 eventType == AccessibilityEvent.TYPE_WINDOWS_CHANGED ||
-                eventType == AccessibilityEvent.TYPE_WINDOW_CONTENT_CHANGED
+                eventType == AccessibilityEvent.TYPE_WINDOW_CONTENT_CHANGED ||
+                eventType == AccessibilityEvent.TYPE_VIEW_SCROLLED
 
         if (!structural) {
             return false
@@ -4791,7 +5745,9 @@ class AgentAccessibilityService :
                         evidence.windowId == target.windowId &&
                         nowWall - evidence.at <=
                             SETTINGS_SNAPSHOT_FRESH_EVIDENCE_MS &&
-                        evidence.visibleText.size >= 2
+                        evidence.visibleText.size >= 2 &&
+                        evidence.nodes.length() >=
+                            SETTINGS_SNAPSHOT_FRESH_MIN_NODES
                 }
             }
 
@@ -6419,6 +7375,33 @@ class AgentAccessibilityService :
         private const val CLICK_VERIFY_POLL_MS =
             100L
 
+        private const val SCROLL_VERIFY_TIMEOUT_MS =
+            900L
+
+        private const val SCROLL_VERIFY_POLL_MS =
+            90L
+
+        private const val SCROLL_FINGERPRINT_NODE_LIMIT =
+            160
+
+        private const val SCROLL_GESTURE_DURATION_MS =
+            260L
+
+        private const val SCROLL_GESTURE_MIN_WIDTH_PX =
+            220
+
+        private const val SCROLL_GESTURE_MIN_HEIGHT_PX =
+            320
+
+        private const val SCROLL_GESTURE_MIN_AREA_RATIO =
+            0.20
+
+        private const val SCROLL_GESTURE_MAX_OCCLUSION_RATIO =
+            0.35
+
+        private const val SETTINGS_LANDSCAPE_DETAIL_MIN_CENTER_RATIO =
+            0.42
+
         private const val MIN_MATCH_SCORE =
             55
 
@@ -6496,6 +7479,9 @@ class AgentAccessibilityService :
 
         private const val SETTINGS_SNAPSHOT_FRESH_EVIDENCE_MS =
             900L
+
+        private const val SETTINGS_SNAPSHOT_FRESH_MIN_NODES =
+            6
 
         private const val SETTINGS_SNAPSHOT_RECOVERY_NODE_LIMIT =
             100
