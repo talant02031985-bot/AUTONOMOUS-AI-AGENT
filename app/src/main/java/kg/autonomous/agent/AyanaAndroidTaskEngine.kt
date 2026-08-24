@@ -5,7 +5,7 @@ import org.json.JSONObject
 import java.util.Locale
 
 /**
- * AYANA Android Task Engine v5.1 — UNIVERSAL TERMINAL ACTION TRUTH.
+ * AYANA Android Task Engine v5.2 — BIDIRECTIONAL SEMANTIC SCROLL SEARCH.
  *
  * Compatibility contract:
  * - keeps the v4.x public constructor, ActionGateway and execute(...) signature;
@@ -13,7 +13,7 @@ import java.util.Locale
  * - keeps one explicit terminal step at the end of every plan;
  * - remains a deterministic local executor. It does not parse user commands.
  *
- * Truth changes in v5.0/v5.1:
+ * Truth changes in v5.0/v5.1/v5.2:
  * - screen change is PROGRESS EVIDENCE only; it can never upgrade a failed action
  *   into SUCCESS;
  * - click_any delegates target selection to AyanaSemanticTargetResolver rather
@@ -21,7 +21,11 @@ import java.util.Locale
  * - input_text trusts only AyanaScreenIntelligence exact-value verification;
  * - target ambiguity/content inaccessibility fail closed before dispatch;
  * - bounded scroll/retry + transition fingerprints prevent dead-route loops;
- * - every failure carries a concise failure_layer/reason for diagnostics.
+ * - every failure carries a concise failure_layer/reason for diagnostics;
+ * - v5.2 adds bounded bidirectional semantic scroll-search: when a target is not
+ *   visible, AUTO search scans toward one boundary, reverses once on no-progress,
+ *   reacquires the screen after every verified scroll, and never upgrades a
+ *   scroll/screen change into target SUCCESS.
  */
 class AyanaAndroidTaskEngine(
     private val screenIntelligence: AyanaScreenIntelligence,
@@ -547,14 +551,29 @@ class AyanaAndroidTaskEngine(
         }
 
         val maxScrolls = if (step.optBoolean("scroll_if_missing", false)) {
-            step.optInt("max_scrolls", 1).coerceIn(0, MAX_SCROLLS_PER_STEP)
+            step.optInt("max_scrolls", DEFAULT_SCROLL_SEARCH_BUDGET)
+                .coerceIn(0, MAX_SCROLLS_PER_STEP)
         } else {
             0
         }
 
+        val requestedScrollDirection =
+            step.optString("scroll_direction", "auto")
+                .trim()
+                .lowercase(Locale.ROOT)
+
+        val autoScrollSearch = requestedScrollDirection !in setOf("up", "down")
+        var activeScrollDirection =
+            if (requestedScrollDirection == "up") "up" else "down"
+        var directionReversed = false
+
         var currentScreen = initialScreen
         var actionsUsed = 0
         var anyProgress = false
+        val seenViewportFingerprintsByDirection = linkedMapOf(
+            "down" to linkedSetOf<String>(),
+            "up" to linkedSetOf<String>()
+        )
 
         for (pass in 0..maxScrolls) {
             if (isCancelled()) return cancelledStep(currentScreen).put("actions_used", actionsUsed)
@@ -645,25 +664,63 @@ class AyanaAndroidTaskEngine(
 
             if (pass < maxScrolls && actionsUsed < remainingBudget) {
                 val beforeScroll = currentScreen
-                val scrollResult = screenIntelligence.scroll(step.optString("scroll_direction", "down"))
+                val seenInDirection =
+                    seenViewportFingerprintsByDirection.getOrPut(activeScrollDirection) {
+                        linkedSetOf()
+                    }
+                val beforeFingerprint = viewportFingerprint(beforeScroll)
+                if (beforeFingerprint.isNotBlank()) {
+                    seenInDirection.add(beforeFingerprint)
+                }
+
+                val scrollResult = screenIntelligence.scroll(activeScrollDirection)
                 actionsUsed++
                 currentScreen = scrollResult.optJSONObject("screen") ?: safeScreenState()
                 val scrollVerified = scrollResult.optBoolean("success", false)
                 val changed = scrollResult.optBoolean("screen_changed", false) ||
                     !sameScreen(beforeScroll, currentScreen)
+                val afterFingerprint = viewportFingerprint(currentScreen)
+                val lowLevelViewportProof =
+                    scrollResult.optBoolean("viewport_changed", false) ||
+                        scrollResult.optBoolean("scroll_event_observed", false)
 
-                // Failed scroll means the route cannot make more bounded progress.
-                if (!scrollVerified) {
+                // A repeated semantic fingerprint is NOT a cycle when the low-level
+                // accessibility layer has already proved physical viewport motion.
+                // Samsung/AYANA sparse trees can legitimately keep identical text
+                // while the viewport moves. Cycle detection is therefore only a
+                // compatibility guard for legacy/signature-only scroll results.
+                val cycled =
+                    scrollVerified &&
+                        changed &&
+                        !lowLevelViewportProof &&
+                        afterFingerprint.isNotBlank() &&
+                        afterFingerprint in seenInDirection
+
+                if (scrollVerified && changed && !cycled) {
+                    anyProgress = true
+                    if (afterFingerprint.isNotBlank()) {
+                        seenInDirection.add(afterFingerprint)
+                    }
+                } else if (autoScrollSearch && !directionReversed) {
+                    // Reaching a boundary/no-progress in AUTO mode is not a terminal
+                    // executor failure. Reverse exactly once and search the opposite
+                    // direction from the factual current viewport.
+                    activeScrollDirection = oppositeScrollDirection(activeScrollDirection)
+                    directionReversed = true
+                } else {
                     return scrollResult
                         .put("success", false)
                         .put("verified", false)
                         .put("progress", anyProgress)
                         .put("actions_used", actionsUsed)
-                        .put("failure_layer", scrollResult.optString("failure_layer", "executor"))
+                        .put("status", if (cycled) "scroll_cycle_detected" else "scroll_search_boundary_reached")
+                        .put("reason", if (cycled) "scroll_cycle_detected" else "scroll_search_boundary_reached")
+                        .put("terminal_status", "BLOCKED")
+                        .put("failure_layer", "recovery")
+                        .put("scroll_direction", activeScrollDirection)
+                        .put("scroll_direction_reversed", directionReversed)
                         .put("screen", currentScreen)
                 }
-
-                if (changed) anyProgress = true
             }
         }
 
@@ -1273,11 +1330,55 @@ class AyanaAndroidTaskEngine(
         }
     }
 
+    private fun oppositeScrollDirection(direction: String): String =
+        if (direction.equals("up", ignoreCase = true)) "down" else "up"
+
+    private fun viewportFingerprint(screen: JSONObject): String {
+        val packageName = screen.optString("package").trim()
+        val contentState =
+            screen.optString(
+                "primary_content_state",
+                screen.optString("content_status")
+            ).trim()
+        val nodes = screen.optJSONArray("nodes")
+        val nodeText = StringBuilder()
+
+        if (nodes != null) {
+            for (index in 0 until nodes.length().coerceAtMost(80)) {
+                val node = nodes.optJSONObject(index) ?: continue
+                val text = node.optString("text").trim()
+                val description =
+                    node.optString(
+                        "content_description",
+                        node.optString("description")
+                    ).trim()
+                val viewId = node.optString("view_id").trim()
+
+                if (
+                    text.isNotBlank() ||
+                    description.isNotBlank() ||
+                    viewId.isNotBlank()
+                ) {
+                    nodeText
+                        .append(text.lowercase(Locale.ROOT))
+                        .append('|')
+                        .append(description.lowercase(Locale.ROOT))
+                        .append('|')
+                        .append(viewId.lowercase(Locale.ROOT))
+                        .append(';')
+                }
+            }
+        }
+
+        return "$packageName#$contentState#$nodeText"
+    }
+
     companion object {
         private const val DEFAULT_MAX_ACTIONS = 8
         private const val HARD_MAX_ACTIONS = 10
         private const val MAX_NO_PROGRESS_STREAK = 2
-        private const val MAX_SCROLLS_PER_STEP = 2
+        private const val DEFAULT_SCROLL_SEARCH_BUDGET = 6
+        private const val MAX_SCROLLS_PER_STEP = 6
         private const val MAX_IDENTICAL_TRANSITION_REPEATS = 2
         private const val DIRECT_ACTION_READY_TIMEOUT_MS = 1600L
         private const val DIRECT_ACTION_POLL_MS = 80L
