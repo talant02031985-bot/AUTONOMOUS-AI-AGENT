@@ -16,13 +16,16 @@ import android.graphics.Paint
 import android.graphics.RadialGradient
 import android.graphics.Shader
 import android.graphics.Path
+import android.graphics.Rect
 import android.graphics.Typeface
 import android.graphics.drawable.GradientDrawable
 import android.os.Build
 import android.os.Bundle
 import android.os.SystemClock
+import android.os.Looper
 import android.net.Uri
 import android.provider.Settings
+import android.text.method.PasswordTransformationMethod
 import android.view.Gravity
 import android.view.View
 import android.view.ViewGroup
@@ -43,14 +46,17 @@ import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.view.ViewCompat
 import androidx.core.view.WindowInsetsCompat
+import java.lang.ref.WeakReference
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.TimeUnit
 import kotlin.concurrent.thread
 
 class MainActivity : AppCompatActivity() {
 
-    // UI generation: v6.9 ACCESSIBILITY SEMANTIC EXPOSURE (v6.8 visuals/routing preserved)
+    // UI generation: v7.0 OWN-APP IN-PROCESS SEMANTIC BRIDGE (v6.8 visuals/routing preserved)
 
     private enum class Page {
         HOME,
@@ -335,11 +341,47 @@ class MainActivity : AppCompatActivity() {
     override fun onResume() {
         super.onResume()
 
+        ownAppBridgeInstance =
+            WeakReference(this)
+
+        ownAppBridgeResumed =
+            true
+
         ayanaPreferences.miniOrbEnabled = true
 
         // The VoiceService is the only lifecycle owner of the global Orb.
         // Resuming the Activity must never create/refresh an overlay instance.
         renderCurrentPage()
+    }
+
+    override fun onPause() {
+
+        if (
+            ownAppBridgeInstance
+                ?.get() ===
+            this
+        ) {
+            ownAppBridgeResumed =
+                false
+        }
+
+        super.onPause()
+    }
+
+    override fun onDestroy() {
+
+        if (
+            ownAppBridgeInstance
+                ?.get() ===
+            this
+        ) {
+            ownAppBridgeResumed =
+                false
+            ownAppBridgeInstance =
+                null
+        }
+
+        super.onDestroy()
     }
 
     override fun onStop() {
@@ -3985,6 +4027,8 @@ class MainActivity : AppCompatActivity() {
                 )
             val running = status == "running"
             val cancelled = status == "cancelled"
+            val blocked = status == "blocked"
+            val unsupported = status == "unsupported"
             val duration =
                 record.optLong(
                     "duration_ms",
@@ -4025,6 +4069,8 @@ class MainActivity : AppCompatActivity() {
                         when {
                             running -> "●  В РАБОТЕ"
                             cancelled -> "■  ОСТАНОВЛЕНО ПОЛЬЗОВАТЕЛЕМ"
+                            blocked -> "■  ЗАБЛОКИРОВАНО"
+                            unsupported -> "■  НЕ ПОДДЕРЖИВАЕТСЯ"
                             success -> "✓  ВЫПОЛНЕНО"
                             else -> "!  ОШИБКА / НЕ ЗАВЕРШЕНО"
                         }
@@ -4035,6 +4081,8 @@ class MainActivity : AppCompatActivity() {
                             when {
                                 running -> "#67E8F9"
                                 cancelled -> "#FCD34D"
+                                blocked -> "#FBBF24"
+                                unsupported -> "#C4B5FD"
                                 success -> "#86EFAC"
                                 else -> "#FCA5A5"
                             }
@@ -4346,8 +4394,12 @@ class MainActivity : AppCompatActivity() {
             "error" ->
                 record.optString(
                     "status"
-                ) ==
-                    "error"
+                ) in
+                    setOf(
+                        "error",
+                        "blocked",
+                        "unsupported"
+                    )
 
             "voice" ->
                 record.optString(
@@ -4507,9 +4559,12 @@ class MainActivity : AppCompatActivity() {
         val status = record.optString("status", "running")
         val statusText = when (status) {
             "success" -> "SUCCESS"
+            "blocked" -> "BLOCKED"
+            "unsupported" -> "UNSUPPORTED"
             "error" -> "ERROR"
             "cancelled" -> "CANCELLED"
-            else -> "RUNNING"
+            "running" -> "RUNNING"
+            else -> status.uppercase(Locale.ROOT).ifBlank { "UNKNOWN" }
         }
 
         return buildString {
@@ -7320,6 +7375,607 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
+
+    // =========================================================
+    // OWN-APP IN-PROCESS SEMANTIC BRIDGE v1
+    // =========================================================
+    // Android Accessibility on this Samsung tablet can expose AYANA's own
+    // TYPE_APPLICATION window as a sparse shell even when native TextViews and
+    // EditTexts are visibly rendered. Because MainActivity and the Accessibility
+    // service run in the same application process, AYANA can obtain a stricter
+    // factual own-app snapshot directly from the live View hierarchy instead of
+    // inventing labels from coordinates or model knowledge.
+
+    private fun buildOwnAppSemanticSnapshotOnUiThread(
+        maxNodes: Int,
+        maxChars: Int
+    ): org.json.JSONObject {
+
+        val root =
+            window.decorView
+
+        val nodes =
+            org.json.JSONArray()
+
+        val visibleTexts =
+            linkedSetOf<String>()
+
+        var nodeIndex =
+            0
+
+        var charCount =
+            0
+
+        fun appendVisibleText(
+            value: String
+        ) {
+            val clean =
+                value
+                    .replace(Regex("\\s+"), " ")
+                    .trim()
+                    .take(700)
+
+            if (clean.isNotBlank()) {
+                visibleTexts.add(clean)
+            }
+        }
+
+        fun walk(
+            view: View,
+            depth: Int
+        ) {
+            if (
+                nodeIndex >= maxNodes ||
+                charCount >= maxChars ||
+                view.visibility != View.VISIBLE ||
+                !view.isShown ||
+                view.alpha <= 0.01f
+            ) {
+                return
+            }
+
+            val bounds =
+                Rect()
+
+            val globallyVisible =
+                try {
+                    view.getGlobalVisibleRect(bounds)
+                } catch (_: Exception) {
+                    false
+                }
+
+            if (
+                !globallyVisible ||
+                bounds.width() <= 0 ||
+                bounds.height() <= 0
+            ) {
+                return
+            }
+
+            val isPassword =
+                view is EditText &&
+                    view.transformationMethod is PasswordTransformationMethod
+
+            val rawText =
+                if (
+                    view is TextView &&
+                    !isPassword
+                ) {
+                    view.text
+                        ?.toString()
+                        .orEmpty()
+                } else {
+                    ""
+                }
+
+            val description =
+                if (isPassword) {
+                    "[PASSWORD_HIDDEN]"
+                } else {
+                    view.contentDescription
+                        ?.toString()
+                        .orEmpty()
+                }
+
+            val text =
+                if (isPassword) {
+                    "[PASSWORD_HIDDEN]"
+                } else {
+                    rawText
+                }
+
+            val editable =
+                view is EditText
+
+            val scrollable =
+                view is ScrollView ||
+                    view is HorizontalScrollView ||
+                    view.canScrollVertically(1) ||
+                    view.canScrollVertically(-1) ||
+                    view.canScrollHorizontally(1) ||
+                    view.canScrollHorizontally(-1)
+
+            val semantic =
+                text.isNotBlank() ||
+                    description.isNotBlank() ||
+                    view.isClickable ||
+                    editable ||
+                    scrollable
+
+            // For an actionable own-app control, contentDescription is the explicit
+            // accessibility label authored by AYANA. Prefer it as the resolver text
+            // so a clickable navigation control outranks an unrelated non-clickable
+            // label that happens to show the same word (for example «Память»). The
+            // actual visual text is still preserved in visible_text below.
+            val resolverText =
+                if (
+                    view.isClickable &&
+                    description.isNotBlank() &&
+                    description != "[PASSWORD_HIDDEN]"
+                ) {
+                    description
+                } else {
+                    text
+                }
+
+            if (semantic) {
+                nodeIndex++
+
+                val viewId =
+                    if (view.id == View.NO_ID) {
+                        ""
+                    } else {
+                        try {
+                            resources.getResourceName(view.id)
+                        } catch (_: Exception) {
+                            ""
+                        }
+                    }
+
+                val item =
+                    org.json.JSONObject()
+                        .put("index", nodeIndex)
+                        .put("depth", depth)
+                        .put("text", resolverText.take(700))
+                        .put("description", description.take(700))
+                        .put("visual_text", text.take(700))
+                        .put("view_id", viewId.take(300))
+                        .put("class", view.javaClass.name)
+                        .put("package", packageName)
+                        .put("clickable", view.isClickable)
+                        .put("editable", editable)
+                        .put("scrollable", scrollable)
+                        .put("focusable", view.isFocusable)
+                        .put("focused", view.isFocused)
+                        .put("enabled", view.isEnabled)
+                        .put("visible", true)
+                        .put("password", isPassword)
+                        .put("evidence_source", "own_app_in_process_view_tree")
+                        .put(
+                            "bounds",
+                            org.json.JSONObject()
+                                .put("left", bounds.left)
+                                .put("top", bounds.top)
+                                .put("right", bounds.right)
+                                .put("bottom", bounds.bottom)
+                        )
+
+                val serialized =
+                    item.toString()
+
+                if (
+                    charCount + serialized.length <=
+                    maxChars
+                ) {
+                    nodes.put(item)
+                    charCount += serialized.length
+                    if (!isPassword) {
+                        appendVisibleText(text)
+                        appendVisibleText(description)
+                    }
+                }
+            }
+
+            if (view is ViewGroup) {
+                for (
+                    index in
+                    0 until view.childCount
+                ) {
+                    walk(
+                        view.getChildAt(index),
+                        depth + 1
+                    )
+
+                    if (
+                        nodeIndex >= maxNodes ||
+                        charCount >= maxChars
+                    ) {
+                        break
+                    }
+                }
+            }
+        }
+
+        walk(
+            root,
+            0
+        )
+
+        val visibleArray =
+            org.json.JSONArray()
+
+        visibleTexts.forEach {
+            visibleArray.put(it)
+        }
+
+        val verificationText =
+            visibleTexts
+                .joinToString(" | ")
+                .take(6000)
+
+        val stateFingerprint =
+            ownAppSemanticStateFingerprint()
+
+        val windowNodeArray =
+            org.json.JSONArray()
+
+        for (
+            index in
+            0 until nodes.length()
+        ) {
+            windowNodeArray.put(
+                org.json.JSONObject(
+                    nodes.getJSONObject(index).toString()
+                )
+            )
+        }
+
+        val windows =
+            org.json.JSONArray()
+                .put(
+                    org.json.JSONObject()
+                        .put("context_id", "own_app_main_activity")
+                        .put("window_id", -1000)
+                        .put("package", packageName)
+                        .put("root_class", root.javaClass.name)
+                        .put("title", "AYANA AI")
+                        .put("type_name", "application_in_process")
+                        .put("active", true)
+                        .put("focused", hasWindowFocus())
+                        .put("interaction_context", true)
+                        .put("node_count", windowNodeArray.length())
+                        .put("readable_text_count", visibleTexts.size)
+                        .put("live_readable_text_count", visibleTexts.size)
+                        .put("evidence_readable_text_count", 0)
+                        .put("content_state", "readable")
+                        .put("content_available", true)
+                        .put("failure_reason", "")
+                        .put("acquisition_source", "own_app_in_process_view_tree")
+                        .put("verification_text", verificationText)
+                        .put("visible_text", org.json.JSONArray(visibleTexts.toList()))
+                        .put("nodes", windowNodeArray)
+                )
+
+        return org.json.JSONObject()
+            .put("success", true)
+            .put("snapshot_success", true)
+            .put("understanding_success", visibleTexts.isNotEmpty())
+            .put("content_contract_version", 2)
+            .put("content_status", if (visibleTexts.isNotEmpty()) "readable" else "structure_only")
+            .put("package", packageName)
+            .put("root_class", root.javaClass.name)
+            .put("primary_context_id", "own_app_main_activity")
+            .put("primary_window_title", "AYANA AI")
+            .put("interaction_package", packageName)
+            .put("primary_content_state", if (visibleTexts.isNotEmpty()) "readable" else "structure_only")
+            .put("primary_content_available", visibleTexts.isNotEmpty())
+            .put("primary_failure_reason", if (visibleTexts.isNotEmpty()) "" else "in_process_tree_without_readable_text")
+            .put("primary_acquisition_source", "own_app_in_process_view_tree")
+            .put("primary_readable_text_count", visibleTexts.size)
+            .put("primary_live_readable_text_count", visibleTexts.size)
+            .put("primary_evidence_readable_text_count", 0)
+            .put("primary_node_count", nodes.length())
+            .put("window_context_mode", "v7_own_app_in_process")
+            .put("window_count", 1)
+            .put("raw_window_count", 1)
+            .put("readable_window_count", if (visibleTexts.isNotEmpty()) 1 else 0)
+            .put("partial_window_count", 0)
+            .put("structure_only_window_count", if (visibleTexts.isEmpty()) 1 else 0)
+            .put("unavailable_window_count", 0)
+            .put("evidence_context_count", 0)
+            .put("packages", org.json.JSONArray().put(packageName))
+            .put("visible_text", visibleArray)
+            .put("all_visible_text", org.json.JSONArray(visibleTexts.toList()))
+            .put("verification_text", verificationText)
+            .put("node_count", nodes.length())
+            .put("nodes", nodes)
+            .put("windows", windows)
+            .put("own_app_in_process", true)
+            .put("own_app_state_fingerprint", stateFingerprint)
+    }
+
+    private fun ownAppSemanticStateFingerprint(): String {
+        val inputValue =
+            if (::textInput.isInitialized) {
+                textInput.text
+                    ?.toString()
+                    .orEmpty()
+            } else {
+                ""
+            }
+
+        val scrollY =
+            if (::contentScroll.isInitialized) {
+                contentScroll.scrollY
+            } else {
+                0
+            }
+
+        return buildString {
+            append("page=")
+            append(currentPage.name)
+            append("|text_mode=")
+            append(textModeVisible)
+            append("|history_filter=")
+            append(historyFilter)
+            append("|scroll_y=")
+            append(scrollY)
+            append("|input=")
+            append(inputValue.take(500))
+        }
+    }
+
+    private fun performOwnAppSemanticClickOnUiThread(
+        target: String
+    ): Boolean {
+        val normalizedTarget =
+            normalizeOwnSemanticValue(target)
+
+        if (normalizedTarget.isBlank()) {
+            return false
+        }
+
+        val candidates =
+            mutableListOf<View>()
+
+        fun walk(view: View) {
+            if (
+                view.visibility != View.VISIBLE ||
+                !view.isShown ||
+                !view.isEnabled
+            ) {
+                return
+            }
+
+            if (view.isClickable) {
+                val text =
+                    if (view is TextView) {
+                        normalizeOwnSemanticValue(
+                            view.text
+                                ?.toString()
+                                .orEmpty()
+                        )
+                    } else {
+                        ""
+                    }
+
+                val description =
+                    normalizeOwnSemanticValue(
+                        view.contentDescription
+                            ?.toString()
+                            .orEmpty()
+                    )
+
+                if (
+                    text == normalizedTarget ||
+                    description == normalizedTarget
+                ) {
+                    candidates.add(view)
+                }
+            }
+
+            if (view is ViewGroup) {
+                for (index in 0 until view.childCount) {
+                    walk(view.getChildAt(index))
+                }
+            }
+        }
+
+        walk(window.decorView)
+
+        val distinct =
+            candidates.distinctBy {
+                System.identityHashCode(it)
+            }
+
+        if (distinct.size != 1) {
+            return false
+        }
+
+        val view =
+            distinct.first()
+
+        val pageBefore =
+            currentPage
+
+        val textModeBefore =
+            textModeVisible
+
+        val historyFilterBefore =
+            historyFilter
+
+        val scrollBefore =
+            if (::contentScroll.isInitialized) {
+                contentScroll.scrollY
+            } else {
+                0
+            }
+
+        val accepted =
+            try {
+                view.performClick()
+            } catch (_: Exception) {
+                false
+            }
+
+        if (!accepted) {
+            return false
+        }
+
+        val semanticChange =
+            currentPage != pageBefore ||
+                textModeVisible != textModeBefore ||
+                historyFilter != historyFilterBefore ||
+                (
+                    ::contentScroll.isInitialized &&
+                        contentScroll.scrollY != scrollBefore
+                    )
+
+        // Navigation controls update state synchronously. For other own-app
+        // buttons return true only when Android accepted performClick; the outer
+        // Screen Intelligence layer still requires a changed stable signature.
+        return semanticChange || accepted
+    }
+
+    private fun performOwnAppSemanticSetTextOnUiThread(
+        target: String?,
+        text: String
+    ): Boolean {
+        val normalizedTarget =
+            normalizeOwnSemanticValue(
+                target.orEmpty()
+            )
+
+        val candidates =
+            mutableListOf<EditText>()
+
+        fun walk(view: View) {
+            if (
+                view.visibility != View.VISIBLE ||
+                !view.isShown ||
+                !view.isEnabled
+            ) {
+                return
+            }
+
+            if (
+                view is EditText &&
+                view.transformationMethod !is PasswordTransformationMethod
+            ) {
+                val nodeText =
+                    normalizeOwnSemanticValue(
+                        view.text
+                            ?.toString()
+                            .orEmpty()
+                    )
+
+                val description =
+                    normalizeOwnSemanticValue(
+                        view.contentDescription
+                            ?.toString()
+                            .orEmpty()
+                    )
+
+                val matches =
+                    normalizedTarget.isBlank() ||
+                        nodeText == normalizedTarget ||
+                        description == normalizedTarget
+
+                if (matches) {
+                    candidates.add(view)
+                }
+            }
+
+            if (view is ViewGroup) {
+                for (index in 0 until view.childCount) {
+                    walk(view.getChildAt(index))
+                }
+            }
+        }
+
+        walk(window.decorView)
+
+        val distinct =
+            candidates.distinctBy {
+                System.identityHashCode(it)
+            }
+
+        if (distinct.size != 1) {
+            return false
+        }
+
+        val field =
+            distinct.first()
+
+        return try {
+            field.requestFocus()
+            field.setText(text)
+            field.setSelection(field.text.length)
+            field.text
+                ?.toString() ==
+                text
+        } catch (_: Exception) {
+            false
+        }
+    }
+
+    private fun normalizeOwnSemanticValue(
+        value: String
+    ): String =
+        value
+            .lowercase(Locale.ROOT)
+            .replace('ё', 'е')
+            .replace(Regex("[^\\p{L}\\p{N}]+"), " ")
+            .replace(Regex("\\s+"), " ")
+            .trim()
+
+    private fun <T> runOwnAppBridgeOnUiThread(
+        fallback: T,
+        block: MainActivity.() -> T
+    ): T {
+        if (
+            Looper.myLooper() ==
+            Looper.getMainLooper()
+        ) {
+            return try {
+                block()
+            } catch (_: Exception) {
+                fallback
+            }
+        }
+
+        val latch =
+            CountDownLatch(1)
+
+        var result =
+            fallback
+
+        try {
+            runOnUiThread {
+                try {
+                    result = block()
+                } catch (_: Exception) {
+                    result = fallback
+                } finally {
+                    latch.countDown()
+                }
+            }
+
+            if (
+                !latch.await(
+                    OWN_APP_BRIDGE_TIMEOUT_MS,
+                    TimeUnit.MILLISECONDS
+                )
+            ) {
+                return fallback
+            }
+        } catch (_: Exception) {
+            return fallback
+        }
+
+        return result
+    }
+
     private fun openNotificationSettings() {
 
         val intent =
@@ -7390,6 +8046,112 @@ class MainActivity : AppCompatActivity() {
                     .density
             )
             .toInt()
+    }
+
+
+    companion object {
+
+        @Volatile
+        private var ownAppBridgeInstance:
+            WeakReference<MainActivity>? =
+            null
+
+        @Volatile
+        private var ownAppBridgeResumed =
+            false
+
+        private const val OWN_APP_BRIDGE_TIMEOUT_MS =
+            900L
+
+        fun isOwnAppSemanticBridgeActive(): Boolean {
+            val activity =
+                ownAppBridgeInstance
+                    ?.get()
+
+            return ownAppBridgeResumed &&
+                activity != null &&
+                !activity.isFinishing &&
+                !activity.isDestroyed
+        }
+
+        fun buildOwnAppSemanticSnapshot(
+            maxNodes: Int,
+            maxChars: Int
+        ): org.json.JSONObject? {
+            val activity =
+                ownAppBridgeInstance
+                    ?.get()
+                    ?: return null
+
+            if (
+                !ownAppBridgeResumed ||
+                activity.isFinishing ||
+                activity.isDestroyed
+            ) {
+                return null
+            }
+
+            return activity.runOwnAppBridgeOnUiThread<org.json.JSONObject?>(
+                fallback = null
+            ) {
+                buildOwnAppSemanticSnapshotOnUiThread(
+                    maxNodes = maxNodes.coerceIn(20, 240),
+                    maxChars = maxChars.coerceIn(3000, 24000)
+                )
+            }
+        }
+
+        fun performOwnAppSemanticClick(
+            target: String
+        ): Boolean {
+            val activity =
+                ownAppBridgeInstance
+                    ?.get()
+                    ?: return false
+
+            if (
+                !ownAppBridgeResumed ||
+                activity.isFinishing ||
+                activity.isDestroyed
+            ) {
+                return false
+            }
+
+            return activity.runOwnAppBridgeOnUiThread(
+                fallback = false
+            ) {
+                performOwnAppSemanticClickOnUiThread(
+                    target
+                )
+            }
+        }
+
+        fun performOwnAppSemanticSetText(
+            target: String?,
+            text: String
+        ): Boolean {
+            val activity =
+                ownAppBridgeInstance
+                    ?.get()
+                    ?: return false
+
+            if (
+                !ownAppBridgeResumed ||
+                activity.isFinishing ||
+                activity.isDestroyed
+            ) {
+                return false
+            }
+
+            return activity.runOwnAppBridgeOnUiThread(
+                fallback = false
+            ) {
+                performOwnAppSemanticSetTextOnUiThread(
+                    target = target,
+                    text = text
+                )
+            }
+        }
     }
 
     private class ColorDrawableCompat(
