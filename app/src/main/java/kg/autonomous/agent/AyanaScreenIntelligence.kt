@@ -6,14 +6,16 @@ import org.json.JSONObject
 import java.util.Locale
 
 /**
- * AYANA Screen Intelligence v4.1 — universal semantic action truth + verified viewport scroll.
+ * AYANA Screen Intelligence v4.2 — exact input value truth + bounded local boundary scroll.
  *
- * v4.1 keeps the v4.0 semantic target contract intact and upgrades scroll truth:
- * a Samsung sparse Accessibility snapshot may stay textually identical while the
- * physical viewport really moves. Scroll verification therefore consumes the
- * Accessibility service's same-window movement proof instead of requiring only a
- * changed screenSignature. A dispatched gesture alone is never success.
- * Click/input target identity and terminal truth remain unchanged.
+ * v4.2 preserves the v4.1 semantic target and verified viewport contract. Own-app
+ * editable fields may expose a semantic resolver label in `text`, so exact input
+ * verification now consumes factual `value_text` first, then `visual_text`, then
+ * the legacy external-app `text` field. Password values remain hidden.
+ *
+ * `scrollToBoundary()` executes a bounded local scroll loop without cloud round
+ * trips. It reports success only after at least one verified viewport move followed
+ * by a verified no-progress boundary observation; dispatch alone is never success.
  */
 class AyanaScreenIntelligence(
     context: Context
@@ -247,7 +249,7 @@ class AyanaScreenIntelligence(
                 if (verified) {
                     "Текст введён и подтверждён в целевом поле"
                 } else if (accepted) {
-                    "Android принял ввод, но точное значение поля не подтверждено Accessibility evidence"
+                    "Android принял ввод, но точное значение поля не подтверждено фактическими данными экрана"
                 } else {
                     "Поле подтверждено, но Android не принял ввод текста"
                 }
@@ -422,6 +424,187 @@ class AyanaScreenIntelligence(
                         "Прокрутка не была принята или безопасный путь недоступен"
                 }
             )
+    }
+
+    /**
+     * Bounded local scroll-to-boundary transaction.
+     *
+     * A boundary is accepted only after factual viewport progress was observed at
+     * least once and the following attempt is accepted but proves no additional
+     * movement. An initial no-progress result is not enough to invent a boundary.
+     */
+    fun scrollToBoundary(
+        direction: String,
+        maxSteps: Int = 6,
+        shouldCancel: () -> Boolean = { false }
+    ): JSONObject {
+
+        val boundedMaxSteps =
+            maxSteps
+                .coerceIn(
+                    1,
+                    12
+                )
+
+        val steps =
+            JSONArray()
+
+        var verifiedMoves =
+            0
+
+        for (stepIndex in 0 until boundedMaxSteps) {
+
+            if (shouldCancel()) {
+                return JSONObject()
+                    .put("success", false)
+                    .put("verified", false)
+                    .put("action_accepted", verifiedMoves > 0)
+                    .put("terminal_status", "CANCELLED")
+                    .put("status", "scroll_boundary_cancelled")
+                    .put("reason", "cancel_requested")
+                    .put("direction", direction)
+                    .put("verified_moves", verifiedMoves)
+                    .put("attempts", steps.length())
+                    .put("steps", steps)
+                    .put("proof_level", if (verifiedMoves > 0) "verified_partial_viewport_progress" else "none")
+                    .put("message", "Прокрутка до границы отменена")
+            }
+
+            val step =
+                scroll(
+                    direction
+                )
+
+            steps.put(
+                JSONObject(step.toString())
+                    .apply {
+                        remove("screen")
+                        remove("screen_before")
+                        remove("scroll_dispatch")
+                    }
+            )
+
+            if (
+                step.optBoolean(
+                    "verified",
+                    false
+                ) &&
+                step.optString(
+                    "status"
+                ) ==
+                "scroll_verified"
+            ) {
+                verifiedMoves++
+                continue
+            }
+
+            if (
+                verifiedMoves > 0 &&
+                step.optBoolean(
+                    "action_accepted",
+                    false
+                ) &&
+                step.optString(
+                    "status"
+                ) ==
+                "scroll_no_progress"
+            ) {
+                return JSONObject()
+                    .put("success", true)
+                    .put("verified", true)
+                    .put("action_accepted", true)
+                    .put("terminal_status", "SUCCESS")
+                    .put("status", "scroll_boundary_verified")
+                    .put("reason", "verified_progress_then_no_progress")
+                    .put("direction", direction)
+                    .put("verified_moves", verifiedMoves)
+                    .put("attempts", steps.length())
+                    .put("boundary_verified", true)
+                    .put("steps", steps)
+                    .put("proof_level", "verified_viewport_progress_and_boundary")
+                    .put("screen", step.optJSONObject("screen") ?: JSONObject())
+                    .put("message", "Граница прокрутки подтверждена после фактического движения экрана")
+            }
+
+            val terminal =
+                step
+                    .optString(
+                        "terminal_status",
+                        "ERROR"
+                    )
+                    .uppercase(
+                        Locale.ROOT
+                    )
+
+            return JSONObject()
+                .put("success", false)
+                .put("verified", false)
+                .put(
+                    "action_accepted",
+                    step.optBoolean(
+                        "action_accepted",
+                        false
+                    )
+                )
+                .put(
+                    "terminal_status",
+                    when (terminal) {
+                        "BLOCKED" -> "BLOCKED"
+                        "UNSUPPORTED" -> "UNSUPPORTED"
+                        "CANCELLED" -> "CANCELLED"
+                        else -> "ERROR"
+                    }
+                )
+                .put(
+                    "status",
+                    if (verifiedMoves == 0 && step.optString("status") == "scroll_no_progress") {
+                        "scroll_boundary_not_proven"
+                    } else {
+                        step.optString("status", "scroll_boundary_failed")
+                    }
+                )
+                .put(
+                    "reason",
+                    if (verifiedMoves == 0 && step.optString("status") == "scroll_no_progress") {
+                        "initial_no_progress_is_not_boundary_proof"
+                    } else {
+                        step.optString("reason", "scroll_boundary_failed")
+                    }
+                )
+                .put("direction", direction)
+                .put("verified_moves", verifiedMoves)
+                .put("attempts", steps.length())
+                .put("boundary_verified", false)
+                .put("steps", steps)
+                .put("proof_level", if (verifiedMoves > 0) "verified_partial_viewport_progress" else "none")
+                .put("screen", step.optJSONObject("screen") ?: JSONObject())
+                .put(
+                    "message",
+                    if (verifiedMoves == 0 && step.optString("status") == "scroll_no_progress") {
+                        "Граница не подтверждена: движение экрана до остановки не наблюдалось"
+                    } else {
+                        step.optString(
+                            "message",
+                            "Прокрутка до границы не подтверждена"
+                        )
+                    }
+                )
+        }
+
+        return JSONObject()
+            .put("success", false)
+            .put("verified", false)
+            .put("action_accepted", verifiedMoves > 0)
+            .put("terminal_status", "BLOCKED")
+            .put("status", "scroll_boundary_not_reached")
+            .put("reason", "bounded_step_limit_reached_while_still_moving")
+            .put("direction", direction)
+            .put("verified_moves", verifiedMoves)
+            .put("attempts", steps.length())
+            .put("boundary_verified", false)
+            .put("steps", steps)
+            .put("proof_level", if (verifiedMoves > 0) "verified_partial_viewport_progress" else "none")
+            .put("message", "Достигнут безопасный лимит локальной прокрутки; граница не подтверждена")
     }
 
     fun tap(
@@ -659,7 +842,24 @@ class AyanaScreenIntelligence(
                 continue
             }
 
-            val nodeText = normalizeValue(node.optString("text"))
+            val nodeValue =
+                normalizeValue(
+                    node
+                        .optString(
+                            "value_text"
+                        )
+                        .ifBlank {
+                            node
+                                .optString(
+                                    "visual_text"
+                                )
+                                .ifBlank {
+                                    node.optString(
+                                        "text"
+                                    )
+                                }
+                        }
+                )
             val nodeViewId = node.optString("view_id").trim()
             val nodeDescription = normalizeValue(node.optString("description"))
             val nodeBounds = canonicalBounds(node.opt("bounds"))
@@ -672,11 +872,11 @@ class AyanaScreenIntelligence(
                             nodeDescription == expectedDescription
                     )
 
-            if (sameIdentity && nodeText == expected) {
+            if (sameIdentity && nodeValue == expected) {
                 identityMatches += node
             }
 
-            if (node.optBoolean("focused", false) && nodeText == expected) {
+            if (node.optBoolean("focused", false) && nodeValue == expected) {
                 focusedMatches += node
             }
         }
