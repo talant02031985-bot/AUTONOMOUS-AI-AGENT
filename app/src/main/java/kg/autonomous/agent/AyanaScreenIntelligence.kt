@@ -6,13 +6,14 @@ import org.json.JSONObject
 import java.util.Locale
 
 /**
- * AYANA Screen Intelligence v4.0 — universal semantic action truth.
+ * AYANA Screen Intelligence v4.1 — universal semantic action truth + verified viewport scroll.
  *
- * v4.0 keeps the v3 perception contract intact, but all semantic click/input
- * actions now pass through AyanaSemanticTargetResolver before Android receives
- * input. A generic screen change is evidence of progress, not permission to
- * invent target identity. Action results expose explicit acceptance,
- * verification and terminal status fields for higher execution layers.
+ * v4.1 keeps the v4.0 semantic target contract intact and upgrades scroll truth:
+ * a Samsung sparse Accessibility snapshot may stay textually identical while the
+ * physical viewport really moves. Scroll verification therefore consumes the
+ * Accessibility service's same-window movement proof instead of requiring only a
+ * changed screenSignature. A dispatched gesture alone is never success.
+ * Click/input target identity and terminal truth remain unchanged.
  */
 class AyanaScreenIntelligence(
     context: Context
@@ -261,47 +262,164 @@ class AyanaScreenIntelligence(
             AgentAccessibilityService.instance
                 ?: return unavailable()
 
-        val before = currentSnapshot(service)
-        val beforeSignature = safeSignature(service)
+        val before =
+            currentSnapshot(service)
 
-        val acceptedAndVerified =
+        val beforeSignature =
+            safeSignature(service)
+
+        val dispatch =
             try {
-                service.scroll(direction)
+                service.scrollDetailed(
+                    direction
+                )
             } catch (_: Exception) {
-                false
+                JSONObject()
+                    .put("success", false)
+                    .put("verified", false)
+                    .put("action_accepted", false)
+                    .put("status", "scroll_dispatch_exception")
+                    .put("reason", "scroll_dispatch_exception")
+                    .put("proof_level", "none")
             }
 
+        // scrollDetailed() already performs bounded factual verification. The
+        // brief settle lets Samsung's event-recovery snapshot catch up so the
+        // next semantic target lookup can consume freshly visible Settings rows.
         sleepBriefly()
 
-        val afterSignature = safeSignature(service)
-        val after = currentSnapshot(service)
-        val changed =
+        val afterSignature =
+            safeSignature(service)
+
+        val after =
+            currentSnapshot(service)
+
+        val signatureChanged =
             beforeSignature.isNotBlank() &&
                 afterSignature.isNotBlank() &&
                 beforeSignature != afterSignature
 
-        // v5.9 scroll returns true only when performAction was accepted AND
-        // waitForScreenChange() verified progress.
-        val verified = acceptedAndVerified && changed
+        val actionAccepted =
+            dispatch.optBoolean(
+                "action_accepted",
+                false
+            )
+
+        val lowLevelVerified =
+            dispatch.optBoolean(
+                "verified",
+                dispatch.optBoolean(
+                    "success",
+                    false
+                )
+            )
+
+        val viewportChanged =
+            dispatch.optBoolean(
+                "viewport_changed",
+                false
+            ) ||
+                dispatch.optBoolean(
+                    "scroll_event_observed",
+                    false
+                )
+
+        // v4.1: physical viewport movement is a screen-progress fact even when
+        // Samsung's verification_text/signature remains sparse and unchanged.
+        // The low-level service may set viewportChanged only after same-window
+        // movement proof, so this does not turn gesture dispatch into success.
+        val changed =
+            signatureChanged ||
+                (
+                    lowLevelVerified &&
+                        viewportChanged
+                    )
+
+        val verified =
+            lowLevelVerified &&
+                viewportChanged
+
+        val status =
+            when {
+                verified ->
+                    "scroll_verified"
+
+                actionAccepted ->
+                    "scroll_no_progress"
+
+                else ->
+                    "scroll_rejected"
+            }
+
+        val terminal =
+            when {
+                verified ->
+                    "SUCCESS"
+
+                actionAccepted ->
+                    "BLOCKED"
+
+                else ->
+                    "ERROR"
+            }
 
         return JSONObject()
             .put("success", verified)
             .put("verified", verified)
-            .put("action_accepted", acceptedAndVerified)
-            .put("terminal_status", if (verified) "SUCCESS" else "ERROR")
-            .put("status", if (verified) "scroll_verified" else "scroll_no_progress")
-            .put("reason", if (verified) "scroll_verified" else "scroll_no_progress")
+            .put("action_accepted", actionAccepted)
+            .put("terminal_status", terminal)
+            .put("status", status)
+            .put(
+                "reason",
+                dispatch.optString(
+                    "reason",
+                    status
+                )
+            )
             .put("direction", direction)
             .put("screen_changed", changed)
-            .put("proof_level", if (verified) "screen_change" else "none")
+            .put("signature_changed", signatureChanged)
+            .put("viewport_changed", viewportChanged)
+            .put(
+                "scroll_event_observed",
+                dispatch.optBoolean(
+                    "scroll_event_observed",
+                    false
+                )
+            )
+            .put(
+                "dispatch_method",
+                dispatch.optString(
+                    "dispatch_method"
+                )
+            )
+            .put(
+                "proof_level",
+                if (verified) {
+                    dispatch.optString(
+                        "proof_level",
+                        "verified_viewport_progress"
+                    )
+                } else if (actionAccepted) {
+                    "action_accepted_unverified"
+                } else {
+                    "none"
+                }
+            )
+            .put("scroll_dispatch", dispatch)
             .put("screen_before", screenEvidenceSummary(before, beforeSignature))
             .put("screen", after)
             .put(
                 "message",
-                if (verified) {
-                    "Экран прокручен; прогресс подтверждён"
-                } else {
-                    "Прокрутка не дала подтверждённого изменения экрана"
+                when {
+                    verified ->
+                        "Экран прокручен; физический прогресс viewport подтверждён"
+
+                    actionAccepted ->
+                        "Android принял прокрутку, но физическое движение viewport не подтверждено"
+
+                    else ->
+                        "Прокрутка не была принята или безопасный путь недоступен"
                 }
             )
     }
