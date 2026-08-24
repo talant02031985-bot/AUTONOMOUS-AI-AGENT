@@ -50,7 +50,7 @@ import kotlin.concurrent.thread
 
 class MainActivity : AppCompatActivity() {
 
-    // UI generation: v6.8 MULTIMODAL ROUTING INTEGRITY (v6.6 visual design preserved)
+    // UI generation: v6.9 ACCESSIBILITY SEMANTIC EXPOSURE (v6.8 visuals/routing preserved)
 
     private enum class Page {
         HOME,
@@ -815,6 +815,14 @@ class MainActivity : AppCompatActivity() {
             text =
                 label
 
+            contentDescription =
+                pageAccessibilityLabel(
+                    page
+                )
+
+            importantForAccessibility =
+                View.IMPORTANT_FOR_ACCESSIBILITY_YES
+
             textSize =
                     16.5f
 
@@ -854,6 +862,20 @@ class MainActivity : AppCompatActivity() {
                 page
             ] =
                 this
+        }
+    }
+
+    private fun pageAccessibilityLabel(
+        page: Page
+    ): String {
+
+        return when (page) {
+            Page.HOME -> "Главная"
+            Page.TASKS -> "Задачи"
+            Page.MEMORY -> "Память"
+            Page.HISTORY -> "История"
+            Page.DIAGNOSTICS -> "Система"
+            Page.SETTINGS -> "Настройки"
         }
     }
 
@@ -5146,6 +5168,10 @@ class MainActivity : AppCompatActivity() {
             EditText(this).apply {
                 hint =
                     "Введите команду AYANA…"
+                contentDescription =
+                    "Поле текстовой команды AYANA"
+                importantForAccessibility =
+                    View.IMPORTANT_FOR_ACCESSIBILITY_YES
                 textSize =
                     16f
                 setTextColor(
@@ -5193,6 +5219,8 @@ class MainActivity : AppCompatActivity() {
                 gravity = Gravity.CENTER
                 setTextColor(Color.parseColor("#C4B5FD"))
                 contentDescription = "Прикрепить фото, файл или видео"
+                importantForAccessibility =
+                    View.IMPORTANT_FOR_ACCESSIBILITY_YES
                 background = softDrawable(
                     "#0B1020",
                     "#40366D",
@@ -5226,6 +5254,10 @@ class MainActivity : AppCompatActivity() {
             TextView(this).apply {
                 text =
                     "➤"
+                contentDescription =
+                    "Отправить текстовую команду"
+                importantForAccessibility =
+                    View.IMPORTANT_FOR_ACCESSIBILITY_YES
                 textSize =
                     23f
                 gravity =
