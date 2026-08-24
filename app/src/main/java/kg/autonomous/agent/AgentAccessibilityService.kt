@@ -20,13 +20,15 @@ import kotlin.math.max
 class AgentAccessibilityService :
     AccessibilityService() {
 
-    // AYANA Accessibility v6.2 — OWN-APP EVENT PERCEPTION + VERIFIED VIEWPORT TRUTH.
-    // v6.2 preserves the v6.1/v6.0/v5.9/v5.8 execution truth and fixes a self-package
-    // perception regression: MainActivity Accessibility events are admitted only when
-    // they belong to the live TYPE_APPLICATION window, while Orb/overlay events remain
-    // excluded. Structural MainActivity events may contribute one bounded descendant
-    // snapshot to the exact same window, enabling semantic click/input without allowing
-    // overlays to steal foreground identity.
+    // AYANA Accessibility v6.3 — OWN-APP IN-PROCESS SEMANTIC BRIDGE + VERIFIED VIEWPORT TRUTH.
+    // v6.3 preserves the v6.2/v6.1/v6.0/v5.9/v5.8 execution truth and adds a
+    // same-process semantic bridge for the currently resumed AYANA MainActivity. On this
+    // Samsung tablet Android may expose AYANA's own native UI as a sparse Accessibility
+    // shell even when dozens of TextViews/EditTexts are visibly rendered. For the own app
+    // only, v6.3 consumes a factual View-hierarchy snapshot from MainActivity and routes
+    // resolver-confirmed click/text actions back to those exact live Views. External apps
+    // still use Accessibility exclusively; Orb/overlay windows remain excluded. No
+    // coordinate-only target is invented and v12.3 Recents terminal truth is unchanged.
     // v6.0 adds verified
     // viewport scroll fallback while retaining the device-proven Samsung One UI identity path:
     // a visible One UI Home :id/taskview whose contentDescription exactly equals the app label is the task card.
@@ -2678,6 +2680,20 @@ class AgentAccessibilityService :
         target: String
     ): Boolean {
 
+        // v6.3 own-app truth: when MainActivity is the currently resumed app, the
+        // semantic resolver consumed the in-process View snapshot. Dispatch back to
+        // that same factual View hierarchy instead of falling through to a sparse
+        // Accessibility shell or coordinate guess.
+        if (
+            MainActivity
+                .isOwnAppSemanticBridgeActive()
+        ) {
+            return MainActivity
+                .performOwnAppSemanticClick(
+                    target
+                )
+        }
+
         val allContexts =
             resolveWindowContexts()
 
@@ -2948,6 +2964,20 @@ class AgentAccessibilityService :
         target: String?,
         text: String
     ): Boolean {
+
+        // v6.3 own-app input truth: use the same live EditText identity exposed by
+        // MainActivity's in-process semantic snapshot. Exact-value verification still
+        // occurs in AyanaScreenIntelligence after this dispatch.
+        if (
+            MainActivity
+                .isOwnAppSemanticBridgeActive()
+        ) {
+            return MainActivity
+                .performOwnAppSemanticSetText(
+                    target = target,
+                    text = text
+                )
+        }
 
         val contexts =
             interactionWindowContexts(
@@ -4257,6 +4287,42 @@ class AgentAccessibilityService :
         val snapshotStartedAt =
             SystemClock.elapsedRealtime()
 
+        // v6.3: AYANA's own MainActivity is a special trusted acquisition source.
+        // It is not model-derived evidence: the snapshot is serialized directly from
+        // the currently resumed native View hierarchy in the same process. This path
+        // is active only while MainActivity is resumed; every external app continues
+        // through the normal Accessibility window pipeline below.
+        if (
+            MainActivity
+                .isOwnAppSemanticBridgeActive()
+        ) {
+            val ownAppSnapshot =
+                try {
+                    MainActivity
+                        .buildOwnAppSemanticSnapshot(
+                            maxNodes = maxNodes,
+                            maxChars = maxChars
+                        )
+                } catch (_: Exception) {
+                    null
+                }
+
+            if (
+                ownAppSnapshot != null &&
+                ownAppSnapshot.optBoolean(
+                    "snapshot_success",
+                    ownAppSnapshot.optBoolean("success", false)
+                )
+            ) {
+                return ownAppSnapshot
+                    .put(
+                        "snapshot_duration_ms",
+                        (SystemClock.elapsedRealtime() - snapshotStartedAt)
+                            .coerceAtLeast(0L)
+                    )
+            }
+        }
+
         val liveContexts =
             resolveWindowContexts()
 
@@ -4982,6 +5048,24 @@ class AgentAccessibilityService :
 
         if (!snapshot.optBoolean("success", false)) {
             return "unavailable"
+        }
+
+        val ownAppState =
+            snapshot
+                .optString(
+                    "own_app_state_fingerprint"
+                )
+                .trim()
+
+        if (ownAppState.isNotBlank()) {
+            return (
+                snapshot.optString("package") +
+                    "|own_app|" +
+                    ownAppState
+                )
+                .take(7000)
+                .hashCode()
+                .toString()
         }
 
         return (
