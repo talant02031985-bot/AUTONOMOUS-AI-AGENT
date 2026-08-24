@@ -56,7 +56,11 @@ import kotlin.math.abs
 
 class AyanaVoiceService : Service() {
 
-    // AYANA v12.8 UNIVERSAL PERCEPTION & ACTION ENGINE — semantic action routing slice.
+    // AYANA v12.8.2 TERMINAL + INPUT + TEXT STOP + LOCAL BOUNDARY SCROLL TRUTH.
+    // v12.8.2 preserves universal semantic routing and adds:
+    // - local semantic-action terminal truth guard (model final cannot upgrade failed local action),
+    // - text-mode Agent Core microphone STOP isolation while keeping button STOP,
+    // - bounded local "scroll to end" execution without one cloud turn per swipe.
     // All ordinary semantic click lanes now converge on AyanaScreenIntelligence v4,
     // which resolves one factual Accessibility target before Android dispatch and
     // returns explicit acceptance/verification/terminal evidence. File & Document
@@ -3160,10 +3164,12 @@ class AyanaVoiceService : Service() {
                 details = "risk=${commandSafetyDecision.riskLevel}"
             )
 
-            respondAndResume(
-                commandSafetyDecision.reason,
-                silent,
-                success = false
+            respondBlockedAndResume(
+                text = commandSafetyDecision.reason,
+                silent = silent,
+                technical =
+                    "local_command_safety_blocked:" +
+                        commandSafetyDecision.riskName
             )
             return
         }
@@ -3898,6 +3904,36 @@ class AyanaVoiceService : Service() {
                 finishLocalCommand(
                     "Звук включён",
                     silent
+                )
+
+                return
+            }
+
+            (
+                (
+                    routingNormalized.contains("прокрути") ||
+                        routingNormalized.contains("пролистай")
+                    ) &&
+                    (
+                        routingNormalized.contains("экран") ||
+                            routingNormalized.contains("страниц")
+                        ) &&
+                    routingNormalized.contains("до конца")
+                ) -> {
+
+                val direction =
+                    if (
+                        routingNormalized.contains("вверх") ||
+                        routingNormalized.contains("наверх")
+                    ) {
+                        "up"
+                    } else {
+                        "down"
+                    }
+
+                executeLocalScrollToBoundary(
+                    direction = direction,
+                    silent = silent
                 )
 
                 return
@@ -8288,6 +8324,178 @@ class AyanaVoiceService : Service() {
         return ""
     }
 
+    private fun executeLocalScrollToBoundary(
+        direction: String,
+        silent: Boolean
+    ) {
+
+        val commandToken =
+            activeCommandToken
+
+        executionPhase(
+            phase = "local_scroll_boundary",
+            executor = "screen_intelligence"
+        )
+
+        broadcastStatus(
+            "Прокручиваю экран до границы…",
+            STATE_EXECUTING
+        )
+
+        if (!silent) {
+            startCancelListening()
+        } else {
+            stopCancelListenerWatchdog()
+            stopSherpaListening()
+        }
+
+        val worker =
+            thread(
+                start = false,
+                name = "AyanaLocalScrollBoundary"
+            ) {
+
+                try {
+                    val result =
+                        try {
+                            screenIntelligence
+                                .scrollToBoundary(
+                                    direction = direction,
+                                    maxSteps = 6,
+                                    shouldCancel = {
+                                        cancelRequested ||
+                                            executionKernel.isCancelled() ||
+                                            shuttingDown ||
+                                            commandToken != activeCommandToken
+                                    }
+                                )
+                        } catch (error: Exception) {
+                            JSONObject()
+                                .put("success", false)
+                                .put("verified", false)
+                                .put("action_accepted", false)
+                                .put("terminal_status", "ERROR")
+                                .put("status", "local_scroll_boundary_exception")
+                                .put(
+                                    "reason",
+                                    error.message
+                                        ?: "local_scroll_boundary_exception"
+                                )
+                                .put(
+                                    "message",
+                                    "Локальная прокрутка до границы завершилась ошибкой"
+                                )
+                        }
+
+                    commandHistoryStore.addEvent(
+                        activeCommandHistoryId,
+                        state = "local_scroll_boundary",
+                        message = result.optString(
+                            "status",
+                            "scroll_boundary_unknown"
+                        ),
+                        details = result.toString().take(1800)
+                    )
+
+                    if (
+                        result.optString(
+                            "terminal_status"
+                        ) == "CANCELLED" ||
+                        isCommandCancelled(
+                            commandToken
+                        ) ||
+                        shuttingDown
+                    ) {
+                        return@thread
+                    }
+
+                    mainHandler.post {
+                        if (
+                            shuttingDown ||
+                            commandToken != activeCommandToken ||
+                            isCommandCancelled(
+                                commandToken
+                            )
+                        ) {
+                            return@post
+                        }
+
+                        val message =
+                            result
+                                .optString(
+                                    "message"
+                                )
+                                .trim()
+                                .ifBlank {
+                                    "Прокрутка до границы не подтверждена"
+                                }
+
+                        when (
+                            result
+                                .optString(
+                                    "terminal_status",
+                                    "ERROR"
+                                )
+                                .uppercase(
+                                    Locale.ROOT
+                                )
+                        ) {
+                            "SUCCESS" ->
+                                finishLocalCommand(
+                                    "Экран прокручен до подтверждённой границы.",
+                                    silent
+                                )
+
+                            "BLOCKED" ->
+                                respondBlockedAndResume(
+                                    text = message,
+                                    silent = silent,
+                                    technical =
+                                        "local_scroll_boundary:" +
+                                            result.optString("reason")
+                                )
+
+                            "UNSUPPORTED" ->
+                                respondUnsupportedAndResume(
+                                    text = message,
+                                    silent = silent,
+                                    technical =
+                                        "local_scroll_boundary:" +
+                                            result.optString("reason")
+                                )
+
+                            else ->
+                                respondAndResume(
+                                    text = message,
+                                    silent = silent,
+                                    success = false,
+                                    technical =
+                                        "local_scroll_boundary:" +
+                                            result.optString("reason")
+                                )
+                        }
+                    }
+                } finally {
+                    if (
+                        Thread.currentThread() ===
+                        currentAgentThread
+                    ) {
+                        currentAgentThread =
+                            null
+                    }
+                }
+            }
+
+        currentAgentThread =
+            worker
+
+        executionKernel.bindThread(
+            worker
+        )
+
+        worker.start()
+    }
+
     private fun clickByText(
         target: String,
         silent: Boolean
@@ -8336,13 +8544,16 @@ class AyanaVoiceService : Service() {
                 details = safetyDecision.reason.take(260)
             )
 
-            respondAndResume(
-                safetyDecision.reason
-                    .ifBlank {
-                        "Действие остановлено локальным Safety Engine AYANA."
-                    },
-                silent,
-                success = false
+            respondBlockedAndResume(
+                text =
+                    safetyDecision.reason
+                        .ifBlank {
+                            "Действие остановлено локальным Safety Engine AYANA."
+                        },
+                silent = silent,
+                technical =
+                    "local_click_safety_blocked:" +
+                        safetyDecision.riskName
             )
 
             return
@@ -9799,13 +10010,32 @@ class AyanaVoiceService : Service() {
             executor = "agent_core_executor"
         )
 
-        startCancelListening()
-        commandHistoryStore.addEvent(
-            activeCommandHistoryId,
-            state = "cancel_listener_armed",
-            message = "STOP активирован для Agent Core",
-            details = "lane=agent_core; execution=${executionKernel.current()?.id.orEmpty()}"
-        )
+        // Voice commands keep microphone STOP/barge-in. Text commands must not
+        // arm the microphone while Agent Core is running: ambient speech is not
+        // allowed to cancel a text-authored execution. Physical/UI STOP remains
+        // available through ACTION_CANCEL_COMMAND.
+        if (!silent) {
+            startCancelListening()
+            commandHistoryStore.addEvent(
+                activeCommandHistoryId,
+                state = "cancel_listener_armed",
+                message = "STOP активирован для Agent Core",
+                details =
+                    "lane=agent_core; source=voice; " +
+                        "execution=${executionKernel.current()?.id.orEmpty()}"
+            )
+        } else {
+            stopCancelListenerWatchdog()
+            stopSherpaListening()
+            commandHistoryStore.addEvent(
+                activeCommandHistoryId,
+                state = "cancel_listener_text_isolated",
+                message = "Текстовый Agent Core выполняется без фонового микрофонного STOP",
+                details =
+                    "lane=agent_core; source=text; button_stop_available=true; " +
+                        "execution=${executionKernel.current()?.id.orEmpty()}"
+            )
+        }
 
         val worker =
             thread(
@@ -9998,6 +10228,18 @@ class AyanaVoiceService : Service() {
 
                 var finalSuccess =
                     true
+
+                // v12.8.2: Agent Core may explain or replan after a local action,
+                // but it cannot upgrade the latest failed semantic action to SUCCESS.
+                // A later successful semantic action replaces the older failure.
+                var finalTerminalStatus:
+                    String? = null
+
+                var lastSemanticActionTool =
+                    ""
+
+                var lastSemanticActionResult:
+                    JSONObject? = null
 
                 // v12.7: create_artifact is a locally verified terminal tool. Once it
                 // returns, a second Agent Core turn is unnecessary and would create a
@@ -10209,6 +10451,50 @@ class AyanaVoiceService : Service() {
                                     ) ==
                                 "success"
 
+
+                            val semanticFailure =
+                                lastSemanticActionResult
+                                    ?.takeIf {
+                                        !isSemanticActionResultVerified(
+                                            it
+                                        )
+                                    }
+
+                            if (semanticFailure != null) {
+                                finalSuccess =
+                                    false
+
+                                finalTerminalStatus =
+                                    semanticActionFailureTerminalStatus(
+                                        semanticFailure
+                                    )
+
+                                finalAnswer =
+                                    semanticFailure
+                                        .optString(
+                                            "message"
+                                        )
+                                        .trim()
+                                        .ifBlank {
+                                            "Локальное действие ${lastSemanticActionTool.ifBlank { "Android" }} не подтверждено; AYANA не будет объявлять задачу выполненной."
+                                        }
+
+                                commandHistoryStore.addEvent(
+                                    activeCommandHistoryId,
+                                    state = "terminal_truth_guard",
+                                    message = "Agent Core terminal сверён с локальным результатом действия",
+                                    details =
+                                        (
+                                            "tool=$lastSemanticActionTool; " +
+                                                "local_success=${semanticFailure.optBoolean("success", false)}; " +
+                                                "local_verified=${semanticFailure.optBoolean("verified", false)}; " +
+                                                "local_status=${semanticFailure.optString("status")}; " +
+                                                "local_terminal=${semanticFailure.optString("terminal_status")}; " +
+                                                "effective_terminal=${finalTerminalStatus ?: "ERROR"}"
+                                            ).take(900)
+                                )
+                            }
+
                             break
                         }
 
@@ -10233,6 +10519,50 @@ class AyanaVoiceService : Service() {
                                     .ifBlank {
                                         "Готово."
                                     }
+
+
+                            val semanticFailure =
+                                lastSemanticActionResult
+                                    ?.takeIf {
+                                        !isSemanticActionResultVerified(
+                                            it
+                                        )
+                                    }
+
+                            if (semanticFailure != null) {
+                                finalSuccess =
+                                    false
+
+                                finalTerminalStatus =
+                                    semanticActionFailureTerminalStatus(
+                                        semanticFailure
+                                    )
+
+                                finalAnswer =
+                                    semanticFailure
+                                        .optString(
+                                            "message"
+                                        )
+                                        .trim()
+                                        .ifBlank {
+                                            "Локальное действие ${lastSemanticActionTool.ifBlank { "Android" }} не подтверждено; AYANA не будет объявлять задачу выполненной."
+                                        }
+
+                                commandHistoryStore.addEvent(
+                                    activeCommandHistoryId,
+                                    state = "terminal_truth_guard",
+                                    message = "Agent Core terminal сверён с локальным результатом действия",
+                                    details =
+                                        (
+                                            "tool=$lastSemanticActionTool; " +
+                                                "local_success=${semanticFailure.optBoolean("success", false)}; " +
+                                                "local_verified=${semanticFailure.optBoolean("verified", false)}; " +
+                                                "local_status=${semanticFailure.optString("status")}; " +
+                                                "local_terminal=${semanticFailure.optString("terminal_status")}; " +
+                                                "effective_terminal=${finalTerminalStatus ?: "ERROR"}"
+                                            ).take(900)
+                                )
+                            }
 
                             break
                         }
@@ -10621,6 +10951,20 @@ class AyanaVoiceService : Service() {
                                 message = toolName,
                                 details = result.toString()
                             )
+
+                            if (
+                                isSemanticActionTruthTool(
+                                    toolName
+                                )
+                            ) {
+                                lastSemanticActionTool =
+                                    toolName
+
+                                lastSemanticActionResult =
+                                    JSONObject(
+                                        result.toString()
+                                    )
+                            }
 
                             if (
                                 currentDurableGoalId !=
@@ -11859,7 +12203,9 @@ class AyanaVoiceService : Service() {
                             answer,
                             silent,
                             success =
-                                finalSuccess
+                                finalSuccess,
+                            terminalStatus =
+                                finalTerminalStatus
                         )
                     }
                 }
@@ -15475,6 +15821,66 @@ class AyanaVoiceService : Service() {
                 "Выполняю действие…"
         }
     }
+
+    private fun isSemanticActionTruthTool(
+        name: String
+    ): Boolean =
+        name in
+            setOf(
+                "click_text",
+                "click_screen_element",
+                "input_screen_text",
+                "scroll_screen",
+                "tap_screen_coordinates"
+            )
+
+    private fun isSemanticActionResultVerified(
+        result: JSONObject
+    ): Boolean {
+
+        if (
+            !result.optBoolean(
+                "success",
+                false
+            )
+        ) {
+            return false
+        }
+
+        // New semantic tools carry explicit `verified`. Keep compatibility with
+        // any legacy local result that only exposes factual success.
+        return !result.has(
+            "verified"
+        ) ||
+            result.optBoolean(
+                "verified",
+                false
+            )
+    }
+
+    private fun semanticActionFailureTerminalStatus(
+        result: JSONObject
+    ): String? =
+        when (
+            result
+                .optString(
+                    "terminal_status"
+                )
+                .uppercase(
+                    Locale.ROOT
+                )
+        ) {
+            "BLOCKED" ->
+                AyanaCommandHistoryStore.STATUS_BLOCKED
+
+            "UNSUPPORTED" ->
+                AyanaCommandHistoryStore.STATUS_UNSUPPORTED
+
+            // ERROR remains the default when success=false and no explicit
+            // non-error terminal class applies.
+            else ->
+                null
+        }
 
     private fun executeAgentTool(
         name: String,
