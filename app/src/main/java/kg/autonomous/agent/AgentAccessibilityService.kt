@@ -20,9 +20,13 @@ import kotlin.math.max
 class AgentAccessibilityService :
     AccessibilityService() {
 
-    // AYANA Accessibility v6.1 — UNIVERSAL FOREGROUND PERCEPTION + VERIFIED VIEWPORT TRUTH.
-    // v6.1 preserves the v6.0/v5.9/v5.8 ban on position-only Recents gestures and adds
-    // bounded exact-window semantic recovery for sparse foreground application roots.
+    // AYANA Accessibility v6.2 — OWN-APP EVENT PERCEPTION + VERIFIED VIEWPORT TRUTH.
+    // v6.2 preserves the v6.1/v6.0/v5.9/v5.8 execution truth and fixes a self-package
+    // perception regression: MainActivity Accessibility events are admitted only when
+    // they belong to the live TYPE_APPLICATION window, while Orb/overlay events remain
+    // excluded. Structural MainActivity events may contribute one bounded descendant
+    // snapshot to the exact same window, enabling semantic click/input without allowing
+    // overlays to steal foreground identity.
     // v6.0 adds verified
     // viewport scroll fallback while retaining the device-proven Samsung One UI identity path:
     // a visible One UI Home :id/taskview whose contentDescription exactly equals the app label is the task card.
@@ -154,6 +158,10 @@ class AgentAccessibilityService :
         0L
 
     @Volatile
+    private var lastOwnAppStructuralRecoveryAt =
+        0L
+
+    @Volatile
     private var lastSettingsSnapshotRecoveryAt =
         0L
 
@@ -217,11 +225,14 @@ class AgentAccessibilityService :
                 ?.toString()
                 .orEmpty()
 
-        // AYANA's own floating Orb is a TYPE_APPLICATION_OVERLAY surface. Its
-        // visual/state updates must never steal foreground-window recency from
-        // the app the user is actually controlling. MainActivity still remains
-        // fully readable/actionable through the live focused window root.
-        if (eventPackage == packageName) {
+        // AYANA owns both the real MainActivity window and floating overlay surfaces.
+        // Never drop the whole package: that made AYANA blind to its own UI. Admit only
+        // events proven to belong to the live foreground TYPE_APPLICATION window; keep
+        // Orb/overlay/background self-events out so they cannot steal foreground recency.
+        if (
+            eventPackage == packageName &&
+            !isOwnForegroundApplicationEvent(event)
+        ) {
             pruneEventEvidence()
             return
         }
@@ -4997,10 +5008,20 @@ class AgentAccessibilityService :
                 ?.toString()
                 .orEmpty()
 
+        if (eventPackage.isBlank()) {
+            pruneEventEvidence(
+                now
+            )
+            return
+        }
+
+        val ownForegroundApplicationEvent =
+            eventPackage == packageName &&
+                isOwnForegroundApplicationEvent(event)
+
         if (
-            eventPackage.isBlank() ||
-            eventPackage ==
-                packageName
+            eventPackage == packageName &&
+            !ownForegroundApplicationEvent
         ) {
             pruneEventEvidence(
                 now
@@ -5032,9 +5053,23 @@ class AgentAccessibilityService :
                     now = now
                 )
 
-            if (settingsRecovery) {
-                lastSettingsStructuralRecoveryAt =
-                    now
+            val ownAppRecovery =
+                ownForegroundApplicationEvent &&
+                    shouldCaptureOwnAppStructuralRecovery(
+                        eventType = event.eventType,
+                        now = now
+                    )
+
+            if (settingsRecovery || ownAppRecovery) {
+                if (settingsRecovery) {
+                    lastSettingsStructuralRecoveryAt =
+                        now
+                }
+
+                if (ownAppRecovery) {
+                    lastOwnAppStructuralRecoveryAt =
+                        now
+                }
 
                 val recoveryRoot =
                     try {
@@ -5049,11 +5084,28 @@ class AgentAccessibilityService :
                     try {
                         snapshotEventTree(
                             root = recoveryRoot,
-                            maxNodes = SETTINGS_EVENT_RECOVERY_NODE_LIMIT,
-                            maxChars = SETTINGS_EVENT_RECOVERY_CHAR_LIMIT
+                            maxNodes =
+                                if (ownAppRecovery) {
+                                    OWN_APP_EVENT_RECOVERY_NODE_LIMIT
+                                } else {
+                                    SETTINGS_EVENT_RECOVERY_NODE_LIMIT
+                                },
+                            maxChars =
+                                if (ownAppRecovery) {
+                                    OWN_APP_EVENT_RECOVERY_CHAR_LIMIT
+                                } else {
+                                    SETTINGS_EVENT_RECOVERY_CHAR_LIMIT
+                                }
                         )
                     } catch (_: Exception) {
                         JSONArray()
+                    }
+
+                val evidenceSource =
+                    if (ownAppRecovery) {
+                        "own_app_structural_recovery"
+                    } else {
+                        "settings_structural_recovery"
                     }
 
                 for (index in 0 until recoveredNodes.length()) {
@@ -5064,7 +5116,7 @@ class AgentAccessibilityService :
                                 JSONObject(node.toString())
                                     .put(
                                         "evidence_source",
-                                        "settings_structural_recovery"
+                                        evidenceSource
                                     )
                             )
                         }
@@ -5241,6 +5293,142 @@ class AgentAccessibilityService :
         }
     }
 
+
+    private fun isOwnForegroundApplicationEvent(
+        event: AccessibilityEvent
+    ): Boolean {
+
+        if (
+            event.packageName
+                ?.toString()
+                .orEmpty() !=
+            packageName
+        ) {
+            return false
+        }
+
+        val eventWindowId =
+            try {
+                event.windowId
+            } catch (_: Exception) {
+                -1
+            }
+
+        val matchingWindow =
+            try {
+                windows.firstOrNull { window ->
+                    eventWindowId >= 0 &&
+                        window.id == eventWindowId
+                }
+            } catch (_: Exception) {
+                null
+            }
+
+        if (matchingWindow != null) {
+            val type =
+                try { matchingWindow.type } catch (_: Exception) { -1 }
+
+            if (
+                type == AccessibilityWindowInfo.TYPE_ACCESSIBILITY_OVERLAY ||
+                type == AccessibilityWindowInfo.TYPE_INPUT_METHOD
+            ) {
+                return false
+            }
+
+            if (type != AccessibilityWindowInfo.TYPE_APPLICATION) {
+                return false
+            }
+
+            val active =
+                try { matchingWindow.isActive } catch (_: Exception) { false }
+
+            val focused =
+                try { matchingWindow.isFocused } catch (_: Exception) { false }
+
+            if (!active && !focused) {
+                return false
+            }
+
+            val rootPackage =
+                try {
+                    matchingWindow.root
+                        ?.packageName
+                        ?.toString()
+                        .orEmpty()
+                } catch (_: Exception) {
+                    ""
+                }
+
+            return rootPackage.isBlank() ||
+                rootPackage == packageName
+        }
+
+        // Very short transition fallback: allow a self event only when its source
+        // itself belongs to AYANA and occupies a substantial application-sized area.
+        // Small overlay-like sources remain excluded.
+        val source =
+            try { event.source } catch (_: Exception) { null }
+                ?: return false
+
+        if (
+            source.packageName
+                ?.toString()
+                .orEmpty() !=
+            packageName
+        ) {
+            return false
+        }
+
+        val bounds = Rect()
+        try {
+            highestUsableEventRoot(source)
+                .getBoundsInScreen(bounds)
+        } catch (_: Exception) {
+            try {
+                source.getBoundsInScreen(bounds)
+            } catch (_: Exception) {
+                return false
+            }
+        }
+
+        val screenArea =
+            resources.displayMetrics.widthPixels
+                .coerceAtLeast(1)
+                .toLong() *
+                resources.displayMetrics.heightPixels
+                    .coerceAtLeast(1)
+                    .toLong()
+
+        val area =
+            bounds.width().coerceAtLeast(0).toLong() *
+                bounds.height().coerceAtLeast(0).toLong()
+
+        return area > 0L &&
+            area.toDouble() / screenArea.toDouble() >=
+                OWN_APP_MIN_APPLICATION_AREA_RATIO
+    }
+
+    private fun shouldCaptureOwnAppStructuralRecovery(
+        eventType: Int,
+        now: Long
+    ): Boolean {
+
+        val structural =
+            eventType == AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED ||
+                eventType == AccessibilityEvent.TYPE_WINDOWS_CHANGED ||
+                eventType == AccessibilityEvent.TYPE_WINDOW_CONTENT_CHANGED ||
+                eventType == AccessibilityEvent.TYPE_VIEW_SCROLLED ||
+                eventType == AccessibilityEvent.TYPE_VIEW_CLICKED ||
+                eventType == AccessibilityEvent.TYPE_VIEW_FOCUSED
+
+        if (!structural) {
+            return false
+        }
+
+        return now -
+            lastOwnAppStructuralRecoveryAt >=
+            OWN_APP_EVENT_RECOVERY_THROTTLE_MS
+    }
 
     private fun shouldCaptureSettingsStructuralRecovery(
         eventPackage: String,
@@ -6658,12 +6846,16 @@ class AgentAccessibilityService :
                     .filter { evidence ->
                         val age = now - evidence.at
 
-                        val ownOnDemandRecovery =
+                        val ownApplicationEvidence =
                             evidence.packageName == packageName &&
-                                evidence.origin ==
-                                    "foreground_on_demand_prefetch" &&
                                 evidence.windowId >= 0 &&
-                                evidence.windowId in ownRecoveryWindowIds
+                                evidence.windowId in ownRecoveryWindowIds &&
+                                evidence.origin in
+                                    setOf(
+                                        "accessibility_event",
+                                        "own_app_structural_recovery",
+                                        "foreground_on_demand_prefetch"
+                                    )
 
                         val externalEvidence =
                             evidence.packageName != packageName
@@ -6671,7 +6863,7 @@ class AgentAccessibilityService :
                         age <= EVENT_EVIDENCE_TTL_MS &&
                             (
                                 externalEvidence ||
-                                    ownOnDemandRecovery
+                                    ownApplicationEvidence
                                 ) &&
                             (
                                 (evidence.windowId >= 0 && evidence.windowId in liveIds) ||
@@ -8435,6 +8627,9 @@ class AgentAccessibilityService :
         private const val OWN_OVERLAY_MAX_AREA_RATIO =
             0.20
 
+        private const val OWN_APP_MIN_APPLICATION_AREA_RATIO =
+            0.35
+
         private const val EVIDENCE_WINDOW_TYPE =
             -100
 
@@ -8476,6 +8671,15 @@ class AgentAccessibilityService :
 
         private const val FOREGROUND_SNAPSHOT_RECOVERY_CHAR_LIMIT =
             8200
+
+        private const val OWN_APP_EVENT_RECOVERY_THROTTLE_MS =
+            500L
+
+        private const val OWN_APP_EVENT_RECOVERY_NODE_LIMIT =
+            128
+
+        private const val OWN_APP_EVENT_RECOVERY_CHAR_LIMIT =
+            11000
 
         private const val SETTINGS_EVENT_RECOVERY_THROTTLE_MS =
             650L
