@@ -18,22 +18,17 @@ import kotlin.math.min
 import kotlin.math.sin
 
 /**
- * AYANA Core Visualizer v1.1 — PREMIUM ENERGY FIELD.
+ * AYANA Core Visualizer v1.2 â€” SIGNATURE ENERGY FIELD R3.
  *
- * Visual-only main-card renderer for AYANA v12.10.0.
+ * Visual-only renderer for the main AYANA card.
  *
- * Design goals:
- * 1) dense layered energy sphere instead of a small schematic nucleus;
- * 2) large custom AYANA neon wordmark in the visual center;
- * 3) full-width multi-layer waveform with glow and deterministic spectrum bars;
- * 4) concentric HUD rings, rotating broken arcs, energy filaments and particles;
- * 5) state-reactive color/motion without claiming measured microphone amplitude;
- * 6) no bitmap decoding, no random allocation, no accessibility semantics;
- * 7) shaders rebuilt only on size/state change; reusable Paths/Paints per frame.
- *
- * IMPORTANT TRUTH CONTRACT:
- * The waveform is a state visualization. It is NOT presented as a factual audio
- * meter until AYANA exposes a separately verified amplitude stream.
+ * R3 goals:
+ * - restore the strong visual density and large AYANA signature of the pre-R2 UI;
+ * - keep the cleaner cyan / blue / violet premium identity from the approved references;
+ * - use one dominant circular energy field, not a thin wireframe diagram;
+ * - make the horizontal waveform visually important and span the whole panel;
+ * - keep the renderer deterministic, allocation-light and independent from Accessibility;
+ * - never present the synthetic waveform as measured microphone amplitude.
  */
 class AyanaCoreVisualizer(
     context: Context
@@ -42,55 +37,31 @@ class AyanaCoreVisualizer(
     private val density =
         resources.displayMetrics.density
 
-    private val ambientPaint =
-        Paint(Paint.ANTI_ALIAS_FLAG)
-
-    private val auraPaint =
-        Paint(Paint.ANTI_ALIAS_FLAG)
-
-    private val corePaint =
+    private val fillPaint =
         Paint(Paint.ANTI_ALIAS_FLAG)
 
     private val ringPaint =
         Paint(Paint.ANTI_ALIAS_FLAG).apply {
             style = Paint.Style.STROKE
             strokeCap = Paint.Cap.ROUND
+            strokeJoin = Paint.Join.ROUND
         }
 
-    private val finePaint =
-        Paint(Paint.ANTI_ALIAS_FLAG).apply {
-            style = Paint.Style.STROKE
-            strokeCap = Paint.Cap.ROUND
-        }
-
-    private val waveGlowPaint =
+    private val glowPaint =
         Paint(Paint.ANTI_ALIAS_FLAG).apply {
             style = Paint.Style.STROKE
             strokeCap = Paint.Cap.ROUND
             strokeJoin = Paint.Join.ROUND
         }
+
+    private val particlePaint =
+        Paint(Paint.ANTI_ALIAS_FLAG)
 
     private val wavePaint =
         Paint(Paint.ANTI_ALIAS_FLAG).apply {
             style = Paint.Style.STROKE
             strokeCap = Paint.Cap.ROUND
             strokeJoin = Paint.Join.ROUND
-        }
-
-    private val spectrumPaint =
-        Paint(Paint.ANTI_ALIAS_FLAG).apply {
-            style = Paint.Style.STROKE
-            strokeCap = Paint.Cap.ROUND
-        }
-
-    private val particlePaint =
-        Paint(Paint.ANTI_ALIAS_FLAG)
-
-    private val wordmarkGlowPaint =
-        Paint(Paint.ANTI_ALIAS_FLAG).apply {
-            style = Paint.Style.STROKE
-            strokeCap = Paint.Cap.SQUARE
-            strokeJoin = Paint.Join.MITER
         }
 
     private val wordmarkPaint =
@@ -100,32 +71,27 @@ class AyanaCoreVisualizer(
             strokeJoin = Paint.Join.MITER
         }
 
-    private val primaryWavePath =
+    private val wordmarkGlowPaint =
+        Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            style = Paint.Style.STROKE
+            strokeCap = Paint.Cap.ROUND
+            strokeJoin = Paint.Join.ROUND
+        }
+
+    private val mainWavePath =
         Path()
 
-    private val secondaryWavePath =
+    private val fineWavePath =
         Path()
 
-    private val tertiaryWavePath =
+    private val energyPath =
         Path()
 
-    private val orbitBounds =
+    private val bounds =
         RectF()
 
-    private var ambientShader:
-        RadialGradient? = null
-
-    private var auraShader:
-        RadialGradient? = null
-
-    private var coreShader:
-        RadialGradient? = null
-
-    private var waveShader:
-        LinearGradient? = null
-
-    private var wordmarkShader:
-        LinearGradient? = null
+    private var attached =
+        false
 
     private var shaderWidth =
         -1
@@ -136,54 +102,31 @@ class AyanaCoreVisualizer(
     private var shaderState =
         ""
 
-    private var attached =
-        false
+    private var ambientShader:
+        RadialGradient? = null
 
-    private val scaffoldRadii =
-        floatArrayOf(
-            0.56f,
-            0.68f,
-            0.80f,
-            0.91f,
-            1.00f
-        )
+    private var nucleusShader:
+        RadialGradient? = null
 
-    private val wordmarkWidths =
-        floatArrayOf(
-            0.17f,
-            0.15f,
-            0.17f,
-            0.18f,
-            0.17f
-        )
+    private var coreHaloShader:
+        RadialGradient? = null
 
-    private val wordmarkWidthSum =
-        0.84f
+    private var horizontalShader:
+        LinearGradient? = null
 
-    private var activePalette =
+    private var palette =
         Palette(
-            primary = Color.parseColor("#22D3EE"),
-            secondary = Color.parseColor("#8B5CF6"),
-            deep = Color.parseColor("#2563EB"),
-            pale = Color.parseColor("#E6FBFF")
+            cyan = Color.parseColor("#27E8FF"),
+            blue = Color.parseColor("#2388FF"),
+            violet = Color.parseColor("#A14CFF"),
+            white = Color.parseColor("#F3FDFF"),
+            deep = Color.parseColor("#091331")
         )
-
-    private var activeMotion =
-        Motion(
-            outerCycleMs = 9200f,
-            middleCycleMs = 11200f,
-            innerCycleMs = 7600f,
-            waveDivisor = 270.0,
-            particleDivisor = 1280.0,
-            breatheDivisor = 520.0
-        )
-
-    private var activeEnergy =
-        0.72f
 
     init {
         importantForAccessibility =
             View.IMPORTANT_FOR_ACCESSIBILITY_NO
+
         isFocusable = false
         isClickable = false
     }
@@ -218,8 +161,10 @@ class AyanaCoreVisualizer(
             oldw,
             oldh
         )
+
         shaderWidth = -1
         shaderHeight = -1
+
         rebuildShaders(
             AyanaVoiceService.currentStatusState
         )
@@ -263,214 +208,215 @@ class AyanaCoreVisualizer(
                 height.toFloat()
             )
 
-        val palette =
-            activePalette
-
-        val motion =
-            activeMotion
-
-        val energy =
-            activeEnergy
-
-        val outerRadius =
+        // The circular body intentionally occupies most of the panel height.
+        val radius =
             minSide * 0.455f
-
-        val phaseFast =
-            continuousAngle(
-                now,
-                motion.outerCycleMs,
-                1f,
-                false
-            )
-
-        val phaseReverse =
-            continuousAngle(
-                now,
-                motion.middleCycleMs,
-                1f,
-                true
-            )
-
-        val phaseSlow =
-            continuousAngle(
-                now,
-                motion.innerCycleMs,
-                1f,
-                false
-            )
 
         val breathe =
             (
-                sin(
-                    now / motion.breatheDivisor
-                ) *
-                    0.5 +
-                    0.5
+                0.5 +
+                    0.5 *
+                    sin(
+                        now / 620.0
+                    )
                 )
                 .toFloat()
 
-        // Deep ambient field — fills the visual panel instead of leaving a
-        // small isolated symbol floating in a large black rectangle.
-        ambientPaint.alpha =
-            230
+        val outerPhase =
+            continuousAngle(
+                now,
+                cycleMs = 11800f,
+                reverse = false
+            )
+
+        val reversePhase =
+            continuousAngle(
+                now,
+                cycleMs = 15300f,
+                reverse = true
+            )
+
+        val innerPhase =
+            continuousAngle(
+                now,
+                cycleMs = 8400f,
+                reverse = false
+            )
+
+        // 1. Deep energy ambience: no tiny isolated nucleus.
+        fillPaint.shader =
+            ambientShader
+        fillPaint.alpha =
+            238
         canvas.drawCircle(
             cx,
             cy,
-            minSide * 0.73f,
-            ambientPaint
+            radius * 1.32f,
+            fillPaint
         )
 
-        auraPaint.alpha =
-            (
-                165 +
-                    40 *
-                    breathe
-                )
-                .toInt()
-                .coerceIn(0, 255)
+        fillPaint.shader =
+            coreHaloShader
+        fillPaint.alpha =
+            220
         canvas.drawCircle(
             cx,
             cy,
-            outerRadius *
+            radius *
                 (
-                    0.79f +
-                        energy *
-                        0.04f
+                    0.92f +
+                        breathe * 0.025f
                     ),
-            auraPaint
+            fillPaint
         )
 
-        // Faint geometric scaffold.
-        drawHudScaffold(
-            canvas = canvas,
-            cx = cx,
-            cy = cy,
-            outerRadius = outerRadius,
-            phaseFast = phaseFast,
-            phaseReverse = phaseReverse,
-            palette = palette
+        // 2. Signature outer energy rings with broad glow passes.
+        drawSignatureRing(
+            canvas,
+            cx,
+            cy,
+            radius * 0.99f,
+            outerPhase + 8f,
+            palette.cyan,
+            222,
+            2.1f
         )
 
-        // Dense spherical energy filaments inspired by the approved AYANA
-        // references. Ellipses are intentionally layered at different tilts.
-        drawEnergyFilaments(
-            canvas = canvas,
-            cx = cx,
-            cy = cy,
-            outerRadius = outerRadius,
-            phaseFast = phaseFast,
-            phaseReverse = phaseReverse,
-            phaseSlow = phaseSlow,
-            palette = palette,
-            energy = energy
+        drawSignatureRing(
+            canvas,
+            cx,
+            cy,
+            radius * 0.91f,
+            reversePhase + 92f,
+            palette.violet,
+            188,
+            1.7f
         )
 
-        // Full-width luminous sound-energy rail. Drawn before the wordmark so
-        // AYANA remains clearly readable above it.
+        drawSignatureRing(
+            canvas,
+            cx,
+            cy,
+            radius * 0.78f,
+            innerPhase + 176f,
+            palette.white,
+            142,
+            1.15f
+        )
+
+        // 3. Dense but controlled plasma petals. Three broad families are
+        // enough for depth; avoiding the R2 tangle of many thin ellipses.
+        drawPlasmaPetal(
+            canvas,
+            cx,
+            cy,
+            radius * 0.76f,
+            outerPhase,
+            tilt = -28f,
+            color = palette.cyan,
+            alpha = 125,
+            widthDp = 1.55f
+        )
+
+        drawPlasmaPetal(
+            canvas,
+            cx,
+            cy,
+            radius * 0.74f,
+            reversePhase + 73f,
+            tilt = 28f,
+            color = palette.violet,
+            alpha = 112,
+            widthDp = 1.45f
+        )
+
+        drawPlasmaPetal(
+            canvas,
+            cx,
+            cy,
+            radius * 0.68f,
+            innerPhase + 141f,
+            tilt = 78f,
+            color = palette.blue,
+            alpha = 104,
+            widthDp = 1.15f
+        )
+
+        // 4. Spark ring / digital particle halo.
+        drawParticleHalo(
+            canvas,
+            now,
+            cx,
+            cy,
+            radius
+        )
+
+        // 5. Central nucleus sits behind the wordmark and waveform.
+        fillPaint.shader =
+            nucleusShader
+        fillPaint.alpha =
+            255
+        canvas.drawCircle(
+            cx,
+            cy,
+            radius *
+                (
+                    0.47f +
+                        breathe * 0.015f
+                    ),
+            fillPaint
+        )
+
+        drawInnerLensRings(
+            canvas,
+            cx,
+            cy,
+            radius,
+            innerPhase,
+            reversePhase
+        )
+
+        // 6. Full-width signature waveform, visually stronger than R2.
         drawWaveform(
-            canvas = canvas,
-            now = now,
-            cx = cx,
-            cy = cy,
-            palette = palette,
-            motion = motion,
-            energy = energy
-        )
-
-        drawParticles(
-            canvas = canvas,
-            now = now,
-            cx = cx,
-            cy = cy,
-            outerRadius = outerRadius,
-            palette = palette,
-            motion = motion
-        )
-
-        // Large inner luminous nucleus with glass-like boundary rings.
-        corePaint.alpha =
-            250
-        canvas.drawCircle(
+            canvas,
+            now,
             cx,
             cy,
-            outerRadius *
-                (
-                    0.39f +
-                        energy *
-                        0.018f *
-                        breathe
-                    ),
-            corePaint
+            radius
         )
 
-        finePaint.shader = null
-        finePaint.color =
-            withAlpha(
-                palette.pale,
-                148
-            )
-        finePaint.strokeWidth =
-            dp(0.78f)
-        canvas.drawCircle(
-            cx,
-            cy,
-            outerRadius * 0.315f,
-            finePaint
-        )
-
-        finePaint.color =
-            withAlpha(
-                palette.primary,
-                126
-            )
-        finePaint.strokeWidth =
-            dp(0.66f)
-        canvas.drawCircle(
-            cx,
-            cy,
-            outerRadius * 0.455f,
-            finePaint
-        )
-
-        // Custom vector AYANA wordmark: no font dependency and visually much
-        // closer to the approved crossbar-less A reference.
+        // 7. Large AYANA signature. This is intentionally dominant and much
+        // closer to the previous successful composition and the references.
         drawAyanaWordmark(
-            canvas = canvas,
-            cx = cx,
-            cy = cy,
-            outerRadius = outerRadius,
-            energy = energy
+            canvas,
+            cx,
+            cy,
+            radius
         )
 
-        // Four small star flares give the energy field photographic depth
-        // without using blur/shadow software layers.
+        // 8. Optical flares for premium depth.
         drawStarFlare(
             canvas,
-            cx - outerRadius * 0.53f,
-            cy - outerRadius * 0.52f,
-            palette.pale,
-            0.95f
+            cx - radius * 0.58f,
+            cy - radius * 0.46f,
+            palette.white,
+            1.10f
         )
+
         drawStarFlare(
             canvas,
-            cx + outerRadius * 0.45f,
-            cy - outerRadius * 0.62f,
-            palette.secondary,
-            0.78f
+            cx + radius * 0.54f,
+            cy - radius * 0.63f,
+            palette.violet,
+            0.86f
         )
+
         drawStarFlare(
             canvas,
-            cx - outerRadius * 0.28f,
-            cy + outerRadius * 0.72f,
-            palette.primary,
-            0.68f
-        )
-        drawStarFlare(
-            canvas,
-            cx + outerRadius * 0.62f,
-            cy + outerRadius * 0.41f,
-            palette.pale,
-            0.60f
+            cx + radius * 0.68f,
+            cy + radius * 0.38f,
+            palette.cyan,
+            0.72f
         )
 
         if (attached) {
@@ -493,6 +439,7 @@ class AyanaCoreVisualizer(
         shaderWidth = width
         shaderHeight = height
         shaderState = state
+        palette = paletteFor(state)
 
         val cx =
             width / 2f
@@ -506,848 +453,299 @@ class AyanaCoreVisualizer(
                 height.toFloat()
             )
 
-        activePalette =
-            paletteFor(state)
-
-        activeMotion =
-            motionFor(state)
-
-        activeEnergy =
-            energyFor(state)
-
-        val palette =
-            activePalette
-
         ambientShader =
             RadialGradient(
                 cx,
                 cy,
-                minSide * 0.75f,
+                minSide * 0.71f,
                 intArrayOf(
-                    withAlpha(palette.primary, 60),
-                    withAlpha(palette.deep, 44),
-                    withAlpha(palette.secondary, 22),
-                    withAlpha(palette.primary, 7),
+                    withAlpha(palette.blue, 74),
+                    withAlpha(palette.violet, 48),
+                    withAlpha(palette.cyan, 24),
+                    withAlpha(palette.deep, 14),
                     Color.TRANSPARENT
                 ),
                 floatArrayOf(
                     0f,
-                    0.27f,
-                    0.54f,
+                    0.30f,
+                    0.56f,
                     0.80f,
                     1f
                 ),
                 Shader.TileMode.CLAMP
             )
 
-        auraShader =
+        coreHaloShader =
             RadialGradient(
                 cx,
                 cy,
-                minSide * 0.40f,
+                minSide * 0.43f,
                 intArrayOf(
-                    withAlpha(palette.pale, 40),
-                    withAlpha(palette.primary, 54),
-                    withAlpha(palette.secondary, 22),
+                    withAlpha(palette.white, 18),
+                    withAlpha(palette.cyan, 60),
+                    withAlpha(palette.blue, 52),
+                    withAlpha(palette.violet, 30),
                     Color.TRANSPARENT
                 ),
                 floatArrayOf(
                     0f,
-                    0.36f,
-                    0.70f,
+                    0.32f,
+                    0.58f,
+                    0.80f,
                     1f
                 ),
                 Shader.TileMode.CLAMP
             )
 
-        coreShader =
+        nucleusShader =
             RadialGradient(
                 cx - minSide * 0.035f,
-                cy - minSide * 0.045f,
-                minSide * 0.26f,
+                cy - minSide * 0.055f,
+                minSide * 0.27f,
                 intArrayOf(
                     Color.WHITE,
-                    withAlpha(palette.pale, 252),
-                    withAlpha(palette.primary, 242),
-                    withAlpha(palette.deep, 165),
-                    withAlpha(palette.secondary, 76),
+                    palette.white,
+                    palette.cyan,
+                    withAlpha(palette.blue, 226),
+                    withAlpha(palette.violet, 150),
                     Color.TRANSPARENT
                 ),
                 floatArrayOf(
                     0f,
-                    0.10f,
-                    0.29f,
-                    0.52f,
-                    0.78f,
+                    0.08f,
+                    0.24f,
+                    0.47f,
+                    0.72f,
                     1f
                 ),
                 Shader.TileMode.CLAMP
             )
 
-        waveShader =
+        horizontalShader =
             LinearGradient(
-                width * 0.05f,
+                width * 0.035f,
                 cy,
-                width * 0.95f,
+                width * 0.965f,
                 cy,
                 intArrayOf(
-                    withAlpha(palette.primary, 175),
-                    palette.pale,
-                    palette.primary,
-                    palette.secondary,
-                    withAlpha(palette.secondary, 180)
+                    withAlpha(palette.cyan, 170),
+                    palette.cyan,
+                    palette.white,
+                    palette.violet,
+                    withAlpha(palette.violet, 175)
                 ),
                 floatArrayOf(
                     0f,
-                    0.36f,
+                    0.26f,
                     0.50f,
-                    0.68f,
+                    0.77f,
                     1f
                 ),
                 Shader.TileMode.CLAMP
             )
-
-        wordmarkShader =
-            LinearGradient(
-                cx - minSide * 0.40f,
-                cy,
-                cx + minSide * 0.40f,
-                cy,
-                intArrayOf(
-                    palette.pale,
-                    palette.primary,
-                    Color.WHITE,
-                    palette.secondary,
-                    palette.pale
-                ),
-                floatArrayOf(
-                    0f,
-                    0.22f,
-                    0.50f,
-                    0.78f,
-                    1f
-                ),
-                Shader.TileMode.CLAMP
-            )
-
-        ambientPaint.shader =
-            ambientShader
-
-        auraPaint.shader =
-            auraShader
-
-        corePaint.shader =
-            coreShader
-
-        waveGlowPaint.shader =
-            waveShader
-
-        wavePaint.shader =
-            waveShader
-
-        spectrumPaint.shader =
-            waveShader
-
-        wordmarkGlowPaint.shader =
-            wordmarkShader
-
-        wordmarkPaint.shader =
-            wordmarkShader
     }
 
-    private fun drawHudScaffold(
+    private fun drawSignatureRing(
         canvas: Canvas,
         cx: Float,
         cy: Float,
-        outerRadius: Float,
-        phaseFast: Float,
-        phaseReverse: Float,
-        palette: Palette
+        radius: Float,
+        phase: Float,
+        color: Int,
+        alpha: Int,
+        widthDp: Float
     ) {
-        finePaint.shader = null
-
-        for (
-            index in
-            scaffoldRadii.indices
-        ) {
-            finePaint.color =
-                withAlpha(
-                    if (
-                        index % 2 == 0
-                    ) {
-                        palette.primary
-                    } else {
-                        palette.pale
-                    },
-                    34 +
-                        index *
-                        7
-                )
-
-            finePaint.strokeWidth =
-                dp(
-                    if (
-                        index ==
-                        scaffoldRadii.lastIndex
-                    ) {
-                        0.72f
-                    } else {
-                        0.52f
-                    }
-                )
-
-            canvas.drawCircle(
-                cx,
-                cy,
-                outerRadius *
-                    scaffoldRadii[index],
-                finePaint
-            )
-        }
-
-        // Broken outer arcs.
-        drawBrokenCircle(
-            canvas,
-            cx,
-            cy,
-            outerRadius * 0.985f,
-            phaseFast + 8f,
-            palette.primary,
-            178,
-            1.05f
+        bounds.set(
+            cx - radius,
+            cy - radius,
+            cx + radius,
+            cy + radius
         )
 
-        drawBrokenCircle(
-            canvas,
-            cx,
-            cy,
-            outerRadius * 0.885f,
-            phaseReverse + 37f,
-            palette.secondary,
-            128,
-            0.82f
-        )
-
-        drawBrokenCircle(
-            canvas,
-            cx,
-            cy,
-            outerRadius * 0.745f,
-            phaseFast * 0.72f + 112f,
-            palette.pale,
-            96,
-            0.64f
-        )
-
-        // 48 subtle radial HUD ticks around the outer ring.
-        ringPaint.shader = null
-        ringPaint.strokeCap =
-            Paint.Cap.ROUND
-
-        for (
-            i in
-            0 until 48
-        ) {
-            val angle =
-                Math.toRadians(
-                    (
-                        i *
-                            7.5f +
-                            phaseReverse *
-                            0.12f
-                        )
-                        .toDouble()
-                )
-
-            val longTick =
-                i % 6 == 0
-
-            val inner =
-                outerRadius *
-                    if (longTick) 0.955f else 0.972f
-
-            val outer =
-                outerRadius * 1.01f
-
-            val x1 =
-                cx +
-                    cos(angle)
-                        .toFloat() *
-                    inner
-
-            val y1 =
-                cy +
-                    sin(angle)
-                        .toFloat() *
-                    inner
-
-            val x2 =
-                cx +
-                    cos(angle)
-                        .toFloat() *
-                    outer
-
-            val y2 =
-                cy +
-                    sin(angle)
-                        .toFloat() *
-                    outer
-
-            ringPaint.color =
-                withAlpha(
-                    if (longTick) {
-                        palette.pale
-                    } else {
-                        palette.primary
-                    },
-                    if (longTick) 116 else 52
-                )
-
-            ringPaint.strokeWidth =
-                dp(
-                    if (longTick) 0.90f else 0.50f
-                )
-
-            canvas.drawLine(
-                x1,
-                y1,
-                x2,
-                y2,
-                ringPaint
-            )
-        }
-    }
-
-    private fun drawEnergyFilaments(
-        canvas: Canvas,
-        cx: Float,
-        cy: Float,
-        outerRadius: Float,
-        phaseFast: Float,
-        phaseReverse: Float,
-        phaseSlow: Float,
-        palette: Palette,
-        energy: Float
-    ) {
-        val baseAlpha =
-            (
-                92 +
-                    energy *
-                    66
-                )
+        // Broad glow pass.
+        glowPaint.shader = null
+        glowPaint.color = color
+        glowPaint.alpha =
+            (alpha * 0.20f)
                 .toInt()
-                .coerceIn(0, 180)
+                .coerceIn(0, 255)
+        glowPaint.strokeWidth =
+            dp(widthDp * 5.4f)
 
-        // Six rotating oval filaments create the spherical/petal energy body.
-        drawTiltedFilament(
-            canvas,
-            cx,
-            cy,
-            outerRadius * 0.73f,
-            outerRadius * 0.91f,
-            -54f,
-            phaseFast,
-            282f,
-            palette.primary,
-            baseAlpha,
-            1.10f
+        canvas.drawArc(
+            bounds,
+            phase,
+            116f,
+            false,
+            glowPaint
+        )
+        canvas.drawArc(
+            bounds,
+            phase + 176f,
+            72f,
+            false,
+            glowPaint
+        )
+        canvas.drawArc(
+            bounds,
+            phase + 282f,
+            38f,
+            false,
+            glowPaint
         )
 
-        drawTiltedFilament(
-            canvas,
-            cx,
-            cy,
-            outerRadius * 0.70f,
-            outerRadius * 0.94f,
-            -28f,
-            phaseReverse + 44f,
-            268f,
-            palette.secondary,
-            baseAlpha - 20,
-            0.90f
-        )
-
-        drawTiltedFilament(
-            canvas,
-            cx,
-            cy,
-            outerRadius * 0.66f,
-            outerRadius * 0.96f,
-            -7f,
-            phaseSlow + 97f,
-            292f,
-            palette.pale,
-            baseAlpha - 42,
-            0.72f
-        )
-
-        drawTiltedFilament(
-            canvas,
-            cx,
-            cy,
-            outerRadius * 0.69f,
-            outerRadius * 0.93f,
-            21f,
-            phaseFast + 131f,
-            255f,
-            palette.primary,
-            baseAlpha - 14,
-            0.96f
-        )
-
-        drawTiltedFilament(
-            canvas,
-            cx,
-            cy,
-            outerRadius * 0.72f,
-            outerRadius * 0.90f,
-            47f,
-            phaseReverse + 206f,
-            276f,
-            palette.secondary,
-            baseAlpha - 28,
-            0.82f
-        )
-
-        drawTiltedFilament(
-            canvas,
-            cx,
-            cy,
-            outerRadius * 0.63f,
-            outerRadius * 0.84f,
-            74f,
-            phaseSlow + 284f,
-            238f,
-            palette.pale,
-            baseAlpha - 52,
-            0.66f
-        )
-
-        // Two luminous inner rings make the center feel like a contained core.
         ringPaint.shader = null
-        orbitBounds.set(
-            cx - outerRadius * 0.54f,
-            cy - outerRadius * 0.54f,
-            cx + outerRadius * 0.54f,
-            cy + outerRadius * 0.54f
-        )
-
-        ringPaint.color =
-            withAlpha(
-                palette.primary,
-                142
-            )
+        ringPaint.color = color
+        ringPaint.alpha = alpha
         ringPaint.strokeWidth =
-            dp(1.22f)
+            dp(widthDp)
+
         canvas.drawArc(
-            orbitBounds,
-            phaseFast + 18f,
-            126f,
+            bounds,
+            phase,
+            116f,
             false,
             ringPaint
         )
         canvas.drawArc(
-            orbitBounds,
-            phaseFast + 205f,
-            78f,
+            bounds,
+            phase + 176f,
+            72f,
             false,
             ringPaint
         )
-
-        orbitBounds.set(
-            cx - outerRadius * 0.43f,
-            cy - outerRadius * 0.43f,
-            cx + outerRadius * 0.43f,
-            cy + outerRadius * 0.43f
-        )
-
-        ringPaint.color =
-            withAlpha(
-                palette.pale,
-                116
-            )
-        ringPaint.strokeWidth =
-            dp(0.80f)
         canvas.drawArc(
-            orbitBounds,
-            phaseReverse + 73f,
-            194f,
+            bounds,
+            phase + 282f,
+            38f,
             false,
             ringPaint
         )
     }
 
-    private fun drawWaveform(
+    private fun drawPlasmaPetal(
         canvas: Canvas,
-        now: Long,
         cx: Float,
         cy: Float,
-        palette: Palette,
-        motion: Motion,
-        energy: Float
+        radius: Float,
+        phase: Float,
+        tilt: Float,
+        color: Int,
+        alpha: Int,
+        widthDp: Float
     ) {
-        val left =
-            width * 0.035f
-
-        val right =
-            width * 0.965f
-
-        val span =
-            right - left
-
-        val phase =
-            now.toDouble() /
-                motion.waveDivisor
-
-        val maxAmplitude =
-            height *
-                (
-                    0.066f +
-                        energy *
-                        0.105f
-                    )
-
-        primaryWavePath.reset()
-        secondaryWavePath.reset()
-        tertiaryWavePath.reset()
+        energyPath.reset()
 
         val points =
-            112
+            96
+
+        val tiltRad =
+            Math.toRadians(
+                tilt.toDouble()
+            )
+
+        val cosTilt =
+            cos(tiltRad)
+                .toFloat()
+
+        val sinTilt =
+            sin(tiltRad)
+                .toFloat()
+
+        val phaseRad =
+            Math.toRadians(
+                phase.toDouble()
+            )
 
         for (
             i in
             0..points
         ) {
-            val p =
-                i.toFloat() /
-                    points.toFloat()
+            val t =
+                i.toDouble() /
+                    points.toDouble() *
+                    PI *
+                    2.0
 
-            val x =
-                left +
-                    span *
-                    p
-
-            val normalized =
-                (
-                    x -
-                        cx
-                    ) /
+            val radial =
+                radius *
                     (
-                        span *
-                            0.5f
-                        )
-
-            // Keep visible activity across the full rail, with stronger energy
-            // around the center and deterministic secondary peaks.
-            val centerEnvelope =
-                (
-                    1f -
-                        normalized *
-                            normalized
-                    )
-                    .coerceIn(
-                        0f,
-                        1f
-                    )
-
-            val distributed =
-                (
-                    0.38f +
-                        0.62f *
-                        centerEnvelope
-                    ) *
-                    (
-                        0.74f +
-                            0.26f *
-                            abs(
-                                sin(
-                                    p *
-                                        PI *
-                                        4.0 +
-                                        phase *
-                                        0.16
-                                )
+                        0.78f +
+                            0.18f *
+                            sin(
+                                t * 3.0 +
+                                    phaseRad
                             )
                                 .toFloat()
                         )
 
-            val primary =
-                (
-                    sin(
-                        phase +
-                            p *
-                            PI *
-                            11.6
-                    ) *
-                        0.48 +
-                        sin(
-                            phase *
-                                1.63 +
-                                p *
-                                PI *
-                                23.4
-                        ) *
-                        0.27 +
-                        sin(
-                            phase *
-                                0.71 -
-                                p *
-                                PI *
-                                6.8
-                        ) *
-                        0.25
-                    )
-                    .toFloat()
+            val rawX =
+                cos(t)
+                    .toFloat() *
+                    radial
 
-            val secondary =
-                (
-                    sin(
-                        phase *
-                            0.76 +
-                            p *
-                            PI *
-                            8.1
-                    ) *
-                        0.72 +
-                        sin(
-                            phase *
-                                1.34 +
-                                p *
-                                PI *
-                                16.3
-                        ) *
-                        0.28
-                    )
-                    .toFloat()
+            val rawY =
+                sin(t)
+                    .toFloat() *
+                    radial *
+                    0.78f
 
-            val tertiary =
-                sin(
-                    phase *
-                        1.11 -
-                        p *
-                        PI *
-                        13.7
-                )
-                    .toFloat()
+            val x =
+                cx +
+                    rawX * cosTilt -
+                    rawY * sinTilt
 
-            val y1 =
+            val y =
                 cy +
-                    primary *
-                    maxAmplitude *
-                    distributed
-
-            val y2 =
-                cy +
-                    secondary *
-                    maxAmplitude *
-                    distributed *
-                    0.58f
-
-            val y3 =
-                cy +
-                    tertiary *
-                    maxAmplitude *
-                    distributed *
-                    0.32f
+                    rawX * sinTilt +
+                    rawY * cosTilt
 
             if (i == 0) {
-                primaryWavePath.moveTo(
+                energyPath.moveTo(
                     x,
-                    y1
-                )
-                secondaryWavePath.moveTo(
-                    x,
-                    y2
-                )
-                tertiaryWavePath.moveTo(
-                    x,
-                    y3
+                    y
                 )
             } else {
-                primaryWavePath.lineTo(
+                energyPath.lineTo(
                     x,
-                    y1
-                )
-                secondaryWavePath.lineTo(
-                    x,
-                    y2
-                )
-                tertiaryWavePath.lineTo(
-                    x,
-                    y3
+                    y
                 )
             }
         }
 
-        // Soft spectrum bars behind the line make the rail feel like a real
-        // visualization while remaining explicitly synthetic/state-driven.
-        spectrumPaint.shader =
-            waveShader
-        spectrumPaint.alpha =
-            54
-        spectrumPaint.strokeWidth =
-            dp(0.62f)
-
-        val barCount =
-            70
-
-        for (
-            i in
-            0 until barCount
-        ) {
-            val p =
-                i.toFloat() /
-                    (
-                        barCount -
-                            1
-                        )
-
-            val x =
-                left +
-                    span *
-                    p
-
-            val normalized =
-                (
-                    x -
-                        cx
-                    ) /
-                    (
-                        span *
-                            0.5f
-                        )
-
-            val envelope =
-                (
-                    0.28f +
-                        0.72f *
-                        (
-                            1f -
-                                normalized *
-                                    normalized
-                            )
-                            .coerceIn(0f, 1f)
-                    )
-
-            val value =
-                abs(
-                    sin(
-                        phase *
-                            1.18 +
-                            i *
-                            0.73
-                    ) *
-                        0.64 +
-                        sin(
-                            phase *
-                                0.47 -
-                                i *
-                                1.37
-                        ) *
-                        0.36
-                )
-                    .toFloat()
-
-            val halfHeight =
-                maxAmplitude *
-                    envelope *
-                    (
-                        0.10f +
-                            value *
-                            0.54f
-                        )
-
-            canvas.drawLine(
-                x,
-                cy - halfHeight,
-                x,
-                cy + halfHeight,
-                spectrumPaint
-            )
-        }
-
-        // Wide low-alpha pass = glow, then crisp colored line.
-        waveGlowPaint.shader =
-            waveShader
-        waveGlowPaint.alpha =
-            48
-        waveGlowPaint.strokeWidth =
-            dp(6.2f)
+        glowPaint.shader = null
+        glowPaint.color = color
+        glowPaint.alpha =
+            (alpha * 0.18f)
+                .toInt()
+                .coerceIn(0, 255)
+        glowPaint.strokeWidth =
+            dp(widthDp * 5.0f)
         canvas.drawPath(
-            primaryWavePath,
-            waveGlowPaint
+            energyPath,
+            glowPaint
         )
 
-        waveGlowPaint.alpha =
-            34
-        waveGlowPaint.strokeWidth =
-            dp(3.8f)
+        ringPaint.shader = null
+        ringPaint.color = color
+        ringPaint.alpha = alpha
+        ringPaint.strokeWidth =
+            dp(widthDp)
         canvas.drawPath(
-            secondaryWavePath,
-            waveGlowPaint
-        )
-
-        wavePaint.shader =
-            waveShader
-        wavePaint.alpha =
-            238
-        wavePaint.strokeWidth =
-            dp(1.24f)
-        canvas.drawPath(
-            primaryWavePath,
-            wavePaint
-        )
-
-        wavePaint.alpha =
-            138
-        wavePaint.strokeWidth =
-            dp(0.82f)
-        canvas.drawPath(
-            secondaryWavePath,
-            wavePaint
-        )
-
-        wavePaint.alpha =
-            82
-        wavePaint.strokeWidth =
-            dp(0.62f)
-        canvas.drawPath(
-            tertiaryWavePath,
-            wavePaint
-        )
-
-        // Bright zero-axis rail.
-        wavePaint.shader =
-            null
-        wavePaint.color =
-            withAlpha(
-                palette.pale,
-                112
-            )
-        wavePaint.alpha =
-            112
-        wavePaint.strokeWidth =
-            dp(0.58f)
-        canvas.drawLine(
-            left,
-            cy,
-            right,
-            cy,
-            wavePaint
+            energyPath,
+            ringPaint
         )
     }
 
-    private fun drawParticles(
+    private fun drawParticleHalo(
         canvas: Canvas,
         now: Long,
         cx: Float,
         cy: Float,
-        outerRadius: Float,
-        palette: Palette,
-        motion: Motion
+        radius: Float
     ) {
         val count =
-            28
+            84
 
         for (
             i in
@@ -1361,225 +759,599 @@ class AyanaCoreVisualizer(
                 seed +
                     now.toDouble() /
                         (
-                            motion.particleDivisor +
-                                i *
-                                61.0
+                            5200.0 +
+                                i * 17.0
                             )
 
-            val radius =
-                outerRadius *
+            val band =
+                when (
+                    i % 4
+                ) {
+                    0 -> 0.88f
+                    1 -> 0.94f
+                    2 -> 1.01f
+                    else -> 1.07f
+                }
+
+            val jitter =
+                0.018f *
+                    sin(
+                        seed * 2.1 +
+                            now / 1100.0
+                    )
+                        .toFloat()
+
+            val r =
+                radius *
                     (
-                        0.47f +
-                            (
-                                i %
-                                    7
-                                ) *
-                            0.078f
+                        band +
+                            jitter
                         )
 
             val x =
                 cx +
                     cos(angle)
                         .toFloat() *
-                    radius
+                    r
 
             val y =
                 cy +
-                    sin(
-                        angle *
-                            1.07 +
-                            seed *
-                            0.37
-                    )
+                    sin(angle)
                         .toFloat() *
-                    radius *
-                    0.82f
+                    r * 0.92f
 
             val color =
                 when (
-                    i %
-                        4
-                    ) {
-                    0 ->
-                        palette.primary
-
-                    1 ->
-                        palette.secondary
-
-                    2 ->
-                        palette.pale
-
-                    else ->
-                        palette.deep
+                    i % 5
+                ) {
+                    0 -> palette.white
+                    1, 2 -> palette.cyan
+                    3 -> palette.blue
+                    else -> palette.violet
                 }
 
             val alpha =
-                92 +
-                    (
-                        i %
-                            5
-                        ) *
-                    25
+                60 +
+                    (i % 6) * 23
 
-            particlePaint.shader = null
-            particlePaint.color =
-                color
-            particlePaint.alpha =
-                alpha.coerceIn(0, 220)
-
-            val particleRadius =
+            val dot =
                 dp(
                     when {
-                        i % 11 == 0 -> 1.55f
-                        i % 5 == 0 -> 1.10f
-                        else -> 0.68f
+                        i % 19 == 0 -> 1.65f
+                        i % 7 == 0 -> 1.05f
+                        else -> 0.62f
                     }
                 )
+
+            particlePaint.shader = null
+            particlePaint.color = color
+            particlePaint.alpha =
+                alpha.coerceIn(0, 210)
 
             canvas.drawCircle(
                 x,
                 y,
-                particleRadius,
+                dot,
                 particlePaint
             )
 
             if (
-                i %
-                    11 ==
-                0
+                i % 19 == 0
             ) {
-                particlePaint.alpha =
-                    42
+                particlePaint.alpha = 34
                 canvas.drawCircle(
                     x,
                     y,
-                    particleRadius * 3.6f,
+                    dot * 4.2f,
                     particlePaint
                 )
             }
         }
     }
 
+    private fun drawInnerLensRings(
+        canvas: Canvas,
+        cx: Float,
+        cy: Float,
+        radius: Float,
+        phase: Float,
+        reversePhase: Float
+    ) {
+        val radii =
+            floatArrayOf(
+                0.33f,
+                0.45f,
+                0.57f,
+                0.66f
+            )
+
+        for (
+            i in
+            radii.indices
+        ) {
+            val r =
+                radius *
+                    radii[i]
+
+            ringPaint.shader = null
+            ringPaint.color =
+                when (
+                    i % 3
+                ) {
+                    0 -> palette.white
+                    1 -> palette.cyan
+                    else -> palette.violet
+                }
+
+            ringPaint.alpha =
+                66 +
+                    i * 18
+
+            ringPaint.strokeWidth =
+                dp(
+                    if (
+                        i == 0
+                    ) {
+                        1.0f
+                    } else {
+                        0.62f
+                    }
+                )
+
+            canvas.drawCircle(
+                cx,
+                cy,
+                r,
+                ringPaint
+            )
+        }
+
+        bounds.set(
+            cx - radius * 0.60f,
+            cy - radius * 0.60f,
+            cx + radius * 0.60f,
+            cy + radius * 0.60f
+        )
+
+        ringPaint.color =
+            palette.cyan
+        ringPaint.alpha = 184
+        ringPaint.strokeWidth =
+            dp(1.45f)
+
+        canvas.drawArc(
+            bounds,
+            phase + 20f,
+            78f,
+            false,
+            ringPaint
+        )
+
+        canvas.drawArc(
+            bounds,
+            phase + 204f,
+            45f,
+            false,
+            ringPaint
+        )
+
+        bounds.set(
+            cx - radius * 0.49f,
+            cy - radius * 0.49f,
+            cx + radius * 0.49f,
+            cy + radius * 0.49f
+        )
+
+        ringPaint.color =
+            palette.white
+        ringPaint.alpha = 112
+        ringPaint.strokeWidth =
+            dp(0.85f)
+
+        canvas.drawArc(
+            bounds,
+            reversePhase + 65f,
+            128f,
+            false,
+            ringPaint
+        )
+    }
+
+    private fun drawWaveform(
+        canvas: Canvas,
+        now: Long,
+        cx: Float,
+        cy: Float,
+        radius: Float
+    ) {
+        val left =
+            width * 0.025f
+
+        val right =
+            width * 0.975f
+
+        val span =
+            right - left
+
+        val phase =
+            now / 260.0
+
+        val maxAmplitude =
+            min(
+                height * 0.19f,
+                radius * 0.45f
+            )
+
+        mainWavePath.reset()
+        fineWavePath.reset()
+
+        val points =
+            128
+
+        for (
+            i in
+            0..points
+        ) {
+            val p =
+                i.toFloat() /
+                    points.toFloat()
+
+            val x =
+                left +
+                    span * p
+
+            val nx =
+                (
+                    x - cx
+                    ) /
+                    (
+                        span * 0.5f
+                        )
+
+            val center =
+                (
+                    1f -
+                        nx * nx
+                    )
+                    .coerceIn(0f, 1f)
+
+            // Strong center + meaningful side activity like the original UI.
+            val envelope =
+                0.28f +
+                    0.72f * center
+
+            val wave =
+                (
+                    sin(
+                        phase +
+                            p * PI * 12.0
+                    ) * 0.52 +
+                        sin(
+                            phase * 1.71 -
+                                p * PI * 24.0
+                        ) * 0.28 +
+                        sin(
+                            phase * 0.61 +
+                                p * PI * 5.2
+                        ) * 0.20
+                    )
+                    .toFloat()
+
+            val fine =
+                (
+                    sin(
+                        phase * 1.23 -
+                            p * PI * 18.4
+                    ) * 0.66 +
+                        sin(
+                            phase * 0.77 +
+                                p * PI * 7.4
+                        ) * 0.34
+                    )
+                    .toFloat()
+
+            val y =
+                cy +
+                    wave *
+                    maxAmplitude *
+                    envelope
+
+            val yFine =
+                cy +
+                    fine *
+                    maxAmplitude *
+                    envelope *
+                    0.42f
+
+            if (i == 0) {
+                mainWavePath.moveTo(x, y)
+                fineWavePath.moveTo(x, yFine)
+            } else {
+                mainWavePath.lineTo(x, y)
+                fineWavePath.lineTo(x, yFine)
+            }
+        }
+
+        // Dense central spectrum bars behind the waveform.
+        wavePaint.shader =
+            horizontalShader
+        wavePaint.alpha = 72
+        wavePaint.strokeWidth =
+            dp(0.74f)
+
+        val bars =
+            92
+
+        for (
+            i in
+            0 until bars
+        ) {
+            val p =
+                i.toFloat() /
+                    (bars - 1).toFloat()
+
+            val x =
+                left +
+                    span * p
+
+            val nx =
+                (
+                    x - cx
+                    ) /
+                    (
+                        span * 0.5f
+                        )
+
+            val envelope =
+                0.25f +
+                    0.75f *
+                    (
+                        1f -
+                            nx * nx
+                        )
+                        .coerceIn(0f, 1f)
+
+            val energy =
+                abs(
+                    sin(
+                        phase * 1.1 +
+                            i * 0.67
+                    ) * 0.62 +
+                        sin(
+                            phase * 0.49 -
+                                i * 1.21
+                        ) * 0.38
+                )
+                    .toFloat()
+
+            val half =
+                maxAmplitude *
+                    envelope *
+                    (
+                        0.08f +
+                            energy * 0.46f
+                        )
+
+            canvas.drawLine(
+                x,
+                cy - half,
+                x,
+                cy + half,
+                wavePaint
+            )
+        }
+
+        // White/cyan baseline.
+        wavePaint.shader = null
+        wavePaint.color =
+            palette.white
+        wavePaint.alpha = 110
+        wavePaint.strokeWidth =
+            dp(0.72f)
+        canvas.drawLine(
+            left,
+            cy,
+            right,
+            cy,
+            wavePaint
+        )
+
+        // Main neon glow.
+        glowPaint.shader =
+            horizontalShader
+        glowPaint.alpha = 48
+        glowPaint.strokeWidth =
+            dp(9.0f)
+        canvas.drawPath(
+            mainWavePath,
+            glowPaint
+        )
+
+        glowPaint.alpha = 74
+        glowPaint.strokeWidth =
+            dp(4.3f)
+        canvas.drawPath(
+            mainWavePath,
+            glowPaint
+        )
+
+        wavePaint.shader =
+            horizontalShader
+        wavePaint.alpha = 250
+        wavePaint.strokeWidth =
+            dp(1.72f)
+        canvas.drawPath(
+            mainWavePath,
+            wavePaint
+        )
+
+        wavePaint.alpha = 122
+        wavePaint.strokeWidth =
+            dp(0.82f)
+        canvas.drawPath(
+            fineWavePath,
+            wavePaint
+        )
+    }
+
     private fun drawAyanaWordmark(
         canvas: Canvas,
         cx: Float,
         cy: Float,
-        outerRadius: Float,
-        energy: Float
+        radius: Float
     ) {
+        // Wide signature: more like the previous good UI and the references.
         val totalWidth =
             min(
-                width * 0.54f,
-                outerRadius * 1.72f
+                width * 0.63f,
+                radius * 1.95f
             )
 
         val letterHeight =
             min(
-                height * 0.205f,
-                dp(54f)
+                height * 0.245f,
+                radius * 0.52f
             )
 
-        val top =
-            cy -
-                letterHeight *
-                0.50f
-
         val gap =
-            totalWidth * 0.035f
+            totalWidth * 0.040f
 
-        val usable =
-            totalWidth -
-                gap *
-                4f
+        val unit =
+            (
+                totalWidth -
+                    gap * 4f
+                ) /
+                5f
 
         val startX =
             cx -
-                totalWidth /
-                2f
+                totalWidth / 2f
+
+        val top =
+            cy -
+                letterHeight / 2f
+
+        val bottom =
+            cy +
+                letterHeight / 2f
 
         wordmarkGlowPaint.shader =
-            wordmarkShader
-        wordmarkGlowPaint.alpha =
-            (
-                54 +
-                    energy *
-                    26
-                )
-                .toInt()
-                .coerceIn(0, 92)
+            horizontalShader
+        wordmarkGlowPaint.alpha = 54
         wordmarkGlowPaint.strokeWidth =
-            dp(7.4f)
+            dp(13.0f)
 
         wordmarkPaint.shader =
-            wordmarkShader
-        wordmarkPaint.alpha =
-            252
+            horizontalShader
+        wordmarkPaint.alpha = 255
         wordmarkPaint.strokeWidth =
-            dp(2.25f)
+            dp(3.8f)
 
-        var x =
-            startX
-
-        for (
-            index in
-            wordmarkWidths.indices
-        ) {
-            val w =
-                usable *
-                    wordmarkWidths[index] /
-                    wordmarkWidthSum
-
-            drawLetter(
-                canvas,
-                index,
-                x,
-                top,
-                w,
-                letterHeight,
-                wordmarkGlowPaint
-            )
-
-            drawLetter(
-                canvas,
-                index,
-                x,
-                top,
-                w,
-                letterHeight,
-                wordmarkPaint
-            )
-
-            x +=
-                w +
-                    gap
-        }
-
-        // Faint center spark behind the wordmark.
-        particlePaint.shader = null
-        particlePaint.color =
-            Color.WHITE
-        particlePaint.alpha =
-            185
-        canvas.drawCircle(
-            cx,
-            cy,
-            dp(1.15f),
-            particlePaint
+        // A
+        drawA(
+            canvas,
+            startX,
+            top,
+            unit,
+            letterHeight,
+            wordmarkGlowPaint
+        )
+        drawA(
+            canvas,
+            startX,
+            top,
+            unit,
+            letterHeight,
+            wordmarkPaint
         )
 
-        particlePaint.alpha =
-            34
-        canvas.drawCircle(
-            cx,
-            cy,
-            dp(8.5f),
-            particlePaint
+        // Y
+        val yX =
+            startX +
+                (unit + gap)
+        drawY(
+            canvas,
+            yX,
+            top,
+            unit,
+            letterHeight,
+            wordmarkGlowPaint
+        )
+        drawY(
+            canvas,
+            yX,
+            top,
+            unit,
+            letterHeight,
+            wordmarkPaint
+        )
+
+        // A
+        val a2X =
+            startX +
+                (unit + gap) * 2f
+        drawA(
+            canvas,
+            a2X,
+            top,
+            unit,
+            letterHeight,
+            wordmarkGlowPaint
+        )
+        drawA(
+            canvas,
+            a2X,
+            top,
+            unit,
+            letterHeight,
+            wordmarkPaint
+        )
+
+        // N
+        val nX =
+            startX +
+                (unit + gap) * 3f
+        drawN(
+            canvas,
+            nX,
+            top,
+            bottom,
+            unit,
+            wordmarkGlowPaint
+        )
+        drawN(
+            canvas,
+            nX,
+            top,
+            bottom,
+            unit,
+            wordmarkPaint
+        )
+
+        // A
+        val a3X =
+            startX +
+                (unit + gap) * 4f
+        drawA(
+            canvas,
+            a3X,
+            top,
+            unit,
+            letterHeight,
+            wordmarkGlowPaint
+        )
+        drawA(
+            canvas,
+            a3X,
+            top,
+            unit,
+            letterHeight,
+            wordmarkPaint
         )
     }
 
-    private fun drawLetter(
+    private fun drawA(
         canvas: Canvas,
-        index: Int,
         x: Float,
         top: Float,
         width: Float,
@@ -1587,228 +1359,94 @@ class AyanaCoreVisualizer(
         paint: Paint
     ) {
         val bottom =
-            top +
-                height
+            top + height
 
-        val midY =
-            top +
-                height *
-                0.47f
+        val center =
+            x + width / 2f
 
-        when (index) {
-            // A — approved AYANA style uses a clean Λ-like form without a
-            // conventional horizontal crossbar.
-            0,
-            2,
-            4 -> {
-                canvas.drawLine(
-                    x,
-                    bottom,
-                    x + width * 0.50f,
-                    top,
-                    paint
-                )
-                canvas.drawLine(
-                    x + width * 0.50f,
-                    top,
-                    x + width,
-                    bottom,
-                    paint
-                )
-            }
-
-            // Y
-            1 -> {
-                canvas.drawLine(
-                    x,
-                    top,
-                    x + width * 0.50f,
-                    midY,
-                    paint
-                )
-                canvas.drawLine(
-                    x + width,
-                    top,
-                    x + width * 0.50f,
-                    midY,
-                    paint
-                )
-                canvas.drawLine(
-                    x + width * 0.50f,
-                    midY,
-                    x + width * 0.50f,
-                    bottom,
-                    paint
-                )
-            }
-
-            // N
-            else -> {
-                canvas.drawLine(
-                    x,
-                    bottom,
-                    x,
-                    top,
-                    paint
-                )
-                canvas.drawLine(
-                    x,
-                    top,
-                    x + width,
-                    bottom,
-                    paint
-                )
-                canvas.drawLine(
-                    x + width,
-                    bottom,
-                    x + width,
-                    top,
-                    paint
-                )
-            }
-        }
-    }
-
-    private fun drawBrokenCircle(
-        canvas: Canvas,
-        cx: Float,
-        cy: Float,
-        radius: Float,
-        phase: Float,
-        color: Int,
-        alpha: Int,
-        widthDp: Float
-    ) {
-        orbitBounds.set(
-            cx - radius,
-            cy - radius,
-            cx + radius,
-            cy + radius
+        // Signature crossbar-less A used by AYANA branding.
+        canvas.drawLine(
+            x,
+            bottom,
+            center,
+            top,
+            paint
         )
-
-        ringPaint.shader = null
-        ringPaint.color =
-            color
-        ringPaint.alpha =
-            alpha.coerceIn(0, 255)
-        ringPaint.strokeWidth =
-            dp(widthDp)
-
-        canvas.drawArc(
-            orbitBounds,
-            phase,
-            74f,
-            false,
-            ringPaint
-        )
-
-        canvas.drawArc(
-            orbitBounds,
-            phase + 112f,
-            42f,
-            false,
-            ringPaint
-        )
-
-        canvas.drawArc(
-            orbitBounds,
-            phase + 196f,
-            86f,
-            false,
-            ringPaint
-        )
-
-        canvas.drawArc(
-            orbitBounds,
-            phase + 316f,
-            24f,
-            false,
-            ringPaint
+        canvas.drawLine(
+            center,
+            top,
+            x + width,
+            bottom,
+            paint
         )
     }
 
-    private fun drawTiltedFilament(
+    private fun drawY(
         canvas: Canvas,
-        cx: Float,
-        cy: Float,
-        radiusX: Float,
-        radiusY: Float,
-        tiltDeg: Float,
-        startDeg: Float,
-        sweepDeg: Float,
-        color: Int,
-        alpha: Int,
-        widthDp: Float
+        x: Float,
+        top: Float,
+        width: Float,
+        height: Float,
+        paint: Paint
     ) {
-        val save =
-            canvas.save()
+        val junctionY =
+            top + height * 0.49f
 
-        canvas.rotate(
-            tiltDeg,
-            cx,
-            cy
+        val center =
+            x + width / 2f
+
+        canvas.drawLine(
+            x,
+            top,
+            center,
+            junctionY,
+            paint
         )
-
-        orbitBounds.set(
-            cx - radiusX,
-            cy - radiusY,
-            cx + radiusX,
-            cy + radiusY
+        canvas.drawLine(
+            x + width,
+            top,
+            center,
+            junctionY,
+            paint
         )
-
-        // Glow pass.
-        ringPaint.shader = null
-        ringPaint.color =
-            color
-        ringPaint.alpha =
-            (
-                alpha *
-                    0.24f
-                )
-                .toInt()
-                .coerceIn(0, 68)
-        ringPaint.strokeWidth =
-            dp(widthDp * 4.1f)
-        canvas.drawArc(
-            orbitBounds,
-            startDeg,
-            sweepDeg,
-            false,
-            ringPaint
+        canvas.drawLine(
+            center,
+            junctionY,
+            center,
+            top + height,
+            paint
         )
+    }
 
-        // Crisp filament.
-        ringPaint.alpha =
-            alpha.coerceIn(0, 220)
-        ringPaint.strokeWidth =
-            dp(widthDp)
-        canvas.drawArc(
-            orbitBounds,
-            startDeg,
-            sweepDeg,
-            false,
-            ringPaint
+    private fun drawN(
+        canvas: Canvas,
+        x: Float,
+        top: Float,
+        bottom: Float,
+        width: Float,
+        paint: Paint
+    ) {
+        canvas.drawLine(
+            x,
+            bottom,
+            x,
+            top,
+            paint
         )
-
-        // Complementary broken tail.
-        ringPaint.alpha =
-            (
-                alpha *
-                    0.58f
-                )
-                .toInt()
-                .coerceIn(0, 150)
-        ringPaint.strokeWidth =
-            dp(widthDp * 0.72f)
-        canvas.drawArc(
-            orbitBounds,
-            startDeg + 188f,
-            sweepDeg * 0.22f,
-            false,
-            ringPaint
+        canvas.drawLine(
+            x,
+            top,
+            x + width,
+            bottom,
+            paint
         )
-
-        canvas.restoreToCount(save)
+        canvas.drawLine(
+            x + width,
+            bottom,
+            x + width,
+            top,
+            paint
+        )
     }
 
     private fun drawStarFlare(
@@ -1816,333 +1454,195 @@ class AyanaCoreVisualizer(
         x: Float,
         y: Float,
         color: Int,
-        scale: Float
+        strength: Float
     ) {
-        finePaint.shader = null
-        finePaint.color =
-            color
-        finePaint.alpha =
-            176
-        finePaint.strokeWidth =
-            dp(0.70f)
+        particlePaint.shader = null
+        particlePaint.color = color
+        particlePaint.alpha =
+            (220f * strength)
+                .toInt()
+                .coerceIn(0, 255)
+
+        canvas.drawCircle(
+            x,
+            y,
+            dp(1.35f * strength),
+            particlePaint
+        )
+
+        ringPaint.shader = null
+        ringPaint.color = color
+        ringPaint.alpha =
+            (120f * strength)
+                .toInt()
+                .coerceIn(0, 180)
+        ringPaint.strokeWidth =
+            dp(0.76f)
 
         val long =
-            dp(7.5f) *
-                scale
+            dp(9.5f * strength)
 
         val short =
-            dp(3.2f) *
-                scale
+            dp(4.0f * strength)
 
         canvas.drawLine(
             x - long,
             y,
             x + long,
             y,
-            finePaint
+            ringPaint
         )
 
         canvas.drawLine(
             x,
-            y - long,
-            x,
-            y + long,
-            finePaint
-        )
-
-        finePaint.alpha =
-            104
-        canvas.drawLine(
-            x - short,
             y - short,
-            x + short,
-            y + short,
-            finePaint
-        )
-
-        canvas.drawLine(
-            x - short,
-            y + short,
-            x + short,
-            y - short,
-            finePaint
-        )
-
-        particlePaint.shader = null
-        particlePaint.color =
-            Color.WHITE
-        particlePaint.alpha =
-            220
-        canvas.drawCircle(
             x,
-            y,
-            dp(0.90f) *
-                scale,
-            particlePaint
+            y + short,
+            ringPaint
         )
     }
 
     private fun continuousAngle(
         nowMs: Long,
         cycleMs: Float,
-        speedMultiplier: Float,
         reverse: Boolean
     ): Float {
         val turns =
-            nowMs.toDouble() *
-                speedMultiplier.toDouble() /
+            nowMs.toDouble() /
                 cycleMs.toDouble()
 
-        val fractional =
+        val fraction =
             turns -
                 kotlin.math.floor(turns)
 
         val degrees =
-            (
-                fractional *
-                    360.0
-                )
+            (fraction * 360.0)
                 .toFloat()
 
         return if (reverse) {
-            (
-                360f -
-                    degrees
-                ) %
-                360f
+            (360f - degrees) % 360f
         } else {
             degrees
         }
     }
 
-    private fun energyFor(
-        state: String
-    ): Float =
-        when (state) {
-            AyanaVoiceService.STATE_COMMAND ->
-                1.00f
-
-            AyanaVoiceService.STATE_EXECUTING ->
-                1.00f
-
-            AyanaVoiceService.STATE_THINKING ->
-                0.86f
-
-            AyanaVoiceService.STATE_SPEAKING ->
-                0.96f
-
-            AyanaVoiceService.STATE_SUCCESS ->
-                0.70f
-
-            AyanaVoiceService.STATE_ERROR ->
-                0.76f
-
-            AyanaVoiceService.STATE_CANCELLED ->
-                0.62f
-
-            AyanaVoiceService.STATE_STOPPED ->
-                0.34f
-
-            else ->
-                0.72f
-        }
-
-    private fun motionFor(
-        state: String
-    ): Motion =
-        when (state) {
-            AyanaVoiceService.STATE_COMMAND ->
-                Motion(
-                    outerCycleMs = 5400f,
-                    middleCycleMs = 6700f,
-                    innerCycleMs = 4300f,
-                    waveDivisor = 148.0,
-                    particleDivisor = 860.0,
-                    breatheDivisor = 330.0
-                )
-
-            AyanaVoiceService.STATE_EXECUTING ->
-                Motion(
-                    outerCycleMs = 4800f,
-                    middleCycleMs = 6100f,
-                    innerCycleMs = 3900f,
-                    waveDivisor = 138.0,
-                    particleDivisor = 790.0,
-                    breatheDivisor = 300.0
-                )
-
-            AyanaVoiceService.STATE_THINKING ->
-                Motion(
-                    outerCycleMs = 7200f,
-                    middleCycleMs = 8800f,
-                    innerCycleMs = 5900f,
-                    waveDivisor = 210.0,
-                    particleDivisor = 1060.0,
-                    breatheDivisor = 430.0
-                )
-
-            AyanaVoiceService.STATE_SPEAKING ->
-                Motion(
-                    outerCycleMs = 6100f,
-                    middleCycleMs = 7600f,
-                    innerCycleMs = 5000f,
-                    waveDivisor = 158.0,
-                    particleDivisor = 900.0,
-                    breatheDivisor = 350.0
-                )
-
-            AyanaVoiceService.STATE_STOPPED ->
-                Motion(
-                    outerCycleMs = 13000f,
-                    middleCycleMs = 16000f,
-                    innerCycleMs = 10800f,
-                    waveDivisor = 430.0,
-                    particleDivisor = 1900.0,
-                    breatheDivisor = 760.0
-                )
-
-            else ->
-                Motion(
-                    outerCycleMs = 9200f,
-                    middleCycleMs = 11200f,
-                    innerCycleMs = 7600f,
-                    waveDivisor = 270.0,
-                    particleDivisor = 1280.0,
-                    breatheDivisor = 520.0
-                )
-        }
-
     private fun paletteFor(
         state: String
-    ): Palette =
-        when (state) {
+    ): Palette {
+        return when (state) {
             AyanaVoiceService.STATE_COMMAND ->
                 Palette(
-                    primary = Color.parseColor("#27E5FF"),
-                    secondary = Color.parseColor("#A855F7"),
-                    deep = Color.parseColor("#2563EB"),
-                    pale = Color.parseColor("#E6FBFF")
+                    cyan = Color.parseColor("#35F1FF"),
+                    blue = Color.parseColor("#1DA2FF"),
+                    violet = Color.parseColor("#8D5CFF"),
+                    white = Color.parseColor("#F6FEFF"),
+                    deep = Color.parseColor("#07162E")
                 )
 
             AyanaVoiceService.STATE_THINKING ->
                 Palette(
-                    primary = Color.parseColor("#7DD3FC"),
-                    secondary = Color.parseColor("#C084FC"),
-                    deep = Color.parseColor("#4F46E5"),
-                    pale = Color.parseColor("#EEF2FF")
+                    cyan = Color.parseColor("#60D9FF"),
+                    blue = Color.parseColor("#4B68FF"),
+                    violet = Color.parseColor("#B56DFF"),
+                    white = Color.parseColor("#FBF7FF"),
+                    deep = Color.parseColor("#140B2E")
                 )
 
             AyanaVoiceService.STATE_EXECUTING ->
                 Palette(
-                    primary = Color.parseColor("#2DD4BF"),
-                    secondary = Color.parseColor("#38BDF8"),
-                    deep = Color.parseColor("#0F766E"),
-                    pale = Color.parseColor("#E6FFFB")
-                )
-
-            AyanaVoiceService.STATE_SUCCESS ->
-                Palette(
-                    primary = Color.parseColor("#4ADE80"),
-                    secondary = Color.parseColor("#22D3EE"),
-                    deep = Color.parseColor("#15803D"),
-                    pale = Color.parseColor("#ECFDF5")
-                )
-
-            AyanaVoiceService.STATE_ERROR ->
-                Palette(
-                    primary = Color.parseColor("#FB7185"),
-                    secondary = Color.parseColor("#F59E0B"),
-                    deep = Color.parseColor("#BE123C"),
-                    pale = Color.parseColor("#FFF1F2")
-                )
-
-            AyanaVoiceService.STATE_CANCELLED ->
-                Palette(
-                    primary = Color.parseColor("#FBBF24"),
-                    secondary = Color.parseColor("#C084FC"),
-                    deep = Color.parseColor("#B45309"),
-                    pale = Color.parseColor("#FFFBEB")
+                    cyan = Color.parseColor("#31FFE0"),
+                    blue = Color.parseColor("#21A7D6"),
+                    violet = Color.parseColor("#5A77FF"),
+                    white = Color.parseColor("#F2FFFC"),
+                    deep = Color.parseColor("#072826")
                 )
 
             AyanaVoiceService.STATE_SPEAKING ->
                 Palette(
-                    primary = Color.parseColor("#60A5FA"),
-                    secondary = Color.parseColor("#A78BFA"),
-                    deep = Color.parseColor("#4338CA"),
-                    pale = Color.parseColor("#EEF2FF")
+                    cyan = Color.parseColor("#55D9FF"),
+                    blue = Color.parseColor("#446FFF"),
+                    violet = Color.parseColor("#A957FF"),
+                    white = Color.parseColor("#F9FBFF"),
+                    deep = Color.parseColor("#111432")
                 )
 
-            AyanaVoiceService.STATE_STOPPED ->
+            AyanaVoiceService.STATE_SUCCESS ->
                 Palette(
-                    primary = Color.parseColor("#64748B"),
-                    secondary = Color.parseColor("#475569"),
-                    deep = Color.parseColor("#334155"),
-                    pale = Color.parseColor("#CBD5E1")
+                    cyan = Color.parseColor("#4DF7C5"),
+                    blue = Color.parseColor("#2DB9CF"),
+                    violet = Color.parseColor("#5CE1A4"),
+                    white = Color.parseColor("#F5FFF9"),
+                    deep = Color.parseColor("#09241C")
+                )
+
+            AyanaVoiceService.STATE_ERROR ->
+                Palette(
+                    cyan = Color.parseColor("#FF7E9E"),
+                    blue = Color.parseColor("#E54878"),
+                    violet = Color.parseColor("#FF4CB0"),
+                    white = Color.parseColor("#FFF5F7"),
+                    deep = Color.parseColor("#2D0815")
+                )
+
+            AyanaVoiceService.STATE_CANCELLED ->
+                Palette(
+                    cyan = Color.parseColor("#FFD66D"),
+                    blue = Color.parseColor("#F6A73A"),
+                    violet = Color.parseColor("#FFB457"),
+                    white = Color.parseColor("#FFFCEF"),
+                    deep = Color.parseColor("#2A1C08")
                 )
 
             else ->
                 Palette(
-                    primary = Color.parseColor("#22D3EE"),
-                    secondary = Color.parseColor("#8B5CF6"),
-                    deep = Color.parseColor("#2563EB"),
-                    pale = Color.parseColor("#E6FBFF")
+                    cyan = Color.parseColor("#27E8FF"),
+                    blue = Color.parseColor("#2388FF"),
+                    violet = Color.parseColor("#A14CFF"),
+                    white = Color.parseColor("#F3FDFF"),
+                    deep = Color.parseColor("#091331")
                 )
         }
+    }
 
     private fun frameDelayMs(
         state: String
-    ): Long =
-        when (state) {
+    ): Long {
+        return when (state) {
             AyanaVoiceService.STATE_COMMAND,
-            AyanaVoiceService.STATE_EXECUTING ->
-                24L
+            AyanaVoiceService.STATE_EXECUTING -> 28L
 
             AyanaVoiceService.STATE_THINKING,
-            AyanaVoiceService.STATE_SPEAKING ->
-                27L
+            AyanaVoiceService.STATE_SPEAKING -> 30L
 
-            AyanaVoiceService.STATE_LISTENING ->
-                31L
+            AyanaVoiceService.STATE_LISTENING -> 32L
 
-            AyanaVoiceService.STATE_SUCCESS,
-            AyanaVoiceService.STATE_ERROR,
-            AyanaVoiceService.STATE_CANCELLED ->
-                44L
-
-            else ->
-                80L
+            else -> 55L
         }
+    }
 
     private fun withAlpha(
         color: Int,
         alpha: Int
-    ): Int =
-        Color.argb(
+    ): Int {
+        return Color.argb(
             alpha.coerceIn(0, 255),
             Color.red(color),
             Color.green(color),
             Color.blue(color)
         )
+    }
 
     private fun dp(
         value: Float
-    ): Float =
-        value *
-            density
+    ): Float {
+        return value * density
+    }
 
     private data class Palette(
-        val primary: Int,
-        val secondary: Int,
-        val deep: Int,
-        val pale: Int
-    )
-
-    private data class Motion(
-        val outerCycleMs: Float,
-        val middleCycleMs: Float,
-        val innerCycleMs: Float,
-        val waveDivisor: Double,
-        val particleDivisor: Double,
-        val breatheDivisor: Double
+        val cyan: Int,
+        val blue: Int,
+        val violet: Int,
+        val white: Int,
+        val deep: Int
     )
 }
