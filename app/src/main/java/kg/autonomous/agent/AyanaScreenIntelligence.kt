@@ -6,11 +6,12 @@ import org.json.JSONObject
 import java.util.Locale
 
 /**
- * AYANA Screen Intelligence v4.3 — Settings native-query fallback + exact input truth.
+ * AYANA Screen Intelligence v4.4 — Settings sparse-content native-query fallback + exact input truth.
  *
- * v4.3 preserves v4.2 input/boundary-scroll truth and adds one fail-closed recovery
+ * v4.4 preserves v4.3/v4.2 truth and extends the same fail-closed recovery
  * path for sparse Samsung Settings snapshots: if the normal semantic resolver reports
- * target_not_found while com.android.settings is the factual interaction package, the
+ * target_not_found OR content_unavailable while com.android.settings is the factual
+ * interaction package, the
  * Accessibility service may perform an exact native text query in that same live window.
  * Success still requires a verified post-action screen change. Ambiguity remains blocked.
  *
@@ -104,12 +105,18 @@ class AyanaScreenIntelligence(
                     )
                     .trim()
 
-            // v4.3: the snapshot may be semantically sparse on Samsung App Info even
-            // though Android's live Accessibility provider can resolve the exact row.
-            // Retry only for factual target_not_found on the current Settings package.
-            // Never bypass ambiguity, confirmation, or a different foreground package.
+            // v4.4: Samsung App Info may expose the correct Settings foreground
+            // package while the serialized semantic snapshot is either sparse
+            // (target_not_found) or structurally present but unreadable
+            // (content_unavailable). Android's native text provider can still expose
+            // the exact visible row in both cases. Recover only for these two factual
+            // failure modes, only inside com.android.settings, and keep ambiguity /
+            // confirmation / other packages fail-closed.
             if (
-                reason == "target_not_found" &&
+                reason in setOf(
+                    "target_not_found",
+                    "content_unavailable"
+                ) &&
                 interactionPackage == "com.android.settings" &&
                 cleanTarget.isNotBlank()
             ) {
