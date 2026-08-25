@@ -20,7 +20,11 @@ import kotlin.math.max
 class AgentAccessibilityService :
     AccessibilityService() {
 
-    // AYANA Accessibility v6.5 — CROSS-APP FOREGROUND TRUTH + OWN-APP SEMANTIC BRIDGE.
+    // AYANA Accessibility v6.6 — SETTINGS DEEP DETAIL RECOVERY + CROSS-APP FOREGROUND TRUTH.
+    // v6.6 preserves the device-confirmed v6.5 cross-app foreground-owner fix and closes
+    // the remaining Samsung Settings gap where a fresh but shallow App Info action cluster
+    // (Open / Disable / Force stop) incorrectly suppressed the bounded descendant prefetch
+    // even while visible rows such as Permissions were absent from Accessibility evidence.
     // v6.5 preserves v6.3/v6.2/v6.1/v6.0 execution truth and hardens the own-app
     // bridge for Android large-screen multi-resume. A merely RESUMED AYANA Activity can
     // no longer preempt a focused external application window during terminal verification.
@@ -6732,6 +6736,78 @@ class AgentAccessibilityService :
         }
     }
 
+    /**
+     * True only when fresh Settings evidence is rich enough to suppress the
+     * on-demand descendant prefetch. Node/text counts alone are insufficient:
+     * on Samsung App Info the persistent action bar can satisfy those counts while
+     * the visible settings rows are still missing.
+     *
+     * The check is intentionally package-local and conservative. Non-App-Info
+     * Settings surfaces keep the existing lightweight freshness shortcut. For an
+     * App-Info action cluster, at least one factual detail-row marker must also be
+     * present before recovery is skipped.
+     */
+    private fun settingsEvidenceIsDeepEnough(
+        evidence: EventEvidence
+    ): Boolean {
+
+        if (
+            evidence.visibleText.size < 2 ||
+            evidence.nodes.length() <
+            SETTINGS_SNAPSHOT_FRESH_MIN_NODES
+        ) {
+            return false
+        }
+
+        val normalizedText =
+            normalize(
+                evidence.visibleText
+                    .joinToString(
+                        " | "
+                    )
+            )
+
+        if (
+            !hasAppInfoActionCluster(
+                normalizedText
+            )
+        ) {
+            return true
+        }
+
+        val detailMarkers =
+            listOf(
+                "разрешения",
+                "уведомления",
+                "время использования экрана",
+                "управление неиспольз",
+                "использование по умолчанию",
+                "открытие по умолчанию",
+                "язык",
+                "мобильные данные",
+                "батарея",
+                "аккумулятор",
+                "хранилище",
+                "память",
+                "permissions",
+                "notifications",
+                "screen time",
+                "unused app",
+                "open by default",
+                "defaults",
+                "language",
+                "mobile data",
+                "battery",
+                "storage"
+            )
+
+        return detailMarkers.any { marker ->
+            normalizedText.contains(
+                marker
+            )
+        }
+    }
+
     private fun maybeCaptureSettingsOnDemandEvidence(
         liveContexts: List<WindowContext>
     ) {
@@ -6769,8 +6845,12 @@ class AgentAccessibilityService :
             return
         }
 
-        // If we already have very fresh readable Settings evidence for this exact
-        // window, do not spend another IPC-prefetch request during verifier polls.
+        // A fresh Settings event is not automatically semantically complete.
+        // Samsung App Info may expose only the stable bottom action cluster
+        // (Open / Disable / Force stop) while visible detail rows such as
+        // Permissions remain absent from the captured tree. Treat that shallow
+        // cluster as insufficient so the bounded API-33 descendant prefetch still
+        // gets one chance to recover the factual detail rows from the SAME window.
         val nowWall =
             System.currentTimeMillis()
 
@@ -6783,9 +6863,9 @@ class AgentAccessibilityService :
                         evidence.windowId == target.windowId &&
                         nowWall - evidence.at <=
                             SETTINGS_SNAPSHOT_FRESH_EVIDENCE_MS &&
-                        evidence.visibleText.size >= 2 &&
-                        evidence.nodes.length() >=
-                            SETTINGS_SNAPSHOT_FRESH_MIN_NODES
+                        settingsEvidenceIsDeepEnough(
+                            evidence
+                        )
                 }
             }
 
