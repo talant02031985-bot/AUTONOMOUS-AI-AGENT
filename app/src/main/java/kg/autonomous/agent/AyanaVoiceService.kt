@@ -56,6 +56,9 @@ import kotlin.math.abs
 
 class AyanaVoiceService : Service() {
 
+    // AYANA v12.10.0 AGENT CORE PERFORMANCE + CAPABILITY EVIDENCE TRUTH + VISUAL CORE REFRESH.
+    // v12.10 adds phase-level Agent Core transport telemetry only in this service;
+    // routing, STOP ownership, Android executors, artifact truth and Marin remain frozen.
     // AYANA v12.9.0 ROUTING INTEGRITY + MAIN-THREAD RESPONSIVENESS + DIAGNOSTIC TRUTH.
     // v12.9.0 freezes the YouTube/Settings terminal-verification branch and moves forward
     // with systemic behavior fixes: all command/multimodal/durable-goal entrypoints escape
@@ -15911,6 +15914,42 @@ class AyanaVoiceService : Service() {
         val requestStartedAt =
             SystemClock.elapsedRealtime()
 
+        var requestPreparedAt =
+            requestStartedAt
+
+        var requestBodySentAt =
+            requestStartedAt
+
+        var responseHeadersAt =
+            requestStartedAt
+
+        var responseBodyReadAt =
+            requestStartedAt
+
+        var responseParsedAt =
+            requestStartedAt
+
+        var requestByteCount =
+            0
+
+        var responseByteCount =
+            0
+
+        var responseCodeForTelemetry =
+            -1
+
+        var requestPrepared =
+            false
+
+        var requestSent =
+            false
+
+        var headersReceived =
+            false
+
+        var bodyRead =
+            false
+
         try {
 
             val url =
@@ -15924,13 +15963,21 @@ class AyanaVoiceService : Service() {
 
             currentAgentConnection =
                 connection
-            executionKernel.bindConnection(connection)
+
+            executionKernel.bindConnection(
+                connection
+            )
 
             connection.requestMethod =
                 "POST"
 
             connection.setRequestProperty(
                 "Content-Type",
+                "application/json"
+            )
+
+            connection.setRequestProperty(
+                "Accept",
                 "application/json"
             )
 
@@ -15987,7 +16034,6 @@ class AyanaVoiceService : Service() {
             if (
                 !memoryContext.isNullOrBlank()
             ) {
-
                 requestJson.put(
                     "memory_context",
                     memoryContext
@@ -16008,7 +16054,6 @@ class AyanaVoiceService : Service() {
                 !previousResponseId
                     .isNullOrBlank()
             ) {
-
                 requestJson.put(
                     "previous_response_id",
                     previousResponseId
@@ -16017,59 +16062,100 @@ class AyanaVoiceService : Service() {
 
             if (
                 toolResults != null &&
-                toolResults.length() > 0
+                toolResults.length() >
+                0
             ) {
-
                 requestJson.put(
                     "tool_results",
                     toolResults
                 )
             }
 
+            // Serialize exactly once. Fixed-length streaming avoids implicit
+            // chunked framing for this bounded JSON payload.
+            val requestBytes =
+                requestJson
+                    .toString()
+                    .toByteArray(
+                        Charsets.UTF_8
+                    )
+
+            requestByteCount =
+                requestBytes.size
+
+            connection.setFixedLengthStreamingMode(
+                requestBytes.size
+            )
+
+            requestPreparedAt =
+                SystemClock.elapsedRealtime()
+
+            requestPrepared =
+                true
+
             connection
                 .outputStream
                 .use { output ->
-
                     output.write(
-                        requestJson
-                            .toString()
-                            .toByteArray(
-                                Charsets.UTF_8
-                            )
+                        requestBytes
                     )
+                    output.flush()
                 }
+
+            requestBodySentAt =
+                SystemClock.elapsedRealtime()
+
+            requestSent =
+                true
 
             val responseCode =
                 connection
                     .responseCode
+
+            responseCodeForTelemetry =
+                responseCode
+
+            responseHeadersAt =
+                SystemClock.elapsedRealtime()
+
+            headersReceived =
+                true
 
             val stream =
                 if (
                     responseCode in
                     200..299
                 ) {
-
-                    connection
-                        .inputStream
-
+                    connection.inputStream
                 } else {
-
-                    connection
-                        .errorStream
+                    connection.errorStream
                 }
 
             val responseText =
                 stream
-                    .bufferedReader()
-                    .use {
+                    ?.bufferedReader()
+                    ?.use {
                         it.readText()
                     }
+                    .orEmpty()
+
+            responseBodyReadAt =
+                SystemClock.elapsedRealtime()
+
+            bodyRead =
+                true
+
+            responseByteCount =
+                responseText
+                    .toByteArray(
+                        Charsets.UTF_8
+                    )
+                    .size
 
             if (
                 responseCode !in
                 200..299
             ) {
-
                 throw IllegalStateException(
                     "Agent HTTP " +
                         responseCode +
@@ -16083,28 +16169,140 @@ class AyanaVoiceService : Service() {
                     responseText
                 )
 
+            responseParsedAt =
+                SystemClock.elapsedRealtime()
+
+            val totalMs =
+                (
+                    responseParsedAt -
+                        requestStartedAt
+                    )
+                    .coerceAtLeast(
+                        0L
+                    )
+
             capabilityRegistry
                 .recordAgentCoreResult(
                     success = true,
-                    latencyMs =
-                        SystemClock.elapsedRealtime() -
-                            requestStartedAt
+                    latencyMs = totalMs
                 )
+
+            recordAgentCorePerformanceTelemetry(
+                totalMs = totalMs,
+                prepareMs =
+                    requestPreparedAt -
+                        requestStartedAt,
+                uploadMs =
+                    requestBodySentAt -
+                        requestPreparedAt,
+                headersWaitMs =
+                    responseHeadersAt -
+                        requestBodySentAt,
+                bodyReadMs =
+                    responseBodyReadAt -
+                        responseHeadersAt,
+                jsonParseMs =
+                    responseParsedAt -
+                        responseBodyReadAt,
+                requestBytes =
+                    requestByteCount,
+                responseBytes =
+                    responseByteCount,
+                httpCode =
+                    responseCodeForTelemetry
+            )
 
             return parsed
 
-        } catch (error: Exception) {
+        } catch (
+            error: Exception
+        ) {
+
+            val failedAt =
+                SystemClock.elapsedRealtime()
 
             capabilityRegistry
                 .recordAgentCoreResult(
                     success = false,
                     latencyMs =
-                        SystemClock.elapsedRealtime() -
+                        failedAt -
                             requestStartedAt,
                     error =
                         error.message
                             ?: error.javaClass.simpleName
                 )
+
+            val failurePrepareMs =
+                if (requestPrepared) {
+                    requestPreparedAt -
+                        requestStartedAt
+                } else {
+                    failedAt -
+                        requestStartedAt
+                }
+
+            val failureUploadMs =
+                when {
+                    requestSent ->
+                        requestBodySentAt -
+                            requestPreparedAt
+
+                    requestPrepared ->
+                        failedAt -
+                            requestPreparedAt
+
+                    else ->
+                        0L
+                }
+
+            val failureHeadersMs =
+                when {
+                    headersReceived ->
+                        responseHeadersAt -
+                            requestBodySentAt
+
+                    requestSent ->
+                        failedAt -
+                            requestBodySentAt
+
+                    else ->
+                        0L
+                }
+
+            val failureBodyMs =
+                when {
+                    bodyRead ->
+                        responseBodyReadAt -
+                            responseHeadersAt
+
+                    headersReceived ->
+                        failedAt -
+                            responseHeadersAt
+
+                    else ->
+                        0L
+                }
+
+            recordAgentCorePerformanceTelemetry(
+                totalMs =
+                    failedAt -
+                        requestStartedAt,
+                prepareMs =
+                    failurePrepareMs,
+                uploadMs =
+                    failureUploadMs,
+                headersWaitMs =
+                    failureHeadersMs,
+                bodyReadMs =
+                    failureBodyMs,
+                jsonParseMs = 0L,
+                requestBytes =
+                    requestByteCount,
+                responseBytes =
+                    responseByteCount,
+                httpCode =
+                    responseCodeForTelemetry
+            )
 
             throw error
 
@@ -16118,11 +16316,96 @@ class AyanaVoiceService : Service() {
                     null
             }
 
-            executionKernel.clearConnection(connection)
+            executionKernel.clearConnection(
+                connection
+            )
 
             connection
                 ?.disconnect()
         }
+    }
+
+    private fun recordAgentCorePerformanceTelemetry(
+        totalMs: Long,
+        prepareMs: Long,
+        uploadMs: Long,
+        headersWaitMs: Long,
+        bodyReadMs: Long,
+        jsonParseMs: Long,
+        requestBytes: Int,
+        responseBytes: Int,
+        httpCode: Int
+    ) {
+        val safeTotal =
+            totalMs.coerceAtLeast(
+                0L
+            )
+
+        val safePrepare =
+            prepareMs.coerceAtLeast(
+                0L
+            )
+
+        val safeUpload =
+            uploadMs.coerceAtLeast(
+                0L
+            )
+
+        val safeHeaders =
+            headersWaitMs.coerceAtLeast(
+                0L
+            )
+
+        val safeBody =
+            bodyReadMs.coerceAtLeast(
+                0L
+            )
+
+        val safeParse =
+            jsonParseMs.coerceAtLeast(
+                0L
+            )
+
+        capabilityRegistry
+            .recordAgentCorePerformance(
+                totalMs = safeTotal,
+                prepareMs = safePrepare,
+                uploadMs = safeUpload,
+                headersWaitMs = safeHeaders,
+                bodyReadMs = safeBody,
+                jsonParseMs = safeParse,
+                requestBytes =
+                    requestBytes.coerceAtLeast(
+                        0
+                    ),
+                responseBytes =
+                    responseBytes.coerceAtLeast(
+                        0
+                    ),
+                httpCode = httpCode
+            )
+
+        commandHistoryStore.addEvent(
+            activeCommandHistoryId,
+            state = "agent_performance",
+            message =
+                "Agent Core phase telemetry",
+            details =
+                (
+                    "total_ms=$safeTotal; " +
+                        "prepare_ms=$safePrepare; " +
+                        "upload_ms=$safeUpload; " +
+                        "headers_wait_ms=$safeHeaders; " +
+                        "body_read_ms=$safeBody; " +
+                        "json_parse_ms=$safeParse; " +
+                        "request_bytes=${requestBytes.coerceAtLeast(0)}; " +
+                        "response_bytes=${responseBytes.coerceAtLeast(0)}; " +
+                        "http_code=$httpCode"
+                    )
+                    .take(
+                        900
+                    )
+        )
     }
 
     private fun agentToolStatus(
