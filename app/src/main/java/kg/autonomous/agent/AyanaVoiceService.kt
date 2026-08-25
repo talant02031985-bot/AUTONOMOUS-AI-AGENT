@@ -56,6 +56,15 @@ import kotlin.math.abs
 
 class AyanaVoiceService : Service() {
 
+    // AYANA v12.9.0 ROUTING INTEGRITY + MAIN-THREAD RESPONSIVENESS + DIAGNOSTIC TRUTH.
+    // v12.9.0 freezes the YouTube/Settings terminal-verification branch and moves forward
+    // with systemic behavior fixes: all command/multimodal/durable-goal entrypoints escape
+    // the Android main looper before potentially blocking work; app-lifecycle clarification
+    // is restricted to short ASR-noise fragments instead of ordinary informational phrases;
+    // high-level development/project capability questions are no longer swallowed by the
+    // document/artifact canned-response fast path; explicit self-diagnostics runs locally
+    // without an Agent Core preflight so it cannot overwrite the telemetry it is measuring,
+    // and every non-PASS diagnostic check is included in the final report.
     // AYANA v12.8.14 VERIFIED SETTINGS OWNER HANDOFF + SETTINGS CHAIN NATIVE RECOVERY.
     // v12.8.14 preserves v12.8.11 behavior and closes the remaining cross-step truth gap:
     // once App Info is VERIFIED by a real com.android.settings window/semantic surface, that
@@ -116,6 +125,13 @@ class AyanaVoiceService : Service() {
 
     private val mainHandler =
         Handler(Looper.getMainLooper())
+
+    // v12.9.0: deterministic/local command work may contain bounded verification loops,
+    // Accessibility IPC and file/network operations. None of that is allowed to monopolize
+    // Android's main looper. Serialize main-originated command work off-main so UI/ANR
+    // responsiveness is preserved without introducing overlapping command transactions.
+    private val commandDispatchLock =
+        Any()
 
     @Volatile
     private var listenMode =
@@ -2868,6 +2884,32 @@ class AyanaVoiceService : Service() {
         silent: Boolean
     ) {
 
+        // v12.9.0 MAIN-THREAD EXECUTION ISOLATION.
+        // Voice endpoint and text-mode entrypoints both arrive through mainHandler.
+        // Re-enter this same method from a serialized worker so deterministic routes
+        // containing polling/sleeps/Accessibility IPC cannot trigger an Android ANR.
+        if (Looper.myLooper() == Looper.getMainLooper()) {
+            val commandSnapshot =
+                originalCommand
+
+            thread(
+                start = true,
+                name = "AyanaCommandRouter"
+            ) {
+                synchronized(
+                    commandDispatchLock
+                ) {
+                    if (!shuttingDown) {
+                        executeCommand(
+                            originalCommand = commandSnapshot,
+                            silent = silent
+                        )
+                    }
+                }
+            }
+            return
+        }
+
         stopSherpaListening()
 
         listenMode =
@@ -3201,9 +3243,24 @@ class AyanaVoiceService : Service() {
                 return
             }
 
-        // CAPABILITY TRUTH FAST-PATH v11.3
-        // Questions about photo/video upload must describe THIS Android client,
-        // not generic ChatGPT capabilities.
+        // v12.9.0 LOCAL SELF-DIAGNOSTICS TRUTH.
+        // Diagnostics must observe the previous Agent Core measurement, not create a
+        // fresh Agent Core request first and overwrite the latency/error being measured.
+        if (
+            isExplicitSelfDiagnosticsRequest(
+                routingNormalized
+            )
+        ) {
+            runLocalSelfDiagnosticsCommand(
+                silent = silent
+            )
+            return
+        }
+
+        // CAPABILITY TRUTH FAST-PATH v11.3 / v12.9.0 scope guard.
+        // Only narrow media/document capability questions stay local. Higher-level
+        // development/project questions (APK, GitHub, source code, AI agents, etc.)
+        // must reach Agent Core for contextual reasoning.
         localCapabilityTruthReply(
             routingNormalized
         )
@@ -6775,25 +6832,78 @@ class AyanaVoiceService : Service() {
             return null
         }
 
-        return KNOWN_LOCAL_LAUNCH_ALIASES
-            .asSequence()
-            .filter {
-                it.isNotBlank() &&
-                    clean != it
-            }
-            .sortedByDescending {
-                it.length
-            }
-            .firstOrNull { alias ->
-                Regex(
-                    "(^|\\s)" +
-                        Regex.escape(alias) +
-                        "($|\\s)"
-                )
-                    .containsMatchIn(
-                        clean
+        val alias =
+            KNOWN_LOCAL_LAUNCH_ALIASES
+                .asSequence()
+                .filter {
+                    it.isNotBlank() &&
+                        clean != it
+                }
+                .sortedByDescending {
+                    it.length
+                }
+                .firstOrNull { candidate ->
+                    Regex(
+                        "(^|\\s)" +
+                            Regex.escape(candidate) +
+                            "($|\\s)"
                     )
+                        .containsMatchIn(
+                            clean
+                        )
+                }
+                ?: return null
+
+        // v12.9.0 ROUTING INTEGRITY:
+        // clarification is only for a short ASR fragment around a known app alias
+        // (for example «ни ютуб» / «и ютуб»). Meaningful residual words such as
+        // «подробно», «история», «возможности», «что такое» are conversational intent
+        // and must reach Agent Core rather than being collapsed to app lifecycle.
+        val aliasRegex =
+            Regex(
+                "(^|\\s)" +
+                    Regex.escape(alias) +
+                    "($|\\s)"
+            )
+
+        val residual =
+            clean
+                .replaceFirst(
+                    aliasRegex,
+                    " "
+                )
+                .replace(
+                    Regex("\\s+"),
+                    " "
+                )
+                .trim()
+
+        if (
+            residual.isBlank()
+        ) {
+            return null
+        }
+
+        val residualTokens =
+            residual
+                .split(
+                    ' '
+                )
+                .filter {
+                    it.isNotBlank()
+                }
+
+        if (
+            residualTokens.any {
+                token ->
+                token !in
+                    LIFECYCLE_CLARIFICATION_NOISE_TOKENS
             }
+        ) {
+            return null
+        }
+
+        return alias
     }
 
     private fun beginLocalLifecycleClarification(
@@ -9176,6 +9286,156 @@ class AyanaVoiceService : Service() {
         }
     }
 
+    private fun isExplicitSelfDiagnosticsRequest(
+        command: String
+    ): Boolean {
+
+        val normalized =
+            command
+                .lowercase(
+                    Locale.ROOT
+                )
+                .replace(
+                    'ё',
+                    'е'
+                )
+                .replace(
+                    Regex("\\s+"),
+                    " "
+                )
+                .trim()
+
+        val diagnosticIntent =
+            normalized.contains(
+                "диагност"
+            ) ||
+                normalized.contains(
+                    "диганост"
+                )
+
+        val selfScope =
+            normalized.contains(
+                "себ"
+            ) ||
+                normalized.contains(
+                    "аяна"
+                ) ||
+                normalized.contains(
+                    "систем"
+                )
+
+        return diagnosticIntent &&
+            selfScope
+    }
+
+    private fun runLocalSelfDiagnosticsCommand(
+        silent: Boolean
+    ) {
+
+        broadcastStatus(
+            "Проверяю своё состояние…",
+            STATE_EXECUTING
+        )
+
+        val result =
+            try {
+                selfDiagnostics.run(
+                    focus = "all",
+                    appName = ""
+                )
+            } catch (error: Exception) {
+                commandHistoryStore.addEvent(
+                    activeCommandHistoryId,
+                    state = "local_self_diagnostics_error",
+                    message = "Локальная самодиагностика завершилась исключением",
+                    details =
+                        error.message
+                            .orEmpty()
+                            .take(
+                                500
+                            )
+                )
+
+                respondAndResume(
+                    text = "Не удалось выполнить локальную самодиагностику.",
+                    silent = silent,
+                    success = false,
+                    technical =
+                        "local_self_diagnostics_exception"
+                )
+                return
+            }
+
+        val report =
+            selfDiagnostics
+                .reportFromResult(
+                    result
+                )
+
+        commandHistoryStore.addEvent(
+            activeCommandHistoryId,
+            state = "local_self_diagnostics",
+            message = "Самодиагностика выполнена локально без Agent Core",
+            details =
+                (
+                    "overall=${result.optString("overall_status")}; " +
+                        "passed=${result.optInt("passed")}; " +
+                        "warnings=${result.optInt("warnings")}; " +
+                        "unknown=${result.optInt("unknown")}; " +
+                        "failed=${result.optInt("failed")}"
+                    )
+                    .take(
+                        700
+                    )
+        )
+
+        // A diagnostic command succeeded when the diagnostic transaction itself
+        // completed. Detected component WARN/FAIL states are reported in content and
+        // must not rewrite the command execution into ERROR.
+        respondAndResume(
+            text = report,
+            silent = silent,
+            success = true
+        )
+    }
+
+    private fun isHighLevelCapabilityReasoningRequest(
+        normalized: String
+    ): Boolean {
+
+        return listOf(
+            "ии агент",
+            "ai агент",
+            "агента",
+            "apk",
+            "апк",
+            "гитхаб",
+            "github",
+            "репозитор",
+            "исходн",
+            "исходный код",
+            "код прилож",
+            "приложен",
+            "программ",
+            "разработ",
+            "проект",
+            "техзадан",
+            "техническ",
+            "сборк",
+            "собери прилож",
+            "готовое прилож",
+            "android прилож",
+            "андроид прилож",
+            "установочный файл"
+        )
+            .any {
+                marker ->
+                normalized.contains(
+                    marker
+                )
+            }
+    }
+
     private fun localCapabilityTruthReply(
         command: String
     ): String? {
@@ -9190,6 +9450,14 @@ class AyanaVoiceService : Service() {
                     'е'
                 )
                 .trim()
+
+        if (
+            isHighLevelCapabilityReasoningRequest(
+                normalized
+            )
+        ) {
+            return null
+        }
 
         val hasPhoto =
             normalized.contains(
@@ -12533,6 +12801,26 @@ class AyanaVoiceService : Service() {
         allowAutoResume: Boolean
     ) {
 
+        if (Looper.myLooper() == Looper.getMainLooper()) {
+            thread(
+                start = true,
+                name = "AyanaDurableGoalResume"
+            ) {
+                synchronized(
+                    commandDispatchLock
+                ) {
+                    if (!shuttingDown) {
+                        resumeDurableGoal(
+                            silent = silent,
+                            explicitConfirmation = explicitConfirmation,
+                            allowAutoResume = allowAutoResume
+                        )
+                    }
+                }
+            }
+            return
+        }
+
         try {
             resumeDurableGoalInternal(
                 silent = silent,
@@ -14275,6 +14563,24 @@ class AyanaVoiceService : Service() {
         silent: Boolean
     ) {
 
+        if (Looper.myLooper() == Looper.getMainLooper()) {
+            thread(
+                start = true,
+                name = "AyanaDurableGoalCancel"
+            ) {
+                synchronized(
+                    commandDispatchLock
+                ) {
+                    if (!shuttingDown) {
+                        cancelDurableGoalFromControl(
+                            silent = silent
+                        )
+                    }
+                }
+            }
+            return
+        }
+
         if (
             currentAgentThread?.isAlive ==
             true ||
@@ -14615,6 +14921,33 @@ class AyanaVoiceService : Service() {
         prompt: String,
         manifestText: String
     ) {
+
+        // v12.9.0: multimodal validation, file handling and network/model work are
+        // never executed on Android's main looper.
+        if (Looper.myLooper() == Looper.getMainLooper()) {
+            val promptSnapshot =
+                prompt
+            val manifestSnapshot =
+                manifestText
+
+            thread(
+                start = true,
+                name = "AyanaMultimodalCommand"
+            ) {
+                synchronized(
+                    commandDispatchLock
+                ) {
+                    if (!shuttingDown) {
+                        executeMultimodalCommand(
+                            prompt = promptSnapshot,
+                            manifestText = manifestSnapshot
+                        )
+                    }
+                }
+            }
+            return
+        }
+
         stopSherpaListening()
         listenMode = ListenMode.BUSY
         cancelRequested = false
@@ -22610,6 +22943,20 @@ class AyanaVoiceService : Service() {
                 "страниц",
                 "картин",
                 "фото "
+            )
+
+        private val LIFECYCLE_CLARIFICATION_NOISE_TOKENS =
+            setOf(
+                "ни",
+                "ну",
+                "и",
+                "а",
+                "э",
+                "эм",
+                "мм",
+                "м",
+                "эй",
+                "аяна"
             )
 
         private val LIFECYCLE_CLARIFICATION_EXCLUSION_MARKERS =
