@@ -1,4 +1,4 @@
-// AYANA Worker v10.6.1 — Typed XLSX Cells; File & Document Engine
+// AYANA Worker v10.7 — Agent Core Performance + Capability Evidence Truth; File & Document Engine retained
 const ANDROID_GOAL_TOOL = {
   type: "function",
   name: "execute_android_goal",
@@ -482,7 +482,7 @@ const DEVICE_TOOLS = [
   {
     type: "function",
     name: "run_self_diagnostics",
-    description: "Run AYANA Self-Diagnostics v3 using current Android runtime facts. Results distinguish PASS, WARNING, UNKNOWN and FAIL; never treat UNKNOWN as a passed check. Use when the user asks why AYANA/device control is not working, asks AYANA to check herself, or asks for a focused diagnosis.",
+    description: "Run AYANA Self-Diagnostics v4.1 using current Android runtime facts. Results distinguish PASS, WARNING, UNKNOWN and FAIL; never treat UNKNOWN as a passed check. Use when the user asks why AYANA/device control is not working, asks AYANA to check herself, or asks for a focused diagnosis.",
     strict: true,
     parameters: {
       type: "object",
@@ -800,6 +800,18 @@ const AYANA_CURRENT_CAPABILITIES = `
 КАРТА ФАКТИЧЕСКОГО СОСТОЯНИЯ AYANA — v11.7 MULTIMODAL ROUTING + GROUNDED FOLLOW-UP поверх PERCEPTION / EXECUTION INTEGRITY.
 Свежий Android AGENT INTELLIGENCE CONTEXT всегда имеет приоритет над этой статической картой.
 
+КРИТИЧЕСКАЯ DEVELOPMENT / DELIVERY TRUTH:
+- генерация исходного кода, патча или файла НЕ означает запись в GitHub;
+- AYANA Android сейчас НЕ имеет универсального авторизованного GitHub repository-write executor;
+- AYANA Android сейчас НЕ может сама создавать commit/push в репозиторий;
+- AYANA Android сейчас НЕ запускает Android Gradle/GitHub Actions сборку APK;
+- AYANA Android не должна утверждать, что APK собран/подписан/опубликован, пока внешний build pipeline не вернул фактический артефакт;
+- подготовить готовый исходник/патч = отдельная возможность; commit/push/build/deploy = отдельные неподтверждённые/нереализованные возможности.
+
+КРИТИЧЕСКАЯ SETTINGS TRUTH:
+- Samsung App Info -> Permissions реализован как маршрут, но текущий combined terminal verifier имеет известный window-list edge; физически правильный экран не даёт права рекламировать этот путь как универсально device-confirmed;
+- для таких возможностей говори «реализовано, но terminal verification имеет известное ограничение», пока runtime/device evidence не станет подтверждённым.
+
 КРИТИЧЕСКАЯ CAPABILITY TRUTH:
 - v12.7 добавляет реальный File & Document Engine: TXT, DOCX, PDF, XLSX, JPEG и графики-JPEG создаются локально, проверяются и публикуются в Downloads/AYANA; прикреплённый DOCX можно переводить на ru/en/ky/de/fr/es/tr с сохранением исходного OOXML-пакета и заменой только Word text nodes; обе функции требуют device-приёмки;
 - v11.6 добавил attachment transport в существующий текстовый режим: фото, поддерживаемые документы и видео; v11.7 связывает успешный multimodal response_id с последующим Agent Core turn и защищает local Android routing от hijack вложением;
@@ -852,6 +864,12 @@ DEVICE-CONFIRMED БАЗА:
 const AYANA_CAPABILITY_AWARENESS_INSTRUCTIONS = `
 ЭТИ ПРАВИЛА ДЕЙСТВУЮТ, КОГДА ПОЛЬЗОВАТЕЛЬ СПРАШИВАЕТ AYANA О СЕБЕ, ВОЗМОЖНОСТЯХ, ОГРАНИЧЕНИЯХ ИЛИ АВТОНОМНОСТИ.
 
+0. Свежий AGENT INTELLIGENCE CONTEXT — главный источник машинной capability truth.
+0a. Никогда не повышай capability из «могу подготовить код/файл» до «могу записать в GitHub / commit / push / собрать APK / подписать / задеплоить».
+0b. Если runtime явно сообщает github_repository_write=false, github_commit_push=false, android_apk_build=false или direct_apk_delivery=false — говори это прямо.
+0c. Успешно сгенерированный исходник/патч является доказательством только генерации исходника/патча, а не внешнего действия.
+0d. Не объявляй внешнее действие SUCCESS без отдельного executor result / verified artifact evidence.
+0e. Если runtime/context сообщает settings_permissions_device_confirmed=false или известное ограничение terminal verifier, не говори, что переход в Permissions гарантированно подтверждён; называй его реализованным, но ограниченным/не полностью подтверждённым.
 1. Сначала используй свежий AGENT INTELLIGENCE CONTEXT, затем статическую карту v11.3.
 2. Строго различай «реализовано», «доступно сейчас» и «device-confirmed».
 2a. Любое утверждение «я могу/умею/можно загрузить мне» должно быть совместимо с AYANA CAPABILITY TRUTH. Для v11.6 различай image_vision=true, document_understanding=true и video_analysis=visual_sampled_frames; не приписывай анализ аудиодорожки, если video_audio_analysis=false.
@@ -1044,6 +1062,44 @@ function isDeepRequest(message = "") {
   const exhaustiveList = /(полный|полностью|весь|всю|все)\s+(?:список|перечень|план|отчет|обзор|направлен|пункт|этап|шаг|возможност|требован)/.test(n)
     || /(?:все|весь)\s+(?:основн\w*\s+)?(?:направлен|пункт|этап|шаг|возможност|требован)/.test(n);
   return explicitDepth || exhaustiveList;
+}
+
+function isComplexReasoningRequest(message = "") {
+  const n = normalizeIntentText(message);
+
+  return /(проанализируй|проанализировать|анализируй|сравни|сравнить|исследуй|исследовать|пошагов|реши|решить|оцени|оценить|выбери|выбрать|докажи|доказать|обоснуй|обосновать|стратег|архитектур|план действий)/.test(n);
+}
+
+function needsFreshWebInformation(message = "") {
+  const n = normalizeIntentText(message);
+
+  return /(сегодня|сейчас|текущ|последн|свеж|новост|погод|курс валют|котиров|цена|стоимост|расписан|результат матча|выборы|президент|премьер)/.test(n);
+}
+
+function isFastInformationalRequest(message = "") {
+  const n = normalizeIntentText(message);
+
+  if (
+    !n
+    || needsFreshWebInformation(n)
+    || isComplexReasoningRequest(n)
+  ) {
+    return false;
+  }
+
+  if (
+    /^(?:кто такой|кто такая|кто такие|что такое|что значит|расскажи(?: мне)?(?: о| про)?|объясни(?: мне)?|дай информацию(?: о)?|информация(?: о)?|опиши|как устроен|как устроена|как работает)(?:\s|$)/.test(n)
+  ) {
+    return true;
+  }
+
+  const words = n
+    .split(/\s+/)
+    .filter(Boolean);
+
+  return words.length >= 2
+    && words.length <= 7
+    && /(?:подробно|детально|развернуто|подробнее)$/.test(n);
 }
 
 function isArtifactCreationRequest(message = "") {
@@ -1580,6 +1636,21 @@ ${agentIntelligenceContext}
     && !deepRequest
     && (capabilityMode || isFastEverydayRequest(message || "", source));
 
+  // Answer-detail words such as "подробно" must not by themselves force the
+  // expensive reasoning route. Fresh/current and genuinely analytical requests
+  // remain on the full path.
+  const detailedFastInfoMode = !durableRecoveryMode
+    && !androidNavigationMode
+    && !artifactCreationMode
+    && !capabilityMode
+    && deepRequest
+    && isFastInformationalRequest(message || "");
+
+  const fastModelMode =
+    androidNavigationMode
+    || fastEverydayMode
+    || detailedFastInfoMode;
+
   const styleInstructions = source === "voice"
     ? AYANA_VOICE_STYLE
     : AYANA_TEXT_STYLE;
@@ -1605,11 +1676,11 @@ ${selfAutonomyMode ? AYANA_SELF_AUTONOMY_COMPACT_INSTRUCTIONS : ""}`
     : "";
 
   const payload = {
-    model: androidNavigationMode || fastEverydayMode
+    model: fastModelMode
       ? "gpt-5.6-luna"
       : "gpt-5.6",
     reasoning: {
-      effort: androidNavigationMode || fastEverydayMode
+      effort: fastModelMode
         ? "none"
         : "low"
     },
@@ -1627,6 +1698,8 @@ ${styleInstructions}${productInstructions}${scopeInstructions}${recoveryInstruct
         ? (source === "voice" ? 2600 : 5200)
       : durableRecoveryMode
         ? (source === "voice" ? 420 : 520)
+      : detailedFastInfoMode
+        ? (source === "voice" ? 650 : 1500)
       : deepRequest
         ? (source === "voice" ? 650 : 2200)
         : source === "voice"
@@ -1660,7 +1733,11 @@ ${styleInstructions}${productInstructions}${scopeInstructions}${recoveryInstruct
   } else if (diagnosticMode) {
     payload.tools = diagnosticTools();
     payload.tool_choice = "auto";
-  } else if (!fastEverydayMode && !capabilityMode) {
+  } else if (
+    !fastEverydayMode
+    && !detailedFastInfoMode
+    && !capabilityMode
+  ) {
     payload.tools = [
       { type: "web_search" },
       ...DEVICE_TOOLS
