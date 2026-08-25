@@ -20,7 +20,13 @@ import kotlin.math.max
 class AgentAccessibilityService :
     AccessibilityService() {
 
-    // AYANA Accessibility v6.7 — SETTINGS NATIVE TEXT QUERY RECOVERY + CROSS-APP FOREGROUND TRUTH.
+    // AYANA Accessibility v6.8 — STICKY FOREGROUND OWNER TRUTH + SETTINGS NATIVE TEXT QUERY RECOVERY.
+    // v6.8 preserves v6.7 native Settings text-query recovery and fixes a cross-app
+    // ownership lease defect exposed by long deterministic Settings chains. A verified
+    // external foreground owner is now state, not a short timer: it vetoes AYANA's
+    // in-process View bridge until a later high-confidence foreground-ownership event
+    // supersedes it. This prevents a physically open Settings/Permissions screen from
+    // reverting to own_app_main_activity merely because a 6.5 s lease expired.
     // v6.7 preserves v6.6/v6.5 truth and adds a bounded native Accessibility text-query
     // recovery for sparse Samsung Settings detail panes. When the serialized snapshot
     // omits a visibly rendered row, upper layers may request an exact semantic label and
@@ -251,11 +257,12 @@ class AgentAccessibilityService :
             return
         }
 
-        // v6.5: keep a separate, high-confidence interaction-owner signal.
+        // v6.8: keep a separate, high-confidence interaction-owner signal.
         // Generic lastEventPackage is intentionally NOT used for foreground truth because
         // notification/background events from another package can arrive while AYANA owns
-        // the screen. Window-state/windows/focus events, however, are strong enough to
-        // temporarily veto the own-app in-process bridge during cross-app transitions.
+        // the screen. Window-state/windows/focus events are ownership transitions: the
+        // newest such event supersedes the previous owner and remains authoritative until
+        // another high-confidence ownership event replaces it. Ownership is not a lease.
         if (
             eventPackage.isNotBlank() &&
             isForegroundOwnershipEvent(event.eventType)
@@ -5707,12 +5714,17 @@ class AgentAccessibilityService :
     }
 
     /**
-     * v6.5 cross-app invariant:
+     * v6.8 cross-app invariant:
      * the in-process AYANA View bridge is an acquisition optimization, never an
-     * authority over Android foreground ownership. A fresh external window/focus
-     * event vetoes it even when MainActivity remains RESUMED/focused because of
-     * large-screen lifecycle races. Live Accessibility windows provide a second
-     * independent veto.
+     * authority over Android foreground ownership. Foreground ownership is sticky
+     * state, not a time-limited lease: after a high-confidence external window/focus
+     * event, the bridge stays vetoed until a later high-confidence ownership event
+     * explicitly returns ownership to AYANA. Live Accessibility windows remain an
+     * independent second veto.
+     *
+     * This deliberately fails closed if Android misses a return event: AYANA can still
+     * read its own UI through normal Accessibility, whereas re-enabling the in-process
+     * bridge on a timer can mask a real external screen and create false terminal truth.
      */
     private fun shouldUseOwnAppSemanticBridge(): Boolean {
 
@@ -5723,25 +5735,13 @@ class AgentAccessibilityService :
             return false
         }
 
-        val now =
-            System.currentTimeMillis()
-
         val ownerPackage =
             lastForegroundOwnerPackage
                 .trim()
 
-        val ownerAge =
-            if (lastForegroundOwnerTime > 0L) {
-                (now - lastForegroundOwnerTime)
-                    .coerceAtLeast(0L)
-            } else {
-                Long.MAX_VALUE
-            }
-
         if (
             ownerPackage.isNotBlank() &&
-            ownerPackage != packageName &&
-            ownerAge <= OWN_APP_BRIDGE_EXTERNAL_OWNER_TTL_MS
+            ownerPackage != packageName
         ) {
             return false
         }
@@ -9176,11 +9176,6 @@ class AgentAccessibilityService :
 
         private const val OWN_OVERLAY_MAX_AREA_RATIO =
             0.20
-
-        // Long enough to cover the bounded App Info/Permissions verifier, short enough
-        // that a missed return-to-AYANA event cannot strand the own-app bridge.
-        private const val OWN_APP_BRIDGE_EXTERNAL_OWNER_TTL_MS =
-            6500L
 
         private const val OWN_APP_MIN_APPLICATION_AREA_RATIO =
             0.35
