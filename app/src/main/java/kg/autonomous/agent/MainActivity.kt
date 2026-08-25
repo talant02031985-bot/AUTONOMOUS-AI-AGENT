@@ -56,7 +56,10 @@ import kotlin.concurrent.thread
 
 class MainActivity : AppCompatActivity() {
 
-    // UI generation: v7.1 EXACT EDITABLE VALUE TRUTH (v7.0 visuals/routing preserved)
+    // UI generation: v7.3 VISUAL CORE REFRESH + v7.2 FOREGROUND WINDOW-FOCUS TRUTH.
+    // v7.3 changes only the decorative AYANA Core visualizer. v7.2 foreground
+    // ownership truth is retained: RESUMED alone is not proof that AYANA owns
+    // the active/input window on Android large-screen multi-resume.
     // Editable own-app controls expose a separate factual value_text field.
     // Resolver-facing text remains the semantic accessibility label, while
     // Screen Intelligence can verify the exact post-input value without
@@ -351,11 +354,34 @@ class MainActivity : AppCompatActivity() {
         ownAppBridgeResumed =
             true
 
+        // v7.2 foreground truth retained in v7.3: RESUMED is insufficient on
+        // large-screen multi-resume; the own-app bridge also requires real
+        // window focus.
+        ownAppBridgeWindowFocused =
+            hasWindowFocus()
+
         ayanaPreferences.miniOrbEnabled = true
 
         // The VoiceService is the only lifecycle owner of the global Orb.
         // Resuming the Activity must never create/refresh an overlay instance.
         renderCurrentPage()
+    }
+
+    override fun onWindowFocusChanged(
+        hasFocus: Boolean
+    ) {
+        super.onWindowFocusChanged(
+            hasFocus
+        )
+
+        if (
+            ownAppBridgeInstance
+                ?.get() ===
+            this
+        ) {
+            ownAppBridgeWindowFocused =
+                hasFocus
+        }
     }
 
     override fun onPause() {
@@ -366,6 +392,8 @@ class MainActivity : AppCompatActivity() {
             this
         ) {
             ownAppBridgeResumed =
+                false
+            ownAppBridgeWindowFocused =
                 false
         }
 
@@ -380,6 +408,8 @@ class MainActivity : AppCompatActivity() {
             this
         ) {
             ownAppBridgeResumed =
+                false
+            ownAppBridgeWindowFocused =
                 false
             ownAppBridgeInstance =
                 null
@@ -1255,7 +1285,7 @@ class MainActivity : AppCompatActivity() {
         )
 
         val neural =
-            AyanaAudioVisualizerView(this).apply {
+            AyanaCoreVisualizer(this).apply {
                 background =
                     GradientDrawable(
                         GradientDrawable.Orientation.TL_BR,
@@ -1827,7 +1857,7 @@ class MainActivity : AppCompatActivity() {
         coreRow.addView(stateColumn)
 
         val liveView =
-            AyanaAudioVisualizerView(this).apply {
+            AyanaCoreVisualizer(this).apply {
                 background =
                     GradientDrawable(
                         GradientDrawable.Orientation.TL_BR,
@@ -8075,6 +8105,10 @@ class MainActivity : AppCompatActivity() {
         private var ownAppBridgeResumed =
             false
 
+        @Volatile
+        private var ownAppBridgeWindowFocused =
+            false
+
         private const val OWN_APP_BRIDGE_TIMEOUT_MS =
             900L
 
@@ -8084,6 +8118,7 @@ class MainActivity : AppCompatActivity() {
                     ?.get()
 
             return ownAppBridgeResumed &&
+                ownAppBridgeWindowFocused &&
                 activity != null &&
                 !activity.isFinishing &&
                 !activity.isDestroyed
@@ -8100,6 +8135,7 @@ class MainActivity : AppCompatActivity() {
 
             if (
                 !ownAppBridgeResumed ||
+                !ownAppBridgeWindowFocused ||
                 activity.isFinishing ||
                 activity.isDestroyed
             ) {
@@ -8126,6 +8162,7 @@ class MainActivity : AppCompatActivity() {
 
             if (
                 !ownAppBridgeResumed ||
+                !ownAppBridgeWindowFocused ||
                 activity.isFinishing ||
                 activity.isDestroyed
             ) {
@@ -8152,6 +8189,7 @@ class MainActivity : AppCompatActivity() {
 
             if (
                 !ownAppBridgeResumed ||
+                !ownAppBridgeWindowFocused ||
                 activity.isFinishing ||
                 activity.isDestroyed
             ) {
