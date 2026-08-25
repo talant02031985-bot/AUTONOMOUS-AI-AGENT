@@ -56,7 +56,12 @@ import kotlin.math.abs
 
 class AyanaVoiceService : Service() {
 
-    // AYANA v12.8.11 SETTINGS CHAIN NATIVE RECOVERY + TERMINAL/INPUT/SCROLL TRUTH.
+    // AYANA v12.8.14 VERIFIED SETTINGS OWNER HANDOFF + SETTINGS CHAIN NATIVE RECOVERY.
+    // v12.8.14 preserves v12.8.11 behavior and closes the remaining cross-step truth gap:
+    // once App Info is VERIFIED by a real com.android.settings window/semantic surface, that
+    // factual owner is handed to Accessibility v7.0 before the next Settings-row action. This
+    // keeps Samsung launcher/SystemUI shells from replacing the verified Settings owner during
+    // the same transaction. Intent dispatch alone never performs this handoff.
     // v12.8.11 preserves v12.8.10/v12.8.2 behavior and closes the combined
     // App Info -> subpage gap: canonical Settings row targets are tried before
     // scrolling through Screen Intelligence v4.4, and a short exact-intent-only
@@ -5504,6 +5509,71 @@ class AyanaVoiceService : Service() {
             .trim()
     }
 
+    /**
+     * Preserve an already-proven Settings owner across Samsung transient window-list gaps.
+     * This helper never infers foreground from an Intent: it is called only after the caller
+     * has verified the actual app-detail screen.
+     */
+    private fun attestVerifiedSettingsOwnerFromScreen(
+        screen: JSONObject,
+        source: String
+    ): Boolean {
+
+        val windows =
+            screen.optJSONArray("windows")
+                ?: return false
+
+        var best: JSONObject? = null
+        var bestScore = Int.MIN_VALUE
+
+        for (index in 0 until windows.length()) {
+            val window = windows.optJSONObject(index) ?: continue
+
+            if (window.optString("package") != "com.android.settings") {
+                continue
+            }
+
+            val evidenceAge =
+                window.optLong("evidence_age_ms", -1L)
+
+            val freshEvidence =
+                evidenceAge in 0L..SETTINGS_ATTESTATION_EVIDENCE_MAX_AGE_MS
+
+            val provenContext =
+                window.optBoolean("interaction_context", false) ||
+                    window.optBoolean("active", false) ||
+                    window.optBoolean("focused", false) ||
+                    freshEvidence
+
+            if (!provenContext) {
+                continue
+            }
+
+            var score = 0
+            if (window.optBoolean("interaction_context", false)) score += 100
+            if (window.optBoolean("focused", false)) score += 80
+            if (window.optBoolean("active", false)) score += 60
+            if (freshEvidence) score += 40
+            if (window.optString("semantic_surface").isNotBlank()) score += 20
+
+            if (score > bestScore) {
+                best = window
+                bestScore = score
+            }
+        }
+
+        val provenWindow =
+            best
+                ?: return false
+
+        return AgentAccessibilityService
+            .attestVerifiedForegroundOwner(
+                ownerPackage = "com.android.settings",
+                windowId = provenWindow.optInt("window_id", -1),
+                source = source
+            )
+    }
+
     private fun isVerifiedAppDetailScreen(
         screen: JSONObject,
         appTarget: String,
@@ -5727,6 +5797,18 @@ class AyanaVoiceService : Service() {
         return buildString {
             append("primary=")
             append(screen.optString("primary_context_id"))
+            append("; owner=")
+            append(screen.optString("foreground_owner_package"))
+            append(" owner_wid=")
+            append(screen.optInt("foreground_owner_window_id", -1))
+            append(" owner_age=")
+            append(screen.optLong("foreground_owner_age_ms", -1L))
+            append(" owner_source=")
+            append(screen.optString("foreground_owner_source"))
+            append(" event_pkg=")
+            append(screen.optString("event_package"))
+            append(" event_wid=")
+            append(screen.optInt("event_window_id", -1))
             append("; windows=")
             append(windows.length())
 
@@ -5813,6 +5895,11 @@ class AyanaVoiceService : Service() {
                     section = section
                 )
             ) {
+                attestVerifiedSettingsOwnerFromScreen(
+                    screen = latest,
+                    source = "verified_app_detail_screen"
+                )
+
                 return JSONObject()
                     .put(
                         "success",
@@ -5929,6 +6016,16 @@ class AyanaVoiceService : Service() {
             val threshold = if (structuralOnly) 70 else 80
 
             if (confidence >= threshold && evidenceFreshEnough) {
+                val settingsWindowId =
+                    window.optInt("window_id", -1)
+
+                AgentAccessibilityService
+                    .attestVerifiedForegroundOwner(
+                        ownerPackage = "com.android.settings",
+                        windowId = settingsWindowId,
+                        source = "settings_intent_attestation"
+                    )
+
                 return JSONObject()
                     .put("success", true)
                     .put("verified", true)
@@ -5936,6 +6033,8 @@ class AyanaVoiceService : Service() {
                     .put("confidence", confidence)
                     .put("evidence_age_ms", evidenceAge)
                     .put("dispatch_age_ms", dispatchAge)
+                    .put("settings_window_id", settingsWindowId)
+                    .put("foreground_owner_handoff", true)
                     .put("target_package", targetPackage)
                     .put("section", section)
                     .put("verification_mode", "exact_intent_plus_same_window_semantic_surface")
