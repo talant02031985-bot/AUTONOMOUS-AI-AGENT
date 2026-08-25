@@ -20,9 +20,11 @@ import kotlin.math.max
 class AgentAccessibilityService :
     AccessibilityService() {
 
-    // AYANA Accessibility v6.3 — OWN-APP IN-PROCESS SEMANTIC BRIDGE + VERIFIED VIEWPORT TRUTH.
-    // v6.3 preserves the v6.2/v6.1/v6.0/v5.9/v5.8 execution truth and adds a
-    // same-process semantic bridge for the currently resumed AYANA MainActivity. On this
+    // AYANA Accessibility v6.5 — CROSS-APP FOREGROUND TRUTH + OWN-APP SEMANTIC BRIDGE.
+    // v6.5 preserves v6.3/v6.2/v6.1/v6.0 execution truth and hardens the own-app
+    // bridge for Android large-screen multi-resume. A merely RESUMED AYANA Activity can
+    // no longer preempt a focused external application window during terminal verification.
+    // v6.3 added a same-process semantic bridge for AYANA MainActivity. On this
     // Samsung tablet Android may expose AYANA's own native UI as a sparse Accessibility
     // shell even when dozens of TextViews/EditTexts are visibly rendered. For the own app
     // only, v6.3 consumes a factual View-hierarchy snapshot from MainActivity and routes
@@ -237,6 +239,29 @@ class AgentAccessibilityService :
         ) {
             pruneEventEvidence()
             return
+        }
+
+        // v6.5: keep a separate, high-confidence interaction-owner signal.
+        // Generic lastEventPackage is intentionally NOT used for foreground truth because
+        // notification/background events from another package can arrive while AYANA owns
+        // the screen. Window-state/windows/focus events, however, are strong enough to
+        // temporarily veto the own-app in-process bridge during cross-app transitions.
+        if (
+            eventPackage.isNotBlank() &&
+            isForegroundOwnershipEvent(event.eventType)
+        ) {
+            lastForegroundOwnerPackage =
+                eventPackage
+
+            lastForegroundOwnerTime =
+                System.currentTimeMillis()
+
+            lastForegroundOwnerWindowId =
+                try {
+                    event.windowId
+                } catch (_: Exception) {
+                    -1
+                }
         }
 
         lastEventPackage =
@@ -2684,10 +2709,7 @@ class AgentAccessibilityService :
         // semantic resolver consumed the in-process View snapshot. Dispatch back to
         // that same factual View hierarchy instead of falling through to a sparse
         // Accessibility shell or coordinate guess.
-        if (
-            MainActivity
-                .isOwnAppSemanticBridgeActive()
-        ) {
+        if (shouldUseOwnAppSemanticBridge()) {
             return MainActivity
                 .performOwnAppSemanticClick(
                     target
@@ -2968,10 +2990,7 @@ class AgentAccessibilityService :
         // v6.3 own-app input truth: use the same live EditText identity exposed by
         // MainActivity's in-process semantic snapshot. Exact-value verification still
         // occurs in AyanaScreenIntelligence after this dispatch.
-        if (
-            MainActivity
-                .isOwnAppSemanticBridgeActive()
-        ) {
+        if (shouldUseOwnAppSemanticBridge()) {
             return MainActivity
                 .performOwnAppSemanticSetText(
                     target = target,
@@ -4287,15 +4306,17 @@ class AgentAccessibilityService :
         val snapshotStartedAt =
             SystemClock.elapsedRealtime()
 
-        // v6.3: AYANA's own MainActivity is a special trusted acquisition source.
-        // It is not model-derived evidence: the snapshot is serialized directly from
-        // the currently resumed native View hierarchy in the same process. This path
-        // is active only while MainActivity is resumed; every external app continues
-        // through the normal Accessibility window pipeline below.
-        if (
-            MainActivity
-                .isOwnAppSemanticBridgeActive()
-        ) {
+        // v6.5 cross-app foreground truth:
+        // MainActivity's in-process View tree is trusted only while its window is
+        // genuinely focused (MainActivity v7.2 gate) AND Accessibility does not expose
+        // a different active/focused application window. This second guard is deliberate
+        // defense-in-depth for Android large-screen multi-resume / lifecycle races.
+        // It prevents a stale own-app snapshot from masking Settings, Chrome, YouTube,
+        // or any other external foreground application during terminal verification.
+        val ownAppBridgeActive =
+            shouldUseOwnAppSemanticBridge()
+
+        if (ownAppBridgeActive) {
             val ownAppSnapshot =
                 try {
                     MainActivity
@@ -4319,6 +4340,10 @@ class AgentAccessibilityService :
                         "snapshot_duration_ms",
                         (SystemClock.elapsedRealtime() - snapshotStartedAt)
                             .coerceAtLeast(0L)
+                    )
+                    .put(
+                        "foreground_truth_mode",
+                        "own_app_window_focus_plus_event_owner_plus_accessibility_guard"
                     )
             }
         }
@@ -5007,7 +5032,7 @@ class AgentAccessibilityService :
             .put("primary_live_readable_text_count", primaryLiveReadableTextCount)
             .put("primary_evidence_readable_text_count", primaryEvidenceReadableTextCount)
             .put("primary_node_count", primaryNodeCount)
-            .put("window_context_mode", "v5_perception_truth")
+            .put("window_context_mode", "v6_5_foreground_owner_event_truth")
             .put("window_count", allContexts.size)
             .put("raw_window_count", safeWindowCount())
             .put("readable_window_count", readableWindowCount)
@@ -5377,6 +5402,78 @@ class AgentAccessibilityService :
         }
     }
 
+
+    private fun isForegroundOwnershipEvent(
+        eventType: Int
+    ): Boolean {
+
+        return eventType == AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED ||
+            eventType == AccessibilityEvent.TYPE_WINDOWS_CHANGED ||
+            eventType == AccessibilityEvent.TYPE_VIEW_FOCUSED ||
+            eventType == AccessibilityEvent.TYPE_VIEW_ACCESSIBILITY_FOCUSED
+    }
+
+    /**
+     * v6.5 cross-app invariant:
+     * the in-process AYANA View bridge is an acquisition optimization, never an
+     * authority over Android foreground ownership. A fresh external window/focus
+     * event vetoes it even when MainActivity remains RESUMED/focused because of
+     * large-screen lifecycle races. Live Accessibility windows provide a second
+     * independent veto.
+     */
+    private fun shouldUseOwnAppSemanticBridge(): Boolean {
+
+        if (
+            !MainActivity
+                .isOwnAppSemanticBridgeActive()
+        ) {
+            return false
+        }
+
+        val now =
+            System.currentTimeMillis()
+
+        val ownerPackage =
+            lastForegroundOwnerPackage
+                .trim()
+
+        val ownerAge =
+            if (lastForegroundOwnerTime > 0L) {
+                (now - lastForegroundOwnerTime)
+                    .coerceAtLeast(0L)
+            } else {
+                Long.MAX_VALUE
+            }
+
+        if (
+            ownerPackage.isNotBlank() &&
+            ownerPackage != packageName &&
+            ownerAge <= OWN_APP_BRIDGE_EXTERNAL_OWNER_TTL_MS
+        ) {
+            return false
+        }
+
+        val contexts =
+            try {
+                resolveWindowContexts()
+            } catch (_: Exception) {
+                emptyList()
+            }
+
+        val externalForeground =
+            contexts.any { context ->
+                context.packageName.isNotBlank() &&
+                    context.packageName != packageName &&
+                    context.type == AccessibilityWindowInfo.TYPE_APPLICATION &&
+                    (context.focused || context.active)
+            }
+
+        if (externalForeground) {
+            return false
+        }
+
+        return true
+    }
 
     private fun isOwnForegroundApplicationEvent(
         event: AccessibilityEvent
@@ -8711,6 +8808,11 @@ class AgentAccessibilityService :
         private const val OWN_OVERLAY_MAX_AREA_RATIO =
             0.20
 
+        // Long enough to cover the bounded App Info/Permissions verifier, short enough
+        // that a missed return-to-AYANA event cannot strand the own-app bridge.
+        private const val OWN_APP_BRIDGE_EXTERNAL_OWNER_TTL_MS =
+            6500L
+
         private const val OWN_APP_MIN_APPLICATION_AREA_RATIO =
             0.35
 
@@ -8793,6 +8895,18 @@ class AgentAccessibilityService :
         var instance:
             AgentAccessibilityService? =
             null
+
+        @Volatile
+        var lastForegroundOwnerPackage:
+            String = ""
+
+        @Volatile
+        var lastForegroundOwnerWindowId:
+            Int = -1
+
+        @Volatile
+        var lastForegroundOwnerTime:
+            Long = 0L
 
         @Volatile
         var lastEventPackage:
