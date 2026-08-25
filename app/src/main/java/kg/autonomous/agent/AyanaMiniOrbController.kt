@@ -22,7 +22,7 @@ import kotlin.math.abs
 import kotlin.math.sin
 
 /**
- * AYANA Floating Orb v4.7 — PREMIUM GLASS CORE / CONTINUOUS PHASE.
+ * AYANA Floating Orb v4.8 — SIGNATURE GLASS CORE R3 / CONTINUOUS PHASE.
  *
  * Rules:
  * 1) exactly one overlay View per app process;
@@ -595,15 +595,14 @@ class AyanaMiniOrbController(
 
     /**
      * Static nested View: it does not retain a controller instance.
-     * v4.7 changes ONLY rendering. Overlay lifecycle, dimensions, drag/tap,
-     * persisted position, STOP semantics, frame cadence and state timing remain
-     * owned by the unchanged controller contract around this View.
+     * This is important because several short-lived controller objects may call
+     * refresh(), while the actual overlay remains one process-wide View.
      */
     private class FloatingOrbView(
         context: Context
     ) : View(context) {
 
-        private val ambientPaint =
+        private val haloPaint =
             Paint(
                 Paint.ANTI_ALIAS_FLAG
             )
@@ -619,6 +618,14 @@ class AyanaMiniOrbController(
             )
 
         private val ringPaint =
+            Paint(
+                Paint.ANTI_ALIAS_FLAG
+            ).apply {
+                style = Paint.Style.STROKE
+                strokeCap = Paint.Cap.ROUND
+            }
+
+        private val glowPaint =
             Paint(
                 Paint.ANTI_ALIAS_FLAG
             ).apply {
@@ -642,7 +649,7 @@ class AyanaMiniOrbController(
         private val arcBounds =
             RectF()
 
-        private var ambientShader:
+        private var haloShader:
             RadialGradient? = null
 
         private var glassShader:
@@ -699,6 +706,7 @@ class AyanaMiniOrbController(
         fun setAyanaState(
             state: String
         ) {
+
             if (
                 state ==
                 ayanaState
@@ -707,9 +715,7 @@ class AyanaMiniOrbController(
                 return
             }
 
-            ayanaState =
-                state
-
+            ayanaState = state
             accentColor =
                 strokeFor(state)
 
@@ -748,37 +754,39 @@ class AyanaMiniOrbController(
                 )
                     .toFloat()
 
+            // R3 deliberately returns to the clean proportions of the old Orb:
+            // a compact glass sphere with large broken circular orbits around it.
             val shellRadius =
-                minSide * 0.325f
+                minSide * 0.255f
 
             val coreRadius =
-                shellRadius * 0.24f
+                shellRadius * 0.34f
 
             val accent =
                 accentColor
 
             val pale =
                 Color.rgb(
-                    230,
-                    250,
+                    235,
+                    252,
                     255
                 )
 
-            ambientShader =
+            haloShader =
                 RadialGradient(
                     cx,
                     cy,
-                    minSide * 0.49f,
+                    minSide * 0.43f,
                     intArrayOf(
-                        withAlpha(accent, 32),
-                        withAlpha(accent, 19),
-                        withAlpha(accent, 7),
+                        withAlpha(pale, 28),
+                        withAlpha(accent, 38),
+                        withAlpha(accent, 12),
                         Color.TRANSPARENT
                     ),
                     floatArrayOf(
                         0f,
-                        0.43f,
-                        0.76f,
+                        0.38f,
+                        0.72f,
                         1f
                     ),
                     Shader.TileMode.CLAMP
@@ -786,25 +794,21 @@ class AyanaMiniOrbController(
 
             glassShader =
                 RadialGradient(
-                    cx -
-                        shellRadius *
-                        0.24f,
-                    cy -
-                        shellRadius *
-                        0.29f,
-                    shellRadius * 1.46f,
+                    cx - shellRadius * 0.20f,
+                    cy - shellRadius * 0.24f,
+                    shellRadius * 1.40f,
                     intArrayOf(
-                        withAlpha(Color.WHITE, 86),
-                        withAlpha(pale, 58),
-                        withAlpha(accent, 38),
-                        withAlpha(accent, 13),
+                        withAlpha(Color.WHITE, 205),
+                        withAlpha(pale, 112),
+                        withAlpha(accent, 74),
+                        withAlpha(accent, 24),
                         Color.TRANSPARENT
                     ),
                     floatArrayOf(
                         0f,
-                        0.17f,
+                        0.15f,
                         0.42f,
-                        0.77f,
+                        0.76f,
                         1f
                     ),
                     Shader.TileMode.CLAMP
@@ -812,34 +816,28 @@ class AyanaMiniOrbController(
 
             coreShader =
                 RadialGradient(
-                    cx -
-                        coreRadius *
-                        0.20f,
-                    cy -
-                        coreRadius *
-                        0.24f,
-                    coreRadius * 2.85f,
+                    cx - coreRadius * 0.14f,
+                    cy - coreRadius * 0.18f,
+                    coreRadius * 2.25f,
                     intArrayOf(
                         Color.WHITE,
-                        withAlpha(pale, 252),
-                        withAlpha(accent, 248),
-                        withAlpha(accent, 152),
-                        withAlpha(accent, 48),
+                        withAlpha(pale, 255),
+                        withAlpha(accent, 252),
+                        withAlpha(accent, 126),
                         Color.TRANSPARENT
                     ),
                     floatArrayOf(
                         0f,
-                        0.12f,
-                        0.30f,
-                        0.52f,
-                        0.76f,
+                        0.16f,
+                        0.38f,
+                        0.72f,
                         1f
                     ),
                     Shader.TileMode.CLAMP
                 )
 
-            ambientPaint.shader =
-                ambientShader
+            haloPaint.shader =
+                haloShader
 
             glassPaint.shader =
                 glassShader
@@ -851,6 +849,7 @@ class AyanaMiniOrbController(
         override fun onDraw(
             canvas: Canvas
         ) {
+
             super.onDraw(canvas)
 
             val now =
@@ -870,7 +869,7 @@ class AyanaMiniOrbController(
                     .toFloat()
 
             val shellRadius =
-                minSide * 0.325f
+                minSide * 0.255f
 
             val activeMotion =
                 when (ayanaState) {
@@ -878,14 +877,12 @@ class AyanaMiniOrbController(
                     AyanaVoiceService.STATE_COMMAND,
                     AyanaVoiceService.STATE_THINKING,
                     AyanaVoiceService.STATE_EXECUTING,
-                    AyanaVoiceService.STATE_SPEAKING ->
-                        true
-
-                    else ->
-                        false
+                    AyanaVoiceService.STATE_SPEAKING -> true
+                    else -> false
                 }
 
-            // EXACT v4.4/v4.6 state-cycle timings are intentionally frozen.
+            // TECHNICAL CONTRACT FROZEN: these cycle timings are byte-for-byte
+            // equivalent to v4.4/v4.7 behavior. Only drawing changed in R3.
             val idleCycleMs =
                 when (ayanaState) {
                     AyanaVoiceService.STATE_LISTENING -> 3400f
@@ -932,12 +929,9 @@ class AyanaMiniOrbController(
                 when (ayanaState) {
                     AyanaVoiceService.STATE_COMMAND,
                     AyanaVoiceService.STATE_SPEAKING -> 0.075f
-
                     AyanaVoiceService.STATE_THINKING,
                     AyanaVoiceService.STATE_EXECUTING -> 0.055f
-
                     AyanaVoiceService.STATE_LISTENING -> 0.035f
-
                     else -> 0f
                 }
 
@@ -959,40 +953,39 @@ class AyanaMiniOrbController(
 
             val pale =
                 Color.rgb(
-                    230,
-                    250,
+                    235,
+                    252,
                     255
                 )
 
-            // Large but transparent ambient halo: the Orb is now visually
-            // present at 72 dp without introducing an opaque background disk.
-            ambientPaint.alpha =
+            // Soft transparent aura: the Orb remains lightweight and never
+            // becomes an opaque badge.
+            haloPaint.alpha =
                 if (
                     ayanaState ==
                     AyanaVoiceService.STATE_THINKING
                 ) {
-                    236
+                    220
                 } else {
-                    208
+                    188
                 }
 
             canvas.drawCircle(
                 cx,
                 cy,
-                minSide * 0.48f,
-                ambientPaint
+                minSide * 0.41f,
+                haloPaint
             )
 
-            // Glass sphere nearly fills the central body, matching the approved
-            // glossy cyan reference rather than the previous tiny wireframe core.
+            // Clean glass sphere.
             glassPaint.alpha =
                 if (
                     ayanaState ==
                     AyanaVoiceService.STATE_THINKING
                 ) {
-                    224
+                    238
                 } else {
-                    204
+                    218
                 }
 
             canvas.drawCircle(
@@ -1001,57 +994,12 @@ class AyanaMiniOrbController(
                 shellRadius *
                     (
                         1f +
-                            pulse *
-                            0.11f
+                            pulse * 0.10f
                         ),
                 glassPaint
             )
 
-            // Outer glass boundary + inner lens rings.
-            finePaint.shader = null
-            finePaint.color =
-                withAlpha(
-                    pale,
-                    190
-                )
-            finePaint.strokeWidth =
-                dpLocal(0.86f)
-            canvas.drawCircle(
-                cx,
-                cy,
-                shellRadius * 0.995f,
-                finePaint
-            )
-
-            finePaint.color =
-                withAlpha(
-                    accent,
-                    118
-                )
-            finePaint.strokeWidth =
-                dpLocal(0.66f)
-            canvas.drawCircle(
-                cx,
-                cy,
-                shellRadius * 0.76f,
-                finePaint
-            )
-
-            finePaint.color =
-                withAlpha(
-                    pale,
-                    100
-                )
-            finePaint.strokeWidth =
-                dpLocal(0.58f)
-            canvas.drawCircle(
-                cx,
-                cy,
-                shellRadius * 0.53f,
-                finePaint
-            )
-
-            // Central cyan/state-colored luminous energy bead.
+            // Central luminous bead.
             corePaint.alpha =
                 if (
                     now <
@@ -1059,7 +1007,7 @@ class AyanaMiniOrbController(
                 ) {
                     255
                 } else {
-                    250
+                    248
                 }
 
             canvas.drawCircle(
@@ -1067,32 +1015,75 @@ class AyanaMiniOrbController(
                 cy,
                 shellRadius *
                     (
-                        0.30f +
-                            pulse *
-                            0.26f
+                        0.34f +
+                            pulse * 0.20f
                         ),
                 corePaint
             )
 
-            // Strong specular highlights give the sphere a glass surface.
+            // Lens boundaries: just enough structure, no R2 wireframe clutter.
+            finePaint.shader = null
+            finePaint.color =
+                withAlpha(
+                    pale,
+                    176
+                )
+            finePaint.strokeWidth =
+                dpLocal(0.82f)
+            canvas.drawCircle(
+                cx,
+                cy,
+                shellRadius * 0.98f,
+                finePaint
+            )
+
+            finePaint.color =
+                withAlpha(
+                    accent,
+                    122
+                )
+            finePaint.strokeWidth =
+                dpLocal(0.68f)
+            canvas.drawCircle(
+                cx,
+                cy,
+                shellRadius * 0.70f,
+                finePaint
+            )
+
+            finePaint.color =
+                withAlpha(
+                    pale,
+                    92
+                )
+            finePaint.strokeWidth =
+                dpLocal(0.56f)
+            canvas.drawCircle(
+                cx,
+                cy,
+                shellRadius * 0.49f,
+                finePaint
+            )
+
+            // Fixed optical glass highlights.
             arcBounds.set(
-                cx - shellRadius * 0.87f,
-                cy - shellRadius * 0.87f,
-                cx + shellRadius * 0.87f,
-                cy + shellRadius * 0.87f
+                cx - shellRadius * 0.90f,
+                cy - shellRadius * 0.90f,
+                cx + shellRadius * 0.90f,
+                cy + shellRadius * 0.90f
             )
 
             ringPaint.shader = null
             ringPaint.color =
                 withAlpha(
                     Color.WHITE,
-                    184
+                    194
                 )
             ringPaint.strokeWidth =
-                dpLocal(1.18f)
+                dpLocal(1.05f)
             canvas.drawArc(
                 arcBounds,
-                198f,
+                202f,
                 61f,
                 false,
                 ringPaint
@@ -1101,170 +1092,115 @@ class AyanaMiniOrbController(
             ringPaint.color =
                 withAlpha(
                     accent,
-                    154
+                    144
                 )
             ringPaint.strokeWidth =
-                dpLocal(0.92f)
+                dpLocal(0.86f)
             canvas.drawArc(
                 arcBounds,
-                18f,
-                39f,
+                22f,
+                35f,
                 false,
                 ringPaint
             )
 
-            // Inner rotating HUD segments.
+            // Two clean inner HUD segments.
+            val innerRadius =
+                shellRadius * 0.60f
+
             arcBounds.set(
-                cx - shellRadius * 0.66f,
-                cy - shellRadius * 0.66f,
-                cx + shellRadius * 0.66f,
-                cy + shellRadius * 0.66f
+                cx - innerRadius,
+                cy - innerRadius,
+                cx + innerRadius,
+                cy + innerRadius
             )
 
             ringPaint.color =
                 withAlpha(
                     accent,
-                    224
+                    220
                 )
             ringPaint.strokeWidth =
-                dpLocal(1.38f)
+                dpLocal(1.35f)
             canvas.drawArc(
                 arcBounds,
                 innerRotation + 18f,
-                48f,
+                42f,
                 false,
                 ringPaint
             )
             canvas.drawArc(
                 arcBounds,
-                innerRotation + 198f,
-                30f,
+                innerRotation + 196f,
+                25f,
                 false,
                 ringPaint
             )
 
-            ringPaint.color =
-                withAlpha(
-                    pale,
-                    122
-                )
-            ringPaint.strokeWidth =
-                dpLocal(0.72f)
-            canvas.drawArc(
-                arcBounds,
-                reverseRotation + 92f,
-                85f,
-                false,
-                ringPaint
-            )
-
-            // Premium outer orbit system. The large asymmetrical sweeps occupy
-            // the full 72 dp canvas, close to the user's approved reference.
-            drawTiltedOrbit(
+            // Signature orbit system: circular, asymmetric, sparse. This is the
+            // clean identity from the old Orb, enhanced with glow and larger
+            // satellite hierarchy.
+            drawOrbit(
                 canvas = canvas,
                 cx = cx,
                 cy = cy,
-                radiusX = shellRadius + dpLocal(6.2f),
-                radiusY = shellRadius * 0.70f,
-                tiltDeg = -24f,
-                start = rotation + 4f,
-                sweepA = 96f,
-                sweepB = 50f,
-                offsetB = 178f,
-                color = withAlpha(accent, 232),
-                widthDp = 1.45f
+                radius = shellRadius + dpLocal(4.8f),
+                start = rotation + 12f,
+                sweepA = 82f,
+                sweepB = 42f,
+                offsetB = 180f,
+                color = withAlpha(accent, 225),
+                widthDp = 1.35f,
+                glow = true
             )
 
-            drawTiltedOrbit(
+            drawOrbit(
                 canvas = canvas,
                 cx = cx,
                 cy = cy,
-                radiusX = shellRadius + dpLocal(9.6f),
-                radiusY = shellRadius * 0.78f,
-                tiltDeg = 31f,
-                start = reverseRotation + 62f,
-                sweepA = 77f,
-                sweepB = 37f,
-                offsetB = 168f,
-                color = withAlpha(pale, 194),
-                widthDp = 1.02f
-            )
-
-            drawTiltedOrbit(
-                canvas = canvas,
-                cx = cx,
-                cy = cy,
-                radiusX = shellRadius + dpLocal(11.3f),
-                radiusY = shellRadius * 0.58f,
-                tiltDeg = 77f,
-                start = slowRotation + 214f,
+                radius = shellRadius + dpLocal(9.1f),
+                start = reverseRotation + 72f,
                 sweepA = 62f,
-                sweepB = 29f,
+                sweepB = 30f,
+                offsetB = 164f,
+                color = withAlpha(pale, 176),
+                widthDp = 0.92f,
+                glow = false
+            )
+
+            drawOrbit(
+                canvas = canvas,
+                cx = cx,
+                cy = cy,
+                radius = shellRadius + dpLocal(13.2f),
+                start = slowRotation + 226f,
+                sweepA = 52f,
+                sweepB = 23f,
                 offsetB = 151f,
-                color = withAlpha(accent, 166),
-                widthDp = 0.82f
+                color = withAlpha(accent, 148),
+                widthDp = 0.72f,
+                glow = false
             )
 
-            // Long elegant top-right and lower-left highlight strokes.
-            drawTiltedOrbit(
-                canvas = canvas,
-                cx = cx,
-                cy = cy,
-                radiusX = shellRadius + dpLocal(12.1f),
-                radiusY = shellRadius * 0.86f,
-                tiltDeg = -11f,
-                start = reverseRotation + 248f,
-                sweepA = 48f,
-                sweepB = 20f,
-                offsetB = 177f,
-                color = withAlpha(pale, 122),
-                widthDp = 0.62f
-            )
-
-            // Larger orbital satellites with halos.
-            drawTiltedNode(
-                canvas = canvas,
-                cx = cx,
-                cy = cy,
-                radiusX = shellRadius + dpLocal(9.6f),
-                radiusY = shellRadius * 0.78f,
-                tiltDeg = 31f,
-                angleDeg = reverseRotation + 94f,
-                color = accent,
-                radiusDp = 1.85f
-            )
-
-            drawTiltedNode(
-                canvas = canvas,
-                cx = cx,
-                cy = cy,
-                radiusX = shellRadius + dpLocal(11.3f),
-                radiusY = shellRadius * 0.58f,
-                tiltDeg = 77f,
-                angleDeg = slowRotation + 258f,
-                color = pale,
-                radiusDp = 1.45f
-            )
-
-            drawTiltedNode(
-                canvas = canvas,
-                cx = cx,
-                cy = cy,
-                radiusX = shellRadius + dpLocal(6.2f),
-                radiusY = shellRadius * 0.70f,
-                tiltDeg = -24f,
-                angleDeg = rotation + 22f,
-                color = accent,
-                radiusDp = 1.05f
-            )
-
-            // Small fixed optical spark near the nucleus.
-            drawStarFlare(
+            // Two satellites only: readable hierarchy, no flower/tangle effect.
+            drawNode(
                 canvas,
-                cx + shellRadius * 0.18f,
-                cy - shellRadius * 0.24f,
+                cx,
+                cy,
+                shellRadius + dpLocal(9.1f),
+                reverseRotation + 96f,
+                accent,
+                1.55f
+            )
+
+            drawNode(
+                canvas,
+                cx,
+                cy,
+                shellRadius + dpLocal(13.2f),
+                slowRotation + 256f,
                 pale,
-                0.62f
+                1.14f
             )
 
             if (
@@ -1285,11 +1221,10 @@ class AyanaMiniOrbController(
                                 .toFloat()
 
                 ringPaint.shader = null
-                ringPaint.color =
-                    accent
+                ringPaint.color = accent
                 ringPaint.alpha =
                     (
-                        205 *
+                        190 *
                             (
                                 1f -
                                     phase
@@ -1298,15 +1233,15 @@ class AyanaMiniOrbController(
                         .toInt()
                         .coerceIn(
                             0,
-                            205
+                            190
                         )
                 ringPaint.strokeWidth =
-                    dpLocal(1.25f)
+                    dpLocal(1.2f)
 
                 val flashRadius =
                     shellRadius +
-                        dpLocal(5f) +
-                        dpLocal(7f) *
+                        dpLocal(9f) +
+                        dpLocal(8f) *
                         phase
 
                 canvas.drawCircle(
@@ -1342,9 +1277,7 @@ class AyanaMiniOrbController(
 
             val fractional =
                 turns -
-                    kotlin.math.floor(
-                        turns
-                    )
+                    kotlin.math.floor(turns)
 
             val degrees =
                 (
@@ -1364,68 +1297,62 @@ class AyanaMiniOrbController(
             }
         }
 
-        private fun drawTiltedOrbit(
+        private fun drawOrbit(
             canvas: Canvas,
             cx: Float,
             cy: Float,
-            radiusX: Float,
-            radiusY: Float,
-            tiltDeg: Float,
+            radius: Float,
             start: Float,
             sweepA: Float,
             sweepB: Float,
             offsetB: Float,
             color: Int,
-            widthDp: Float
+            widthDp: Float,
+            glow: Boolean
         ) {
-            val save =
-                canvas.save()
-
-            canvas.rotate(
-                tiltDeg,
-                cx,
-                cy
-            )
-
             arcBounds.set(
-                cx - radiusX,
-                cy - radiusY,
-                cx + radiusX,
-                cy + radiusY
+                cx - radius,
+                cy - radius,
+                cx + radius,
+                cy + radius
             )
+
+            if (glow) {
+                glowPaint.shader = null
+                glowPaint.color = color
+                glowPaint.alpha =
+                    42
+                glowPaint.strokeWidth =
+                    dpLocal(
+                        widthDp *
+                            4.6f
+                    )
+
+                canvas.drawArc(
+                    arcBounds,
+                    start,
+                    sweepA,
+                    false,
+                    glowPaint
+                )
+
+                canvas.drawArc(
+                    arcBounds,
+                    start +
+                        offsetB,
+                    sweepB,
+                    false,
+                    glowPaint
+                )
+            }
 
             ringPaint.shader = null
-            ringPaint.color =
-                color
-            ringPaint.alpha =
-                Color.alpha(color)
-
-            // Low-alpha wide pass simulates light bloom without forcing a
-            // software shadow layer.
-            ringPaint.strokeWidth =
-                dpLocal(
-                    widthDp *
-                        3.4f
-                )
-            ringPaint.alpha =
-                (
-                    Color.alpha(color) *
-                        0.16f
-                    )
-                    .toInt()
-                    .coerceIn(0, 54)
-            canvas.drawArc(
-                arcBounds,
-                start,
-                sweepA,
-                false,
-                ringPaint
-            )
-
+            ringPaint.color = color
             ringPaint.alpha =
                 Color.alpha(color)
             ringPaint.strokeWidth =
                 dpLocal(widthDp)
+
             canvas.drawArc(
                 arcBounds,
                 start,
@@ -1433,6 +1360,7 @@ class AyanaMiniOrbController(
                 false,
                 ringPaint
             )
+
             canvas.drawArc(
                 arcBounds,
                 start + offsetB,
@@ -1440,19 +1368,13 @@ class AyanaMiniOrbController(
                 false,
                 ringPaint
             )
-
-            canvas.restoreToCount(
-                save
-            )
         }
 
-        private fun drawTiltedNode(
+        private fun drawNode(
             canvas: Canvas,
             cx: Float,
             cy: Float,
-            radiusX: Float,
-            radiusY: Float,
-            tiltDeg: Float,
+            radius: Float,
             angleDeg: Float,
             color: Int,
             radiusDp: Float
@@ -1462,56 +1384,22 @@ class AyanaMiniOrbController(
                     angleDeg.toDouble()
                 )
 
-            val localX =
-                Math.cos(radians)
-                    .toFloat() *
-                    radiusX
-
-            val localY =
-                Math.sin(radians)
-                    .toFloat() *
-                    radiusY
-
-            val tilt =
-                Math.toRadians(
-                    tiltDeg.toDouble()
-                )
-
             val x =
                 cx +
-                    localX *
-                    Math.cos(tilt)
-                        .toFloat() -
-                    localY *
-                    Math.sin(tilt)
-                        .toFloat()
+                    Math.cos(radians)
+                        .toFloat() *
+                    radius
 
             val y =
                 cy +
-                    localX *
-                    Math.sin(tilt)
-                        .toFloat() +
-                    localY *
-                    Math.cos(tilt)
-                        .toFloat()
+                    Math.sin(radians)
+                        .toFloat() *
+                    radius
 
             nodePaint.shader = null
-            nodePaint.color =
-                color
-            nodePaint.alpha =
-                54
-            canvas.drawCircle(
-                x,
-                y,
-                dpLocal(
-                    radiusDp *
-                        3.8f
-                ),
-                nodePaint
-            )
+            nodePaint.color = color
+            nodePaint.alpha = 218
 
-            nodePaint.alpha =
-                220
             canvas.drawCircle(
                 x,
                 y,
@@ -1519,74 +1407,15 @@ class AyanaMiniOrbController(
                 nodePaint
             )
 
-            nodePaint.color =
-                Color.WHITE
-            nodePaint.alpha =
-                215
+            nodePaint.alpha = 48
+
             canvas.drawCircle(
-                x -
-                    dpLocal(
-                        radiusDp *
-                            0.22f
-                    ),
-                y -
-                    dpLocal(
-                        radiusDp *
-                            0.24f
-                    ),
+                x,
+                y,
                 dpLocal(
                     radiusDp *
-                        0.30f
+                        3.0f
                 ),
-                nodePaint
-            )
-        }
-
-        private fun drawStarFlare(
-            canvas: Canvas,
-            x: Float,
-            y: Float,
-            color: Int,
-            scale: Float
-        ) {
-            finePaint.shader = null
-            finePaint.color =
-                color
-            finePaint.alpha =
-                178
-            finePaint.strokeWidth =
-                dpLocal(0.58f)
-
-            val radius =
-                dpLocal(4.1f) *
-                    scale
-
-            canvas.drawLine(
-                x - radius,
-                y,
-                x + radius,
-                y,
-                finePaint
-            )
-
-            canvas.drawLine(
-                x,
-                y - radius,
-                x,
-                y + radius,
-                finePaint
-            )
-
-            nodePaint.shader = null
-            nodePaint.color =
-                Color.WHITE
-            nodePaint.alpha =
-                222
-            canvas.drawCircle(
-                x,
-                y,
-                dpLocal(0.68f) *
-                    scale,
                 nodePaint
             )
         }
@@ -1597,12 +1426,9 @@ class AyanaMiniOrbController(
             return when (state) {
                 AyanaVoiceService.STATE_COMMAND,
                 AyanaVoiceService.STATE_EXECUTING -> FRAME_ACTIVE_MS
-
                 AyanaVoiceService.STATE_THINKING,
                 AyanaVoiceService.STATE_SPEAKING -> FRAME_NORMAL_MS
-
                 AyanaVoiceService.STATE_LISTENING -> FRAME_LISTENING_MS
-
                 else -> FRAME_TERMINAL_MS
             }
         }
@@ -1633,11 +1459,8 @@ class AyanaMiniOrbController(
                     AyanaVoiceService.STATE_COMMAND,
                     AyanaVoiceService.STATE_THINKING,
                     AyanaVoiceService.STATE_EXECUTING,
-                    AyanaVoiceService.STATE_SPEAKING ->
-                        true
-
-                    else ->
-                        false
+                    AyanaVoiceService.STATE_SPEAKING -> true
+                    else -> false
                 }
 
             return active ||
@@ -1696,7 +1519,7 @@ class AyanaMiniOrbController(
         private const val TERMINAL_FLASH_MS =
             1200L
 
-        // v4.4 CONTINUOUS PHASE:
+        // v4.8 R3 keeps the v4.4 CONTINUOUS PHASE technical cadence:
         // The old 36-45 ms cadence produced visibly stepped orbital motion
         // on high-refresh tablets. Keep the vector-only renderer, but raise
         // the active/idle animation cadence to ~38-42 FPS. This remains far
