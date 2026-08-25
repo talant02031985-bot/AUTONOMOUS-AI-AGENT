@@ -22,7 +22,7 @@ import kotlin.math.abs
 import kotlin.math.sin
 
 /**
- * AYANA Floating Orb v4.4 — CONTINUOUS PHASE / GLASS CORE.
+ * AYANA Floating Orb v4.6 — VISUAL CORE REFRESH / CONTINUOUS PHASE.
  *
  * Rules:
  * 1) exactly one overlay View per app process;
@@ -721,27 +721,27 @@ class AyanaMiniOrbController(
             val cx = width / 2f
             val cy = height / 2f
             val minSide = minOf(width, height).toFloat()
-            val shellRadius = minSide * 0.225f
-            val coreRadius = shellRadius * 0.42f
+            val shellRadius = minSide * 0.255f
+            val coreRadius = shellRadius * 0.34f
 
             val accent = accentColor
             val pale = Color.rgb(224, 247, 255)
 
             glassShader =
                 RadialGradient(
-                    cx,
-                    cy,
-                    shellRadius * 1.18f,
+                    cx - shellRadius * 0.18f,
+                    cy - shellRadius * 0.22f,
+                    shellRadius * 1.38f,
                     intArrayOf(
-                        withAlpha(pale, 42),
-                        withAlpha(accent, 34),
-                        withAlpha(accent, 14),
+                        withAlpha(pale, 58),
+                        withAlpha(accent, 42),
+                        withAlpha(accent, 16),
                         Color.TRANSPARENT
                     ),
                     floatArrayOf(
                         0f,
-                        0.38f,
-                        0.76f,
+                        0.34f,
+                        0.74f,
                         1f
                     ),
                     Shader.TileMode.CLAMP
@@ -749,19 +749,21 @@ class AyanaMiniOrbController(
 
             coreShader =
                 RadialGradient(
-                    cx,
-                    cy,
-                    coreRadius * 1.85f,
+                    cx - coreRadius * 0.22f,
+                    cy - coreRadius * 0.24f,
+                    coreRadius * 2.25f,
                     intArrayOf(
                         Color.WHITE,
+                        withAlpha(pale, 250),
                         withAlpha(accent, 245),
-                        withAlpha(accent, 105),
+                        withAlpha(accent, 102),
                         Color.TRANSPARENT
                     ),
                     floatArrayOf(
                         0f,
-                        0.22f,
-                        0.62f,
+                        0.14f,
+                        0.36f,
+                        0.68f,
                         1f
                     ),
                     Shader.TileMode.CLAMP
@@ -781,7 +783,7 @@ class AyanaMiniOrbController(
             val cx = width / 2f
             val cy = height / 2f
             val minSide = minOf(width, height).toFloat()
-            val shellRadius = minSide * 0.225f
+            val shellRadius = minSide * 0.255f
 
             val activeMotion =
                 when (ayanaState) {
@@ -844,156 +846,150 @@ class AyanaMiniOrbController(
             val accent = accentColor
             val pale = Color.rgb(224, 247, 255)
 
-            // Transparent overlay: only translucent glass/light is painted.
+            // v4.6 transparent glass sphere. No opaque backing disk.
             glassPaint.alpha =
-                if (ayanaState == AyanaVoiceService.STATE_THINKING) 210 else 185
+                if (ayanaState == AyanaVoiceService.STATE_THINKING) 218 else 194
             canvas.drawCircle(
                 cx,
                 cy,
-                shellRadius * (1f + pulse * 0.22f),
+                shellRadius * (1f + pulse * 0.16f),
                 glassPaint
             )
 
-            // Central luminous energy bead.
+            // Bright cyan / state-colored nucleus.
             corePaint.alpha =
-                if (now < terminalFlashUntil) 255 else 238
+                if (now < terminalFlashUntil) 255 else 246
             canvas.drawCircle(
                 cx,
                 cy,
-                shellRadius * (0.46f + pulse * 0.55f),
+                shellRadius * (0.29f + pulse * 0.35f),
                 corePaint
             )
 
-            // Glass shell: multiple very thin concentric highlights.
-            finePaint.color = withAlpha(pale, 155)
-            finePaint.strokeWidth = dpLocal(0.8f)
+            finePaint.color = withAlpha(pale, 178)
+            finePaint.strokeWidth = dpLocal(0.72f)
             canvas.drawCircle(
                 cx,
                 cy,
-                shellRadius * 0.72f,
+                shellRadius * 0.64f,
                 finePaint
             )
 
-            finePaint.color = withAlpha(accent, 115)
-            finePaint.strokeWidth = dpLocal(0.7f)
+            finePaint.color = withAlpha(accent, 128)
+            finePaint.strokeWidth = dpLocal(0.68f)
             canvas.drawCircle(
                 cx,
                 cy,
-                shellRadius * 0.92f,
+                shellRadius * 0.94f,
                 finePaint
             )
 
-            ringPaint.color = withAlpha(pale, 175)
-            ringPaint.strokeWidth = dpLocal(1.05f)
             arcBounds.set(
-                cx - shellRadius,
-                cy - shellRadius,
-                cx + shellRadius,
-                cy + shellRadius
+                cx - shellRadius * 0.78f,
+                cy - shellRadius * 0.78f,
+                cx + shellRadius * 0.78f,
+                cy + shellRadius * 0.78f
             )
+
+            ringPaint.color = withAlpha(pale, 186)
+            ringPaint.strokeWidth = dpLocal(0.95f)
             canvas.drawArc(
                 arcBounds,
                 rotation + 205f,
-                86f,
+                66f,
                 false,
                 ringPaint
             )
 
-            ringPaint.color = withAlpha(accent, 190)
-            ringPaint.strokeWidth = dpLocal(1.4f)
+            ringPaint.color = withAlpha(accent, 224)
+            ringPaint.strokeWidth = dpLocal(1.35f)
             canvas.drawArc(
                 arcBounds,
-                reverseRotation + 25f,
-                54f,
+                reverseRotation + 24f,
+                48f,
                 false,
                 ringPaint
             )
 
-            // Inner HUD segments.
-            val innerRadius = shellRadius * 0.62f
-            arcBounds.set(
-                cx - innerRadius,
-                cy - innerRadius,
-                cx + innerRadius,
-                cy + innerRadius
-            )
-            ringPaint.color = withAlpha(accent, 225)
-            ringPaint.strokeWidth = dpLocal(1.5f)
-            canvas.drawArc(
-                arcBounds,
-                innerRotation + 18f,
-                42f,
-                false,
-                ringPaint
-            )
-            canvas.drawArc(
-                arcBounds,
-                innerRotation + 194f,
-                27f,
-                false,
-                ringPaint
-            )
-
-            // Three outer orbital paths: thin, broken and asymmetric like the
-            // approved glass-core concept. They deliberately rotate at
-            // different speeds/directions so idle never looks frozen.
-            drawOrbit(
+            drawTiltedOrbit(
                 canvas = canvas,
                 cx = cx,
                 cy = cy,
-                radius = shellRadius + dpLocal(5.5f),
+                radiusX = shellRadius + dpLocal(5.2f),
+                radiusY = shellRadius * 0.50f,
+                tiltDeg = -28f,
                 start = rotation + 8f,
-                sweepA = 72f,
-                sweepB = 39f,
+                sweepA = 76f,
+                sweepB = 38f,
                 offsetB = 178f,
-                color = withAlpha(accent, 205),
-                widthDp = 1.25f
+                color = withAlpha(accent, 218),
+                widthDp = 1.15f
             )
 
-            drawOrbit(
+            drawTiltedOrbit(
                 canvas = canvas,
                 cx = cx,
                 cy = cy,
-                radius = shellRadius + dpLocal(10.5f),
+                radiusX = shellRadius + dpLocal(10.2f),
+                radiusY = shellRadius * 0.62f,
+                tiltDeg = 34f,
                 start = reverseRotation + 74f,
-                sweepA = 58f,
-                sweepB = 31f,
-                offsetB = 162f,
-                color = withAlpha(pale, 150),
-                widthDp = 0.9f
+                sweepA = 62f,
+                sweepB = 30f,
+                offsetB = 164f,
+                color = withAlpha(pale, 168),
+                widthDp = 0.86f
             )
 
-            drawOrbit(
+            drawTiltedOrbit(
                 canvas = canvas,
                 cx = cx,
                 cy = cy,
-                radius = shellRadius + dpLocal(15.0f),
+                radiusX = shellRadius + dpLocal(14.4f),
+                radiusY = shellRadius * 0.42f,
+                tiltDeg = 78f,
                 start = slowRotation + 228f,
-                sweepA = 49f,
-                sweepB = 25f,
+                sweepA = 51f,
+                sweepB = 24f,
                 offsetB = 151f,
-                color = withAlpha(accent, 138),
-                widthDp = 0.75f
+                color = withAlpha(accent, 148),
+                widthDp = 0.72f
             )
 
-            // Small luminous orbital nodes. No bitmap, no allocation.
-            drawNode(
-                canvas,
-                cx,
-                cy,
-                shellRadius + dpLocal(10.5f),
-                reverseRotation + 93f,
-                accent,
-                1.35f
+            drawTiltedNode(
+                canvas = canvas,
+                cx = cx,
+                cy = cy,
+                radiusX = shellRadius + dpLocal(10.2f),
+                radiusY = shellRadius * 0.62f,
+                tiltDeg = 34f,
+                angleDeg = reverseRotation + 94f,
+                color = accent,
+                radiusDp = 1.30f
             )
-            drawNode(
-                canvas,
-                cx,
-                cy,
-                shellRadius + dpLocal(15.0f),
-                slowRotation + 254f,
-                pale,
-                1.15f
+
+            drawTiltedNode(
+                canvas = canvas,
+                cx = cx,
+                cy = cy,
+                radiusX = shellRadius + dpLocal(14.4f),
+                radiusY = shellRadius * 0.42f,
+                tiltDeg = 78f,
+                angleDeg = slowRotation + 254f,
+                color = pale,
+                radiusDp = 1.10f
+            )
+
+            drawTiltedNode(
+                canvas = canvas,
+                cx = cx,
+                cy = cy,
+                radiusX = shellRadius + dpLocal(5.2f),
+                radiusY = shellRadius * 0.50f,
+                tiltDeg = -28f,
+                angleDeg = innerRotation + 15f,
+                color = accent,
+                radiusDp = 0.82f
             )
 
             if (now < terminalFlashUntil) {
@@ -1140,6 +1136,114 @@ class AyanaMiniOrbController(
                 dpLocal(radiusDp * 2.5f),
                 nodePaint
             )
+        }
+
+        private fun drawTiltedOrbit(
+            canvas: Canvas,
+            cx: Float,
+            cy: Float,
+            radiusX: Float,
+            radiusY: Float,
+            tiltDeg: Float,
+            start: Float,
+            sweepA: Float,
+            sweepB: Float,
+            offsetB: Float,
+            color: Int,
+            widthDp: Float
+        ) {
+            val save = canvas.save()
+
+            canvas.rotate(
+                tiltDeg,
+                cx,
+                cy
+            )
+
+            arcBounds.set(
+                cx - radiusX,
+                cy - radiusY,
+                cx + radiusX,
+                cy + radiusY
+            )
+
+            ringPaint.color = color
+            ringPaint.alpha = Color.alpha(color)
+            ringPaint.strokeWidth = dpLocal(widthDp)
+
+            canvas.drawArc(
+                arcBounds,
+                start,
+                sweepA,
+                false,
+                ringPaint
+            )
+
+            canvas.drawArc(
+                arcBounds,
+                start + offsetB,
+                sweepB,
+                false,
+                ringPaint
+            )
+
+            canvas.restoreToCount(save)
+        }
+
+        private fun drawTiltedNode(
+            canvas: Canvas,
+            cx: Float,
+            cy: Float,
+            radiusX: Float,
+            radiusY: Float,
+            tiltDeg: Float,
+            angleDeg: Float,
+            color: Int,
+            radiusDp: Float
+        ) {
+            val radians =
+                Math.toRadians(
+                    angleDeg.toDouble()
+                )
+
+            val x =
+                cx +
+                    Math.cos(radians)
+                        .toFloat() *
+                    radiusX
+
+            val y =
+                cy +
+                    Math.sin(radians)
+                        .toFloat() *
+                    radiusY
+
+            val save = canvas.save()
+
+            canvas.rotate(
+                tiltDeg,
+                cx,
+                cy
+            )
+
+            nodePaint.color = color
+            nodePaint.alpha = 225
+            canvas.drawCircle(
+                x,
+                y,
+                dpLocal(radiusDp),
+                nodePaint
+            )
+
+            nodePaint.alpha = 68
+            canvas.drawCircle(
+                x,
+                y,
+                dpLocal(radiusDp * 2.55f),
+                nodePaint
+            )
+
+            canvas.restoreToCount(save)
         }
 
         private fun frameDelayMs(
