@@ -6,7 +6,13 @@ import org.json.JSONObject
 import java.util.Locale
 
 /**
- * AYANA Screen Intelligence v4.2 — exact input value truth + bounded local boundary scroll.
+ * AYANA Screen Intelligence v4.3 — Settings native-query fallback + exact input truth.
+ *
+ * v4.3 preserves v4.2 input/boundary-scroll truth and adds one fail-closed recovery
+ * path for sparse Samsung Settings snapshots: if the normal semantic resolver reports
+ * target_not_found while com.android.settings is the factual interaction package, the
+ * Accessibility service may perform an exact native text query in that same live window.
+ * Success still requires a verified post-action screen change. Ambiguity remains blocked.
  *
  * v4.2 preserves the v4.1 semantic target and verified viewport contract. Own-app
  * editable fields may expose a semantic resolver label in `text`, so exact input
@@ -82,6 +88,83 @@ class AyanaScreenIntelligence(
             )
 
         if (!resolution.optBoolean("resolved", false)) {
+            val reason =
+                resolution
+                    .optString(
+                        "reason",
+                        resolution.optString("status")
+                    )
+                    .trim()
+
+            val interactionPackage =
+                before
+                    .optString(
+                        "interaction_package",
+                        before.optString("package")
+                    )
+                    .trim()
+
+            // v4.3: the snapshot may be semantically sparse on Samsung App Info even
+            // though Android's live Accessibility provider can resolve the exact row.
+            // Retry only for factual target_not_found on the current Settings package.
+            // Never bypass ambiguity, confirmation, or a different foreground package.
+            if (
+                reason == "target_not_found" &&
+                interactionPackage == "com.android.settings" &&
+                cleanTarget.isNotBlank()
+            ) {
+                val recovered =
+                    try {
+                        service.clickElementByNativeTextQuery(
+                            cleanTarget
+                        )
+                    } catch (_: Exception) {
+                        false
+                    }
+
+                if (recovered) {
+                    sleepBriefly()
+
+                    val afterSignature =
+                        safeSignature(
+                            service
+                        )
+
+                    val after =
+                        currentSnapshot(
+                            service
+                        )
+
+                    val changed =
+                        beforeSignature.isNotBlank() &&
+                            afterSignature.isNotBlank() &&
+                            beforeSignature !=
+                            afterSignature
+
+                    if (changed) {
+                        return JSONObject()
+                            .put("success", true)
+                            .put("verified", true)
+                            .put("action_accepted", true)
+                            .put("terminal_status", "SUCCESS")
+                            .put("status", "target_action_verified_native_query")
+                            .put("reason", "target_action_verified_native_query")
+                            .put("target", cleanTarget)
+                            .put("requested_target", cleanTarget)
+                            .put("resolved_target", cleanTarget)
+                            .put("screen_changed", true)
+                            .put("proof_level", "native_accessibility_text_query_and_screen_change")
+                            .put("target_evidence", resolution)
+                            .put("screen_before", screenEvidenceSummary(before, beforeSignature))
+                            .put("screen", after)
+                            .put(
+                                "message",
+                                "Целевой элемент найден точным Android Accessibility-запросом и нажат; изменение экрана подтверждено"
+                            )
+                    }
+                }
+            }
+
             return resolutionFailure(
                 resolution = resolution,
                 requestedTarget = cleanTarget,
