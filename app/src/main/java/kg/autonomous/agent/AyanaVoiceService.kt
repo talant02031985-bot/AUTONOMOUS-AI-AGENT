@@ -56,7 +56,12 @@ import kotlin.math.abs
 
 class AyanaVoiceService : Service() {
 
-    // AYANA v12.8.2 TERMINAL + INPUT + TEXT STOP + LOCAL BOUNDARY SCROLL TRUTH.
+    // AYANA v12.8.11 SETTINGS CHAIN NATIVE RECOVERY + TERMINAL/INPUT/SCROLL TRUTH.
+    // v12.8.11 preserves v12.8.10/v12.8.2 behavior and closes the combined
+    // App Info -> subpage gap: canonical Settings row targets are tried before
+    // scrolling through Screen Intelligence v4.4, and a short exact-intent-only
+    // transition grace handles Samsung launcher/system shells without weakening
+    // terminal verification.
     // v12.8.2 preserves universal semantic routing and adds:
     // - local semantic-action terminal truth guard (model final cannot upgrade failed local action),
     // - text-mode Agent Core microphone STOP isolation while keeping button STOP,
@@ -5204,18 +5209,15 @@ class AyanaVoiceService : Service() {
                             )
                         }
 
-                        // After at least one scroll the Accessibility snapshot can
-                        // lag behind the visible list on One UI. Trying canonical
-                        // row labels is safe because Screen Intelligence still
-                        // resolves them semantically against real visible nodes.
-                        if (
-                            attempt >
-                            0
-                        ) {
-                            addAll(
-                                targets
-                            )
-                        }
+                        // v12.8.11: always try canonical Settings row labels before
+                        // scrolling. Screen Intelligence v4.4 remains fail-closed and
+                        // can recover an exact visible row through Android's native
+                        // Accessibility text provider even when Samsung omits it from
+                        // the serialized snapshot. This avoids moving the wrong pane
+                        // before giving the factual current viewport a chance.
+                        addAll(
+                            targets
+                        )
                     }
 
             for (
@@ -18900,14 +18902,14 @@ class AyanaVoiceService : Service() {
                 packageName
             )
 
-            val appInfoVerification =
+            var appInfoVerification =
                 awaitVerifiedAppDetailScreen(
                     appTarget = label,
                     section = "info",
                     timeoutMs = APP_DETAIL_VERIFY_TIMEOUT_MS
                 )
 
-            val appInfoAttestation =
+            var appInfoAttestation =
                 if (appInfoVerification.optBoolean("success", false)) {
                     JSONObject().put("success", false)
                 } else {
@@ -18918,6 +18920,56 @@ class AyanaVoiceService : Service() {
                         dispatchedAtMs = appInfoIntentDispatchedAt
                     )
                 }
+
+            // v12.8.11 Samsung transition grace: an exact App Info intent can be
+            // accepted while Accessibility still reports a transient launcher/system
+            // shell at the original 3.2 s boundary. Give only this exact-intent fallback
+            // one additional bounded observation window; never infer success from time
+            // or dispatch alone, and keep the same strict screen/attestation proof.
+            if (
+                !appInfoVerification.optBoolean("success", false) &&
+                !appInfoAttestation.optBoolean("success", false) &&
+                !cancelRequested &&
+                !shuttingDown
+            ) {
+                val graceVerification =
+                    awaitVerifiedAppDetailScreen(
+                        appTarget = label,
+                        section = "info",
+                        timeoutMs = APP_DETAIL_TRANSITION_GRACE_MS
+                    )
+
+                val graceAttestation =
+                    if (graceVerification.optBoolean("success", false)) {
+                        JSONObject().put("success", false)
+                    } else {
+                        verifySettingsIntentAttestation(
+                            screen = graceVerification.optJSONObject("screen") ?: JSONObject(),
+                            targetPackage = packageName,
+                            section = "info",
+                            dispatchedAtMs = appInfoIntentDispatchedAt
+                        )
+                    }
+
+                if (
+                    graceVerification.optBoolean("success", false) ||
+                    graceAttestation.optBoolean("success", false)
+                ) {
+                    appInfoVerification = graceVerification
+                    appInfoAttestation = graceAttestation
+
+                    commandHistoryStore.addEvent(
+                        activeCommandHistoryId,
+                        state = "app_settings_transition_recovered",
+                        message = "App Info подтверждён после bounded transition grace",
+                        details =
+                            "package=$packageName; section=$normalizedSection; grace_ms=$APP_DETAIL_TRANSITION_GRACE_MS".take(520)
+                    )
+                } else {
+                    appInfoVerification = graceVerification
+                    appInfoAttestation = graceAttestation
+                }
+            }
 
             if (
                 !appInfoVerification.optBoolean(
@@ -22370,6 +22422,12 @@ class AyanaVoiceService : Service() {
 
         private const val APP_DETAIL_VERIFY_POLL_MS =
             80L
+
+        // Extra observation only for the exact App Info fallback after the normal
+        // verifier window expires on a transient Samsung launcher/system shell.
+        // Success still requires the ordinary strict verifier or exact-intent attestation.
+        private const val APP_DETAIL_TRANSITION_GRACE_MS =
+            1100L
 
         // For complete local settings phrases, commit a stable Sherpa partial
         // before the endpoint detector times out. Long enough to tolerate normal
