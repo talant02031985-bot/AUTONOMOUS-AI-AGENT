@@ -20,7 +20,16 @@ import kotlin.math.max
 class AgentAccessibilityService :
     AccessibilityService() {
 
-    // AYANA Accessibility v6.8 — STICKY FOREGROUND OWNER TRUTH + SETTINGS NATIVE TEXT QUERY RECOVERY.
+    // AYANA Accessibility v6.9 — STICKY OWNER EVIDENCE CONTINUITY + SETTINGS NATIVE TEXT QUERY RECOVERY.
+    // v6.9 preserves v6.8 sticky foreground-owner truth and closes the remaining Samsung
+    // window-list gap seen after a verified Settings transition: One UI can keep the real
+    // Settings screen physically foreground while getWindows() temporarily exposes only
+    // launcher/system shells. Foreground ownership is now updated only from a proven
+    // active/focused TYPE_APPLICATION window or a substantial same-package event source;
+    // transient launcher/SystemUI shell events cannot steal an established app owner. Fresh
+    // Accessibility evidence from the sticky external owner may survive a temporary live-
+    // window omission and is ranked active only while fresh and non-contradicted. No content
+    // or package is fabricated without same-package Accessibility evidence.
     // v6.8 preserves v6.7 native Settings text-query recovery and fixes a cross-app
     // ownership lease defect exposed by long deterministic Settings chains. A verified
     // external foreground owner is now state, not a short timer: it vetoes AYANA's
@@ -265,7 +274,10 @@ class AgentAccessibilityService :
         // another high-confidence ownership event replaces it. Ownership is not a lease.
         if (
             eventPackage.isNotBlank() &&
-            isForegroundOwnershipEvent(event.eventType)
+            shouldAcceptForegroundOwnershipEvent(
+                event = event,
+                eventPackage = eventPackage
+            )
         ) {
             lastForegroundOwnerPackage =
                 eventPackage
@@ -5332,7 +5344,7 @@ class AgentAccessibilityService :
             .put("primary_live_readable_text_count", primaryLiveReadableTextCount)
             .put("primary_evidence_readable_text_count", primaryEvidenceReadableTextCount)
             .put("primary_node_count", primaryNodeCount)
-            .put("window_context_mode", "v6_5_foreground_owner_event_truth")
+            .put("window_context_mode", "v6_9_sticky_owner_evidence_continuity")
             .put("window_count", allContexts.size)
             .put("raw_window_count", safeWindowCount())
             .put("readable_window_count", readableWindowCount)
@@ -5350,6 +5362,17 @@ class AgentAccessibilityService :
             .put("event_package", lastEventPackage)
             .put("event_class", lastEventClass)
             .put("event_window_id", lastEventWindowId)
+            .put("foreground_owner_package", lastForegroundOwnerPackage)
+            .put("foreground_owner_window_id", lastForegroundOwnerWindowId)
+            .put(
+                "foreground_owner_age_ms",
+                if (lastForegroundOwnerTime > 0L) {
+                    (System.currentTimeMillis() - lastForegroundOwnerTime)
+                        .coerceAtLeast(0L)
+                } else {
+                    -1L
+                }
+            )
             .put(
                 "event_age_ms",
                 (System.currentTimeMillis() - lastEventTime)
@@ -5711,6 +5734,176 @@ class AgentAccessibilityService :
             eventType == AccessibilityEvent.TYPE_WINDOWS_CHANGED ||
             eventType == AccessibilityEvent.TYPE_VIEW_FOCUSED ||
             eventType == AccessibilityEvent.TYPE_VIEW_ACCESSIBILITY_FOCUSED
+    }
+
+    /**
+     * v6.9 ownership proof gate. TYPE_WINDOWS_CHANGED can be emitted by One UI Home or
+     * SystemUI while another application still owns the visible screen. Such shell events
+     * are not ownership proof. Prefer an event-window that Android itself marks as an
+     * active/focused TYPE_APPLICATION. During Samsung transition gaps where getWindows()
+     * omits the real application window, accept only a same-package event source whose
+     * highest usable root covers a substantial part of the display.
+     */
+    private fun shouldAcceptForegroundOwnershipEvent(
+        event: AccessibilityEvent,
+        eventPackage: String
+    ): Boolean {
+
+        if (
+            eventPackage.isBlank() ||
+            !isForegroundOwnershipEvent(
+                event.eventType
+            )
+        ) {
+            return false
+        }
+
+        if (
+            eventPackage == packageName
+        ) {
+            return isOwnForegroundApplicationEvent(
+                event
+            )
+        }
+
+        val eventWindowId =
+            try {
+                event.windowId
+            } catch (_: Exception) {
+                -1
+            }
+
+        val matchingWindow =
+            try {
+                windows.firstOrNull { window ->
+                    eventWindowId >= 0 &&
+                        window.id == eventWindowId
+                }
+            } catch (_: Exception) {
+                null
+            }
+
+        if (
+            matchingWindow != null
+        ) {
+            val type =
+                try {
+                    matchingWindow.type
+                } catch (_: Exception) {
+                    -1
+                }
+
+            val active =
+                try {
+                    matchingWindow.isActive
+                } catch (_: Exception) {
+                    false
+                }
+
+            val focused =
+                try {
+                    matchingWindow.isFocused
+                } catch (_: Exception) {
+                    false
+                }
+
+            val rootPackage =
+                try {
+                    matchingWindow.root
+                        ?.packageName
+                        ?.toString()
+                        .orEmpty()
+                } catch (_: Exception) {
+                    ""
+                }
+
+            if (
+                type == AccessibilityWindowInfo.TYPE_APPLICATION &&
+                (active || focused) &&
+                (
+                    rootPackage.isBlank() ||
+                        rootPackage == eventPackage
+                    )
+            ) {
+                return true
+            }
+
+            // A package-bearing launcher/SystemUI TYPE_SYSTEM shell must never replace a
+            // proven application owner merely because the shell emitted WINDOWS_CHANGED.
+            if (
+                type != AccessibilityWindowInfo.TYPE_APPLICATION &&
+                (
+                    isKnownLauncherPackage(
+                        eventPackage
+                    ) ||
+                        eventPackage == "com.android.systemui"
+                    )
+            ) {
+                return false
+            }
+        }
+
+        if (
+            event.eventType == AccessibilityEvent.TYPE_WINDOWS_CHANGED
+        ) {
+            return false
+        }
+
+        val source =
+            try {
+                event.source
+            } catch (_: Exception) {
+                null
+            }
+                ?: return false
+
+        if (
+            source.packageName
+                ?.toString()
+                .orEmpty() != eventPackage
+        ) {
+            return false
+        }
+
+        val bounds =
+            Rect()
+
+        try {
+            highestUsableEventRoot(
+                source
+            ).getBoundsInScreen(
+                bounds
+            )
+        } catch (_: Exception) {
+            try {
+                source.getBoundsInScreen(
+                    bounds
+                )
+            } catch (_: Exception) {
+                return false
+            }
+        }
+
+        val screenArea =
+            resources.displayMetrics.widthPixels
+                .coerceAtLeast(1)
+                .toLong() *
+                resources.displayMetrics.heightPixels
+                    .coerceAtLeast(1)
+                    .toLong()
+
+        val sourceArea =
+            bounds.width()
+                .coerceAtLeast(0)
+                .toLong() *
+                bounds.height()
+                    .coerceAtLeast(0)
+                    .toLong()
+
+        return sourceArea > 0L &&
+            sourceArea.toDouble() /
+                screenArea.toDouble() >=
+                FOREGROUND_OWNER_SOURCE_MIN_AREA_RATIO
     }
 
     /**
@@ -7388,6 +7581,23 @@ class AgentAccessibilityService :
                 }
                 .toSet()
 
+        val stickyOwnerPackage =
+            lastForegroundOwnerPackage
+                .trim()
+
+        val contradictoryLiveExternalApplication =
+            liveContexts
+                .any { context ->
+                    context.packageName.isNotBlank() &&
+                        context.packageName != packageName &&
+                        context.packageName != stickyOwnerPackage &&
+                        context.type == AccessibilityWindowInfo.TYPE_APPLICATION &&
+                        (
+                            context.active ||
+                                context.focused
+                            )
+                }
+
         synchronized(eventEvidenceLock) {
             pruneEventEvidenceLocked(now)
 
@@ -7410,6 +7620,19 @@ class AgentAccessibilityService :
                         val externalEvidence =
                             evidence.packageName != packageName
 
+                        // v6.9: a sticky external owner may temporarily disappear from
+                        // getWindows() on Samsung while the real screen remains visible.
+                        // Admit only FRESH evidence for that exact proven owner and only
+                        // when no different focused/active external application contradicts
+                        // it. This restores evidence continuity without promoting launcher
+                        // or SystemUI shells and without inventing a package from a blank root.
+                        val stickyOwnerContinuation =
+                            externalEvidence &&
+                                stickyOwnerPackage.isNotBlank() &&
+                                evidence.packageName == stickyOwnerPackage &&
+                                age <= EVENT_VERIFICATION_TTL_MS &&
+                                !contradictoryLiveExternalApplication
+
                         age <= EVENT_EVIDENCE_TTL_MS &&
                             (
                                 externalEvidence ||
@@ -7426,7 +7649,8 @@ class AgentAccessibilityService :
                                         liveContexts.isEmpty() &&
                                         evidence.packageName == lastEventPackage &&
                                         age <= EVENT_EVIDENCE_ORPHAN_TTL_MS
-                                    )
+                                    ) ||
+                                    stickyOwnerContinuation
                                 )
                     }
 
@@ -7496,13 +7720,26 @@ class AgentAccessibilityService :
                 .maxOfOrNull { it.layer }
                 ?: 0
 
+        val evidenceAgeMs =
+            (System.currentTimeMillis() - evidence.at)
+                .coerceAtLeast(0L)
+
+        val stickyOwnerEvidence =
+            evidence.packageName.isNotBlank() &&
+                evidence.packageName == lastForegroundOwnerPackage.trim() &&
+                evidenceAgeMs <= EVENT_VERIFICATION_TTL_MS
+
+        val syntheticActive =
+            (evidence.windowId >= 0 && evidence.windowId == lastEventWindowId) ||
+                stickyOwnerEvidence
+
         val rank =
             windowInteractionRank(
                 windowId = evidence.windowId,
                 packageName = evidence.packageName,
                 type = EVIDENCE_WINDOW_TYPE,
                 layer = samePackageLayer,
-                active = evidence.windowId >= 0 && evidence.windowId == lastEventWindowId,
+                active = syntheticActive,
                 focused = false,
                 pictureInPicture = false
             ) - EVIDENCE_CONTEXT_RANK_PENALTY
@@ -7514,7 +7751,7 @@ class AgentAccessibilityService :
             className = evidence.className,
             type = EVIDENCE_WINDOW_TYPE,
             layer = samePackageLayer,
-            active = evidence.windowId >= 0 && evidence.windowId == lastEventWindowId,
+            active = syntheticActive,
             focused = false,
             pictureInPicture = false,
             bounds = Rect(evidence.bounds),
@@ -9178,6 +9415,9 @@ class AgentAccessibilityService :
             0.20
 
         private const val OWN_APP_MIN_APPLICATION_AREA_RATIO =
+            0.35
+
+        private const val FOREGROUND_OWNER_SOURCE_MIN_AREA_RATIO =
             0.35
 
         private const val EVIDENCE_WINDOW_TYPE =
