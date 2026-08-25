@@ -20,7 +20,13 @@ import kotlin.math.max
 class AgentAccessibilityService :
     AccessibilityService() {
 
-    // AYANA Accessibility v6.6 — SETTINGS DEEP DETAIL RECOVERY + CROSS-APP FOREGROUND TRUTH.
+    // AYANA Accessibility v6.7 — SETTINGS NATIVE TEXT QUERY RECOVERY + CROSS-APP FOREGROUND TRUTH.
+    // v6.7 preserves v6.6/v6.5 truth and adds a bounded native Accessibility text-query
+    // recovery for sparse Samsung Settings detail panes. When the serialized snapshot
+    // omits a visibly rendered row, upper layers may request an exact semantic label and
+    // this service queries only the current interaction window roots through Android's
+    // own findAccessibilityNodeInfosByText API, requires an exact visible/enabled match,
+    // fails closed on ambiguity, and returns success only after a verified screen change.
     // v6.6 preserves the device-confirmed v6.5 cross-app foreground-owner fix and closes
     // the remaining Samsung Settings gap where a fresh but shallow App Info action cluster
     // (Open / Disable / Force stop) incorrectly suppressed the bounded descendant prefetch
@@ -2656,6 +2662,289 @@ class AgentAccessibilityService :
         return clickElement(
             target
         )
+    }
+
+    /**
+     * v6.7 Samsung Settings sparse-tree recovery.
+     *
+     * buildScreenSnapshot() intentionally stays fail-closed and does not invent nodes.
+     * On some One UI App Info panes the normal descendant serialization exposes only
+     * the persistent Open/Disable/Force-stop action cluster even while rows such as
+     * Permissions are visibly rendered. Android's native text-query API can still
+     * resolve that factual row from the same live Accessibility window.
+     *
+     * Safety/truth contract:
+     * - current interaction package/window only;
+     * - TYPE_APPLICATION roots only;
+     * - exact normalized text/description match only;
+     * - visible + enabled + non-password;
+     * - ambiguous distinct matches fail closed;
+     * - no coordinate guess: center tap is allowed only for the exact resolved node;
+     * - true is returned only after screenSignature() changes.
+     */
+    fun clickElementByNativeTextQuery(
+        target: String
+    ): Boolean {
+
+        val normalizedTarget =
+            normalize(
+                target
+            )
+
+        if (normalizedTarget.isBlank()) {
+            return false
+        }
+
+        val allContexts =
+            resolveWindowContexts()
+
+        val primary =
+            primaryWindowContext(
+                allContexts
+            )
+                ?: return false
+
+        val interactionContexts =
+            interactionWindowContexts(
+                allContexts
+            )
+                .filter { context ->
+                    context.packageName ==
+                        primary.packageName &&
+                        context.type ==
+                        AccessibilityWindowInfo.TYPE_APPLICATION
+                }
+
+        if (interactionContexts.isEmpty()) {
+            return false
+        }
+
+        val candidates =
+            mutableListOf<ContextNodeMatch>()
+
+        val seen =
+            linkedSetOf<String>()
+
+        for (context in interactionContexts) {
+            for (root in semanticRootsForContext(context)) {
+                val matches =
+                    try {
+                        root.findAccessibilityNodeInfosByText(
+                            target
+                        )
+                    } catch (_: Exception) {
+                        emptyList()
+                    }
+
+                for (node in matches) {
+                    val visible =
+                        try { node.isVisibleToUser } catch (_: Exception) { false }
+
+                    val enabled =
+                        try { node.isEnabled } catch (_: Exception) { false }
+
+                    val password =
+                        try { node.isPassword } catch (_: Exception) { true }
+
+                    if (!visible || !enabled || password) {
+                        continue
+                    }
+
+                    val text =
+                        normalize(
+                            try {
+                                node.text
+                                    ?.toString()
+                                    .orEmpty()
+                            } catch (_: Exception) {
+                                ""
+                            }
+                        )
+
+                    val description =
+                        normalize(
+                            try {
+                                node.contentDescription
+                                    ?.toString()
+                                    .orEmpty()
+                            } catch (_: Exception) {
+                                ""
+                            }
+                        )
+
+                    val exactText =
+                        text == normalizedTarget
+
+                    val exactDescription =
+                        description == normalizedTarget
+
+                    if (!exactText && !exactDescription) {
+                        continue
+                    }
+
+                    val bounds = Rect()
+                    try {
+                        node.getBoundsInScreen(
+                            bounds
+                        )
+                    } catch (_: Exception) {
+                        continue
+                    }
+
+                    if (
+                        bounds.width() <= 1 ||
+                        bounds.height() <= 1
+                    ) {
+                        continue
+                    }
+
+                    val key =
+                        "${context.windowId}|${bounds.left}:${bounds.top}:${bounds.right}:${bounds.bottom}|$text|$description"
+
+                    if (!seen.add(key)) {
+                        continue
+                    }
+
+                    val score =
+                        (if (exactText) 100 else 95) +
+                            (if (try { node.isClickable } catch (_: Exception) { false }) 8 else 0)
+
+                    candidates.add(
+                        ContextNodeMatch(
+                            context = context,
+                            match = NodeMatch(
+                                node = node,
+                                score = score
+                            ),
+                            totalScore =
+                                score * 1000 +
+                                    context.rank
+                        )
+                    )
+                }
+            }
+        }
+
+        if (candidates.isEmpty()) {
+            return false
+        }
+
+        val ordered =
+            candidates
+                .sortedByDescending { candidate ->
+                    candidate.totalScore
+                }
+
+        val best =
+            ordered.first()
+
+        val bestBounds = Rect()
+        try {
+            best.match.node.getBoundsInScreen(
+                bestBounds
+            )
+        } catch (_: Exception) {
+            return false
+        }
+
+        val ambiguous =
+            ordered
+                .drop(1)
+                .any { candidate ->
+                    if (candidate.totalScore < best.totalScore - 3000) {
+                        false
+                    } else {
+                        val bounds = Rect()
+                        try {
+                            candidate.match.node.getBoundsInScreen(
+                                bounds
+                            )
+                        } catch (_: Exception) {
+                            return@any false
+                        }
+
+                        overlapRatio(
+                            bestBounds,
+                            bounds
+                        ) < 0.80
+                    }
+                }
+
+        if (ambiguous) {
+            return false
+        }
+
+        val center =
+            nodeCenter(
+                best.match.node
+            )
+                ?: return false
+
+        if (
+            isPointOccludedForContext(
+                x = center.first,
+                y = center.second,
+                target = best.context,
+                allContexts = allContexts
+            )
+        ) {
+            return false
+        }
+
+        val before =
+            screenSignature()
+
+        val actionable =
+            findActionableParent(
+                best.match.node,
+                AccessibilityNodeInfo.ACTION_CLICK
+            )
+
+        if (actionable != null) {
+            val dispatchStartedWallAt =
+                System.currentTimeMillis()
+
+            val accepted =
+                try {
+                    actionable.performAction(
+                        AccessibilityNodeInfo.ACTION_CLICK
+                    )
+                } catch (_: Exception) {
+                    false
+                }
+
+            if (accepted) {
+                invalidateSemanticEvidenceAfterNodeMutation(
+                    node = actionable,
+                    dispatchStartedWallAt = dispatchStartedWallAt
+                )
+
+                if (waitForScreenChange(before)) {
+                    return true
+                }
+            }
+        }
+
+        val tapStartedWallAt =
+            System.currentTimeMillis()
+
+        val tapAccepted =
+            tapNodeCenter(
+                best.match.node
+            )
+
+        if (tapAccepted) {
+            invalidateSemanticEvidenceAfterNodeMutation(
+                node = best.match.node,
+                dispatchStartedWallAt = tapStartedWallAt
+            )
+
+            if (waitForScreenChange(before)) {
+                return true
+            }
+        }
+
+        return false
     }
 
     private fun semanticRootsForContext(
