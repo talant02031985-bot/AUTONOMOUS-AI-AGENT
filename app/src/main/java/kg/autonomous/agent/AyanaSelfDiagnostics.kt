@@ -3,9 +3,15 @@ package kg.autonomous.agent
 import android.content.Context
 import org.json.JSONArray
 import org.json.JSONObject
+import java.util.Locale
 
 /**
- * AYANA Self-Diagnostics v4.0 — VERIFIED HEALTH.
+ * AYANA Self-Diagnostics v4.1 — VERIFIED HEALTH + COMPLETE ISSUE REPORT.
+ *
+ * v4.1 preserves v4.0 health-state truth and adds one canonical formatter that
+ * enumerates every non-PASS check. This prevents callers from reporting
+ * "2 warnings" while explaining only one and avoids duplicating health-summary
+ * logic in VoiceService/UI layers.
  *
  * Health states are explicit:
  * PASS     = fresh/observable evidence is healthy;
@@ -788,22 +794,128 @@ class AyanaSelfDiagnostics(
             )
     }
 
-    fun compactReport(
-        focus: String = "all",
-        appName: String = ""
+    fun reportFromResult(
+        result: JSONObject
     ): String {
 
-        val result =
-            run(
-                focus,
-                appName
-            )
-
         val base =
-            "Самодиагностика: исправно=${result.optInt("passed")}, " +
+            "Самодиагностика завершена: исправно=${result.optInt("passed")}, " +
                 "внимание=${result.optInt("warnings")}, " +
                 "нет данных=${result.optInt("unknown")}, " +
                 "ошибки=${result.optInt("failed")}."
+
+        val issues =
+            mutableListOf<String>()
+
+        val checks =
+            result.optJSONArray(
+                "checks"
+            )
+                ?: JSONArray()
+
+        for (
+            index in
+            0 until checks.length()
+        ) {
+            val item =
+                checks.optJSONObject(
+                    index
+                )
+                    ?: continue
+
+            val status =
+                item.optString(
+                    "status"
+                )
+                    .trim()
+                    .uppercase(
+                        Locale.ROOT
+                    )
+
+            if (
+                status ==
+                STATUS_PASS
+            ) {
+                continue
+            }
+
+            val statusLabel =
+                when (
+                    status
+                ) {
+                    STATUS_WARNING ->
+                        "Внимание"
+                    STATUS_FAIL ->
+                        "Ошибка"
+                    STATUS_UNKNOWN ->
+                        "Нет данных"
+                    else ->
+                        status
+                }
+
+            val name =
+                item.optString(
+                    "name"
+                )
+                    .trim()
+                    .ifBlank {
+                        item.optString(
+                            "id"
+                        )
+                            .trim()
+                    }
+
+            val details =
+                item.optString(
+                    "details"
+                )
+                    .trim()
+
+            issues.add(
+                buildString {
+                    append(
+                        statusLabel
+                    )
+                    append(
+                        ": "
+                    )
+                    append(
+                        name
+                    )
+                    if (
+                        details.isNotBlank()
+                    ) {
+                        append(
+                            " — "
+                        )
+                        append(
+                            details
+                        )
+                    }
+                }
+                    .take(
+                        700
+                    )
+            )
+        }
+
+        val issuePart =
+            if (
+                issues.isEmpty()
+            ) {
+                " Все проверенные компоненты имеют подтверждённый PASS."
+            } else {
+                " Отклонения: " +
+                    issues
+                        .mapIndexed {
+                            index,
+                            item ->
+                            "${index + 1}) $item"
+                        }
+                        .joinToString(
+                            "; "
+                        )
+            }
 
         val appPart =
             result
@@ -829,8 +941,27 @@ class AyanaSelfDiagnostics(
                 }
                 .orEmpty()
 
-        return base +
-            appPart
+        return (
+            base +
+                issuePart +
+                appPart
+            )
+            .take(
+                5000
+            )
+    }
+
+    fun compactReport(
+        focus: String = "all",
+        appName: String = ""
+    ): String {
+
+        return reportFromResult(
+            run(
+                focus,
+                appName
+            )
+        )
     }
 
     private fun filterChecks(
