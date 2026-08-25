@@ -20,7 +20,13 @@ import kotlin.math.max
 class AgentAccessibilityService :
     AccessibilityService() {
 
-    // AYANA Accessibility v6.9 — STICKY OWNER EVIDENCE CONTINUITY + SETTINGS NATIVE TEXT QUERY RECOVERY.
+    // AYANA Accessibility v7.0 — VERIFIED FOREGROUND OWNER HANDOFF + STICKY OWNER EVIDENCE CONTINUITY.
+    // v7.0 preserves v6.9 generic ownership/evidence guards and adds one explicit truth handoff:
+    // when an upper execution layer has already VERIFIED a package-owned external surface from
+    // same-window Accessibility/semantic evidence, it can commit that proven package as the
+    // foreground owner. This is not an intent guess and does not fabricate content; it prevents
+    // Samsung launcher/SystemUI shell windows from becoming primary between two verified steps of
+    // the same Settings transaction. A later genuine foreground ownership event still supersedes it.
     // v6.9 preserves v6.8 sticky foreground-owner truth and closes the remaining Samsung
     // window-list gap seen after a verified Settings transition: One UI can keep the real
     // Settings screen physically foreground while getWindows() temporarily exposes only
@@ -291,6 +297,9 @@ class AgentAccessibilityService :
                 } catch (_: Exception) {
                     -1
                 }
+
+            lastForegroundOwnerSource =
+                "accessibility_event"
         }
 
         lastEventPackage =
@@ -5344,7 +5353,7 @@ class AgentAccessibilityService :
             .put("primary_live_readable_text_count", primaryLiveReadableTextCount)
             .put("primary_evidence_readable_text_count", primaryEvidenceReadableTextCount)
             .put("primary_node_count", primaryNodeCount)
-            .put("window_context_mode", "v6_9_sticky_owner_evidence_continuity")
+            .put("window_context_mode", "v7_0_verified_owner_handoff")
             .put("window_count", allContexts.size)
             .put("raw_window_count", safeWindowCount())
             .put("readable_window_count", readableWindowCount)
@@ -5364,6 +5373,7 @@ class AgentAccessibilityService :
             .put("event_window_id", lastEventWindowId)
             .put("foreground_owner_package", lastForegroundOwnerPackage)
             .put("foreground_owner_window_id", lastForegroundOwnerWindowId)
+            .put("foreground_owner_source", lastForegroundOwnerSource)
             .put(
                 "foreground_owner_age_ms",
                 if (lastForegroundOwnerTime > 0L) {
@@ -9511,6 +9521,47 @@ class AgentAccessibilityService :
         @Volatile
         var lastForegroundOwnerTime:
             Long = 0L
+
+        @Volatile
+        var lastForegroundOwnerSource:
+            String = ""
+
+        /**
+         * Accept only already-verified external foreground truth from AYANA's own execution
+         * pipeline. The caller must have same-window semantic/Accessibility proof; an intent
+         * dispatch alone is never sufficient. This method merely preserves that proven owner
+         * across Samsung getWindows() shell gaps until a later genuine ownership event replaces it.
+         */
+        fun attestVerifiedForegroundOwner(
+            ownerPackage: String,
+            windowId: Int = -1,
+            source: String = "verified_external_proof"
+        ): Boolean {
+
+            val cleanPackage =
+                ownerPackage.trim()
+
+            if (cleanPackage.isBlank()) {
+                return false
+            }
+
+            lastForegroundOwnerPackage =
+                cleanPackage
+
+            lastForegroundOwnerWindowId =
+                windowId
+
+            lastForegroundOwnerTime =
+                System.currentTimeMillis()
+
+            lastForegroundOwnerSource =
+                source.trim()
+                    .ifBlank {
+                        "verified_external_proof"
+                    }
+
+            return true
+        }
 
         @Volatile
         var lastEventPackage:
