@@ -10,7 +10,7 @@ import org.json.JSONArray
 import org.json.JSONObject
 
 /**
- * AYANA Device Capability Registry v2.5 — ARTIFACT ENGINE TRUTH.
+ * AYANA Device Capability Registry v2.7 — EVIDENCE TRUTH + AGENT CORE PERFORMANCE.
  *
  * Single machine-readable source of truth for:
  * 1) what this build implements;
@@ -56,6 +56,61 @@ class AyanaCapabilityRegistry(
             .putString(
                 KEY_AGENT_CORE_ERROR,
                 error.take(400)
+            )
+            .apply()
+    }
+
+    fun recordAgentCorePerformance(
+        totalMs: Long,
+        prepareMs: Long,
+        uploadMs: Long,
+        headersWaitMs: Long,
+        bodyReadMs: Long,
+        jsonParseMs: Long,
+        requestBytes: Int,
+        responseBytes: Int,
+        httpCode: Int
+    ) {
+        prefs.edit()
+            .putLong(
+                KEY_AGENT_CORE_PERF_AT,
+                System.currentTimeMillis()
+            )
+            .putLong(
+                KEY_AGENT_CORE_PERF_TOTAL,
+                totalMs.coerceAtLeast(0L)
+            )
+            .putLong(
+                KEY_AGENT_CORE_PERF_PREPARE,
+                prepareMs.coerceAtLeast(0L)
+            )
+            .putLong(
+                KEY_AGENT_CORE_PERF_UPLOAD,
+                uploadMs.coerceAtLeast(0L)
+            )
+            .putLong(
+                KEY_AGENT_CORE_PERF_HEADERS_WAIT,
+                headersWaitMs.coerceAtLeast(0L)
+            )
+            .putLong(
+                KEY_AGENT_CORE_PERF_BODY_READ,
+                bodyReadMs.coerceAtLeast(0L)
+            )
+            .putLong(
+                KEY_AGENT_CORE_PERF_JSON_PARSE,
+                jsonParseMs.coerceAtLeast(0L)
+            )
+            .putInt(
+                KEY_AGENT_CORE_PERF_REQUEST_BYTES,
+                requestBytes.coerceAtLeast(0)
+            )
+            .putInt(
+                KEY_AGENT_CORE_PERF_RESPONSE_BYTES,
+                responseBytes.coerceAtLeast(0)
+            )
+            .putInt(
+                KEY_AGENT_CORE_PERF_HTTP_CODE,
+                httpCode
             )
             .apply()
     }
@@ -483,6 +538,76 @@ class AyanaCapabilityRegistry(
                         KEY_AGENT_CORE_ERROR,
                         ""
                     ).orEmpty()
+                )
+                .put(
+                    "agent_core_perf_at",
+                    prefs.getLong(
+                        KEY_AGENT_CORE_PERF_AT,
+                        0L
+                    )
+                )
+                .put(
+                    "agent_core_perf_total_ms",
+                    prefs.getLong(
+                        KEY_AGENT_CORE_PERF_TOTAL,
+                        -1L
+                    )
+                )
+                .put(
+                    "agent_core_perf_prepare_ms",
+                    prefs.getLong(
+                        KEY_AGENT_CORE_PERF_PREPARE,
+                        -1L
+                    )
+                )
+                .put(
+                    "agent_core_perf_upload_ms",
+                    prefs.getLong(
+                        KEY_AGENT_CORE_PERF_UPLOAD,
+                        -1L
+                    )
+                )
+                .put(
+                    "agent_core_perf_headers_wait_ms",
+                    prefs.getLong(
+                        KEY_AGENT_CORE_PERF_HEADERS_WAIT,
+                        -1L
+                    )
+                )
+                .put(
+                    "agent_core_perf_body_read_ms",
+                    prefs.getLong(
+                        KEY_AGENT_CORE_PERF_BODY_READ,
+                        -1L
+                    )
+                )
+                .put(
+                    "agent_core_perf_json_parse_ms",
+                    prefs.getLong(
+                        KEY_AGENT_CORE_PERF_JSON_PARSE,
+                        -1L
+                    )
+                )
+                .put(
+                    "agent_core_perf_request_bytes",
+                    prefs.getInt(
+                        KEY_AGENT_CORE_PERF_REQUEST_BYTES,
+                        -1
+                    )
+                )
+                .put(
+                    "agent_core_perf_response_bytes",
+                    prefs.getInt(
+                        KEY_AGENT_CORE_PERF_RESPONSE_BYTES,
+                        -1
+                    )
+                )
+                .put(
+                    "agent_core_perf_http_code",
+                    prefs.getInt(
+                        KEY_AGENT_CORE_PERF_HTTP_CODE,
+                        -1
+                    )
                 )
                 .put(
                     "tts_last_ok",
@@ -949,6 +1074,60 @@ class AyanaCapabilityRegistry(
 
         capability(
             capabilities,
+            "app_detail_permissions_navigation",
+            implemented = true,
+            available = accessibilityConnected,
+            deviceConfirmed = false,
+            note = "Samsung App Info -> Permissions can be reached physically, but the combined terminal verifier still has a known window-list edge; do not advertise it as universally device-confirmed"
+        )
+
+        capability(
+            capabilities,
+            "github_repository_write",
+            implemented = false,
+            available = false,
+            deviceConfirmed = false,
+            note = "AYANA Android can prepare source/patch text, but no authenticated GitHub repository-write executor is implemented"
+        )
+
+        capability(
+            capabilities,
+            "github_commit_push",
+            implemented = false,
+            available = false,
+            deviceConfirmed = false,
+            note = "No current Android capability can create Git commits or push them to GitHub; source generation is not commit/push evidence"
+        )
+
+        capability(
+            capabilities,
+            "android_apk_build",
+            implemented = false,
+            available = false,
+            deviceConfirmed = false,
+            note = "The installed AYANA runtime does not run the Android Gradle/GitHub Actions APK build pipeline"
+        )
+
+        capability(
+            capabilities,
+            "direct_apk_delivery",
+            implemented = false,
+            available = false,
+            deviceConfirmed = false,
+            note = "AYANA cannot claim an APK exists until an external build pipeline produces a verified build artifact"
+        )
+
+        capability(
+            capabilities,
+            "external_account_actions",
+            implemented = false,
+            available = false,
+            deviceConfirmed = false,
+            note = "No general credentialed executor for arbitrary external-account write actions is implemented"
+        )
+
+        capability(
+            capabilities,
             "external_mail_calendar_files",
             implemented = false,
             available = false,
@@ -1022,6 +1201,27 @@ class AyanaCapabilityRegistry(
 
             append(
                 "AYANA CAPABILITY TRUTH v2: "
+            )
+
+            append(
+                "github_repository_write=false; github_commit_push=false; android_apk_build=false; direct_apk_delivery=false; external_account_actions=false; "
+            )
+
+            append(
+                "Source/code/patch generation does NOT prove repository write, commit, push, APK build, signing, deployment, or delivery. "
+            )
+
+            append(
+                "settings_permissions_route_implemented=true; settings_permissions_device_confirmed=false; settings_permissions_available="
+            )
+            append(
+                runtime.optBoolean(
+                    "accessibility_connected",
+                    false
+                )
+            )
+            append(
+                "; Samsung App Info->Permissions has a known terminal-verifier window-list edge, so describe it as implemented/limited rather than universally confirmed. "
             )
 
             append(
@@ -1133,6 +1333,52 @@ class AyanaCapabilityRegistry(
             append(
                 runtime.optLong(
                     "agent_core_last_latency_ms",
+                    -1L
+                )
+            )
+
+            append(
+                "; agent_core_prepare_ms="
+            )
+            append(
+                runtime.optLong(
+                    "agent_core_perf_prepare_ms",
+                    -1L
+                )
+            )
+            append(
+                "; agent_core_upload_ms="
+            )
+            append(
+                runtime.optLong(
+                    "agent_core_perf_upload_ms",
+                    -1L
+                )
+            )
+            append(
+                "; agent_core_headers_wait_ms="
+            )
+            append(
+                runtime.optLong(
+                    "agent_core_perf_headers_wait_ms",
+                    -1L
+                )
+            )
+            append(
+                "; agent_core_body_read_ms="
+            )
+            append(
+                runtime.optLong(
+                    "agent_core_perf_body_read_ms",
+                    -1L
+                )
+            )
+            append(
+                "; agent_core_json_parse_ms="
+            )
+            append(
+                runtime.optLong(
+                    "agent_core_perf_json_parse_ms",
                     -1L
                 )
             )
@@ -1278,6 +1524,25 @@ class AyanaCapabilityRegistry(
         deviceConfirmed: Boolean,
         note: String
     ) {
+        val truthState =
+            when {
+                !implemented ->
+                    "UNIMPLEMENTED"
+
+                !available &&
+                    deviceConfirmed ->
+                    "DEVICE_CONFIRMED_UNAVAILABLE_NOW"
+
+                !available ->
+                    "IMPLEMENTED_UNAVAILABLE_NOW"
+
+                deviceConfirmed ->
+                    "DEVICE_CONFIRMED_AVAILABLE"
+
+                else ->
+                    "IMPLEMENTED_AVAILABLE_UNCONFIRMED"
+            }
+
         array.put(
             JSONObject()
                 .put(
@@ -1297,6 +1562,10 @@ class AyanaCapabilityRegistry(
                     deviceConfirmed
                 )
                 .put(
+                    "truth_state",
+                    truthState
+                )
+                .put(
                     "note",
                     note
                 )
@@ -1306,7 +1575,7 @@ class AyanaCapabilityRegistry(
     companion object {
 
         const val BUILD_LABEL =
-            "v12.7_file_document_engine_build_candidate"
+            "v12.10_agent_performance_capability_visual_core_build_candidate"
 
         private const val PREFS_NAME =
             "ayana_capability_runtime_v11"
@@ -1322,6 +1591,36 @@ class AyanaCapabilityRegistry(
 
         private const val KEY_AGENT_CORE_ERROR =
             "agent_core_error"
+
+        private const val KEY_AGENT_CORE_PERF_AT =
+            "agent_core_perf_at"
+
+        private const val KEY_AGENT_CORE_PERF_TOTAL =
+            "agent_core_perf_total"
+
+        private const val KEY_AGENT_CORE_PERF_PREPARE =
+            "agent_core_perf_prepare"
+
+        private const val KEY_AGENT_CORE_PERF_UPLOAD =
+            "agent_core_perf_upload"
+
+        private const val KEY_AGENT_CORE_PERF_HEADERS_WAIT =
+            "agent_core_perf_headers_wait"
+
+        private const val KEY_AGENT_CORE_PERF_BODY_READ =
+            "agent_core_perf_body_read"
+
+        private const val KEY_AGENT_CORE_PERF_JSON_PARSE =
+            "agent_core_perf_json_parse"
+
+        private const val KEY_AGENT_CORE_PERF_REQUEST_BYTES =
+            "agent_core_perf_request_bytes"
+
+        private const val KEY_AGENT_CORE_PERF_RESPONSE_BYTES =
+            "agent_core_perf_response_bytes"
+
+        private const val KEY_AGENT_CORE_PERF_HTTP_CODE =
+            "agent_core_perf_http_code"
 
         private const val KEY_TTS_OK =
             "tts_ok"
