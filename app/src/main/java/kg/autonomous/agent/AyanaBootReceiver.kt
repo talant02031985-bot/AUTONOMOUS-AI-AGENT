@@ -5,7 +5,7 @@ import android.content.Context
 import android.content.Intent
 
 /**
- * AYANA Boot Receiver v2.0.
+ * AYANA Boot Receiver v2.1 — PASSIVE SERVICE REBIND RECOVERY.
  *
  * Android 14+ does not allow a BOOT_COMPLETED receiver to launch AYANA's
  * microphone foreground service. Therefore boot recovery is intentionally
@@ -79,6 +79,17 @@ class AyanaBootReceiver :
                     scheduler
                         .rescheduleAll(
                             store
+                        )
+                } catch (_: Exception) {
+                }
+
+                // NotificationListenerService is system-bound and may need a
+                // passive rebind after package replacement or reboot. This does
+                // not start AyanaVoiceService and does not request new consent.
+                try {
+                    AyanaNotificationListenerService
+                        .requestRebindIfNeeded(
+                            appContext
                         )
                 } catch (_: Exception) {
                 }
