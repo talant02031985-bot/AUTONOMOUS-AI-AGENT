@@ -106,22 +106,34 @@ class AyanaNotificationListenerService : NotificationListenerService() {
 
         fun isAccessGranted(context: Context): Boolean {
             return try {
+                val component =
+                    ComponentName(
+                        context,
+                        AyanaNotificationListenerService::class.java
+                    )
+
                 if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O_MR1) {
-                    NotificationManager
-                        .getEnabledListenerPackages(context)
-                        .contains(context.packageName)
+                    val manager =
+                        context.getSystemService(Context.NOTIFICATION_SERVICE)
+                            as? NotificationManager
+
+                    manager
+                        ?.isNotificationListenerAccessGranted(component)
+                        ?: false
                 } else {
-                    val enabled = Settings.Secure.getString(
-                        context.contentResolver,
-                        "enabled_notification_listeners"
-                    ).orEmpty()
+                    // API 26 fallback. NotificationManager gained the direct
+                    // access-check API in API 27.
+                    val enabled =
+                        Settings.Secure.getString(
+                            context.contentResolver,
+                            "enabled_notification_listeners"
+                        ).orEmpty()
 
                     enabled
                         .split(':')
                         .any { flattened ->
                             ComponentName
-                                .unflattenFromString(flattened)
-                                ?.packageName == context.packageName
+                                .unflattenFromString(flattened) == component
                         }
                 }
             } catch (_: Exception) {
