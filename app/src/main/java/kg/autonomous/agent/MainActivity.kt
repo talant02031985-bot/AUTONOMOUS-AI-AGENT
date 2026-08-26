@@ -8188,10 +8188,10 @@ class MainActivity : AppCompatActivity() {
 
         val detailIntent =
             Intent(
-                "android.settings.NOTIFICATION_LISTENER_DETAIL_SETTINGS"
+                Settings.ACTION_NOTIFICATION_LISTENER_DETAIL_SETTINGS
             ).apply {
                 putExtra(
-                    "android.provider.extra.NOTIFICATION_LISTENER_COMPONENT_NAME",
+                    Settings.EXTRA_NOTIFICATION_LISTENER_COMPONENT_NAME,
                     component.flattenToString()
                 )
             }
