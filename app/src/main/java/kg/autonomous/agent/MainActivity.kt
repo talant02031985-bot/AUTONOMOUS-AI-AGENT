@@ -56,9 +56,11 @@ import kotlin.concurrent.thread
 
 class MainActivity : AppCompatActivity() {
 
-    // UI generation: v7.3 VISUAL CORE REFRESH + v7.2 FOREGROUND WINDOW-FOCUS TRUTH.
-    // v7.3 changes only the decorative AYANA Core visualizer. v7.2 foreground
-    // ownership truth is retained: RESUMED alone is not proof that AYANA owns
+    // UI generation: v7.4 OWN-APP SEMANTIC ACTION TRUTH + FINAL VISUAL R4.
+    // v7.4 keeps v7.2 foreground ownership truth and hardens the in-process
+    // semantic bridge so the same factual View tree used for perception also
+    // exposes stable action labels for navigation and editable controls.
+    // RESUMED alone is not proof that AYANA owns
     // the active/input window on Android large-screen multi-resume.
     // Editable own-app controls expose a separate factual value_text field.
     // Resolver-facing text remains the semantic accessibility label, while
@@ -651,7 +653,7 @@ class MainActivity : AppCompatActivity() {
 
         val settingsButton =
             topIconButton("⚙").apply {
-                contentDescription = "Настройки"
+                contentDescription = "Открыть настройки"
                 setOnClickListener {
                     switchPage(Page.SETTINGS)
                 }
@@ -7543,7 +7545,10 @@ class MainActivity : AppCompatActivity() {
             // actual visual text is still preserved in visible_text below.
             val resolverText =
                 if (
-                    view.isClickable &&
+                    (
+                        view.isClickable ||
+                            editable
+                        ) &&
                     description.isNotBlank() &&
                     description != "[PASSWORD_HIDDEN]"
                 ) {
@@ -7770,6 +7775,113 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
+    private fun ownAppSemanticMatchScore(
+        requested: String,
+        candidate: String
+    ): Int {
+        val target =
+            normalizeOwnSemanticValue(
+                requested
+            )
+
+        val value =
+            normalizeOwnSemanticValue(
+                candidate
+            )
+
+        if (
+            target.isBlank() ||
+            value.isBlank()
+        ) {
+            return 0
+        }
+
+        if (value == target) {
+            return 300
+        }
+
+        // Authored accessibility labels may intentionally add a product qualifier,
+        // e.g. «Поле текстовой команды AYANA». A shorter user/resolver target may
+        // match only when it is a complete word-boundary prefix/suffix or all of its
+        // tokens are present in the candidate. Selection below still requires a
+        // unique best score with a safe margin.
+        if (
+            value.startsWith("$target ") ||
+            value.endsWith(" $target")
+        ) {
+            return 240
+        }
+
+        val targetTokens =
+            target
+                .split(' ')
+                .filter {
+                    it.length >= 2
+                }
+
+        val valueTokens =
+            value
+                .split(' ')
+                .toSet()
+
+        if (
+            targetTokens.isNotEmpty() &&
+            targetTokens.all {
+                it in valueTokens
+            }
+        ) {
+            return 190 +
+                minOf(
+                    30,
+                    targetTokens.size * 5
+                )
+        }
+
+        return 0
+    }
+
+    private fun <T : View> chooseUniqueOwnAppSemanticCandidate(
+        candidates: List<Pair<T, Int>>
+    ): T? {
+        val ranked =
+            candidates
+                .filter {
+                    it.second > 0
+                }
+                .distinctBy {
+                    System.identityHashCode(
+                        it.first
+                    )
+                }
+                .sortedByDescending {
+                    it.second
+                }
+
+        val best =
+            ranked.firstOrNull()
+                ?: return null
+
+        val second =
+            ranked.getOrNull(
+                1
+            )
+
+        if (
+            second != null &&
+            (
+                second.second ==
+                    best.second ||
+                    best.second -
+                    second.second <
+                    OWN_APP_SEMANTIC_MIN_MARGIN
+                )
+        ) {
+            return null
+        }
+
+        return best.first
+    }
+
     private fun performOwnAppSemanticClickOnUiThread(
         target: String
     ): Boolean {
@@ -7781,7 +7893,7 @@ class MainActivity : AppCompatActivity() {
         }
 
         val candidates =
-            mutableListOf<View>()
+            mutableListOf<Pair<View, Int>>()
 
         fun walk(view: View) {
             if (
@@ -7795,27 +7907,41 @@ class MainActivity : AppCompatActivity() {
             if (view.isClickable) {
                 val text =
                     if (view is TextView) {
-                        normalizeOwnSemanticValue(
-                            view.text
-                                ?.toString()
-                                .orEmpty()
-                        )
+                        view.text
+                            ?.toString()
+                            .orEmpty()
                     } else {
                         ""
                     }
 
                 val description =
-                    normalizeOwnSemanticValue(
-                        view.contentDescription
-                            ?.toString()
-                            .orEmpty()
+                    view.contentDescription
+                        ?.toString()
+                        .orEmpty()
+
+                val score =
+                    maxOf(
+                        ownAppSemanticMatchScore(
+                            normalizedTarget,
+                            text
+                        ),
+                        ownAppSemanticMatchScore(
+                            normalizedTarget,
+                            description
+                        ) +
+                            if (
+                                description.isNotBlank()
+                            ) {
+                                12
+                            } else {
+                                0
+                            }
                     )
 
-                if (
-                    text == normalizedTarget ||
-                    description == normalizedTarget
-                ) {
-                    candidates.add(view)
+                if (score > 0) {
+                    candidates.add(
+                        view to score
+                    )
                 }
             }
 
@@ -7828,17 +7954,11 @@ class MainActivity : AppCompatActivity() {
 
         walk(window.decorView)
 
-        val distinct =
-            candidates.distinctBy {
-                System.identityHashCode(it)
-            }
-
-        if (distinct.size != 1) {
-            return false
-        }
-
         val view =
-            distinct.first()
+            chooseUniqueOwnAppSemanticCandidate(
+                candidates
+            )
+                ?: return false
 
         val pageBefore =
             currentPage
@@ -7892,7 +8012,7 @@ class MainActivity : AppCompatActivity() {
             )
 
         val candidates =
-            mutableListOf<EditText>()
+            mutableListOf<Pair<EditText, Int>>()
 
         fun walk(view: View) {
             if (
@@ -7908,26 +8028,46 @@ class MainActivity : AppCompatActivity() {
                 view.transformationMethod !is PasswordTransformationMethod
             ) {
                 val nodeText =
-                    normalizeOwnSemanticValue(
-                        view.text
-                            ?.toString()
-                            .orEmpty()
-                    )
+                    view.text
+                        ?.toString()
+                        .orEmpty()
 
                 val description =
-                    normalizeOwnSemanticValue(
-                        view.contentDescription
-                            ?.toString()
-                            .orEmpty()
+                    view.contentDescription
+                        ?.toString()
+                        .orEmpty()
+
+                val score =
+                    if (normalizedTarget.isBlank()) {
+                        if (view.isFocused) {
+                            260
+                        } else {
+                            120
+                        }
+                    } else {
+                        maxOf(
+                            ownAppSemanticMatchScore(
+                                normalizedTarget,
+                                nodeText
+                            ),
+                            ownAppSemanticMatchScore(
+                                normalizedTarget,
+                                description
+                            ) +
+                                if (
+                                    description.isNotBlank()
+                                ) {
+                                    20
+                                } else {
+                                    0
+                                }
+                        )
+                    }
+
+                if (score > 0) {
+                    candidates.add(
+                        view to score
                     )
-
-                val matches =
-                    normalizedTarget.isBlank() ||
-                        nodeText == normalizedTarget ||
-                        description == normalizedTarget
-
-                if (matches) {
-                    candidates.add(view)
                 }
             }
 
@@ -7940,17 +8080,11 @@ class MainActivity : AppCompatActivity() {
 
         walk(window.decorView)
 
-        val distinct =
-            candidates.distinctBy {
-                System.identityHashCode(it)
-            }
-
-        if (distinct.size != 1) {
-            return false
-        }
-
         val field =
-            distinct.first()
+            chooseUniqueOwnAppSemanticCandidate(
+                candidates
+            )
+                ?: return false
 
         return try {
             field.requestFocus()
@@ -8111,6 +8245,9 @@ class MainActivity : AppCompatActivity() {
 
         private const val OWN_APP_BRIDGE_TIMEOUT_MS =
             900L
+
+        private const val OWN_APP_SEMANTIC_MIN_MARGIN =
+            18
 
         fun isOwnAppSemanticBridgeActive(): Boolean {
             val activity =
