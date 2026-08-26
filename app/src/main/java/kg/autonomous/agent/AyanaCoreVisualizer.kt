@@ -18,15 +18,16 @@ import kotlin.math.min
 import kotlin.math.sin
 
 /**
- * AYANA Core Visualizer v1.2 â€” SIGNATURE ENERGY FIELD R3.
+ * AYANA Core Visualizer v1.3 — FINAL SIGNATURE CORE R4.
  *
  * Visual-only renderer for the main AYANA card.
  *
- * R3 goals:
- * - restore the strong visual density and large AYANA signature of the pre-R2 UI;
- * - keep the cleaner cyan / blue / violet premium identity from the approved references;
- * - use one dominant circular energy field, not a thin wireframe diagram;
- * - make the horizontal waveform visually important and span the whole panel;
+ * R4 goals:
+ * - one dominant glass/energy sphere with three clean broken HUD rings;
+ * - AYANA is the primary visual identity, wider and thicker than R3;
+ * - the synthetic waveform remains behind the wordmark and is attenuated through its center;
+ * - remove plasma-petal / wireframe clutter while keeping subtle particle depth;
+ * - cyan/blue is primary and violet remains an accent;
  * - keep the renderer deterministic, allocation-light and independent from Accessibility;
  * - never present the synthetic waveform as measured microphone amplitude.
  */
@@ -208,7 +209,6 @@ class AyanaCoreVisualizer(
                 height.toFloat()
             )
 
-        // The circular body intentionally occupies most of the panel height.
         val radius =
             minSide * 0.455f
 
@@ -217,7 +217,7 @@ class AyanaCoreVisualizer(
                 0.5 +
                     0.5 *
                     sin(
-                        now / 620.0
+                        now / 680.0
                     )
                 )
                 .toFloat()
@@ -225,124 +225,89 @@ class AyanaCoreVisualizer(
         val outerPhase =
             continuousAngle(
                 now,
-                cycleMs = 11800f,
+                cycleMs = 12600f,
                 reverse = false
             )
 
         val reversePhase =
             continuousAngle(
                 now,
-                cycleMs = 15300f,
+                cycleMs = 16100f,
                 reverse = true
             )
 
         val innerPhase =
             continuousAngle(
                 now,
-                cycleMs = 8400f,
+                cycleMs = 9600f,
                 reverse = false
             )
 
-        // 1. Deep energy ambience: no tiny isolated nucleus.
+        // 1) Quiet ambient field. The center is one object, not a stack of
+        // competing wireframes.
         fillPaint.shader =
             ambientShader
         fillPaint.alpha =
-            238
+            220
         canvas.drawCircle(
             cx,
             cy,
-            radius * 1.32f,
+            radius * 1.22f,
             fillPaint
         )
 
         fillPaint.shader =
             coreHaloShader
         fillPaint.alpha =
-            220
+            214
         canvas.drawCircle(
             cx,
             cy,
             radius *
                 (
-                    0.92f +
-                        breathe * 0.025f
+                    0.90f +
+                        breathe * 0.018f
                     ),
             fillPaint
         )
 
-        // 2. Signature outer energy rings with broad glow passes.
+        // 2) Three broken circular HUD rings. R4 deliberately removes the R3
+        // plasma petals and dense inner lens stack.
         drawSignatureRing(
             canvas,
             cx,
             cy,
-            radius * 0.99f,
+            radius * 0.985f,
             outerPhase + 8f,
             palette.cyan,
-            222,
-            2.1f
+            196,
+            1.62f
         )
 
         drawSignatureRing(
             canvas,
             cx,
             cy,
-            radius * 0.91f,
-            reversePhase + 92f,
+            radius * 0.855f,
+            reversePhase + 94f,
             palette.violet,
-            188,
-            1.7f
+            146,
+            1.08f
         )
 
         drawSignatureRing(
             canvas,
             cx,
             cy,
-            radius * 0.78f,
+            radius * 0.705f,
             innerPhase + 176f,
             palette.white,
-            142,
-            1.15f
+            100,
+            0.72f
         )
 
-        // 3. Dense but controlled plasma petals. Three broad families are
-        // enough for depth; avoiding the R2 tangle of many thin ellipses.
-        drawPlasmaPetal(
-            canvas,
-            cx,
-            cy,
-            radius * 0.76f,
-            outerPhase,
-            tilt = -28f,
-            color = palette.cyan,
-            alpha = 125,
-            widthDp = 1.55f
-        )
-
-        drawPlasmaPetal(
-            canvas,
-            cx,
-            cy,
-            radius * 0.74f,
-            reversePhase + 73f,
-            tilt = 28f,
-            color = palette.violet,
-            alpha = 112,
-            widthDp = 1.45f
-        )
-
-        drawPlasmaPetal(
-            canvas,
-            cx,
-            cy,
-            radius * 0.68f,
-            innerPhase + 141f,
-            tilt = 78f,
-            color = palette.blue,
-            alpha = 104,
-            widthDp = 1.15f
-        )
-
-        // 4. Spark ring / digital particle halo.
+        // 3) Subtle halo particles only; they support depth instead of becoming
+        // a second focal object.
         drawParticleHalo(
             canvas,
             now,
@@ -351,7 +316,7 @@ class AyanaCoreVisualizer(
             radius
         )
 
-        // 5. Central nucleus sits behind the wordmark and waveform.
+        // 4) One luminous nucleus behind both waveform and signature.
         fillPaint.shader =
             nucleusShader
         fillPaint.alpha =
@@ -361,22 +326,31 @@ class AyanaCoreVisualizer(
             cy,
             radius *
                 (
-                    0.47f +
-                        breathe * 0.015f
+                    0.50f +
+                        breathe * 0.012f
                     ),
             fillPaint
         )
 
-        drawInnerLensRings(
-            canvas,
+        // A single quiet inner glass boundary keeps the sphere readable without
+        // the old lens-stack clutter.
+        ringPaint.shader =
+            null
+        ringPaint.color =
+            palette.cyan
+        ringPaint.alpha =
+            76
+        ringPaint.strokeWidth =
+            dp(0.72f)
+        canvas.drawCircle(
             cx,
             cy,
-            radius,
-            innerPhase,
-            reversePhase
+            radius * 0.565f,
+            ringPaint
         )
 
-        // 6. Full-width signature waveform, visually stronger than R2.
+        // 5) Synthetic energy waveform. It is deliberately reduced through the
+        // center so AYANA remains visually unobstructed.
         drawWaveform(
             canvas,
             now,
@@ -385,8 +359,7 @@ class AyanaCoreVisualizer(
             radius
         )
 
-        // 7. Large AYANA signature. This is intentionally dominant and much
-        // closer to the previous successful composition and the references.
+        // 6) Dominant signature.
         drawAyanaWordmark(
             canvas,
             cx,
@@ -394,29 +367,21 @@ class AyanaCoreVisualizer(
             radius
         )
 
-        // 8. Optical flares for premium depth.
+        // 7) Only two optical accents.
         drawStarFlare(
             canvas,
-            cx - radius * 0.58f,
-            cy - radius * 0.46f,
+            cx - radius * 0.62f,
+            cy - radius * 0.45f,
             palette.white,
-            1.10f
+            0.88f
         )
 
         drawStarFlare(
             canvas,
-            cx + radius * 0.54f,
-            cy - radius * 0.63f,
+            cx + radius * 0.61f,
+            cy - radius * 0.58f,
             palette.violet,
-            0.86f
-        )
-
-        drawStarFlare(
-            canvas,
-            cx + radius * 0.68f,
-            cy + radius * 0.38f,
-            palette.cyan,
-            0.72f
+            0.64f
         )
 
         if (attached) {
@@ -745,7 +710,7 @@ class AyanaCoreVisualizer(
         radius: Float
     ) {
         val count =
-            84
+            52
 
         for (
             i in
@@ -811,15 +776,15 @@ class AyanaCoreVisualizer(
                 }
 
             val alpha =
-                60 +
-                    (i % 6) * 23
+                42 +
+                    (i % 6) * 16
 
             val dot =
                 dp(
                     when {
-                        i % 19 == 0 -> 1.65f
-                        i % 7 == 0 -> 1.05f
-                        else -> 0.62f
+                        i % 17 == 0 -> 1.35f
+                        i % 7 == 0 -> 0.90f
+                        else -> 0.52f
                     }
                 )
 
@@ -836,13 +801,13 @@ class AyanaCoreVisualizer(
             )
 
             if (
-                i % 19 == 0
+                i % 17 == 0
             ) {
                 particlePaint.alpha = 34
                 canvas.drawCircle(
                     x,
                     y,
-                    dot * 4.2f,
+                    dot * 3.6f,
                     particlePaint
                 )
             }
@@ -965,28 +930,28 @@ class AyanaCoreVisualizer(
         radius: Float
     ) {
         val left =
-            width * 0.025f
+            width * 0.035f
 
         val right =
-            width * 0.975f
+            width * 0.965f
 
         val span =
             right - left
 
         val phase =
-            now / 260.0
+            now / 300.0
 
         val maxAmplitude =
             min(
-                height * 0.19f,
-                radius * 0.45f
+                height * 0.145f,
+                radius * 0.34f
             )
 
         mainWavePath.reset()
         fineWavePath.reset()
 
         val points =
-            128
+            112
 
         for (
             i in
@@ -1008,45 +973,70 @@ class AyanaCoreVisualizer(
                         span * 0.5f
                         )
 
-            val center =
+            val radialEnvelope =
                 (
-                    1f -
-                        nx * nx
+                    0.34f +
+                        0.66f *
+                        (
+                            1f -
+                                nx * nx
+                            )
+                            .coerceIn(
+                                0f,
+                                1f
+                            )
                     )
-                    .coerceIn(0f, 1f)
 
-            // Strong center + meaningful side activity like the original UI.
+            // Central wordmark clearance. The wave remains continuous but almost
+            // flat under AYANA instead of cutting through the letter strokes.
+            val logoClearance =
+                when {
+                    kotlin.math.abs(nx) <= 0.60f ->
+                        0.10f
+
+                    kotlin.math.abs(nx) >= 0.82f ->
+                        1f
+
+                    else ->
+                        0.10f +
+                            0.90f *
+                            (
+                                (kotlin.math.abs(nx) - 0.60f) /
+                                    0.22f
+                                )
+                }
+
             val envelope =
-                0.28f +
-                    0.72f * center
+                radialEnvelope *
+                    logoClearance
 
             val wave =
                 (
                     sin(
                         phase +
-                            p * PI * 12.0
-                    ) * 0.52 +
+                            p * PI * 10.0
+                    ) * 0.56 +
                         sin(
-                            phase * 1.71 -
-                                p * PI * 24.0
-                        ) * 0.28 +
+                            phase * 1.58 -
+                                p * PI * 20.0
+                        ) * 0.27 +
                         sin(
-                            phase * 0.61 +
-                                p * PI * 5.2
-                        ) * 0.20
+                            phase * 0.56 +
+                                p * PI * 4.6
+                        ) * 0.17
                     )
                     .toFloat()
 
             val fine =
                 (
                     sin(
-                        phase * 1.23 -
-                            p * PI * 18.4
-                    ) * 0.66 +
+                        phase * 1.16 -
+                            p * PI * 16.5
+                    ) * 0.68 +
                         sin(
-                            phase * 0.77 +
-                                p * PI * 7.4
-                        ) * 0.34
+                            phase * 0.72 +
+                                p * PI * 6.2
+                        ) * 0.32
                     )
                     .toFloat()
 
@@ -1061,26 +1051,42 @@ class AyanaCoreVisualizer(
                     fine *
                     maxAmplitude *
                     envelope *
-                    0.42f
+                    0.34f
 
-            if (i == 0) {
-                mainWavePath.moveTo(x, y)
-                fineWavePath.moveTo(x, yFine)
+            if (
+                i ==
+                0
+            ) {
+                mainWavePath.moveTo(
+                    x,
+                    y
+                )
+                fineWavePath.moveTo(
+                    x,
+                    yFine
+                )
             } else {
-                mainWavePath.lineTo(x, y)
-                fineWavePath.lineTo(x, yFine)
+                mainWavePath.lineTo(
+                    x,
+                    y
+                )
+                fineWavePath.lineTo(
+                    x,
+                    yFine
+                )
             }
         }
 
-        // Dense central spectrum bars behind the waveform.
+        // Sparse side spectrum only. No bars through the AYANA wordmark.
         wavePaint.shader =
             horizontalShader
-        wavePaint.alpha = 72
+        wavePaint.alpha =
+            38
         wavePaint.strokeWidth =
-            dp(0.74f)
+            dp(0.62f)
 
         val bars =
-            92
+            52
 
         for (
             i in
@@ -1102,34 +1108,46 @@ class AyanaCoreVisualizer(
                         span * 0.5f
                         )
 
-            val envelope =
-                0.25f +
-                    0.75f *
-                    (
-                        1f -
-                            nx * nx
-                        )
-                        .coerceIn(0f, 1f)
+            if (
+                kotlin.math.abs(nx) <
+                0.72f
+            ) {
+                continue
+            }
+
+            val edgeEnvelope =
+                (
+                    0.25f +
+                        0.75f *
+                        (
+                            1f -
+                                nx * nx
+                            )
+                            .coerceIn(
+                                0f,
+                                1f
+                            )
+                    )
 
             val energy =
                 abs(
                     sin(
-                        phase * 1.1 +
-                            i * 0.67
-                    ) * 0.62 +
+                        phase * 1.04 +
+                            i * 0.71
+                    ) * 0.64 +
                         sin(
-                            phase * 0.49 -
-                                i * 1.21
-                        ) * 0.38
+                            phase * 0.46 -
+                                i * 1.17
+                        ) * 0.36
                 )
                     .toFloat()
 
             val half =
                 maxAmplitude *
-                    envelope *
+                    edgeEnvelope *
                     (
-                        0.08f +
-                            energy * 0.46f
+                        0.055f +
+                            energy * 0.18f
                         )
 
             canvas.drawLine(
@@ -1141,53 +1159,39 @@ class AyanaCoreVisualizer(
             )
         }
 
-        // White/cyan baseline.
-        wavePaint.shader = null
-        wavePaint.color =
-            palette.white
-        wavePaint.alpha = 110
-        wavePaint.strokeWidth =
-            dp(0.72f)
-        canvas.drawLine(
-            left,
-            cy,
-            right,
-            cy,
-            wavePaint
-        )
-
-        // Main neon glow.
-        glowPaint.shader =
-            horizontalShader
-        glowPaint.alpha = 48
-        glowPaint.strokeWidth =
-            dp(9.0f)
-        canvas.drawPath(
-            mainWavePath,
-            glowPaint
-        )
-
-        glowPaint.alpha = 74
-        glowPaint.strokeWidth =
-            dp(4.3f)
-        canvas.drawPath(
-            mainWavePath,
-            glowPaint
-        )
-
         wavePaint.shader =
             horizontalShader
-        wavePaint.alpha = 250
+        wavePaint.alpha =
+            48
         wavePaint.strokeWidth =
-            dp(1.72f)
+            dp(5.4f)
         canvas.drawPath(
             mainWavePath,
             wavePaint
         )
 
-        wavePaint.alpha = 122
+        wavePaint.alpha =
+            68
         wavePaint.strokeWidth =
-            dp(0.82f)
+            dp(2.45f)
+        canvas.drawPath(
+            mainWavePath,
+            wavePaint
+        )
+
+        wavePaint.alpha =
+            192
+        wavePaint.strokeWidth =
+            dp(1.32f)
+        canvas.drawPath(
+            mainWavePath,
+            wavePaint
+        )
+
+        wavePaint.alpha =
+            66
+        wavePaint.strokeWidth =
+            dp(0.70f)
         canvas.drawPath(
             fineWavePath,
             wavePaint
@@ -1203,18 +1207,18 @@ class AyanaCoreVisualizer(
         // Wide signature: more like the previous good UI and the references.
         val totalWidth =
             min(
-                width * 0.63f,
-                radius * 1.95f
+                width * 0.72f,
+                radius * 2.34f
             )
 
         val letterHeight =
             min(
-                height * 0.245f,
-                radius * 0.52f
+                height * 0.300f,
+                radius * 0.66f
             )
 
         val gap =
-            totalWidth * 0.040f
+            totalWidth * 0.034f
 
         val unit =
             (
@@ -1237,15 +1241,15 @@ class AyanaCoreVisualizer(
 
         wordmarkGlowPaint.shader =
             horizontalShader
-        wordmarkGlowPaint.alpha = 54
+        wordmarkGlowPaint.alpha = 46
         wordmarkGlowPaint.strokeWidth =
-            dp(13.0f)
+            dp(9.4f)
 
         wordmarkPaint.shader =
             horizontalShader
         wordmarkPaint.alpha = 255
         wordmarkPaint.strokeWidth =
-            dp(3.8f)
+            dp(4.65f)
 
         // A
         drawA(
