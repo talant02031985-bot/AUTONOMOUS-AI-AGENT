@@ -51,6 +51,18 @@
             android:stopWithTask="false" />
 
         <service
+            android:name=".AyanaNotificationListenerService"
+            android:exported="true"
+            android:label="AYANA AI Notifications"
+            android:permission="android.permission.BIND_NOTIFICATION_LISTENER_SERVICE">
+
+            <intent-filter>
+                <action android:name="android.service.notification.NotificationListenerService" />
+            </intent-filter>
+
+        </service>
+
+        <service
             android:name=".AgentAccessibilityService"
             android:permission="android.permission.BIND_ACCESSIBILITY_SERVICE"
             android:exported="true"
