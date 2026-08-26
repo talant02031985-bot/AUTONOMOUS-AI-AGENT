@@ -56,6 +56,10 @@ import kotlin.math.abs
 
 class AyanaVoiceService : Service() {
 
+    // AYANA v12.10.2 DEVICE CONTROL TRUTH + NOTIFICATION READ + FOLLOW-UP BOUNDS.
+    // v12.10.2 separates read-only notification intent from Settings navigation,
+    // adds verified exact media-volume setting, and gives FOLLOW_UP an absolute
+    // deadline so recognizer noise cannot keep the microphone armed indefinitely.
     // AYANA v12.10.1 TERMINAL TRUTH + LOCAL EXECUTION + SEMANTIC ACTION HARDENING.
     // v12.10.1 preserves v12.10 Agent Core telemetry/capability truth and adds:
     // - original-goal terminal criterion ownership for durable semantic actions,
@@ -2051,11 +2055,34 @@ class AyanaVoiceService : Service() {
                             }
                         }
 
-                        if (
+                        val followUpNow =
+                            SystemClock.elapsedRealtime()
+
+                        val followUpElapsed =
+                            followUpNow -
+                                modeStartedAt
+
+                        val followUpSilentExpired =
                             !speechSeen &&
-                            SystemClock.elapsedRealtime() -
-                                modeStartedAt >=
-                            FOLLOW_UP_WINDOW_MS
+                                followUpElapsed >=
+                                FOLLOW_UP_WINDOW_MS
+
+                        val followUpSpeechStalled =
+                            speechSeen &&
+                                followUpElapsed >=
+                                FOLLOW_UP_WINDOW_MS &&
+                                followUpNow -
+                                    recognitionChangedAt >=
+                                FOLLOW_UP_STALLED_SPEECH_MS
+
+                        val followUpHardExpired =
+                            followUpElapsed >=
+                                FOLLOW_UP_HARD_LIMIT_MS
+
+                        if (
+                            followUpSilentExpired ||
+                            followUpSpeechStalled ||
+                            followUpHardExpired
                         ) {
 
                             isRecording =
@@ -3365,6 +3392,36 @@ class AyanaVoiceService : Service() {
             )
             return
         }
+
+        // v12.10.2 READ-ONLY NOTIFICATION ROUTER.
+        // Reading recent notifications is a distinct capability from opening the
+        // Android notification Settings screen. A missing listener permission is
+        // BLOCKED and never substituted with a Settings SUCCESS.
+        if (
+            isRecentNotificationsReadRequest(
+                routingNormalized
+            )
+        ) {
+            runLocalRecentNotificationsCommand(
+                silent = silent
+            )
+            return
+        }
+
+        // v12.10.2 VERIFIED EXACT MEDIA VOLUME.
+        // This runs before relative up/down routing and before Agent Core so an
+        // unsupported model response cannot turn a non-executed exact request into
+        // terminal SUCCESS.
+        extractExactMediaVolumeRequest(
+            routingNormalized
+        )
+            ?.let { request ->
+                runLocalExactMediaVolumeCommand(
+                    request = request,
+                    silent = silent
+                )
+                return
+            }
 
         // BASIC LOCAL CALCULATOR v8.9
         // Simple two-number arithmetic must not spend a network round-trip.
@@ -5385,12 +5442,56 @@ class AyanaVoiceService : Service() {
                             timeoutMs = APP_DETAIL_VERIFY_TIMEOUT_MS
                         )
 
+                    // v12.10.2 Samsung verified continuation. The App Info page
+                    // was already strictly proven before this helper is entered.
+                    // Some One UI subpages (especially Permissions) omit the app
+                    // label from the same accessibility context even though the
+                    // destination semantic surface is strongly proven. Accept that
+                    // narrow continuation only after a real click/screen change and
+                    // a fresh Settings semantic surface; never use it for a direct
+                    // unproven Settings launch.
+                    val semanticContinuation =
+                        if (
+                            verification.optBoolean(
+                                "success",
+                                false
+                            )
+                        ) {
+                            JSONObject()
+                                .put(
+                                    "success",
+                                    false
+                                )
+                        } else {
+                            verifyAppDetailSemanticContinuation(
+                                screen =
+                                    verification.optJSONObject(
+                                        "screen"
+                                    )
+                                        ?: JSONObject(),
+                                section = subpage
+                            )
+                        }
+
                     if (
                         verification.optBoolean(
                             "success",
                             false
+                        ) ||
+                        semanticContinuation.optBoolean(
+                            "success",
+                            false
                         )
                     ) {
+                        val verifiedScreen =
+                            verification.optJSONObject(
+                                "screen"
+                            )
+                                ?: semanticContinuation
+                                    .optJSONObject(
+                                        "screen"
+                                    )
+
                         return JSONObject(
                             clickResult.toString()
                         ).apply {
@@ -5407,10 +5508,21 @@ class AyanaVoiceService : Service() {
                                 true
                             )
                             put(
+                                "verification_mode",
+                                if (
+                                    semanticContinuation.optBoolean(
+                                        "success",
+                                        false
+                                    )
+                                ) {
+                                    "verified_app_info_semantic_continuation"
+                                } else {
+                                    "same_context_app_label_and_marker"
+                                }
+                            )
+                            put(
                                 "screen",
-                                verification.optJSONObject(
-                                    "screen"
-                                )
+                                verifiedScreen
                             )
                             put(
                                 "message",
@@ -5684,6 +5796,107 @@ class AyanaVoiceService : Service() {
                 windowId = provenWindow.optInt("window_id", -1),
                 source = source
             )
+    }
+
+    private fun verifyAppDetailSemanticContinuation(
+        screen: JSONObject,
+        section: String
+    ): JSONObject {
+        if (!screen.optBoolean("success", false)) {
+            return JSONObject()
+                .put("success", false)
+        }
+
+        val expectedSurface =
+            when (section) {
+                "notifications" -> "app_notifications"
+                "permissions" -> "app_permissions"
+                "battery" -> "app_battery"
+                "storage" -> "app_storage"
+                "open_by_default" -> "app_defaults"
+                else -> ""
+            }
+
+        if (expectedSurface.isBlank()) {
+            return JSONObject()
+                .put("success", false)
+        }
+
+        val windows =
+            screen.optJSONArray("windows")
+                ?: return JSONObject()
+                    .put("success", false)
+
+        for (index in 0 until windows.length()) {
+            val window =
+                windows.optJSONObject(index)
+                    ?: continue
+
+            if (window.optString("package") != "com.android.settings") {
+                continue
+            }
+
+            val factualContext =
+                window.optBoolean("interaction_context", false) ||
+                    window.optBoolean("active", false) ||
+                    window.optBoolean("focused", false)
+
+            if (!factualContext) {
+                continue
+            }
+
+            if (window.optString("semantic_surface") != expectedSurface) {
+                continue
+            }
+
+            val confidence =
+                window.optInt(
+                    "semantic_surface_confidence",
+                    0
+                )
+
+            if (confidence < 80) {
+                continue
+            }
+
+            val evidenceAge =
+                window.optLong(
+                    "evidence_age_ms",
+                    -1L
+                )
+
+            if (
+                evidenceAge >= 0L &&
+                evidenceAge > SETTINGS_ATTESTATION_EVIDENCE_MAX_AGE_MS
+            ) {
+                continue
+            }
+
+            val windowId =
+                window.optInt(
+                    "window_id",
+                    -1
+                )
+
+            AgentAccessibilityService
+                .attestVerifiedForegroundOwner(
+                    ownerPackage = "com.android.settings",
+                    windowId = windowId,
+                    source = "app_info_semantic_continuation"
+                )
+
+            return JSONObject()
+                .put("success", true)
+                .put("verified", true)
+                .put("surface", expectedSurface)
+                .put("confidence", confidence)
+                .put("evidence_age_ms", evidenceAge)
+                .put("settings_window_id", windowId)
+                .put("screen", screen)
+        }
+
+        return JSONObject()
+            .put("success", false)
     }
 
     private fun isVerifiedAppDetailScreen(
@@ -6364,6 +6577,13 @@ class AyanaVoiceService : Service() {
                 c.startsWith("покажи настройки ")
 
         if (!opensSettingsTopic()) {
+            return null
+        }
+
+        // v12.10.2 semantic separation: read-only requests such as
+        // «покажи последние уведомления на планшете» must be handled by the
+        // notification reader, never by Settings navigation.
+        if (isRecentNotificationsReadRequest(c)) {
             return null
         }
 
@@ -7995,6 +8215,350 @@ class AyanaVoiceService : Service() {
         }
 
         lifecycleWorker.start()
+    }
+
+    private data class ExactMediaVolumeRequest(
+        val requestedLevel: Int,
+        val requestedScaleMax: Int?,
+        val percent: Boolean = false
+    )
+
+    private fun isRecentNotificationsReadRequest(
+        command: String
+    ): Boolean {
+        val c =
+            command
+                .lowercase(Locale.ROOT)
+                .replace('ё', 'е')
+                .replace(Regex("\\s+"), " ")
+                .trim()
+
+        if (!c.contains("уведомлен")) {
+            return false
+        }
+
+        val settingsIntent =
+            c.contains("настрой") ||
+                c.contains("разреш") ||
+                c.contains("доступ к уведом") ||
+                c.contains("категор") ||
+                c.contains("выключ") ||
+                c.contains("включ")
+
+        if (settingsIntent) {
+            return false
+        }
+
+        return c.contains("последн") ||
+            c.contains("недавн") ||
+            c.contains("текущ") ||
+            c.contains("новые уведом") ||
+            c.contains("какие уведом") ||
+            c.contains("что пришло") ||
+            c.contains("прочитай уведом") ||
+            c.contains("прочти уведом") ||
+            c.contains("перечисли уведом") ||
+            (
+                c.contains("покажи") &&
+                    (
+                        c.contains("на планшете") ||
+                            c.contains("мои уведом")
+                        )
+                )
+    }
+
+    private fun runLocalRecentNotificationsCommand(
+        silent: Boolean
+    ) {
+        val result =
+            AyanaNotificationListenerService
+                .readRecent(
+                    context = this,
+                    limit = 8
+                )
+
+        if (!result.optBoolean("success", false)) {
+            respondAndResume(
+                result.optString("message")
+                    .ifBlank {
+                        "Не удалось прочитать последние уведомления."
+                    },
+                silent,
+                success = false,
+                terminalStatus =
+                    when (result.optString("terminal_status")) {
+                        "BLOCKED" -> AyanaCommandHistoryStore.STATUS_BLOCKED
+                        "UNSUPPORTED" -> AyanaCommandHistoryStore.STATUS_UNSUPPORTED
+                        else -> null
+                    }
+            )
+            return
+        }
+
+        val items =
+            result.optJSONArray("notifications")
+                ?: JSONArray()
+
+        if (items.length() == 0) {
+            finishLocalCommand(
+                "Последних уведомлений, доступных AYANA, сейчас нет.",
+                silent
+            )
+            return
+        }
+
+        val lines =
+            ArrayList<String>()
+
+        for (index in 0 until items.length()) {
+            val item = items.optJSONObject(index) ?: continue
+            val app = item.optString("app").trim()
+            val title = item.optString("title").trim()
+            val text = item.optString("text").trim()
+
+            val content =
+                listOf(title, text)
+                    .filter { it.isNotBlank() }
+                    .distinct()
+                    .joinToString(": ")
+                    .take(420)
+
+            lines.add(
+                buildString {
+                    append(index + 1)
+                    append("). ")
+                    append(app.ifBlank { "Приложение" })
+                    if (content.isNotBlank()) {
+                        append(" — ")
+                        append(content)
+                    }
+                }
+            )
+        }
+
+        commandHistoryStore.addEvent(
+            activeCommandHistoryId,
+            state = "notifications_read",
+            message = "Последние уведомления прочитаны локально",
+            details =
+                "count=${lines.size}; listener_connected=${result.optBoolean("listener_connected", false)}"
+        )
+
+        finishLocalCommand(
+            lines.joinToString("\n"),
+            silent
+        )
+    }
+
+    private fun extractExactMediaVolumeRequest(
+        command: String
+    ): ExactMediaVolumeRequest? {
+        val c =
+            command
+                .lowercase(Locale.ROOT)
+                .replace('ё', 'е')
+                .replace(Regex("\\s+"), " ")
+                .trim()
+
+        if (
+            !c.contains("громк") &&
+            !c.contains("звук")
+        ) {
+            return null
+        }
+
+        val setIntent =
+            c.contains("установ") ||
+                c.contains("постав") ||
+                c.contains("выстав") ||
+                c.contains("задай") ||
+                c.contains("сделай громкость")
+
+        if (!setIntent) {
+            return null
+        }
+
+        Regex("""(\d{1,3})\s*(?:из|/)\s*(\d{1,3})""")
+            .find(c)
+            ?.let { match ->
+                val level = match.groupValues[1].toIntOrNull() ?: return null
+                val scale = match.groupValues[2].toIntOrNull() ?: return null
+                return ExactMediaVolumeRequest(level, scale, false)
+            }
+
+        Regex("""(\d{1,3})\s*(?:%|процент(?:а|ов)?)""")
+            .find(c)
+            ?.let { match ->
+                val level = match.groupValues[1].toIntOrNull() ?: return null
+                return ExactMediaVolumeRequest(level, 100, true)
+            }
+
+        Regex("""(?:на|до)\s+(\d{1,3})(?:\s|$)""")
+            .find(c)
+            ?.let { match ->
+                val level = match.groupValues[1].toIntOrNull() ?: return null
+                return ExactMediaVolumeRequest(level, null, false)
+            }
+
+        return null
+    }
+
+    private fun runLocalExactMediaVolumeCommand(
+        request: ExactMediaVolumeRequest,
+        silent: Boolean
+    ) {
+        val result =
+            setExactMediaVolume(request)
+
+        commandHistoryStore.addEvent(
+            activeCommandHistoryId,
+            state =
+                if (result.optBoolean("success", false)) {
+                    "volume_exact_verified"
+                } else {
+                    "volume_exact_failed"
+                },
+            message =
+                if (result.optBoolean("success", false)) {
+                    "Точный уровень громкости подтверждён"
+                } else {
+                    "Точный уровень громкости не подтверждён"
+                },
+            details =
+                (
+                    "requested=${request.requestedLevel}; " +
+                        "scale=${request.requestedScaleMax ?: -1}; " +
+                        "target=${result.optInt("target_level", -1)}; " +
+                        "actual=${result.optInt("actual_level", -1)}; " +
+                        "max=${result.optInt("device_max", -1)}"
+                    ).take(500)
+        )
+
+        if (result.optBoolean("success", false)) {
+            finishLocalCommand(
+                result.optString("message"),
+                silent
+            )
+        } else {
+            respondAndResume(
+                result.optString("message")
+                    .ifBlank {
+                        "Не удалось подтвердить точный уровень громкости."
+                    },
+                silent,
+                success = false
+            )
+        }
+    }
+
+    private fun setExactMediaVolume(
+        request: ExactMediaVolumeRequest
+    ): JSONObject {
+        val audioManager =
+            getSystemService(Context.AUDIO_SERVICE) as AudioManager
+
+        val maxVolume =
+            audioManager.getStreamMaxVolume(AudioManager.STREAM_MUSIC)
+
+        val minVolume =
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+                audioManager.getStreamMinVolume(AudioManager.STREAM_MUSIC)
+            } else {
+                0
+            }
+
+        if (maxVolume <= minVolume) {
+            return toolResult(
+                false,
+                "Точный диапазон громкости мультимедиа сейчас недоступен."
+            )
+        }
+
+        val target =
+            if (request.requestedScaleMax != null) {
+                val scale = request.requestedScaleMax
+                if (
+                    scale <= 0 ||
+                    request.requestedLevel < 0 ||
+                    request.requestedLevel > scale
+                ) {
+                    return toolResult(
+                        false,
+                        "Некорректный уровень громкости: ${request.requestedLevel} из $scale."
+                    )
+                }
+
+                (
+                    (
+                        request.requestedLevel.toLong() *
+                            (maxVolume - minVolume).toLong() +
+                            scale / 2L
+                        ) /
+                        scale.toLong()
+                    ).toInt() + minVolume
+            } else {
+                if (
+                    request.requestedLevel < minVolume ||
+                    request.requestedLevel > maxVolume
+                ) {
+                    return toolResult(
+                        false,
+                        "Уровень ${request.requestedLevel} вне диапазона устройства $minVolume–$maxVolume."
+                    )
+                }
+                request.requestedLevel
+            }
+
+        return try {
+            audioManager.setStreamVolume(
+                AudioManager.STREAM_MUSIC,
+                target,
+                AudioManager.FLAG_SHOW_UI
+            )
+
+            try {
+                Thread.sleep(80L)
+            } catch (_: Exception) {
+            }
+
+            val actual =
+                audioManager.getStreamVolume(AudioManager.STREAM_MUSIC)
+
+            val success =
+                actual == target
+
+            JSONObject()
+                .put("success", success)
+                .put("target_level", target)
+                .put("actual_level", actual)
+                .put("device_min", minVolume)
+                .put("device_max", maxVolume)
+                .put(
+                    "message",
+                    if (success) {
+                        if (request.requestedScaleMax != null) {
+                            val suffix =
+                                if (request.percent) "%" else " из ${request.requestedScaleMax}"
+                            "Громкость мультимедиа установлена: ${request.requestedLevel}$suffix. На устройстве: $actual из $maxVolume."
+                        } else {
+                            "Громкость мультимедиа установлена: $actual из $maxVolume."
+                        }
+                    } else {
+                        "Android принял установку громкости, но проверка дала $actual из $maxVolume вместо $target. SUCCESS не выставлен."
+                    }
+                )
+        } catch (error: Exception) {
+            JSONObject()
+                .put("success", false)
+                .put("target_level", target)
+                .put("actual_level", audioManager.getStreamVolume(AudioManager.STREAM_MUSIC))
+                .put("device_min", minVolume)
+                .put("device_max", maxVolume)
+                .put(
+                    "message",
+                    "Не удалось установить точную громкость: ${error.message ?: error.javaClass.simpleName}"
+                )
+        }
     }
 
     private fun isVolumeUpCommand(
@@ -24822,6 +25386,15 @@ class AyanaVoiceService : Service() {
         // without repeating «Аяна». Silence returns to normal wake mode.
         private const val FOLLOW_UP_WINDOW_MS =
             8000L
+
+        // A non-empty recognizer hypothesis can be noise/echo and must not keep
+        // FOLLOW_UP alive forever. After the normal window, a stable hypothesis
+        // receives only a short endpoint grace; an absolute hard deadline wins.
+        private const val FOLLOW_UP_STALLED_SPEECH_MS =
+            1400L
+
+        private const val FOLLOW_UP_HARD_LIMIT_MS =
+            12000L
 
         // v11.5 app execution router. The context TTL deliberately outlives one
         // Marin clarification response so the user's short follow-up remains local.
