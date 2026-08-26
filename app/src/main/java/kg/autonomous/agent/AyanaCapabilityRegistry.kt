@@ -10,7 +10,7 @@ import org.json.JSONArray
 import org.json.JSONObject
 
 /**
- * AYANA Device Capability Registry v2.7 — EVIDENCE TRUTH + AGENT CORE PERFORMANCE.
+ * AYANA Device Capability Registry v2.8 — DEVICE CONTROL + NOTIFICATION READ TRUTH.
  *
  * Single machine-readable source of truth for:
  * 1) what this build implements;
@@ -362,6 +362,16 @@ class AyanaCapabilityRegistry(
                 ) ==
                 PackageManager.PERMISSION_GRANTED
 
+        val notificationListenerAccess =
+            AyanaNotificationListenerService
+                .isAccessGranted(
+                    appContext
+                )
+
+        val notificationListenerConnected =
+            AyanaNotificationListenerService
+                .isConnected()
+
         val overlayAllowed =
             try {
                 Settings.canDrawOverlays(
@@ -488,6 +498,14 @@ class AyanaCapabilityRegistry(
                 .put(
                     "notification_permission",
                     notificationPermission
+                )
+                .put(
+                    "notification_listener_access",
+                    notificationListenerAccess
+                )
+                .put(
+                    "notification_listener_connected",
+                    notificationListenerConnected
                 )
                 .put(
                     "exact_alarm_permission",
@@ -847,6 +865,33 @@ class AyanaCapabilityRegistry(
             available = microphonePermission,
             deviceConfirmed = true,
             note = "device-confirmed barge-in STOP during Marin"
+        )
+
+        capability(
+            capabilities,
+            "bounded_voice_follow_up",
+            implemented = true,
+            available = microphonePermission,
+            deviceConfirmed = false,
+            note = "v12.10.2 follow-up listener uses 8 s normal window, stalled-speech expiry and 12 s absolute hard limit; pending device acceptance"
+        )
+
+        capability(
+            capabilities,
+            "notification_reading",
+            implemented = true,
+            available = notificationListenerAccess,
+            deviceConfirmed = false,
+            note = "v12.10.2 reads recent notifications locally through NotificationListenerService; Settings navigation is a separate capability; pending device acceptance"
+        )
+
+        capability(
+            capabilities,
+            "exact_media_volume_set",
+            implemented = true,
+            available = true,
+            deviceConfirmed = false,
+            note = "v12.10.2 sets STREAM_MUSIC to a requested exact/proportional level and verifies the actual post-write value before SUCCESS"
         )
 
         capability(
@@ -1225,6 +1270,19 @@ class AyanaCapabilityRegistry(
             )
 
             append(
+                "notification_reading=true; notification_listener_access="
+            )
+            append(
+                runtime.optBoolean(
+                    "notification_listener_access",
+                    false
+                )
+            )
+            append(
+                "; notification_reading_never_equals_open_settings; exact_media_volume_set=true; exact_volume_success_requires_post_write_verification=true; bounded_voice_follow_up=true. "
+            )
+
+            append(
                 "image_upload=true; video_upload=true; image_vision=true; video_analysis=visual_sampled_frames; video_audio_analysis=false; "
             )
 
@@ -1575,7 +1633,7 @@ class AyanaCapabilityRegistry(
     companion object {
 
         const val BUILD_LABEL =
-            "v12.10_agent_performance_capability_visual_core_build_candidate"
+            "v12.10.2_device_control_notification_truth_build_candidate"
 
         private const val PREFS_NAME =
             "ayana_capability_runtime_v11"
