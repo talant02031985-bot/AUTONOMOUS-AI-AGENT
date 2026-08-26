@@ -56,7 +56,7 @@ import kotlin.concurrent.thread
 
 class MainActivity : AppCompatActivity() {
 
-    // UI generation: v7.4 OWN-APP SEMANTIC ACTION TRUTH + FINAL VISUAL R4.
+    // UI generation: v7.5 NOTIFICATION ACCESS TRUTH + OWN-APP SEMANTIC ACTION TRUTH.
     // v7.4 keeps v7.2 foreground ownership truth and hardens the in-process
     // semantic bridge so the same factual View tree used for perception also
     // exposes stable action labels for navigation and editable controls.
@@ -5124,6 +5124,27 @@ class MainActivity : AppCompatActivity() {
 
         contentContainer.addView(
             settingsAction(
+                "Чтение уведомлений",
+                if (
+                    AyanaNotificationListenerService
+                        .isAccessGranted(this)
+                ) {
+                    "Доступ к последним уведомлениям разрешён"
+                } else {
+                    "Разрешить AYANA читать последние уведомления"
+                }
+            ) {
+
+                openNotificationListenerAccessSettings()
+            },
+            sectionParams(
+                top =
+                    8
+            )
+        )
+
+        contentContainer.addView(
+            settingsAction(
                 "Текстовый режим",
                 "Открыть тихий ввод без голосового ответа"
             ) {
@@ -7271,6 +7292,8 @@ class MainActivity : AppCompatActivity() {
             taskScheduler
                 .canScheduleExact(),
             notificationsEnabled(),
+            AyanaNotificationListenerService
+                .isAccessGranted(this),
             true
         ).count {
             it
@@ -8153,6 +8176,43 @@ class MainActivity : AppCompatActivity() {
         }
 
         return result
+    }
+
+    private fun openNotificationListenerAccessSettings() {
+
+        val component =
+            ComponentName(
+                this,
+                AyanaNotificationListenerService::class.java
+            )
+
+        val detailIntent =
+            Intent(
+                "android.settings.NOTIFICATION_LISTENER_DETAIL_SETTINGS"
+            ).apply {
+                putExtra(
+                    "android.provider.extra.NOTIFICATION_LISTENER_COMPONENT_NAME",
+                    component.flattenToString()
+                )
+            }
+
+        try {
+            startActivity(detailIntent)
+        } catch (_: Exception) {
+            try {
+                startActivity(
+                    Intent(
+                        Settings.ACTION_NOTIFICATION_LISTENER_SETTINGS
+                    )
+                )
+            } catch (_: Exception) {
+                startActivity(
+                    Intent(
+                        Settings.ACTION_SETTINGS
+                    )
+                )
+            }
+        }
     }
 
     private fun openNotificationSettings() {
