@@ -8,6 +8,8 @@ import android.app.PendingIntent
 import android.app.Service
 import android.content.ActivityNotFoundException
 import android.content.ComponentName
+import android.content.ClipData
+import android.content.ClipboardManager
 import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
@@ -28,6 +30,8 @@ import android.net.ConnectivityManager
 import android.net.NetworkCapabilities
 import android.os.BatteryManager
 import android.os.Build
+import android.os.Environment
+import android.os.StatFs
 import android.os.Handler
 import android.os.IBinder
 import android.os.Looper
@@ -211,6 +215,13 @@ class AyanaVoiceService : Service() {
 
     @Volatile
     private var micGeneration =
+        0L
+
+    // Owns FOLLOW_UP lifetime independently from Sherpa endpoint/noise state.
+    // Every new bounded follow-up gets a fresh token so a stale deadline from
+    // an older session can never stop a newer microphone session.
+    @Volatile
+    private var followUpDeadlineToken =
         0L
 
     @Volatile
@@ -1279,7 +1290,30 @@ class AyanaVoiceService : Service() {
             "Слушаю продолжение"
         )
 
+        val deadlineToken =
+            ++followUpDeadlineToken
+
         startSherpaListening()
+
+        // FOLLOW-UP OWNERSHIP v12.11
+        // Main-looper deadline owns the absolute follow-up lifetime even when
+        // recognizer noise or partial hypotheses prevent an endpoint.
+        mainHandler.postDelayed(
+            {
+                if (
+                    !shuttingDown &&
+                    deadlineToken ==
+                    followUpDeadlineToken &&
+                    listenMode ==
+                    ListenMode.FOLLOW_UP
+                ) {
+                    followUpDeadlineToken++
+                    stopSherpaListening()
+                    startWakeListening()
+                }
+            },
+            FOLLOW_UP_HARD_LIMIT_MS
+        )
     }
 
     private fun startCancelListening() {
@@ -2871,7 +2905,7 @@ class AyanaVoiceService : Service() {
                 readyFile,
                 deleteAfter = false
             ) {
-                startCommandListening()
+                startFollowUpListening()
             }
 
         } else {
@@ -2904,7 +2938,7 @@ class AyanaVoiceService : Service() {
 
             mainHandler.postDelayed(
                 {
-                    startCommandListening()
+                    startFollowUpListening()
                 },
                 190L
             )
@@ -3272,6 +3306,26 @@ class AyanaVoiceService : Service() {
                     silent = silent
                 )
                 return
+            }
+
+        // v12.11 STRUCTURED LOCAL-FIRST ROUTER.
+        // Typed arguments are resolved locally before generic lifecycle/Settings
+        // or Agent Core fallback. This prevents command parameters such as
+        // notification limit/app filter and relative volume delta from being
+        // discarded after the top-level intent has been recognised.
+        AyanaStructuredLocalCommandRouter
+            .parse(
+                originalCommand
+            )
+            ?.let { structuredIntent ->
+                if (
+                    runStructuredLocalCommand(
+                        intent = structuredIntent,
+                        silent = silent
+                    )
+                ) {
+                    return
+                }
             }
 
         // LOCAL CONVERSATION FAST-PATH v11.2
@@ -5895,6 +5949,179 @@ class AyanaVoiceService : Service() {
                 .put("screen", screen)
         }
 
+        // Samsung large-screen Settings can render the factual detail pane as a
+        // sibling application window with an empty package while the left pane
+        // remains the active/focused com.android.settings owner. This function
+        // is called only after verified App Info + an accepted local row action,
+        // so a fresh semantic marker in that sibling pane is valid continuation
+        // evidence and must stop any fallback scrolling immediately.
+        val ownerWindow =
+            (0 until windows.length())
+                .mapNotNull { index ->
+                    windows.optJSONObject(
+                        index
+                    )
+                }
+                .firstOrNull { window ->
+                    window.optString(
+                        "package"
+                    ) ==
+                        "com.android.settings" &&
+                        (
+                            window.optBoolean(
+                                "interaction_context",
+                                false
+                            ) ||
+                                window.optBoolean(
+                                    "active",
+                                    false
+                                ) ||
+                                window.optBoolean(
+                                    "focused",
+                                    false
+                                )
+                            )
+                }
+
+        if (ownerWindow != null) {
+            val markers =
+                appDetailVerificationMarkers(
+                    section
+                )
+                    .map {
+                        normalizeVerificationText(
+                            it
+                        )
+                    }
+                    .filter {
+                        it.isNotBlank()
+                    }
+
+            for (index in 0 until windows.length()) {
+                val window =
+                    windows.optJSONObject(
+                        index
+                    )
+                        ?: continue
+
+                if (
+                    window.optString(
+                        "type_name"
+                    ) ==
+                    "input_method"
+                ) {
+                    continue
+                }
+
+                val candidateText =
+                    buildString {
+                        append(
+                            window.optString(
+                                "title"
+                            )
+                        )
+                        append(
+                            " "
+                        )
+                        append(
+                            window.optString(
+                                "verification_text"
+                            )
+                        )
+
+                        val visible =
+                            window.optJSONArray(
+                                "visible_text"
+                            )
+
+                        if (visible != null) {
+                            for (
+                                itemIndex in
+                                0 until visible.length()
+                            ) {
+                                append(
+                                    " "
+                                )
+                                append(
+                                    visible.optString(
+                                        itemIndex
+                                    )
+                                )
+                            }
+                        }
+                    }
+
+                val normalizedCandidate =
+                    normalizeVerificationText(
+                        candidateText
+                    )
+
+                val markerFound =
+                    markers.any { marker ->
+                        normalizedCandidate.contains(
+                            marker
+                        )
+                    }
+
+                if (!markerFound) {
+                    continue
+                }
+
+                val ownerWindowId =
+                    ownerWindow.optInt(
+                        "window_id",
+                        -1
+                    )
+
+                AgentAccessibilityService
+                    .attestVerifiedForegroundOwner(
+                        ownerPackage =
+                            "com.android.settings",
+                        windowId =
+                            ownerWindowId,
+                        source =
+                            "app_info_split_pane_semantic_continuation"
+                    )
+
+                return JSONObject()
+                    .put(
+                        "success",
+                        true
+                    )
+                    .put(
+                        "verified",
+                        true
+                    )
+                    .put(
+                        "surface",
+                        expectedSurface
+                    )
+                    .put(
+                        "confidence",
+                        85
+                    )
+                    .put(
+                        "settings_window_id",
+                        ownerWindowId
+                    )
+                    .put(
+                        "detail_window_id",
+                        window.optInt(
+                            "window_id",
+                            -1
+                        )
+                    )
+                    .put(
+                        "verification_mode",
+                        "verified_app_info_split_pane_marker"
+                    )
+                    .put(
+                        "screen",
+                        screen
+                    )
+            }
+        }
+
         return JSONObject()
             .put("success", false)
     }
@@ -8268,13 +8495,16 @@ class AyanaVoiceService : Service() {
     }
 
     private fun runLocalRecentNotificationsCommand(
-        silent: Boolean
+        silent: Boolean,
+        limit: Int = 8,
+        appFilter: String? = null
     ) {
         val result =
             AyanaNotificationListenerService
                 .readRecent(
                     context = this,
-                    limit = 8
+                    limit = limit,
+                    appFilter = appFilter
                 )
 
         if (!result.optBoolean("success", false)) {
@@ -8321,7 +8551,12 @@ class AyanaVoiceService : Service() {
                     .filter { it.isNotBlank() }
                     .distinct()
                     .joinToString(": ")
-                    .take(420)
+                    .replace(
+                        Regex("\\s+"),
+                        " "
+                    )
+                    .trim()
+                    .take(320)
 
             lines.add(
                 buildString {
@@ -8341,7 +8576,7 @@ class AyanaVoiceService : Service() {
             state = "notifications_read",
             message = "Последние уведомления прочитаны локально",
             details =
-                "count=${lines.size}; listener_connected=${result.optBoolean("listener_connected", false)}"
+                "requested_limit=$limit; app_filter=${appFilter.orEmpty().take(80)}; count=${lines.size}; listener_connected=${result.optBoolean("listener_connected", false)}"
         )
 
         finishLocalCommand(
@@ -8509,11 +8744,34 @@ class AyanaVoiceService : Service() {
                 request.requestedLevel
             }
 
+        if (
+            !executionKernel.tryBeginIrreversibleDispatch(
+                kind = "media_volume_exact_set",
+                detail = "target=$target; max=$maxVolume"
+            )
+        ) {
+            return toolResult(
+                false,
+                "Установка громкости отменена до изменения состояния устройства."
+            )
+                .put("target_level", target)
+                .put("actual_level", audioManager.getStreamVolume(AudioManager.STREAM_MUSIC))
+                .put("device_min", minVolume)
+                .put("device_max", maxVolume)
+        }
+
         return try {
             audioManager.setStreamVolume(
                 AudioManager.STREAM_MUSIC,
                 target,
                 AudioManager.FLAG_SHOW_UI
+            )
+
+            executionKernel.markIrreversibleDispatchAccepted(
+                "media_volume_target=$target"
+            )
+            executionKernel.markSideEffectReconciliationStarted(
+                "verify_media_volume_target=$target"
             )
 
             try {
@@ -8526,6 +8784,11 @@ class AyanaVoiceService : Service() {
 
             val success =
                 actual == target
+
+            executionKernel.markSideEffectReconciled(
+                committed = success,
+                detail = "target=$target; actual=$actual"
+            )
 
             JSONObject()
                 .put("success", success)
@@ -8548,15 +8811,38 @@ class AyanaVoiceService : Service() {
                     }
                 )
         } catch (error: Exception) {
+            val actual =
+                try {
+                    audioManager.getStreamVolume(AudioManager.STREAM_MUSIC)
+                } catch (_: Exception) {
+                    -1
+                }
+
+            // Even if Android threw during dispatch, factual post-read owns truth.
+            executionKernel.markIrreversibleDispatchAccepted(
+                "media_volume_dispatch_exception"
+            )
+            executionKernel.markSideEffectReconciliationStarted(
+                "verify_after_media_volume_exception"
+            )
+            executionKernel.markSideEffectReconciled(
+                committed = actual == target,
+                detail = "target=$target; actual=$actual; error=${error.javaClass.simpleName}"
+            )
+
             JSONObject()
-                .put("success", false)
+                .put("success", actual == target)
                 .put("target_level", target)
-                .put("actual_level", audioManager.getStreamVolume(AudioManager.STREAM_MUSIC))
+                .put("actual_level", actual)
                 .put("device_min", minVolume)
                 .put("device_max", maxVolume)
                 .put(
                     "message",
-                    "Не удалось установить точную громкость: ${error.message ?: error.javaClass.simpleName}"
+                    if (actual == target) {
+                        "Громкость мультимедиа установлена и подтверждена после системного исключения: $actual из $maxVolume."
+                    } else {
+                        "Не удалось установить точную громкость: ${error.message ?: error.javaClass.simpleName}"
+                    }
                 )
         }
     }
@@ -10204,6 +10490,2147 @@ class AyanaVoiceService : Service() {
         }
     }
 
+
+    private fun runStructuredLocalCommand(
+        intent: AyanaStructuredLocalCommandRouter.Intent,
+        silent: Boolean
+    ): Boolean {
+        return when (intent) {
+
+            is AyanaStructuredLocalCommandRouter.Intent.NotificationRead -> {
+                runLocalRecentNotificationsCommand(
+                    silent = silent,
+                    limit = intent.limit ?: 8,
+                    appFilter = intent.appFilter
+                )
+                true
+            }
+
+            is AyanaStructuredLocalCommandRouter.Intent.RelativeMediaVolume -> {
+                runLocalRelativeMediaVolumeCommand(
+                    delta = intent.delta,
+                    silent = silent
+                )
+                true
+            }
+
+            is AyanaStructuredLocalCommandRouter.Intent.DeviceMetric -> {
+                runLocalDeviceMetricCommand(
+                    metric = intent.metric,
+                    silent = silent
+                )
+                true
+            }
+
+            AyanaStructuredLocalCommandRouter.Intent.DeviceDiagnostics -> {
+                runLocalDetailedDeviceDiagnosticsCommand(
+                    silent = silent
+                )
+                true
+            }
+
+            is AyanaStructuredLocalCommandRouter.Intent.AppVersion -> {
+                runLocalAppVersionCommand(
+                    appName = intent.appName,
+                    silent = silent
+                )
+                true
+            }
+
+            is AyanaStructuredLocalCommandRouter.Intent.History -> {
+                runLocalCommandHistoryQuery(
+                    limit = intent.limit,
+                    silent = silent
+                )
+                true
+            }
+
+            is AyanaStructuredLocalCommandRouter.Intent.MemoryList -> {
+                runLocalMemoryQuery(
+                    query = intent.query,
+                    silent = silent
+                )
+                true
+            }
+
+            is AyanaStructuredLocalCommandRouter.Intent.MemoryRecall -> {
+                runLocalMemoryQuery(
+                    query = intent.query,
+                    silent = silent
+                )
+                true
+            }
+
+            is AyanaStructuredLocalCommandRouter.Intent.MemoryRemember -> {
+                runLocalMemoryRemember(
+                    text = intent.text,
+                    silent = silent
+                )
+                true
+            }
+
+            is AyanaStructuredLocalCommandRouter.Intent.MemoryForget -> {
+                runLocalMemoryForget(
+                    query = intent.query,
+                    silent = silent
+                )
+                true
+            }
+
+            is AyanaStructuredLocalCommandRouter.Intent.ReminderList -> {
+                runLocalReminderList(
+                    query = intent.query,
+                    silent = silent
+                )
+                true
+            }
+
+            is AyanaStructuredLocalCommandRouter.Intent.ReminderCreate -> {
+                runLocalReminderCreate(
+                    request = intent,
+                    silent = silent
+                )
+                true
+            }
+
+            is AyanaStructuredLocalCommandRouter.Intent.ReminderDelete -> {
+                runLocalReminderDelete(
+                    query = intent.query,
+                    silent = silent
+                )
+                true
+            }
+
+            is AyanaStructuredLocalCommandRouter.Intent.ClipboardCopy -> {
+                runLocalClipboardCopy(
+                    text = intent.text,
+                    silent = silent
+                )
+                true
+            }
+
+            is AyanaStructuredLocalCommandRouter.Intent.InternalPage -> {
+                runLocalInternalPageNavigation(
+                    page = intent.page,
+                    silent = silent
+                )
+                true
+            }
+
+            is AyanaStructuredLocalCommandRouter.Intent.BrightnessSet -> {
+                runLocalBrightnessSet(
+                    percent = intent.percent,
+                    silent = silent
+                )
+                true
+            }
+
+            is AyanaStructuredLocalCommandRouter.Intent.SystemToggle -> {
+                val label =
+                    when (intent.kind) {
+                        AyanaStructuredLocalCommandRouter.ToggleKind.WIFI -> "Wi‑Fi"
+                        AyanaStructuredLocalCommandRouter.ToggleKind.BLUETOOTH -> "Bluetooth"
+                    }
+
+                respondUnsupportedAndResume(
+                    text =
+                        "AYANA не может надёжно ${if (intent.enable) "включить" else "выключить"} $label напрямую на этой версии Android. " +
+                            "Я не буду подменять эту цель открытием настроек и отмечать её как выполненную.",
+                    silent = silent,
+                    technical = "system_toggle_not_available:${intent.kind.name.lowercase(Locale.ROOT)}"
+                )
+                true
+            }
+
+            is AyanaStructuredLocalCommandRouter.Intent.UnknownCapability -> {
+                respondUnsupportedAndResume(
+                    text =
+                        "Функция «${intent.label}» не зарегистрирована как доступная capability AYANA.",
+                    silent = silent,
+                    technical = "unknown_capability"
+                )
+                true
+            }
+
+            is AyanaStructuredLocalCommandRouter.Intent.CompositeVolumeAndState -> {
+                runLocalCompositeVolumeAndState(
+                    level = intent.level,
+                    scale = intent.scale,
+                    silent = silent
+                )
+                true
+            }
+        }
+    }
+
+    private fun beginLocalVerifiedSideEffect(
+        kind: String,
+        detail: String
+    ): Boolean =
+        executionKernel
+            .tryBeginIrreversibleDispatch(
+                kind = kind,
+                detail = detail
+            )
+
+    private fun markLocalSideEffectCommitted(
+        detail: String
+    ) {
+        executionKernel
+            .markIrreversibleDispatchAccepted(
+                detail
+            )
+
+        executionKernel
+            .markSideEffectReconciliationStarted(
+                detail
+            )
+
+        executionKernel
+            .markSideEffectReconciled(
+                committed = true,
+                detail = detail
+            )
+    }
+
+    private fun markLocalSideEffectNotCommitted(
+        detail: String
+    ) {
+        executionKernel
+            .markIrreversibleDispatchAccepted(
+                detail
+            )
+
+        executionKernel
+            .markSideEffectReconciliationStarted(
+                detail
+            )
+
+        executionKernel
+            .markSideEffectReconciled(
+                committed = false,
+                detail = detail
+            )
+    }
+
+    private fun runLocalRelativeMediaVolumeCommand(
+        delta: Int,
+        silent: Boolean
+    ) {
+        executionPhase(
+            phase = "local_relative_volume",
+            executor = "media_volume_executor"
+        )
+
+        val audioManager =
+            getSystemService(
+                Context.AUDIO_SERVICE
+            ) as AudioManager
+
+        val before =
+            try {
+                audioManager.getStreamVolume(
+                    AudioManager.STREAM_MUSIC
+                )
+            } catch (_: Exception) {
+                -1
+            }
+
+        val max =
+            try {
+                audioManager.getStreamMaxVolume(
+                    AudioManager.STREAM_MUSIC
+                )
+            } catch (_: Exception) {
+                -1
+            }
+
+        val min =
+            if (
+                Build.VERSION.SDK_INT >=
+                Build.VERSION_CODES.P
+            ) {
+                try {
+                    audioManager.getStreamMinVolume(
+                        AudioManager.STREAM_MUSIC
+                    )
+                } catch (_: Exception) {
+                    0
+                }
+            } else {
+                0
+            }
+
+        if (before < 0 || max < 0) {
+            respondAndResume(
+                "Не удалось прочитать текущий диапазон громкости мультимедиа.",
+                silent,
+                success = false
+            )
+            return
+        }
+
+        val target =
+            (before + delta)
+                .coerceIn(
+                    min,
+                    max
+                )
+
+        if (target == before) {
+            finishLocalCommand(
+                "Громкость мультимедиа уже на границе диапазона: $before из $max.",
+                silent
+            )
+            return
+        }
+
+        if (
+            !beginLocalVerifiedSideEffect(
+                kind = "media_volume_change",
+                detail = "before=$before; delta=$delta; target=$target"
+            )
+        ) {
+            respondAndResume(
+                "Изменение громкости отменено до выполнения.",
+                silent,
+                success = false
+            )
+            return
+        }
+
+        try {
+            audioManager.setStreamVolume(
+                AudioManager.STREAM_MUSIC,
+                target,
+                AudioManager.FLAG_SHOW_UI
+            )
+        } catch (error: Exception) {
+            markLocalSideEffectNotCommitted(
+                "relative_volume_exception:${error.javaClass.simpleName}"
+            )
+            respondAndResume(
+                "Не удалось изменить громкость мультимедиа.",
+                silent,
+                success = false,
+                technical =
+                    "relative_volume_exception:${error.javaClass.simpleName}"
+            )
+            return
+        }
+
+        executionKernel
+            .markIrreversibleDispatchAccepted(
+                "media_volume_set:$target"
+            )
+        executionKernel
+            .markSideEffectReconciliationStarted(
+                "verify_media_volume:$target"
+            )
+
+        val actual =
+            try {
+                audioManager.getStreamVolume(
+                    AudioManager.STREAM_MUSIC
+                )
+            } catch (_: Exception) {
+                -1
+            }
+
+        val verified =
+            actual == target
+
+        executionKernel
+            .markSideEffectReconciled(
+                committed = verified,
+                detail = "target=$target; actual=$actual"
+            )
+
+        commandHistoryStore.addEvent(
+            activeCommandHistoryId,
+            state =
+                if (verified) {
+                    "volume_relative_verified"
+                } else {
+                    "volume_relative_failed"
+                },
+            message =
+                if (verified) {
+                    "Относительное изменение громкости подтверждено"
+                } else {
+                    "Относительное изменение громкости не подтверждено"
+                },
+            details =
+                "before=$before; delta=$delta; target=$target; actual=$actual; max=$max"
+        )
+
+        if (verified) {
+            finishLocalCommand(
+                "Громкость мультимедиа изменена: $before → $actual из $max.",
+                silent
+            )
+        } else {
+            respondAndResume(
+                "Не удалось подтвердить требуемое изменение громкости: ожидалось $target из $max, на устройстве $actual из $max.",
+                silent,
+                success = false
+            )
+        }
+    }
+
+    private fun runLocalDeviceMetricCommand(
+        metric: AyanaStructuredLocalCommandRouter.Metric,
+        silent: Boolean
+    ) {
+        executionPhase(
+            phase = "local_device_metric",
+            executor = "device_metric_executor"
+        )
+
+        when (metric) {
+            AyanaStructuredLocalCommandRouter.Metric.BATTERY -> {
+                val state =
+                    agentGetDeviceState()
+
+                val battery =
+                    state.optInt(
+                        "battery_percent",
+                        -1
+                    )
+
+                if (battery < 0) {
+                    respondAndResume(
+                        "Не удалось локально прочитать заряд батареи.",
+                        silent,
+                        success = false
+                    )
+                } else {
+                    finishLocalCommand(
+                        "Сейчас заряд батареи — $battery%. " +
+                            if (
+                                state.optBoolean(
+                                    "charging",
+                                    false
+                                )
+                            ) {
+                                "Планшет заряжается."
+                            } else {
+                                "Планшет не заряжается."
+                            },
+                        silent
+                    )
+                }
+            }
+
+            AyanaStructuredLocalCommandRouter.Metric.MEDIA_VOLUME -> {
+                val audioManager =
+                    getSystemService(
+                        Context.AUDIO_SERVICE
+                    ) as AudioManager
+
+                val current =
+                    audioManager.getStreamVolume(
+                        AudioManager.STREAM_MUSIC
+                    )
+
+                val max =
+                    audioManager.getStreamMaxVolume(
+                        AudioManager.STREAM_MUSIC
+                    )
+
+                val percent =
+                    if (max > 0) {
+                        ((current * 100.0) / max)
+                            .toInt()
+                    } else {
+                        0
+                    }
+
+                finishLocalCommand(
+                    "Громкость мультимедиа сейчас $current из $max — примерно $percent%.",
+                    silent
+                )
+            }
+
+            AyanaStructuredLocalCommandRouter.Metric.BRIGHTNESS -> {
+                val raw =
+                    try {
+                        Settings.System.getInt(
+                            contentResolver,
+                            Settings.System.SCREEN_BRIGHTNESS
+                        )
+                    } catch (_: Exception) {
+                        -1
+                    }
+
+                if (raw < 0) {
+                    respondAndResume(
+                        "Текущую яркость экрана локально прочитать не удалось.",
+                        silent,
+                        success = false
+                    )
+                } else {
+                    val percent =
+                        ((raw.coerceIn(0, 255) * 100.0) / 255.0)
+                            .toInt()
+
+                    val adaptive =
+                        try {
+                            Settings.System.getInt(
+                                contentResolver,
+                                Settings.System.SCREEN_BRIGHTNESS_MODE,
+                                Settings.System.SCREEN_BRIGHTNESS_MODE_MANUAL
+                            ) ==
+                                Settings.System.SCREEN_BRIGHTNESS_MODE_AUTOMATIC
+                        } catch (_: Exception) {
+                            false
+                        }
+
+                    finishLocalCommand(
+                        "Яркость экрана сейчас примерно $percent%." +
+                            if (adaptive) {
+                                " Включена адаптивная яркость."
+                            } else {
+                                ""
+                            },
+                        silent
+                    )
+                }
+            }
+
+            AyanaStructuredLocalCommandRouter.Metric.STORAGE -> {
+                val stat =
+                    StatFs(
+                        Environment
+                            .getDataDirectory()
+                            .absolutePath
+                    )
+
+                val free =
+                    stat.availableBytes
+
+                val total =
+                    stat.totalBytes
+
+                val used =
+                    (total - free)
+                        .coerceAtLeast(
+                            0L
+                        )
+
+                finishLocalCommand(
+                    "Хранилище планшета: свободно ${formatStorageGiB(free)} ГБ из ${formatStorageGiB(total)} ГБ; занято ${formatStorageGiB(used)} ГБ.",
+                    silent
+                )
+            }
+
+            AyanaStructuredLocalCommandRouter.Metric.DEVICE_MODEL -> {
+                val manufacturer =
+                    Build.MANUFACTURER
+                        .trim()
+                        .replaceFirstChar {
+                            if (it.isLowerCase()) {
+                                it.titlecase(
+                                    Locale.ROOT
+                                )
+                            } else {
+                                it.toString()
+                            }
+                        }
+
+                finishLocalCommand(
+                    "Модель планшета: $manufacturer ${Build.MODEL}. Устройство: ${Build.DEVICE}.",
+                    silent
+                )
+            }
+
+            AyanaStructuredLocalCommandRouter.Metric.DATE_TIME -> {
+                val now =
+                    LocalDateTime.now()
+
+                val formatter =
+                    DateTimeFormatter.ofPattern(
+                        "EEEE, d MMMM yyyy 'года'. Сейчас HH:mm",
+                        Locale(
+                            "ru",
+                            "RU"
+                        )
+                    )
+
+                finishLocalCommand(
+                    now
+                        .format(
+                            formatter
+                        )
+                        .replaceFirstChar {
+                            if (it.isLowerCase()) {
+                                it.titlecase(
+                                    Locale(
+                                        "ru",
+                                        "RU"
+                                    )
+                                )
+                            } else {
+                                it.toString()
+                            }
+                        } +
+                        " по часовому поясу ${ZoneId.systemDefault().id}.",
+                    silent
+                )
+            }
+
+            AyanaStructuredLocalCommandRouter.Metric.SCREEN_TITLE -> {
+                val screen =
+                    try {
+                        screenIntelligence
+                            .getScreenState()
+                    } catch (_: Exception) {
+                        JSONObject()
+                    }
+
+                val title =
+                    screen
+                        .optString(
+                            "primary_window_title"
+                        )
+                        .trim()
+                        .ifBlank {
+                            val pkg =
+                                screen.optString(
+                                    "interaction_package",
+                                    screen.optString(
+                                        "package"
+                                    )
+                                )
+
+                            if (
+                                pkg ==
+                                packageName
+                            ) {
+                                "AYANA AI"
+                            } else {
+                                pkg
+                            }
+                        }
+
+                if (title.isBlank()) {
+                    respondAndResume(
+                        "Заголовок текущего экрана локально определить не удалось.",
+                        silent,
+                        success = false
+                    )
+                } else {
+                    finishLocalCommand(
+                        "Заголовок текущего экрана: «$title».",
+                        silent
+                    )
+                }
+            }
+        }
+    }
+
+    private fun runLocalDetailedDeviceDiagnosticsCommand(
+        silent: Boolean
+    ) {
+        executionPhase(
+            phase = "local_device_diagnostics",
+            executor = "device_diagnostics_executor"
+        )
+
+        val state =
+            try {
+                agentGetDeviceState()
+            } catch (_: Exception) {
+                JSONObject()
+            }
+
+        val diagnostics =
+            try {
+                selfDiagnostics.run(
+                    focus = "all"
+                )
+            } catch (_: Exception) {
+                JSONObject()
+            }
+
+        val battery =
+            state.optInt(
+                "battery_percent",
+                -1
+            )
+
+        val volume =
+            state.optInt(
+                "media_volume",
+                -1
+            )
+
+        val volumeMax =
+            state.optInt(
+                "media_volume_max",
+                -1
+            )
+
+        val stat =
+            try {
+                StatFs(
+                    Environment
+                        .getDataDirectory()
+                        .absolutePath
+                )
+            } catch (_: Exception) {
+                null
+            }
+
+        val activeTasks =
+            try {
+                taskStore.getFutureTasks().size
+            } catch (_: Exception) {
+                -1
+            }
+
+        val storedTasks =
+            try {
+                taskStore.count()
+            } catch (_: Exception) {
+                -1
+            }
+
+        val memoryCount =
+            try {
+                memoryStore.getAll(
+                    350
+                ).size
+            } catch (_: Exception) {
+                -1
+            }
+
+        val answer =
+            buildString {
+                append(
+                    "Диагностика планшета выполнена локально."
+                )
+
+                if (battery >= 0) {
+                    append(
+                        " Заряд: $battery%"
+                    )
+                    if (
+                        state.optBoolean(
+                            "charging",
+                            false
+                        )
+                    ) {
+                        append(
+                            ", идёт зарядка"
+                        )
+                    } else {
+                        append(
+                            ", зарядка не идёт"
+                        )
+                    }
+                    append(
+                        "."
+                    )
+                }
+
+                if (
+                    volume >= 0 &&
+                    volumeMax > 0
+                ) {
+                    append(
+                        " Громкость мультимедиа: $volume/$volumeMax."
+                    )
+                }
+
+                append(
+                    " Ориентация: "
+                )
+                append(
+                    when (
+                        state.optString(
+                            "orientation"
+                        )
+                    ) {
+                        "landscape" -> "альбомная"
+                        "portrait" -> "портретная"
+                        else -> "не определена"
+                    }
+                )
+                append(
+                    "."
+                )
+
+                if (stat != null) {
+                    append(
+                        " Хранилище: свободно ${formatStorageGiB(stat.availableBytes)} ГБ из ${formatStorageGiB(stat.totalBytes)} ГБ."
+                    )
+                }
+
+                if (memoryCount >= 0) {
+                    append(
+                        " Долговременная память: $memoryCount записей."
+                    )
+                }
+
+                if (
+                    activeTasks >= 0 &&
+                    storedTasks >= 0
+                ) {
+                    append(
+                        " Напоминания: активных $activeTasks, всего сохранено $storedTasks."
+                    )
+                }
+
+                append(
+                    " Чтение уведомлений: "
+                )
+                append(
+                    if (
+                        AyanaNotificationListenerService
+                            .isAccessGranted(
+                                this@AyanaVoiceService
+                            )
+                    ) {
+                        if (
+                            AyanaNotificationListenerService
+                                .isConnected()
+                        ) {
+                            "доступ разрешён, listener подключён."
+                        } else {
+                            "доступ разрешён, listener сейчас переподключается."
+                        }
+                    } else {
+                        "доступ не разрешён."
+                    }
+                )
+
+                if (
+                    diagnostics.has(
+                        "passed"
+                    )
+                ) {
+                    append(
+                        " Самодиагностика: исправно=${diagnostics.optInt("passed", 0)}, внимание=${diagnostics.optInt("warnings", 0)}, нет данных=${diagnostics.optInt("unknown", 0)}, ошибки=${diagnostics.optInt("failed", 0)}."
+                    )
+                }
+            }
+
+        commandHistoryStore.addEvent(
+            activeCommandHistoryId,
+            state = "local_device_diagnostics",
+            message = "Диагностика планшета выполнена локально",
+            details =
+                "battery=$battery; volume=$volume/$volumeMax; memory=$memoryCount; active_reminders=$activeTasks; stored_reminders=$storedTasks"
+        )
+
+        finishLocalCommand(
+            answer,
+            silent
+        )
+    }
+
+    private fun formatStorageGiB(
+        bytes: Long
+    ): String =
+        String.format(
+            Locale.US,
+            "%.1f",
+            bytes.toDouble() /
+                (1024.0 * 1024.0 * 1024.0)
+        )
+            .replace(
+                '.',
+                ','
+            )
+
+    private fun runLocalAppVersionCommand(
+        appName: String,
+        silent: Boolean
+    ) {
+        executionPhase(
+            phase = "local_app_metadata",
+            executor = "package_metadata_executor"
+        )
+
+        val resolution =
+            try {
+                appResolver.resolve(
+                    appName
+                )
+            } catch (_: Exception) {
+                null
+            }
+
+        if (
+            resolution == null ||
+            !resolution.success ||
+            resolution.packageName.isBlank()
+        ) {
+            respondAndResume(
+                "Не удалось определить установленное приложение «$appName».",
+                silent,
+                success = false
+            )
+            return
+        }
+
+        val info =
+            try {
+                packageManager.getPackageInfo(
+                    resolution.packageName,
+                    0
+                )
+            } catch (_: Exception) {
+                null
+            }
+
+        if (info == null) {
+            respondAndResume(
+                "Не удалось прочитать версию приложения ${resolution.label.ifBlank { appName }}.",
+                silent,
+                success = false
+            )
+            return
+        }
+
+        val versionName =
+            info.versionName
+                .orEmpty()
+                .ifBlank {
+                    "не указана"
+                }
+
+        val versionCode =
+            if (
+                Build.VERSION.SDK_INT >=
+                Build.VERSION_CODES.P
+            ) {
+                info.longVersionCode
+            } else {
+                @Suppress("DEPRECATION")
+                info.versionCode
+                    .toLong()
+            }
+
+        commandHistoryStore.addEvent(
+            activeCommandHistoryId,
+            state = "local_app_metadata",
+            message = "Версия установленного приложения прочитана локально",
+            details =
+                "package=${resolution.packageName}; version=$versionName; code=$versionCode"
+        )
+
+        finishLocalCommand(
+            "Установленная версия ${resolution.label.ifBlank { appName }}: $versionName (код $versionCode).",
+            silent
+        )
+    }
+
+    private fun runLocalCommandHistoryQuery(
+        limit: Int,
+        silent: Boolean
+    ) {
+        executionPhase(
+            phase = "local_command_history",
+            executor = "command_history_executor"
+        )
+
+        val records =
+            commandHistoryStore
+                .recent(
+                    limit + 8
+                )
+                .filter { record ->
+                    record.optString(
+                        "id"
+                    ) !=
+                        activeCommandHistoryId &&
+                        record.optString(
+                            "status"
+                        ) !=
+                        AyanaCommandHistoryStore.STATUS_RUNNING
+                }
+                .take(
+                    limit
+                )
+
+        if (records.isEmpty()) {
+            finishLocalCommand(
+                "Предыдущих завершённых команд в истории сейчас нет.",
+                silent
+            )
+            return
+        }
+
+        val lines =
+            records.mapIndexed { index, record ->
+                val command =
+                    record.optString(
+                        "command"
+                    )
+                        .replace(
+                            Regex("\\s+"),
+                            " "
+                        )
+                        .trim()
+                        .take(
+                            180
+                        )
+
+                val status =
+                    record.optString(
+                        "status"
+                    )
+                        .ifBlank {
+                            "UNKNOWN"
+                        }
+
+                val duration =
+                    record
+                        .optLong(
+                            "duration_ms",
+                            -1L
+                        )
+
+                buildString {
+                    append(index + 1)
+                    append("). ")
+                    append(command)
+                    append(" — ")
+                    append(status)
+                    if (duration >= 0L) {
+                        append(" • ")
+                        append(duration)
+                        append(" мс")
+                    }
+                }
+            }
+
+        commandHistoryStore.addEvent(
+            activeCommandHistoryId,
+            state = "local_history_read",
+            message = "История команд прочитана локально",
+            details = "requested=$limit; returned=${records.size}"
+        )
+
+        finishLocalCommand(
+            lines.joinToString(
+                "\n"
+            ),
+            silent
+        )
+    }
+
+    private fun runLocalMemoryQuery(
+        query: String?,
+        silent: Boolean
+    ) {
+        executionPhase(
+            phase = "local_memory_read",
+            executor = "memory_store_executor"
+        )
+
+        val items =
+            if (
+                query.isNullOrBlank()
+            ) {
+                memoryStore.getAll(
+                    50
+                )
+            } else {
+                memoryStore.search(
+                    query = query,
+                    limit = 12
+                )
+            }
+
+        if (items.isEmpty()) {
+            finishLocalCommand(
+                if (
+                    query.isNullOrBlank()
+                ) {
+                    "Долговременная память AYANA сейчас пуста."
+                } else {
+                    "По запросу «$query» точного или достаточно релевантного совпадения в памяти нет."
+                },
+                silent
+            )
+            return
+        }
+
+        val lines =
+            items.mapIndexed { index, item ->
+                "${index + 1}). ${item.text}"
+            }
+
+        commandHistoryStore.addEvent(
+            activeCommandHistoryId,
+            state = "local_memory_read",
+            message = "Долговременная память прочитана локально",
+            details =
+                "query=${query.orEmpty().take(120)}; count=${items.size}; total=${memoryStore.getAll(350).size}"
+        )
+
+        finishLocalCommand(
+            if (
+                query.isNullOrBlank()
+            ) {
+                "В памяти сохранено ${items.size} записей:\n" +
+                    lines.joinToString(
+                        "\n"
+                    )
+            } else {
+                "Найдено в памяти:\n" +
+                    lines.joinToString(
+                        "\n"
+                    )
+            },
+            silent
+        )
+    }
+
+    private fun runLocalMemoryRemember(
+        text: String,
+        silent: Boolean
+    ) {
+        executionPhase(
+            phase = "local_memory_write",
+            executor = "memory_store_executor"
+        )
+
+        if (
+            !beginLocalVerifiedSideEffect(
+                kind = "memory_write",
+                detail = text.take(180)
+            )
+        ) {
+            respondAndResume(
+                "Запись в память отменена до выполнения.",
+                silent,
+                success = false
+            )
+            return
+        }
+
+        val item =
+            try {
+                memoryStore.remember(
+                    text = text,
+                    category = "general",
+                    source = "user",
+                    provenance = "explicit",
+                    confidence = 1.0
+                )
+            } catch (_: Exception) {
+                null
+            }
+
+        if (item == null) {
+            markLocalSideEffectNotCommitted(
+                "memory_write_failed"
+            )
+            respondAndResume(
+                "Не удалось сохранить запись в долговременную память.",
+                silent,
+                success = false
+            )
+            return
+        }
+
+        executionKernel
+            .markIrreversibleDispatchAccepted(
+                "memory_id=${item.id}"
+            )
+        executionKernel
+            .markSideEffectReconciliationStarted(
+                "verify_memory_id=${item.id}"
+            )
+
+        val verified =
+            memoryStore
+                .getAll(
+                    350
+                )
+                .any {
+                    it.id == item.id &&
+                        it.text == item.text
+                }
+
+        executionKernel
+            .markSideEffectReconciled(
+                committed = verified,
+                detail = "memory_id=${item.id}; verified=$verified"
+            )
+
+        if (verified) {
+            finishLocalCommand(
+                "Сохранено в долговременную память: ${item.text}",
+                silent
+            )
+        } else {
+            respondAndResume(
+                "Запись была отправлена в хранилище, но её сохранение не удалось подтвердить.",
+                silent,
+                success = false
+            )
+        }
+    }
+
+    private fun runLocalMemoryForget(
+        query: String,
+        silent: Boolean
+    ) {
+        executionPhase(
+            phase = "local_memory_delete",
+            executor = "memory_store_executor"
+        )
+
+        val candidates =
+            memoryStore.search(
+                query = query,
+                limit = 20
+            )
+
+        if (candidates.isEmpty()) {
+            finishLocalCommand(
+                "По запросу «$query» подходящих записей для удаления не найдено.",
+                silent
+            )
+            return
+        }
+
+        if (
+            !beginLocalVerifiedSideEffect(
+                kind = "memory_delete",
+                detail = query.take(180)
+            )
+        ) {
+            respondAndResume(
+                "Удаление памяти отменено до выполнения.",
+                silent,
+                success = false
+            )
+            return
+        }
+
+        val before =
+            memoryStore
+                .getAll(
+                    350
+                )
+                .size
+
+        val removed =
+            try {
+                memoryStore.forget(
+                    query
+                )
+            } catch (_: Exception) {
+                0
+            }
+
+        if (removed <= 0) {
+            markLocalSideEffectNotCommitted(
+                "memory_delete_removed=0"
+            )
+            respondAndResume(
+                "Подходящие записи были найдены, но удалить их не удалось.",
+                silent,
+                success = false
+            )
+            return
+        }
+
+        executionKernel
+            .markIrreversibleDispatchAccepted(
+                "memory_removed=$removed"
+            )
+        executionKernel
+            .markSideEffectReconciliationStarted(
+                "verify_memory_delete"
+            )
+
+        val after =
+            memoryStore
+                .getAll(
+                    350
+                )
+                .size
+
+        val verified =
+            after ==
+                before -
+                    removed
+
+        executionKernel
+            .markSideEffectReconciled(
+                committed = verified,
+                detail = "before=$before; removed=$removed; after=$after"
+            )
+
+        if (verified) {
+            finishLocalCommand(
+                "Удалено записей из памяти: $removed.",
+                silent
+            )
+        } else {
+            respondAndResume(
+                "Удаление выполнено, но итоговое состояние памяти не удалось подтвердить.",
+                silent,
+                success = false
+            )
+        }
+    }
+
+    private fun runLocalReminderList(
+        query: String?,
+        silent: Boolean
+    ) {
+        executionPhase(
+            phase = "local_reminder_read",
+            executor = "task_store_executor"
+        )
+
+        val now =
+            System.currentTimeMillis()
+
+        val tasks =
+            if (
+                query.isNullOrBlank()
+            ) {
+                taskStore.getFutureTasks(
+                    now
+                )
+            } else {
+                taskStore
+                    .findByQuery(
+                        query = query,
+                        limit = 12
+                    )
+                    .filter {
+                        it.enabled &&
+                            it.triggerAtMillis >=
+                            now
+                    }
+            }
+
+        if (tasks.isEmpty()) {
+            finishLocalCommand(
+                if (
+                    query.isNullOrBlank()
+                ) {
+                    "Активных будущих задач и напоминаний нет."
+                } else {
+                    "Задача или напоминание «$query» среди активных не найдены."
+                },
+                silent
+            )
+            return
+        }
+
+        val zone =
+            ZoneId.systemDefault()
+
+        val formatter =
+            DateTimeFormatter.ofPattern(
+                "d MMMM yyyy, HH:mm",
+                Locale(
+                    "ru",
+                    "RU"
+                )
+            )
+
+        val lines =
+            tasks.mapIndexed { index, task ->
+                val time =
+                    Instant
+                        .ofEpochMilli(
+                            task.triggerAtMillis
+                        )
+                        .atZone(
+                            zone
+                        )
+                        .format(
+                            formatter
+                        )
+
+                buildString {
+                    append(index + 1)
+                    append("). «")
+                    append(task.title)
+                    append("» — ")
+                    append(time)
+                    if (
+                        task.message.isNotBlank() &&
+                        task.message !=
+                        task.title
+                    ) {
+                        append(". ")
+                        append(task.message)
+                    }
+                }
+            }
+
+        commandHistoryStore.addEvent(
+            activeCommandHistoryId,
+            state = "local_reminder_read",
+            message = "Задачи и напоминания прочитаны локально",
+            details =
+                "query=${query.orEmpty().take(120)}; returned=${tasks.size}; active=${taskStore.getFutureTasks(now).size}; stored=${taskStore.count()}"
+        )
+
+        finishLocalCommand(
+            if (
+                query.isNullOrBlank()
+            ) {
+                "Активных задач: ${tasks.size}\n" +
+                    lines.joinToString(
+                        "\n"
+                    )
+            } else {
+                lines.joinToString(
+                    "\n"
+                )
+            },
+            silent
+        )
+    }
+
+    private fun runLocalReminderCreate(
+        request: AyanaStructuredLocalCommandRouter.Intent.ReminderCreate,
+        silent: Boolean
+    ) {
+        executionPhase(
+            phase = "local_reminder_create",
+            executor = "task_store_executor"
+        )
+
+        val zone =
+            ZoneId.systemDefault()
+
+        val now =
+            LocalDateTime.now(
+                zone
+            )
+
+        val trigger =
+            when {
+                request.relativeMinutes != null ->
+                    now.plusMinutes(
+                        request.relativeMinutes.toLong()
+                    )
+
+                request.tomorrowHour != null &&
+                    request.tomorrowMinute != null ->
+                    now
+                        .toLocalDate()
+                        .plusDays(
+                            1
+                        )
+                        .atTime(
+                            request.tomorrowHour,
+                            request.tomorrowMinute
+                        )
+
+                else ->
+                    null
+            }
+
+        if (trigger == null) {
+            respondAndResume(
+                "Не удалось определить время напоминания.",
+                silent,
+                success = false
+            )
+            return
+        }
+
+        val formatter =
+            DateTimeFormatter.ofPattern(
+                "yyyy-MM-dd'T'HH:mm:ss"
+            )
+
+        if (
+            !beginLocalVerifiedSideEffect(
+                kind = "reminder_create",
+                detail =
+                    "${request.title.take(120)} @ ${trigger.format(formatter)}"
+            )
+        ) {
+            respondAndResume(
+                "Создание напоминания отменено до выполнения.",
+                silent,
+                success = false
+            )
+            return
+        }
+
+        val result =
+            agentCreateReminder(
+                title = request.title,
+                message = request.title,
+                triggerAtLocal = trigger.format(
+                    formatter
+                ),
+                recurrence = AyanaTaskStore.RECURRENCE_NONE
+            )
+
+        if (
+            !result.optBoolean(
+                "success",
+                false
+            )
+        ) {
+            markLocalSideEffectNotCommitted(
+                "reminder_create_failed"
+            )
+            respondAndResume(
+                result.optString(
+                    "message"
+                )
+                    .ifBlank {
+                        result.optString(
+                            "message_to_user",
+                            "Не удалось создать напоминание."
+                        )
+                    },
+                silent,
+                success = false
+            )
+            return
+        }
+
+        val taskId =
+            result.optString(
+                "task_id"
+            )
+
+        executionKernel
+            .markIrreversibleDispatchAccepted(
+                "reminder_id=$taskId"
+            )
+        executionKernel
+            .markSideEffectReconciliationStarted(
+                "verify_reminder_id=$taskId"
+            )
+
+        val verified =
+            taskId.isNotBlank() &&
+                taskStore
+                    .getTask(
+                        taskId
+                    ) !=
+                null
+
+        executionKernel
+            .markSideEffectReconciled(
+                committed = verified,
+                detail =
+                    "reminder_id=$taskId; verified=$verified"
+            )
+
+        if (verified) {
+            finishLocalCommand(
+                "Напоминание «${request.title}» создано на ${trigger.format(DateTimeFormatter.ofPattern("d MMMM, HH:mm", Locale("ru", "RU")))}.",
+                silent
+            )
+        } else {
+            respondAndResume(
+                "Напоминание было передано планировщику, но его сохранение не удалось подтвердить.",
+                silent,
+                success = false
+            )
+        }
+    }
+
+    private fun runLocalReminderDelete(
+        query: String,
+        silent: Boolean
+    ) {
+        executionPhase(
+            phase = "local_reminder_delete",
+            executor = "task_store_executor"
+        )
+
+        val candidates =
+            taskStore.findByQuery(
+                query = query,
+                limit = 20
+            )
+
+        if (candidates.isEmpty()) {
+            finishLocalCommand(
+                "Напоминание «$query» не найдено.",
+                silent
+            )
+            return
+        }
+
+        if (
+            !beginLocalVerifiedSideEffect(
+                kind = "reminder_delete",
+                detail = query.take(180)
+            )
+        ) {
+            respondAndResume(
+                "Удаление напоминания отменено до выполнения.",
+                silent,
+                success = false
+            )
+            return
+        }
+
+        val result =
+            agentDeleteReminder(
+                query
+            )
+
+        val removed =
+            result.optInt(
+                "removed",
+                0
+            )
+
+        if (
+            !result.optBoolean(
+                "success",
+                false
+            ) ||
+            removed <= 0
+        ) {
+            markLocalSideEffectNotCommitted(
+                "reminder_delete_failed; removed=$removed"
+            )
+            respondAndResume(
+                result.optString(
+                    "message"
+                )
+                    .ifBlank {
+                        "Напоминание удалить не удалось."
+                    },
+                silent,
+                success = false
+            )
+            return
+        }
+
+        executionKernel
+            .markIrreversibleDispatchAccepted(
+                "reminders_removed=$removed"
+            )
+        executionKernel
+            .markSideEffectReconciliationStarted(
+                "verify_reminder_delete"
+            )
+
+        val remaining =
+            taskStore.findByQuery(
+                query = query,
+                limit = 20
+            )
+
+        val verified =
+            remaining.isEmpty()
+
+        executionKernel
+            .markSideEffectReconciled(
+                committed = verified,
+                detail =
+                    "removed=$removed; remaining_matches=${remaining.size}"
+            )
+
+        if (verified) {
+            finishLocalCommand(
+                "Напоминание «$query» удалено.",
+                silent
+            )
+        } else {
+            respondAndResume(
+                "Удаление выполнено, но совпадающая запись всё ещё присутствует в хранилище.",
+                silent,
+                success = false
+            )
+        }
+    }
+
+    private fun runLocalClipboardCopy(
+        text: String,
+        silent: Boolean
+    ) {
+        executionPhase(
+            phase = "local_clipboard_write",
+            executor = "clipboard_executor"
+        )
+
+        val clipboard =
+            getSystemService(
+                Context.CLIPBOARD_SERVICE
+            ) as ClipboardManager
+
+        if (
+            !beginLocalVerifiedSideEffect(
+                kind = "clipboard_write",
+                detail = "chars=${text.length}"
+            )
+        ) {
+            respondAndResume(
+                "Копирование отменено до выполнения.",
+                silent,
+                success = false
+            )
+            return
+        }
+
+        try {
+            clipboard.setPrimaryClip(
+                ClipData.newPlainText(
+                    "AYANA",
+                    text
+                )
+            )
+        } catch (error: Exception) {
+            markLocalSideEffectNotCommitted(
+                "clipboard_exception:${error.javaClass.simpleName}"
+            )
+            respondAndResume(
+                "Не удалось записать текст в буфер обмена.",
+                silent,
+                success = false,
+                technical =
+                    "clipboard_exception:${error.javaClass.simpleName}"
+            )
+            return
+        }
+
+        executionKernel
+            .markIrreversibleDispatchAccepted(
+                "clipboard_write"
+            )
+        executionKernel
+            .markSideEffectReconciliationStarted(
+                "verify_clipboard"
+            )
+
+        val verified =
+            try {
+                clipboard.primaryClip
+                    ?.getItemAt(
+                        0
+                    )
+                    ?.coerceToText(
+                        this
+                    )
+                    ?.toString() ==
+                    text
+            } catch (_: Exception) {
+                false
+            }
+
+        executionKernel
+            .markSideEffectReconciled(
+                committed = verified,
+                detail =
+                    "chars=${text.length}; verified=$verified"
+            )
+
+        if (verified) {
+            finishLocalCommand(
+                "Текст скопирован в буфер обмена.",
+                silent
+            )
+        } else {
+            respondAndResume(
+                "Текст был передан в буфер обмена, но запись не удалось подтвердить.",
+                silent,
+                success = false
+            )
+        }
+    }
+
+    private fun runLocalInternalPageNavigation(
+        page: AyanaStructuredLocalCommandRouter.Page,
+        silent: Boolean
+    ) {
+        executionPhase(
+            phase = "local_ayana_navigation",
+            executor = "ayana_internal_navigation_executor"
+        )
+
+        val pageKey =
+            when (page) {
+                AyanaStructuredLocalCommandRouter.Page.HOME -> "HOME"
+                AyanaStructuredLocalCommandRouter.Page.TASKS -> "TASKS"
+                AyanaStructuredLocalCommandRouter.Page.MEMORY -> "MEMORY"
+                AyanaStructuredLocalCommandRouter.Page.HISTORY -> "HISTORY"
+                AyanaStructuredLocalCommandRouter.Page.SYSTEM -> "DIAGNOSTICS"
+                AyanaStructuredLocalCommandRouter.Page.SETTINGS -> "SETTINGS"
+            }
+
+        val pageLabel =
+            when (page) {
+                AyanaStructuredLocalCommandRouter.Page.HOME -> "Главная"
+                AyanaStructuredLocalCommandRouter.Page.TASKS -> "Задачи"
+                AyanaStructuredLocalCommandRouter.Page.MEMORY -> "Память"
+                AyanaStructuredLocalCommandRouter.Page.HISTORY -> "История"
+                AyanaStructuredLocalCommandRouter.Page.SYSTEM -> "Система"
+                AyanaStructuredLocalCommandRouter.Page.SETTINGS -> "Настройки"
+            }
+
+        if (
+            !beginLocalVerifiedSideEffect(
+                kind = "ayana_internal_navigation",
+                detail = "page=$pageKey"
+            )
+        ) {
+            respondAndResume(
+                "Переход отменён до выполнения.",
+                silent,
+                success = false
+            )
+            return
+        }
+
+        try {
+            startActivity(
+                Intent(
+                    this,
+                    MainActivity::class.java
+                ).apply {
+                    putExtra(
+                        MainActivity.EXTRA_OPEN_PAGE,
+                        pageKey
+                    )
+
+                    addFlags(
+                        Intent.FLAG_ACTIVITY_NEW_TASK or
+                            Intent.FLAG_ACTIVITY_CLEAR_TOP or
+                            Intent.FLAG_ACTIVITY_SINGLE_TOP
+                    )
+                }
+            )
+        } catch (error: Exception) {
+            markLocalSideEffectNotCommitted(
+                "ayana_navigation_exception:${error.javaClass.simpleName}"
+            )
+            respondAndResume(
+                "Не удалось открыть раздел «$pageLabel» в AYANA.",
+                silent,
+                success = false,
+                technical =
+                    "ayana_internal_navigation_exception:${error.javaClass.simpleName}"
+            )
+            return
+        }
+
+        executionKernel
+            .markIrreversibleDispatchAccepted(
+                "page=$pageKey"
+            )
+        executionKernel
+            .markSideEffectReconciliationStarted(
+                "verify_page=$pageKey"
+            )
+
+        val prefs =
+            getSharedPreferences(
+                MainActivity.UI_STATE_PREFS,
+                Context.MODE_PRIVATE
+            )
+
+        val deadline =
+            System.currentTimeMillis() +
+                1200L
+
+        var actual =
+            prefs.getString(
+                MainActivity.UI_STATE_CURRENT_PAGE,
+                ""
+            )
+                .orEmpty()
+
+        while (
+            actual != pageKey &&
+            System.currentTimeMillis() <
+            deadline
+        ) {
+            try {
+                Thread.sleep(
+                    60L
+                )
+            } catch (_: InterruptedException) {
+                Thread.currentThread()
+                    .interrupt()
+                break
+            }
+
+            actual =
+                prefs.getString(
+                    MainActivity.UI_STATE_CURRENT_PAGE,
+                    ""
+                )
+                    .orEmpty()
+        }
+
+        val verified =
+            actual ==
+                pageKey
+
+        executionKernel
+            .markSideEffectReconciled(
+                committed = verified,
+                detail =
+                    "requested=$pageKey; actual=$actual"
+            )
+
+        if (verified) {
+            finishLocalCommand(
+                "Открыт раздел «$pageLabel» в AYANA.",
+                silent
+            )
+        } else {
+            respondAndResume(
+                "AYANA открыта, но переход в раздел «$pageLabel» не удалось подтвердить.",
+                silent,
+                success = false
+            )
+        }
+    }
+
+    private fun runLocalBrightnessSet(
+        percent: Int,
+        silent: Boolean
+    ) {
+        executionPhase(
+            phase = "local_brightness_set",
+            executor = "brightness_executor"
+        )
+
+        if (percent !in 0..100) {
+            respondAndResume(
+                "Некорректная яркость: $percent%. Допустимый диапазон — от 0 до 100%.",
+                silent,
+                success = false
+            )
+            return
+        }
+
+        if (
+            Build.VERSION.SDK_INT >=
+            Build.VERSION_CODES.M &&
+            !Settings.System.canWrite(
+                this
+            )
+        ) {
+            respondBlockedAndResume(
+                text =
+                    "Для точной установки яркости AYANA нужен системный доступ «Изменение системных настроек». Его можно один раз выдать в настройках AYANA. Яркость не изменена.",
+                silent = silent,
+                technical = "write_settings_permission_required"
+            )
+            return
+        }
+
+        val target =
+            ((percent / 100.0) * 255.0)
+                .toInt()
+                .coerceIn(
+                    0,
+                    255
+                )
+
+        if (
+            !beginLocalVerifiedSideEffect(
+                kind = "screen_brightness_set",
+                detail = "percent=$percent; raw=$target"
+            )
+        ) {
+            respondAndResume(
+                "Изменение яркости отменено до выполнения.",
+                silent,
+                success = false
+            )
+            return
+        }
+
+        val wroteMode =
+            try {
+                Settings.System.putInt(
+                    contentResolver,
+                    Settings.System.SCREEN_BRIGHTNESS_MODE,
+                    Settings.System.SCREEN_BRIGHTNESS_MODE_MANUAL
+                )
+            } catch (_: Exception) {
+                false
+            }
+
+        val wroteBrightness =
+            try {
+                Settings.System.putInt(
+                    contentResolver,
+                    Settings.System.SCREEN_BRIGHTNESS,
+                    target
+                )
+            } catch (_: Exception) {
+                false
+            }
+
+        if (
+            !wroteMode ||
+            !wroteBrightness
+        ) {
+            markLocalSideEffectNotCommitted(
+                "brightness_write_failed; mode=$wroteMode; value=$wroteBrightness"
+            )
+            respondAndResume(
+                "Android не принял изменение яркости.",
+                silent,
+                success = false
+            )
+            return
+        }
+
+        executionKernel
+            .markIrreversibleDispatchAccepted(
+                "brightness_raw=$target"
+            )
+        executionKernel
+            .markSideEffectReconciliationStarted(
+                "verify_brightness"
+            )
+
+        val actual =
+            try {
+                Settings.System.getInt(
+                    contentResolver,
+                    Settings.System.SCREEN_BRIGHTNESS
+                )
+            } catch (_: Exception) {
+                -1
+            }
+
+        val mode =
+            try {
+                Settings.System.getInt(
+                    contentResolver,
+                    Settings.System.SCREEN_BRIGHTNESS_MODE,
+                    -1
+                )
+            } catch (_: Exception) {
+                -1
+            }
+
+        val verified =
+            abs(
+                actual -
+                    target
+            ) <=
+                2 &&
+                mode ==
+                Settings.System.SCREEN_BRIGHTNESS_MODE_MANUAL
+
+        executionKernel
+            .markSideEffectReconciled(
+                committed = verified,
+                detail =
+                    "target=$target; actual=$actual; mode=$mode"
+            )
+
+        if (verified) {
+            finishLocalCommand(
+                "Яркость экрана установлена на $percent%.",
+                silent
+            )
+        } else {
+            respondAndResume(
+                "Изменение яркости не удалось надёжно подтвердить.",
+                silent,
+                success = false
+            )
+        }
+    }
+
+    private fun runLocalCompositeVolumeAndState(
+        level: Int,
+        scale: Int,
+        silent: Boolean
+    ) {
+        val request =
+            ExactMediaVolumeRequest(
+                requestedLevel = level,
+                requestedScaleMax = scale,
+                percent = false
+            )
+
+        val result =
+            setExactMediaVolume(
+                request
+            )
+
+        if (
+            !result.optBoolean(
+                "success",
+                false
+            )
+        ) {
+            respondAndResume(
+                result.optString(
+                    "message"
+                )
+                    .ifBlank {
+                        "Не удалось установить громкость."
+                    },
+                silent,
+                success = false
+            )
+            return
+        }
+
+        val state =
+            agentGetDeviceState()
+
+        val actual =
+            state.optInt(
+                "media_volume",
+                -1
+            )
+
+        val max =
+            state.optInt(
+                "media_volume_max",
+                -1
+            )
+
+        val battery =
+            state.optInt(
+                "battery_percent",
+                -1
+            )
+
+        commandHistoryStore.addEvent(
+            activeCommandHistoryId,
+            state = "multi_intent_verified",
+            message = "Обе цели локальной составной команды подтверждены",
+            details =
+                "volume=$actual/$max; battery=$battery"
+        )
+
+        finishLocalCommand(
+            "Громкость установлена: $actual из $max. Состояние планшета: заряд $battery%; громкость мультимедиа $actual/$max; ориентация " +
+                when (
+                    state.optString(
+                        "orientation"
+                    )
+                ) {
+                    "landscape" -> "альбомная"
+                    "portrait" -> "портретная"
+                    else -> "не определена"
+                } +
+                ".",
+            silent
+        )
+    }
+
     private fun isLocalDeviceStateRequest(
         command: String
     ): Boolean {
@@ -11250,6 +13677,20 @@ class AyanaVoiceService : Service() {
     private fun evaluateSimpleCalculation(
         command: String
     ): String? {
+
+        AyanaLocalExpressionCalculator
+            .evaluate(
+                command
+            )
+            ?.let { result ->
+                return if (
+                    result.success
+                ) {
+                    "Результат: ${result.valueText}."
+                } else {
+                    result.error
+                }
+            }
 
         val cleaned =
             command
