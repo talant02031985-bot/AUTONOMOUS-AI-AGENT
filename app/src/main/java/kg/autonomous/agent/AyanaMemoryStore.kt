@@ -190,9 +190,68 @@ class AyanaMemoryStore(
                     .take(limit.coerceIn(1, MAX_MEMORIES))
             }
 
-            val ranked = rank(items, query)
-                .filter { it.second > 0 }
-                .take(limit.coerceIn(1, MAX_MEMORIES))
+            val normalizedQuery =
+                normalize(
+                    query
+                )
+
+            val queryTokens =
+                tokens(
+                    query
+                )
+
+            val identifierLike =
+                NUMBER.containsMatchIn(
+                    normalizedQuery
+                ) ||
+                    normalizedQuery.contains(
+                        "test"
+                    ) ||
+                    normalizedQuery.contains(
+                        "mem"
+                    )
+
+            val ranked =
+                rank(
+                    items,
+                    query
+                )
+                    .filter { pair ->
+                        if (
+                            identifierLike &&
+                            queryTokens.size >= 2
+                        ) {
+                            val itemText =
+                                normalize(
+                                    pair.first.text +
+                                        " " +
+                                        pair.first.category
+                                )
+
+                            val itemTokens =
+                                tokens(
+                                    pair.first.text +
+                                        " " +
+                                        pair.first.category
+                                )
+
+                            itemText.contains(
+                                normalizedQuery
+                            ) ||
+                                queryTokens.all {
+                                    it in itemTokens
+                                }
+                        } else {
+                            pair.second >=
+                                MIN_SEARCH_SCORE
+                        }
+                    }
+                    .take(
+                        limit.coerceIn(
+                            1,
+                            MAX_MEMORIES
+                        )
+                    )
 
             if (ranked.isNotEmpty()) {
                 val now = System.currentTimeMillis()
@@ -472,6 +531,9 @@ class AyanaMemoryStore(
         private const val FILE_NAME = "ayana_memory.json"
         private const val MAX_MEMORIES = 350
         private const val MAX_TEXT_CHARS = 1800
+        // A user-authored record receives a +2 source bonus. Search must never
+        // treat that bonus alone as relevance; one real token overlap scores 12.
+        private const val MIN_SEARCH_SCORE = 12
         private val NUMBER = Regex("\\b\\d+(?:[.,]\\d+)?\\b")
         private val NEGATION = Regex("\\b(не|нет|никогда|без)\\b")
         private val STOP_WORDS = setOf(
