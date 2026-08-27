@@ -1015,7 +1015,7 @@ class MainActivity : AppCompatActivity() {
 
         // Do not replay an old navigation request if Android later reuses this
         // Activity instance for an unrelated launch.
-        sourceIntent.removeExtra(
+        sourceIntent?.removeExtra(
             EXTRA_OPEN_PAGE
         )
     }
