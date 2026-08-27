@@ -328,6 +328,66 @@ class AyanaSelfDiagnostics(
             }
         )
 
+        val notificationReadAccess =
+            runtime.optBoolean(
+                "notification_listener_access",
+                false
+            )
+
+        val notificationReadConnected =
+            runtime.optBoolean(
+                "notification_listener_connected",
+                false
+            )
+
+        addCheck(
+            checks,
+            "notification_reading",
+            when {
+                !notificationReadAccess ->
+                    STATUS_WARNING
+
+                notificationReadConnected ->
+                    STATUS_PASS
+
+                else ->
+                    STATUS_WARNING
+            },
+            "Чтение уведомлений",
+            when {
+                !notificationReadAccess ->
+                    "Специальный доступ Notification Listener не выдан"
+
+                notificationReadConnected ->
+                    "Notification Listener AYANA подключён"
+
+                else ->
+                    "Доступ выдан, listener ожидает системного переподключения"
+            }
+        )
+
+        val writeSettings =
+            runtime.optBoolean(
+                "write_settings_permission",
+                false
+            )
+
+        addCheck(
+            checks,
+            "brightness_control",
+            if (writeSettings) {
+                STATUS_PASS
+            } else {
+                STATUS_WARNING
+            },
+            "Точная яркость",
+            if (writeSettings) {
+                "Разрешено изменение системной яркости"
+            } else {
+                "Точная установка яркости требует одноразовый доступ «Изменение системных настроек»"
+            }
+        )
+
         val exactAlarm =
             runtime.optBoolean(
                 "exact_alarm_permission",
@@ -543,17 +603,29 @@ class AyanaSelfDiagnostics(
                 -1
             )
 
+        val activeTaskCount =
+            runtime.optInt(
+                "active_reminder_count",
+                -1
+            )
+
         addCheck(
             checks,
             "tasks",
-            if (taskCount >= 0) {
+            if (
+                taskCount >= 0 &&
+                activeTaskCount >= 0
+            ) {
                 STATUS_PASS
             } else {
                 STATUS_FAIL
             },
             "Задачи и напоминания",
-            if (taskCount >= 0) {
-                "Доступно задач/напоминаний: $taskCount"
+            if (
+                taskCount >= 0 &&
+                activeTaskCount >= 0
+            ) {
+                "Активных будущих: $activeTaskCount; всего сохранено: $taskCount"
             } else {
                 "Хранилище задач не удалось прочитать"
             }
