@@ -295,12 +295,10 @@ class MainActivity : AppCompatActivity() {
         requestNeededPermissionsAndStart()
     }
 
-    override fun onNewIntent(intent: Intent?) {
+    override fun onNewIntent(intent: Intent) {
         super.onNewIntent(intent)
-        if (intent != null) {
-            setIntent(intent)
-            applyNavigationIntent(intent)
-        }
+        setIntent(intent)
+        applyNavigationIntent(intent)
     }
 
     override fun onStart() {
