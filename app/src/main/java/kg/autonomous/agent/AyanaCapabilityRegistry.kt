@@ -307,6 +307,17 @@ class AyanaCapabilityRegistry(
                 -1
             }
 
+        val activeReminderCount =
+            try {
+                AyanaTaskStore(
+                    appContext
+                )
+                    .getFutureTasks()
+                    .size
+            } catch (_: Exception) {
+                -1
+            }
+
         val goalViews =
             try {
                 AyanaDurableGoalStore(
@@ -377,6 +388,17 @@ class AyanaCapabilityRegistry(
                 Settings.canDrawOverlays(
                     appContext
                 )
+            } catch (_: Exception) {
+                false
+            }
+
+        val writeSettingsAllowed =
+            try {
+                Build.VERSION.SDK_INT <
+                    Build.VERSION_CODES.M ||
+                    Settings.System.canWrite(
+                        appContext
+                    )
             } catch (_: Exception) {
                 false
             }
@@ -490,6 +512,10 @@ class AyanaCapabilityRegistry(
                 .put(
                     "overlay_permission",
                     overlayAllowed
+                )
+                .put(
+                    "write_settings_permission",
+                    writeSettingsAllowed
                 )
                 .put(
                     "accessibility_connected",
@@ -689,6 +715,10 @@ class AyanaCapabilityRegistry(
                     reminderCount
                 )
                 .put(
+                    "active_reminder_count",
+                    activeReminderCount
+                )
+                .put(
                     "recoverable_goal_count",
                     goalViews.size
                 )
@@ -873,7 +903,7 @@ class AyanaCapabilityRegistry(
             implemented = true,
             available = microphonePermission,
             deviceConfirmed = false,
-            note = "v12.10.2 follow-up listener uses 8 s normal window, stalled-speech expiry and 12 s absolute hard limit; pending device acceptance"
+            note = "v12.11 routes wake acknowledgement into bounded FOLLOW_UP and adds an independent 12 s generation-token watchdog; pending device acceptance"
         )
 
         capability(
@@ -881,8 +911,8 @@ class AyanaCapabilityRegistry(
             "notification_reading",
             implemented = true,
             available = notificationListenerAccess,
-            deviceConfirmed = false,
-            note = "v12.10.2 reads recent notifications locally through NotificationListenerService; Settings navigation is a separate capability; pending device acceptance"
+            deviceConfirmed = true,
+            note = "device-confirmed local NotificationListenerService read; v12.11 adds limit/app filters, empty-entry suppression and data-minimised snippets"
         )
 
         capability(
@@ -890,8 +920,44 @@ class AyanaCapabilityRegistry(
             "exact_media_volume_set",
             implemented = true,
             available = true,
+            deviceConfirmed = true,
+            note = "v12.11 keeps device-confirmed exact STREAM_MUSIC set and adds side-effect reconciliation"
+        )
+
+        capability(
+            capabilities,
+            "relative_media_volume_delta",
+            implemented = true,
+            available = true,
             deviceConfirmed = false,
-            note = "v12.10.2 sets STREAM_MUSIC to a requested exact/proportional level and verifies the actual post-write value before SUCCESS"
+            note = "v12.11 preserves numeric delta (+N/-N) and verifies actual post-write level"
+        )
+
+        capability(
+            capabilities,
+            "exact_screen_brightness_set",
+            implemented = true,
+            available = writeSettingsAllowed,
+            deviceConfirmed = false,
+            note = "v12.11 requires WRITE_SETTINGS and verifies manual-mode + post-write brightness; never substitutes opening Settings"
+        )
+
+        capability(
+            capabilities,
+            "clipboard_write",
+            implemented = true,
+            available = true,
+            deviceConfirmed = false,
+            note = "v12.11 local ClipboardManager write with read-back verification"
+        )
+
+        capability(
+            capabilities,
+            "structured_local_queries",
+            implemented = true,
+            available = true,
+            deviceConfirmed = false,
+            note = "v12.11 local typed arguments for notifications, device metrics, history, memory, reminders and internal AYANA navigation"
         )
 
         capability(
