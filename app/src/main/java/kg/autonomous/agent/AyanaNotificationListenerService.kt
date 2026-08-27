@@ -160,7 +160,8 @@ class AyanaNotificationListenerService : NotificationListenerService() {
 
         fun readRecent(
             context: Context,
-            limit: Int = 8
+            limit: Int = 8,
+            appFilter: String? = null
         ): JSONObject {
             if (!isAccessGranted(context)) {
                 return JSONObject()
@@ -230,9 +231,57 @@ class AyanaNotificationListenerService : NotificationListenerService() {
                 }
             }
 
+            val normalizedFilter =
+                appFilter
+                    ?.trim()
+                    ?.lowercase()
+                    ?.replace('ё', 'е')
+                    ?.takeIf { it.isNotBlank() }
+
             val selected = collected.values
+                .asSequence()
+                .filter { item ->
+                    val title = item.optString("title").trim()
+                    val text = item.optString("text").trim()
+                    val subText = item.optString("sub_text").trim()
+
+                    // Do not surface icon-only/system bookkeeping entries as an
+                    // empty numbered line. They remain in private history and can
+                    // become useful if Android later posts text for the same key.
+                    if (title.isBlank() && text.isBlank() && subText.isBlank()) {
+                        return@filter false
+                    }
+
+                    if (normalizedFilter == null) {
+                        return@filter true
+                    }
+
+                    val haystack =
+                        listOf(
+                            item.optString("app"),
+                            item.optString("package"),
+                            title
+                        )
+                            .joinToString(" ")
+                            .lowercase()
+                            .replace('ё', 'е')
+
+                    haystack.contains(normalizedFilter)
+                }
                 .sortedByDescending { it.optLong("post_time", 0L) }
                 .take(limit.coerceIn(1, 20))
+                .map { source ->
+                    // Data-minimised result for command/history transport. The
+                    // listener's private cache may hold more text, but ordinary
+                    // "show notifications" never injects a whole email body into
+                    // command history.
+                    JSONObject(source.toString()).apply {
+                        put("title", optString("title").take(180))
+                        put("text", optString("text").replace(Regex("\\s+"), " ").trim().take(280))
+                        put("sub_text", optString("sub_text").take(120))
+                    }
+                }
+                .toList()
 
             if (live == null && selected.isEmpty()) {
                 return JSONObject()
