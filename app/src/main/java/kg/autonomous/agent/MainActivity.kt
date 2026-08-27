@@ -290,8 +290,17 @@ class MainActivity : AppCompatActivity() {
         ayanaPreferences.miniOrbEnabled = true
 
         buildAyanaInterface()
+        applyNavigationIntent(intent)
 
         requestNeededPermissionsAndStart()
+    }
+
+    override fun onNewIntent(intent: Intent?) {
+        super.onNewIntent(intent)
+        if (intent != null) {
+            setIntent(intent)
+            applyNavigationIntent(intent)
+        }
     }
 
     override fun onStart() {
@@ -964,7 +973,53 @@ class MainActivity : AppCompatActivity() {
         currentPage =
             page
 
+        getSharedPreferences(
+            UI_STATE_PREFS,
+            Context.MODE_PRIVATE
+        )
+            .edit()
+            .putString(
+                UI_STATE_CURRENT_PAGE,
+                page.name
+            )
+            .apply()
+
         renderCurrentPage()
+    }
+
+    private fun applyNavigationIntent(
+        sourceIntent: Intent?
+    ) {
+        val raw =
+            sourceIntent
+                ?.getStringExtra(
+                    EXTRA_OPEN_PAGE
+                )
+                ?.trim()
+                ?.uppercase(Locale.ROOT)
+                .orEmpty()
+
+        val target =
+            when (raw) {
+                "HOME" -> Page.HOME
+                "TASKS" -> Page.TASKS
+                "MEMORY" -> Page.MEMORY
+                "HISTORY" -> Page.HISTORY
+                "SYSTEM", "DIAGNOSTICS" -> Page.DIAGNOSTICS
+                "SETTINGS" -> Page.SETTINGS
+                else -> null
+            }
+                ?: return
+
+        switchPage(
+            target
+        )
+
+        // Do not replay an old navigation request if Android later reuses this
+        // Activity instance for an unrelated launch.
+        sourceIntent.removeExtra(
+            EXTRA_OPEN_PAGE
+        )
     }
 
     private fun renderCurrentPage() {
@@ -5145,6 +5200,48 @@ class MainActivity : AppCompatActivity() {
 
         contentContainer.addView(
             settingsAction(
+                "Изменение яркости",
+                if (
+                    Build.VERSION.SDK_INT < Build.VERSION_CODES.M ||
+                    Settings.System.canWrite(this)
+                ) {
+                    "AYANA может задавать точный уровень яркости"
+                } else {
+                    "Разрешить AYANA изменять системные настройки яркости"
+                }
+            ) {
+                if (
+                    Build.VERSION.SDK_INT >= Build.VERSION_CODES.M &&
+                    !Settings.System.canWrite(this)
+                ) {
+                    try {
+                        startActivity(
+                            Intent(
+                                Settings.ACTION_MANAGE_WRITE_SETTINGS,
+                                android.net.Uri.parse(
+                                    "package:$packageName"
+                                )
+                            )
+                        )
+                    } catch (_: Exception) {
+                        startActivity(
+                            Intent(
+                                Settings.ACTION_SETTINGS
+                            )
+                        )
+                    }
+                } else {
+                    renderSettings()
+                }
+            },
+            sectionParams(
+                top =
+                    8
+            )
+        )
+
+        contentContainer.addView(
+            settingsAction(
                 "Текстовый режим",
                 "Открыть тихий ввод без голосового ответа"
             ) {
@@ -8289,6 +8386,15 @@ class MainActivity : AppCompatActivity() {
 
 
     companion object {
+
+        const val EXTRA_OPEN_PAGE =
+            "kg.autonomous.agent.extra.OPEN_PAGE"
+
+        const val UI_STATE_PREFS =
+            "ayana_ui_state_v1"
+
+        const val UI_STATE_CURRENT_PAGE =
+            "current_page"
 
         @Volatile
         private var ownAppBridgeInstance:
