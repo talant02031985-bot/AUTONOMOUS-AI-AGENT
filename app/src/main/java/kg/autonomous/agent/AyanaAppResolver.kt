@@ -10,15 +10,17 @@ import java.io.File
 import java.util.Locale
 
 /**
- * AYANA App Resolver v2.3 — PAGINATED APP INTELLIGENCE.
+ * AYANA App Resolver v2.4 — EXACT PACKAGE INTEGRITY.
  *
- * Dynamic source of truth for launchable apps on THIS Android device.
- * v2.2 expands Russian/English/transliterated aliases and common Android app names,
- * but every package is still only a hint and MUST be validated against the launcher
- * map observed on THIS device before launch. Successful mappings are cached and
- * validated again before use.
- * Package visibility is provided by the existing AndroidManifest <queries>
- * launcher intent.
+ * v2.4 preserves v2.3 dynamic/paginated app intelligence and adds a strict
+ * package-name path. A syntactically exact Android package identifier NEVER
+ * enters learned-alias, static-alias or fuzzy label matching.
+ *
+ * Invariants:
+ * - exact package hit -> exact PackageManager / launcher-map result only;
+ * - exact package miss -> fail closed; never choose a similar app;
+ * - normal user-visible names keep the proven v2.3 resolver behavior;
+ * - launch() automatically selects strict mode for package-shaped input.
  */
 class AyanaAppResolver(
     context: Context
@@ -153,7 +155,17 @@ class AyanaAppResolver(
         requestedName: String,
         forceRefresh: Boolean = false
     ): Resolution {
-        val clean = normalizeQuery(requestedName)
+        val requested = requestedName.trim()
+        val exactCandidate = exactPackageCandidate(requested)
+
+        if (exactCandidate != null) {
+            return resolveExactPackage(
+                packageName = exactCandidate,
+                forceRefresh = forceRefresh
+            )
+        }
+
+        val clean = normalizeQuery(requested)
         if (clean.isBlank()) {
             return failure(requestedName, "Пустое название приложения")
         }
@@ -266,15 +278,122 @@ class AyanaAppResolver(
     }
 
     /**
+     * Strict package resolver. No aliases, transliteration, labels, token score
+     * or fuzzy candidates are considered here.
+     */
+    fun resolveExactPackage(
+        packageName: String,
+        forceRefresh: Boolean = false
+    ): Resolution {
+        val requested = packageName.trim()
+        if (!isExactPackageName(requested)) {
+            return Resolution(
+                success = false,
+                requestedName = packageName,
+                label = "",
+                packageName = "",
+                activityName = "",
+                confidence = 0,
+                source = "exact_package_invalid",
+                reason = "Строка не является корректным Android package name",
+                alternatives = emptyList()
+            )
+        }
+
+        // Primary evidence: actual launcher map observed on this device.
+        val exactEntry = listLaunchableApps(forceRefresh)
+            .firstOrNull { it.packageName == requested }
+
+        if (exactEntry != null) {
+            return Resolution(
+                success = true,
+                requestedName = packageName,
+                label = exactEntry.label,
+                packageName = exactEntry.packageName,
+                activityName = exactEntry.activityName,
+                confidence = 100,
+                source = "exact_launcher_package",
+                reason = "Точное package name подтверждено launcher-картой устройства",
+                alternatives = emptyList()
+            )
+        }
+
+        // Secondary exact evidence: PackageManager launch intent. This remains
+        // exact because the queried identifier itself is never transformed.
+        val launchIntent = try {
+            packageManager.getLaunchIntentForPackage(requested)
+        } catch (_: Exception) {
+            null
+        }
+
+        if (launchIntent != null) {
+            val component = launchIntent.component
+            val activity = component?.className.orEmpty()
+            val label = try {
+                @Suppress("DEPRECATION")
+                packageManager.getApplicationInfo(requested, 0)
+                    .loadLabel(packageManager)
+                    ?.toString()
+                    .orEmpty()
+                    .trim()
+            } catch (_: Exception) {
+                ""
+            }.ifBlank { requested.substringAfterLast('.') }
+
+            return Resolution(
+                success = true,
+                requestedName = packageName,
+                label = label,
+                packageName = requested,
+                activityName = activity,
+                confidence = 100,
+                source = "exact_package_manager",
+                reason = "Точное package name подтверждено PackageManager",
+                alternatives = emptyList()
+            )
+        }
+
+        return Resolution(
+            success = false,
+            requestedName = packageName,
+            label = "",
+            packageName = "",
+            activityName = "",
+            confidence = 0,
+            source = "exact_package_miss",
+            reason = "Точный package $requested не найден как запускаемое приложение; fuzzy/alias fallback запрещён",
+            alternatives = emptyList()
+        )
+    }
+
+    fun packageExistsExact(
+        packageName: String,
+        forceRefresh: Boolean = false
+    ): Boolean =
+        resolveExactPackage(
+            packageName = packageName,
+            forceRefresh = forceRefresh
+        ).success
+
+    /**
      * Resolves a user-visible name using the normal resolver first. If that is not
      * conclusive, legacy package candidates may be used only as hints and only
      * after the package is observed in the current launcher map.
+     *
+     * Exact package-shaped input never reaches hints.
      */
     fun resolveWithHints(
         requestedName: String,
         preferredPackages: List<String>,
         forceRefresh: Boolean = false
     ): Resolution {
+        exactPackageCandidate(requestedName)?.let { exactCandidate ->
+            return resolveExactPackage(
+                packageName = exactCandidate,
+                forceRefresh = forceRefresh
+            )
+        }
+
         val primary =
             resolve(
                 requestedName = requestedName,
@@ -343,10 +462,29 @@ class AyanaAppResolver(
 
     fun launch(
         requestedName: String
+    ): JSONObject {
+        val exactCandidate = exactPackageCandidate(requestedName)
+        return if (exactCandidate != null) {
+            launchResolved(
+                resolveExactPackage(
+                    packageName = exactCandidate
+                )
+            )
+        } else {
+            launchResolved(
+                resolve(
+                    requestedName
+                )
+            )
+        }
+    }
+
+    fun launchExactPackage(
+        packageName: String
     ): JSONObject =
         launchResolved(
-            resolve(
-                requestedName
+            resolveExactPackage(
+                packageName = packageName
             )
         )
 
@@ -373,17 +511,33 @@ class AyanaAppResolver(
         }
 
         return try {
-            val intent = Intent(Intent.ACTION_MAIN).apply {
-                addCategory(Intent.CATEGORY_LAUNCHER)
-                component = ComponentName(
-                    resolution.packageName,
-                    resolution.activityName
-                )
-                addFlags(
-                    Intent.FLAG_ACTIVITY_NEW_TASK or
-                        Intent.FLAG_ACTIVITY_RESET_TASK_IF_NEEDED
-                )
-            }
+            val intent =
+                if (resolution.activityName.isNotBlank()) {
+                    Intent(Intent.ACTION_MAIN).apply {
+                        addCategory(Intent.CATEGORY_LAUNCHER)
+                        component = ComponentName(
+                            resolution.packageName,
+                            resolution.activityName
+                        )
+                    }
+                } else {
+                    packageManager
+                        .getLaunchIntentForPackage(
+                            resolution.packageName
+                        )
+                        ?: return resolution.toJson()
+                            .put("success", false)
+                            .put(
+                                "message",
+                                "Точный пакет ${resolution.packageName} найден, но Android не вернул launch intent"
+                            )
+                }
+
+            intent.addFlags(
+                Intent.FLAG_ACTIVITY_NEW_TASK or
+                    Intent.FLAG_ACTIVITY_RESET_TASK_IF_NEEDED
+            )
+
             appContext.startActivity(intent)
 
             resolution.toJson()
@@ -549,6 +703,11 @@ class AyanaAppResolver(
             return
         }
 
+        // Exact package identifiers must never pollute the natural-language alias cache.
+        if (isExactPackageName(normalizedQuery)) {
+            return
+        }
+
         synchronized(lock) {
             try {
                 val aliases = JSONObject()
@@ -558,7 +717,7 @@ class AyanaAppResolver(
                 aliases.put(normalizedQuery, packageName)
 
                 val root = JSONObject()
-                    .put("version", 2)
+                    .put("version", 3)
                     .put("updated_at", System.currentTimeMillis())
                     .put("aliases", aliases)
 
@@ -860,11 +1019,26 @@ class AyanaAppResolver(
         return variants.toList()
     }
 
+
+    private fun exactPackageCandidate(value: String): String? {
+        val trimmed = value.trim()
+        if (isExactPackageName(trimmed)) return trimmed
+
+        val withoutPrefix = trimmed
+            .replace(Regex("^(?i:package|пакет|package name|имя пакета)\\s*[:=]?\\s+"), "")
+            .trim()
+        return withoutPrefix.takeIf(::isExactPackageName)
+    }
+
+    private fun isExactPackageName(value: String): Boolean =
+        EXACT_PACKAGE_REGEX.matches(value.trim())
+
     private fun normalizeQuery(value: String): String =
         normalize(value)
             .removePrefix("приложение ")
             .removePrefix("программу ")
             .removePrefix("программа ")
+            .removePrefix("пакет ")
             .trim()
 
     private fun normalize(value: String): String =
@@ -900,5 +1074,7 @@ class AyanaAppResolver(
         private const val SCAN_CACHE_MS = 60_000L
         private const val MIN_CONFIDENCE = 78
         private const val MIN_WIN_MARGIN = 8
+        private val EXACT_PACKAGE_REGEX =
+            Regex("^[A-Za-z][A-Za-z0-9_]*(?:\\.[A-Za-z0-9_]+)+$")
     }
 }
