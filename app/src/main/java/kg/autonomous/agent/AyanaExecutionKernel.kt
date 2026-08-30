@@ -4,15 +4,20 @@ import java.net.HttpURLConnection
 import java.util.UUID
 
 /**
- * AYANA Execution Kernel v1.2.1 â€” side-effect reconciliation + terminal truth.
+ * AYANA Execution Kernel v1.3 â€” terminal/side-effect truth hardening.
  *
- * Core invariant:
- * Once an irreversible/state-changing dispatch has crossed its atomic dispatch
- * boundary, user cancellation may request STOP but may not produce semantic
- * CANCELLED until the executor reconciles the real-world outcome.
+ * v1.3 preserves v1.2.1 cancellation + reconciliation semantics and adds a
+ * terminal-consistency gate. A terminal can no longer contradict the factual
+ * side-effect state:
+ * - SUCCESS is accepted only with no declared side effect or VERIFIED_COMMITTED;
+ * - BLOCKED / UNSUPPORTED cannot be reported after a committed/uncertain dispatch;
+ * - CANCELLED cannot be reported after the irreversible boundary and converts a
+ *   PREPARING side effect into VERIFIED_NOT_COMMITTED before cancellation;
+ * - ERROR remains the fail-closed terminal for an uncertain post-dispatch outcome;
+ * - PREPARING + non-success terminal is reconciled as NOT_COMMITTED because the
+ *   irreversible dispatch boundary was never crossed.
  *
- * This is deliberately framework-agnostic so Android, artifact and future
- * integration executors can share the same ownership contract.
+ * The public API is intentionally source-compatible with v1.2.1.
  */
 class AyanaExecutionKernel {
 
@@ -90,6 +95,16 @@ class AyanaExecutionKernel {
             if (previous.terminalStatus == TerminalStatus.RUNNING) {
                 previous.terminalStatus = TerminalStatus.ERROR
                 previous.reason = "superseded_by_new_execution"
+                previous.phase = "terminal"
+                addEvidenceLocked(
+                    previous,
+                    Evidence(
+                        type = "execution_superseded",
+                        source = "execution_kernel",
+                        detail = previous.reason,
+                        confidence = 100
+                    )
+                )
                 cancelResourcesLocked(previous)
             }
         }
@@ -175,6 +190,21 @@ class AyanaExecutionKernel {
         if (session.cancelled) {
             return@synchronized false
         }
+        if (
+            session.sideEffectState != SideEffectState.NONE &&
+            session.sideEffectState != SideEffectState.PREPARING
+        ) {
+            addEvidenceLocked(
+                session,
+                Evidence(
+                    type = "side_effect_prepare_rejected",
+                    source = "execution_kernel",
+                    detail = "state=${session.sideEffectState.name}; requested_kind=${kind.trim().take(96)}",
+                    confidence = 100
+                )
+            )
+            return@synchronized false
+        }
 
         session.sideEffectKind = kind.trim().take(96)
         session.sideEffectState = SideEffectState.PREPARING
@@ -216,6 +246,23 @@ class AyanaExecutionKernel {
                     type = "side_effect_dispatch_rejected",
                     source = "execution_kernel",
                     detail = "cancel_already_requested",
+                    confidence = 100
+                )
+            )
+            return@synchronized false
+        }
+        if (
+            session.sideEffectState !in setOf(
+                SideEffectState.NONE,
+                SideEffectState.PREPARING
+            )
+        ) {
+            addEvidenceLocked(
+                session,
+                Evidence(
+                    type = "side_effect_dispatch_rejected",
+                    source = "execution_kernel",
+                    detail = "invalid_state=${session.sideEffectState.name}",
                     confidence = 100
                 )
             )
@@ -441,8 +488,13 @@ class AyanaExecutionKernel {
             return@synchronized snapshotLocked(session)
         }
 
+        reconcilePreparedWithoutDispatchLocked(
+            session = session,
+            terminal = TerminalStatus.CANCELLED
+        )
+
         session.cancelled = true
-        session.phase = "cancelling"
+        session.phase = "terminal"
         session.terminalStatus = TerminalStatus.CANCELLED
         session.reason = reason.trim().take(MAX_REASON_CHARS)
         cancelResourcesLocked(session)
@@ -458,10 +510,10 @@ class AyanaExecutionKernel {
             return@synchronized snapshotLocked(session)
         }
 
-        // Hard terminal-truth invariant: semantic CANCELLED is impossible
-        // after the point-of-no-return until reconciliation, and remains
-        // impossible after a side effect has been VERIFIED_COMMITTED even if
-        // semantic terminal handoff has not happened yet.
+        val requestedReason = reason.trim().take(MAX_REASON_CHARS)
+
+        // Existing STOP invariant: semantic CANCELLED is impossible after the
+        // point-of-no-return and remains impossible after VERIFIED_COMMITTED.
         if (
             status == TerminalStatus.CANCELLED &&
             protectsTerminalTruthLocked(session)
@@ -473,7 +525,7 @@ class AyanaExecutionKernel {
                 } else {
                     "side_effect_committed_terminal_required"
                 }
-            session.reason = reason.trim().take(MAX_REASON_CHARS)
+            session.reason = requestedReason
             addEvidenceLocked(
                 session,
                 Evidence(
@@ -486,9 +538,57 @@ class AyanaExecutionKernel {
             return@synchronized snapshotLocked(session)
         }
 
-        session.terminalStatus = status
+        reconcilePreparedWithoutDispatchLocked(
+            session = session,
+            terminal = status
+        )
+
+        val effectiveStatus =
+            effectiveTerminalStatusLocked(
+                session = session,
+                requested = status
+            )
+
+        if (effectiveStatus != status) {
+            addEvidenceLocked(
+                session,
+                Evidence(
+                    type = "terminal_truth_coerced",
+                    source = "execution_kernel",
+                    detail = buildString {
+                        append("requested=")
+                        append(status.name)
+                        append("; effective=")
+                        append(effectiveStatus.name)
+                        append("; side_effect_state=")
+                        append(session.sideEffectState.name)
+                        if (session.sideEffectKind.isNotBlank()) {
+                            append("; side_effect_kind=")
+                            append(session.sideEffectKind)
+                        }
+                    }.take(MAX_EVIDENCE_DETAIL_CHARS),
+                    confidence = 100
+                )
+            )
+        }
+
+        session.terminalStatus = effectiveStatus
         session.phase = "terminal"
-        session.reason = reason.trim().take(MAX_REASON_CHARS)
+        session.reason =
+            if (effectiveStatus == status) {
+                requestedReason
+            } else {
+                buildString {
+                    append("terminal_truth_coerced_from=")
+                    append(status.name)
+                    append("; side_effect_state=")
+                    append(session.sideEffectState.name)
+                    if (requestedReason.isNotBlank()) {
+                        append("; requested_reason=")
+                        append(requestedReason)
+                    }
+                }.take(MAX_REASON_CHARS)
+            }
         clearResourcesLocked(session)
         snapshotLocked(session)
     }
@@ -529,6 +629,88 @@ class AyanaExecutionKernel {
                 append(session.reason)
             }
         }.take(1400)
+    }
+
+    private fun effectiveTerminalStatusLocked(
+        session: MutableSession,
+        requested: TerminalStatus
+    ): TerminalStatus {
+        val state = session.sideEffectState
+
+        return when (requested) {
+            TerminalStatus.SUCCESS ->
+                when (state) {
+                    SideEffectState.NONE,
+                    SideEffectState.VERIFIED_COMMITTED -> TerminalStatus.SUCCESS
+
+                    SideEffectState.PREPARING,
+                    SideEffectState.DISPATCHING,
+                    SideEffectState.DISPATCHED,
+                    SideEffectState.RECONCILING,
+                    SideEffectState.VERIFIED_NOT_COMMITTED -> TerminalStatus.ERROR
+                }
+
+            TerminalStatus.BLOCKED,
+            TerminalStatus.UNSUPPORTED ->
+                when (state) {
+                    SideEffectState.NONE,
+                    SideEffectState.VERIFIED_NOT_COMMITTED -> requested
+
+                    SideEffectState.PREPARING -> requested
+
+                    SideEffectState.DISPATCHING,
+                    SideEffectState.DISPATCHED,
+                    SideEffectState.RECONCILING,
+                    SideEffectState.VERIFIED_COMMITTED -> TerminalStatus.ERROR
+                }
+
+            TerminalStatus.CANCELLED ->
+                when (state) {
+                    SideEffectState.NONE,
+                    SideEffectState.PREPARING,
+                    SideEffectState.VERIFIED_NOT_COMMITTED -> TerminalStatus.CANCELLED
+
+                    SideEffectState.DISPATCHING,
+                    SideEffectState.DISPATCHED,
+                    SideEffectState.RECONCILING,
+                    SideEffectState.VERIFIED_COMMITTED -> TerminalStatus.ERROR
+                }
+
+            TerminalStatus.ERROR -> TerminalStatus.ERROR
+            TerminalStatus.RUNNING -> TerminalStatus.ERROR
+        }
+    }
+
+    /**
+     * PREPARING proves only intent to mutate. If execution terminates before
+     * tryBeginIrreversibleDispatch(), then no irreversible platform action was
+     * dispatched and the factual side-effect terminal is NOT_COMMITTED.
+     */
+    private fun reconcilePreparedWithoutDispatchLocked(
+        session: MutableSession,
+        terminal: TerminalStatus
+    ) {
+        if (session.sideEffectState != SideEffectState.PREPARING) {
+            return
+        }
+
+        session.sideEffectState = SideEffectState.VERIFIED_NOT_COMMITTED
+        addEvidenceLocked(
+            session,
+            Evidence(
+                type = "side_effect_verified_not_committed",
+                source = "execution_kernel",
+                detail = buildString {
+                    append("terminal_before_dispatch=")
+                    append(terminal.name)
+                    if (session.sideEffectKind.isNotBlank()) {
+                        append("; kind=")
+                        append(session.sideEffectKind)
+                    }
+                }.take(MAX_EVIDENCE_DETAIL_CHARS),
+                confidence = 100
+            )
+        )
     }
 
     private fun requiresReconciliationLocked(session: MutableSession): Boolean =
