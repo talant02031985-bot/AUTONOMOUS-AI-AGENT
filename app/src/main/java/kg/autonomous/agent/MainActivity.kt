@@ -56,7 +56,8 @@ import kotlin.concurrent.thread
 
 class MainActivity : AppCompatActivity() {
 
-    // UI generation: v7.5 NOTIFICATION ACCESS TRUTH + OWN-APP SEMANTIC ACTION TRUTH.
+    // UI generation: v7.8 UI SCROLL PERFORMANCE + v7.5 NOTIFICATION ACCESS TRUTH
+    // + OWN-APP SEMANTIC ACTION TRUTH.
     // v7.4 keeps v7.2 foreground ownership truth and hardens the in-process
     // semantic bridge so the same factual View tree used for perception also
     // exposes stable action labels for navigation and editable controls.
@@ -112,6 +113,57 @@ class MainActivity : AppCompatActivity() {
 
     private var historyFilter =
         "all"
+
+    // History performance v7.7:
+    // Keep only a small visible window of heavy command cards, build event traces
+    // only when the user explicitly expands them, and coalesce terminal refreshes.
+    // The full record remains untouched in AyanaCommandHistoryStore and clipboard export.
+    private var historyVisibleLimit =
+        HISTORY_PAGE_SIZE
+
+    private val historyRefreshRunnable =
+        object : Runnable {
+            override fun run() {
+                if (
+                    currentPage !=
+                        Page.HISTORY ||
+                    !::contentContainer.isInitialized
+                ) {
+                    return
+                }
+
+                if (isContentViewportInMotion()) {
+                    contentContainer.postDelayed(
+                        this,
+                        UI_SCROLL_IDLE_RECHECK_MS
+                    )
+                    return
+                }
+
+                renderHistory(
+                    preserveScroll = true
+                )
+            }
+        }
+
+    // System-page performance v7.8:
+    // Self-diagnostics may touch package/runtime/accessibility state and must never
+    // run synchronously from renderDiagnostics() on the Activity main thread.
+    // Keep a short-lived factual cache and ignore stale background completions.
+    @Volatile
+    private var diagnosticsGeneration =
+        0L
+
+    @Volatile
+    private var diagnosticsRequestInFlight =
+        false
+
+    private var diagnosticsCachedAt =
+        0L
+
+    private var diagnosticsCachedReport:
+        org.json.JSONObject? =
+        null
 
     private val memoryStore by lazy {
         AyanaMemoryStore(
@@ -251,13 +303,11 @@ class MainActivity : AppCompatActivity() {
                     state in setOf(
                         AyanaVoiceService.STATE_SUCCESS,
                         AyanaVoiceService.STATE_ERROR,
-                        AyanaVoiceService.STATE_TEXT,
-                        AyanaVoiceService.STATE_SPEAKING,
                         AyanaVoiceService.STATE_CANCELLED,
                         AyanaVoiceService.STATE_STOPPED
                     )
                 ) {
-                    renderHistory()
+                    scheduleHistoryRefresh()
                 }
             }
         }
@@ -411,6 +461,17 @@ class MainActivity : AppCompatActivity() {
 
     override fun onDestroy() {
 
+        if (::contentContainer.isInitialized) {
+            contentContainer.removeCallbacks(
+                historyRefreshRunnable
+            )
+        }
+
+        // Invalidate any background diagnostics result that may finish after
+        // the Activity has started destruction.
+        diagnosticsGeneration++
+        diagnosticsRequestInFlight = false
+
         if (
             ownAppBridgeInstance
                 ?.get() ===
@@ -523,7 +584,7 @@ class MainActivity : AppCompatActivity() {
         )
 
         contentScroll =
-            ScrollView(this).apply {
+            AyanaContentScrollView(this).apply {
                 isFillViewport = true
                 overScrollMode = View.OVER_SCROLL_NEVER
                 isVerticalScrollBarEnabled = false
@@ -1031,6 +1092,12 @@ class MainActivity : AppCompatActivity() {
         if (::contentScroll.isInitialized) {
             contentScroll.isVerticalScrollBarEnabled =
                 currentPage != Page.HOME
+
+            (contentScroll as? AyanaContentScrollView)
+                ?.setScrollAccessibilityCoalescing(
+                    currentPage == Page.HISTORY ||
+                        currentPage == Page.DIAGNOSTICS
+                )
 
             if (currentPage == Page.HOME) {
                 contentScroll.scrollTo(0, 0)
@@ -3907,7 +3974,43 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    private fun renderHistory() {
+    private fun scheduleHistoryRefresh() {
+
+        if (
+            !::contentContainer.isInitialized ||
+            currentPage !=
+                Page.HISTORY
+        ) {
+            return
+        }
+
+        contentContainer.removeCallbacks(
+            historyRefreshRunnable
+        )
+
+        contentContainer.postDelayed(
+            historyRefreshRunnable,
+            HISTORY_REFRESH_DEBOUNCE_MS
+        )
+    }
+
+    private fun renderHistory(
+        preserveScroll: Boolean = false
+    ) {
+
+        contentContainer.removeCallbacks(
+            historyRefreshRunnable
+        )
+
+        val previousScrollY =
+            if (
+                preserveScroll &&
+                ::contentScroll.isInitialized
+            ) {
+                contentScroll.scrollY
+            } else {
+                0
+            }
 
         contentContainer
             .removeAllViews()
@@ -3964,6 +4067,8 @@ class MainActivity : AppCompatActivity() {
                 background = softDrawable("#1B1017", "#5B2838", 14)
                 setOnClickListener {
                     commandHistoryStore.clear()
+                    historyVisibleLimit =
+                        HISTORY_PAGE_SIZE
                     renderHistory()
                 }
             },
@@ -4046,6 +4151,8 @@ class MainActivity : AppCompatActivity() {
                         setOnClickListener {
                             historyFilter =
                                 pair.first
+                            historyVisibleLimit =
+                                HISTORY_PAGE_SIZE
                             renderHistory()
                         }
                     },
@@ -4072,9 +4179,11 @@ class MainActivity : AppCompatActivity() {
         )
 
         val allRecords =
-            commandHistoryStore.recent(40)
+            commandHistoryStore.recent(
+                HISTORY_MAX_RECORDS
+            )
 
-        val records =
+        val filteredRecords =
             allRecords.filter {
                 historyRecordMatchesFilter(
                     it,
@@ -4082,7 +4191,7 @@ class MainActivity : AppCompatActivity() {
                 )
             }
 
-        if (records.isEmpty()) {
+        if (filteredRecords.isEmpty()) {
             val empty = panel(20)
             empty.addView(
                 TextView(this).apply {
@@ -4100,8 +4209,31 @@ class MainActivity : AppCompatActivity() {
                 empty,
                 sectionParams(top = 12)
             )
+
+            if (
+                preserveScroll &&
+                ::contentScroll.isInitialized
+            ) {
+                contentScroll.post {
+                    contentScroll.scrollTo(
+                        0,
+                        previousScrollY
+                    )
+                }
+            }
             return
         }
+
+        historyVisibleLimit =
+            historyVisibleLimit.coerceIn(
+                HISTORY_PAGE_SIZE,
+                HISTORY_MAX_RECORDS
+            )
+
+        val records =
+            filteredRecords.take(
+                historyVisibleLimit
+            )
 
         records.forEach { record ->
             val success =
@@ -4208,7 +4340,13 @@ class MainActivity : AppCompatActivity() {
 
             card.addView(
                 TextView(this).apply {
-                    text = record.optString("command")
+                    text =
+                        historyPreview(
+                            record.optString(
+                                "command"
+                            ),
+                            HISTORY_COMMAND_PREVIEW_CHARS
+                        )
                     textSize = 17f
                     setTypeface(Typeface.DEFAULT, Typeface.BOLD)
                     setTextColor(Color.WHITE)
@@ -4216,11 +4354,20 @@ class MainActivity : AppCompatActivity() {
                 }
             )
 
-            val result = record.optString("result")
+            val result =
+                record.optString(
+                    "result"
+                )
+
             if (result.isNotBlank()) {
                 card.addView(
                     TextView(this).apply {
-                        text = "Результат: $result"
+                        text =
+                            "Результат: " +
+                                historyPreview(
+                                    result,
+                                    HISTORY_RESULT_PREVIEW_CHARS
+                                )
                         textSize = 14.5f
                         setTextColor(Color.parseColor("#C7D2E2"))
                         setPadding(0, dp(7), 0, 0)
@@ -4230,58 +4377,11 @@ class MainActivity : AppCompatActivity() {
 
             val events = record.optJSONArray("events")
             if (events != null && events.length() > 0) {
+                // Do not build or measure heavy event text during initial history
+                // layout. It is materialized only on the first explicit expansion.
                 val traceView =
                     TextView(this).apply {
-                        val startIndex =
-                            maxOf(
-                                0,
-                                events.length() -
-                                    8
-                            )
-
-                        text =
-                            buildString {
-                                for (
-                                    index in
-                                    startIndex until events.length()
-                                ) {
-                                    val event =
-                                        events.optJSONObject(
-                                            index
-                                        )
-                                            ?: continue
-
-                                    if (
-                                        isNotEmpty()
-                                    ) {
-                                        append(
-                                            "\n"
-                                        )
-                                    }
-
-                                    append(
-                                        "• "
-                                    )
-                                    append(
-                                        event.optString(
-                                            "state"
-                                        )
-                                    )
-                                    append(
-                                        " — "
-                                    )
-                                    append(
-                                        compactHistoryEventMessage(
-                                            record,
-                                            event
-                                        )
-                                            .take(
-                                                180
-                                            )
-                                    )
-                                }
-                            }
-
+                        text = ""
                         textSize =
                             12.5f
                         setTextColor(
@@ -4298,6 +4398,9 @@ class MainActivity : AppCompatActivity() {
                         visibility =
                             View.GONE
                     }
+
+                var traceMaterialized =
+                    false
 
                 val detailsButton =
                     TextView(this).apply {
@@ -4320,6 +4423,19 @@ class MainActivity : AppCompatActivity() {
                             val show =
                                 traceView.visibility !=
                                     View.VISIBLE
+
+                            if (
+                                show &&
+                                !traceMaterialized
+                            ) {
+                                traceView.text =
+                                    buildHistoryTracePreview(
+                                        record,
+                                        events
+                                    )
+                                traceMaterialized =
+                                    true
+                            }
 
                             traceView.visibility =
                                 if (show) {
@@ -4439,7 +4555,9 @@ class MainActivity : AppCompatActivity() {
                                         "id"
                                     )
                                 )
-                                renderHistory()
+                                renderHistory(
+                                    preserveScroll = true
+                                )
                             }
                             .show()
                     }
@@ -4469,6 +4587,150 @@ class MainActivity : AppCompatActivity() {
                 card,
                 sectionParams(top = 9)
             )
+        }
+
+        if (
+            records.size <
+            filteredRecords.size
+        ) {
+            val nextLimit =
+                minOf(
+                    historyVisibleLimit +
+                        HISTORY_PAGE_SIZE,
+                    filteredRecords.size,
+                    HISTORY_MAX_RECORDS
+                )
+
+            contentContainer.addView(
+                TextView(this).apply {
+                    text =
+                        "Показать ещё  " +
+                            records.size +
+                            "/" +
+                            filteredRecords.size
+                    textSize =
+                        14.5f
+                    gravity =
+                        Gravity.CENTER
+                    setTextColor(
+                        Color.parseColor(
+                            "#D9D5FF"
+                        )
+                    )
+                    background =
+                        softDrawable(
+                            "#121426",
+                            "#3B3B68",
+                            14
+                        )
+                    setOnClickListener {
+                        historyVisibleLimit =
+                            nextLimit
+                        renderHistory(
+                            preserveScroll = true
+                        )
+                    }
+                },
+                LinearLayout.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT,
+                    dp(44)
+                ).apply {
+                    topMargin =
+                        dp(10)
+                    bottomMargin =
+                        dp(4)
+                }
+            )
+        }
+
+        if (
+            preserveScroll &&
+            ::contentScroll.isInitialized
+        ) {
+            contentScroll.post {
+                contentScroll.scrollTo(
+                    0,
+                    previousScrollY
+                )
+            }
+        }
+    }
+
+    private fun historyPreview(
+        value: String,
+        maxChars: Int
+    ): String {
+
+        val clean =
+            value.trim()
+
+        if (
+            clean.length <=
+            maxChars
+        ) {
+            return clean
+        }
+
+        return clean
+            .take(
+                maxChars
+            )
+            .trimEnd() +
+            "…"
+    }
+
+    private fun buildHistoryTracePreview(
+        record: org.json.JSONObject,
+        events: org.json.JSONArray
+    ): String {
+
+        val startIndex =
+            maxOf(
+                0,
+                events.length() -
+                    HISTORY_TRACE_EVENT_LIMIT
+            )
+
+        return buildString {
+            for (
+                index in
+                startIndex until events.length()
+            ) {
+                val event =
+                    events.optJSONObject(
+                        index
+                    )
+                        ?: continue
+
+                if (
+                    isNotEmpty()
+                ) {
+                    append(
+                        "\n"
+                    )
+                }
+
+                append(
+                    "• "
+                )
+                append(
+                    event.optString(
+                        "state"
+                    )
+                )
+                append(
+                    " — "
+                )
+                append(
+                    compactHistoryEventMessage(
+                        record,
+                        event
+                    )
+                        .take(
+                            HISTORY_TRACE_EVENT_PREVIEW_CHARS
+                        )
+                )
+            }
         }
     }
 
@@ -4712,7 +4974,261 @@ class MainActivity : AppCompatActivity() {
         }.trimEnd()
     }
 
-    private fun renderDiagnostics() {
+    private fun renderDiagnostics(
+        forceRefresh: Boolean = false,
+        preserveScroll: Boolean = false
+    ) {
+
+        val previousScrollY =
+            if (
+                preserveScroll &&
+                ::contentScroll.isInitialized
+            ) {
+                contentScroll.scrollY
+            } else {
+                0
+            }
+
+        val now =
+            SystemClock.elapsedRealtime()
+
+        val cached =
+            diagnosticsCachedReport
+
+        val cacheFresh =
+            cached != null &&
+                diagnosticsCachedAt > 0L &&
+                now - diagnosticsCachedAt <=
+                DIAGNOSTICS_CACHE_TTL_MS
+
+        if (
+            cached != null &&
+            !forceRefresh
+        ) {
+            renderDiagnosticsReport(
+                report = cached,
+                refreshing =
+                    diagnosticsRequestInFlight
+            )
+
+            restoreContentScrollIfNeeded(
+                preserveScroll,
+                previousScrollY
+            )
+
+            if (
+                !cacheFresh &&
+                !diagnosticsRequestInFlight
+            ) {
+                requestDiagnosticsRefresh(
+                    preserveScroll = true
+                )
+            }
+
+            return
+        }
+
+        renderDiagnosticsLoading(
+            cachedReport = cached
+        )
+
+        restoreContentScrollIfNeeded(
+            preserveScroll,
+            previousScrollY
+        )
+
+        requestDiagnosticsRefresh(
+            preserveScroll = preserveScroll
+        )
+    }
+
+    private fun requestDiagnosticsRefresh(
+        preserveScroll: Boolean
+    ) {
+
+        if (
+            diagnosticsRequestInFlight ||
+            isFinishing ||
+            isDestroyed
+        ) {
+            return
+        }
+
+        diagnosticsRequestInFlight =
+            true
+
+        val generation =
+            ++diagnosticsGeneration
+
+        val scrollYBeforeRequest =
+            if (
+                preserveScroll &&
+                ::contentScroll.isInitialized
+            ) {
+                contentScroll.scrollY
+            } else {
+                0
+            }
+
+        thread(
+            start = true,
+            name = "AyanaSelfDiagnostics"
+        ) {
+            val report =
+                try {
+                    selfDiagnostics
+                        .run(
+                            focus = "all",
+                            appName = ""
+                        )
+                } catch (
+                    error: Exception
+                ) {
+                    diagnosticsFailureReport(
+                        error
+                    )
+                }
+
+            runOnUiThread {
+                if (
+                    generation !=
+                        diagnosticsGeneration ||
+                    isFinishing ||
+                    isDestroyed
+                ) {
+                    return@runOnUiThread
+                }
+
+                diagnosticsRequestInFlight =
+                    false
+
+                diagnosticsCachedReport =
+                    report
+
+                diagnosticsCachedAt =
+                    SystemClock.elapsedRealtime()
+
+                if (
+                    currentPage ==
+                    Page.DIAGNOSTICS
+                ) {
+                    renderDiagnosticsReportWhenIdle(
+                        report = report,
+                        generation = generation,
+                        preserveScroll = preserveScroll,
+                        scrollY = scrollYBeforeRequest
+                    )
+                }
+            }
+        }
+    }
+
+    private fun renderDiagnosticsReportWhenIdle(
+        report: org.json.JSONObject,
+        generation: Long,
+        preserveScroll: Boolean,
+        scrollY: Int
+    ) {
+
+        if (
+            generation !=
+                diagnosticsGeneration ||
+            currentPage !=
+                Page.DIAGNOSTICS ||
+            isFinishing ||
+            isDestroyed
+        ) {
+            return
+        }
+
+        if (isContentViewportInMotion()) {
+            contentContainer.postDelayed(
+                {
+                    renderDiagnosticsReportWhenIdle(
+                        report = report,
+                        generation = generation,
+                        preserveScroll = preserveScroll,
+                        scrollY = scrollY
+                    )
+                },
+                UI_SCROLL_IDLE_RECHECK_MS
+            )
+            return
+        }
+
+        renderDiagnosticsReport(
+            report = report,
+            refreshing = false
+        )
+
+        restoreContentScrollIfNeeded(
+            preserveScroll,
+            scrollY
+        )
+    }
+
+    private fun isContentViewportInMotion(): Boolean {
+        return if (
+            ::contentScroll.isInitialized
+        ) {
+            (contentScroll as? AyanaContentScrollView)
+                ?.isViewportInMotion() ==
+                true
+        } else {
+            false
+        }
+    }
+
+    private fun diagnosticsFailureReport(
+        error: Exception
+    ): org.json.JSONObject {
+
+        return org.json.JSONObject()
+            .put(
+                "overall_status",
+                AyanaSelfDiagnostics.STATUS_FAIL
+            )
+            .put(
+                "passed",
+                0
+            )
+            .put(
+                "warnings",
+                0
+            )
+            .put(
+                "unknown",
+                0
+            )
+            .put(
+                "failed",
+                1
+            )
+            .put(
+                "checks",
+                org.json.JSONArray()
+                    .put(
+                        org.json.JSONObject()
+                            .put(
+                                "name",
+                                "Self-Diagnostics"
+                            )
+                            .put(
+                                "status",
+                                AyanaSelfDiagnostics.STATUS_FAIL
+                            )
+                            .put(
+                                "details",
+                                error.message
+                                    ?: "Неизвестная ошибка"
+                            )
+                    )
+            )
+    }
+
+    private fun renderDiagnosticsLoading(
+        cachedReport: org.json.JSONObject?
+    ) {
 
         contentContainer
             .removeAllViews()
@@ -4724,58 +5240,93 @@ class MainActivity : AppCompatActivity() {
             )
         )
 
-        val report =
-            try {
-                selfDiagnostics
-                    .run(
-                        focus = "all",
-                        appName = ""
-                    )
-            } catch (
-                error: Exception
-            ) {
-                org.json.JSONObject()
-                    .put(
-                        "overall_status",
-                        AyanaSelfDiagnostics.STATUS_FAIL
-                    )
-                    .put(
-                        "passed",
-                        0
-                    )
-                    .put(
-                        "warnings",
-                        0
-                    )
-                    .put(
-                        "unknown",
-                        0
-                    )
-                    .put(
-                        "failed",
-                        1
-                    )
-                    .put(
-                        "checks",
-                        org.json.JSONArray()
-                            .put(
-                                org.json.JSONObject()
-                                    .put(
-                                        "name",
-                                        "Self-Diagnostics"
-                                    )
-                                    .put(
-                                        "status",
-                                        AyanaSelfDiagnostics.STATUS_FAIL
-                                    )
-                                    .put(
-                                        "details",
-                                        error.message
-                                            ?: "Неизвестная ошибка"
-                                    )
-                            )
-                    )
+        if (cachedReport != null) {
+            renderDiagnosticsReportBody(
+                report = cachedReport,
+                refreshing = true,
+                includePageTitle = false
+            )
+            return
+        }
+
+        val loading =
+            panel(
+                20
+            )
+
+        loading.addView(
+            TextView(this).apply {
+                text =
+                    "Проверяю состояние AYANA…"
+                textSize =
+                    17f
+                setTypeface(
+                    Typeface.DEFAULT,
+                    Typeface.BOLD
+                )
+                setTextColor(
+                    Color.WHITE
+                )
             }
+        )
+
+        loading.addView(
+            TextView(this).apply {
+                text =
+                    "Диагностика выполняется в фоне — интерфейс остаётся доступным."
+                textSize =
+                    14.5f
+                setTextColor(
+                    Color.parseColor(
+                        "#8FA0B7"
+                    )
+                )
+                setPadding(
+                    0,
+                    dp(7),
+                    0,
+                    0
+                )
+            }
+        )
+
+        contentContainer.addView(
+            loading,
+            sectionParams(
+                top = 8
+            )
+        )
+    }
+
+    private fun renderDiagnosticsReport(
+        report: org.json.JSONObject,
+        refreshing: Boolean
+    ) {
+
+        contentContainer
+            .removeAllViews()
+
+        renderDiagnosticsReportBody(
+            report = report,
+            refreshing = refreshing,
+            includePageTitle = true
+        )
+    }
+
+    private fun renderDiagnosticsReportBody(
+        report: org.json.JSONObject,
+        refreshing: Boolean,
+        includePageTitle: Boolean
+    ) {
+
+        if (includePageTitle) {
+            contentContainer.addView(
+                pageTitle(
+                    "Диагностика",
+                    "Честное состояние основных модулей"
+                )
+            )
+        }
 
         val summary =
             panel(
@@ -4812,7 +5363,12 @@ class MainActivity : AppCompatActivity() {
                     "Исправно ${report.optInt("passed")}  •  " +
                         "Внимание ${report.optInt("warnings")}  •  " +
                         "Нет данных ${report.optInt("unknown")}  •  " +
-                        "Ошибки ${report.optInt("failed")}"
+                        "Ошибки ${report.optInt("failed")}" +
+                        if (refreshing) {
+                            "  •  обновляю…"
+                        } else {
+                            ""
+                        }
                 textSize =
                     14.5f
                 setTextColor(
@@ -4832,8 +5388,7 @@ class MainActivity : AppCompatActivity() {
         contentContainer.addView(
             summary,
             sectionParams(
-                top =
-                    8
+                top = 8
             )
         )
 
@@ -4870,8 +5425,7 @@ class MainActivity : AppCompatActivity() {
                         )
                 ),
                 sectionParams(
-                    top =
-                        7
+                    top = 7
                 )
             )
         }
@@ -4938,12 +5492,39 @@ class MainActivity : AppCompatActivity() {
             contentContainer.addView(
                 card,
                 sectionParams(
-                    top =
-                        12
+                    top = 12
                 )
             )
         }
     }
+
+    private fun restoreContentScrollIfNeeded(
+        preserveScroll: Boolean,
+        scrollY: Int
+    ) {
+
+        if (
+            !preserveScroll ||
+            !::contentScroll.isInitialized
+        ) {
+            return
+        }
+
+        contentScroll.post {
+            if (
+                currentPage ==
+                Page.DIAGNOSTICS ||
+                currentPage ==
+                Page.HISTORY
+            ) {
+                contentScroll.scrollTo(
+                    0,
+                    scrollY
+                )
+            }
+        }
+    }
+
 
     private fun diagnosticStatusLabel(
         status: String
@@ -8413,6 +8994,39 @@ class MainActivity : AppCompatActivity() {
         private const val OWN_APP_SEMANTIC_MIN_MARGIN =
             18
 
+        private const val HISTORY_PAGE_SIZE =
+            10
+
+        private const val HISTORY_MAX_RECORDS =
+            40
+
+        private const val HISTORY_REFRESH_DEBOUNCE_MS =
+            280L
+
+        private const val HISTORY_COMMAND_PREVIEW_CHARS =
+            360
+
+        private const val HISTORY_RESULT_PREVIEW_CHARS =
+            700
+
+        private const val HISTORY_TRACE_EVENT_LIMIT =
+            8
+
+        private const val HISTORY_TRACE_EVENT_PREVIEW_CHARS =
+            180
+
+        private const val DIAGNOSTICS_CACHE_TTL_MS =
+            15000L
+
+        private const val UI_SCROLL_ACCESSIBILITY_DEBOUNCE_MS =
+            220L
+
+        private const val UI_SCROLL_MOTION_WINDOW_MS =
+            180L
+
+        private const val UI_SCROLL_IDLE_RECHECK_MS =
+            90L
+
         fun isOwnAppSemanticBridgeActive(): Boolean {
             val activity =
                 ownAppBridgeInstance
@@ -8505,6 +9119,155 @@ class MainActivity : AppCompatActivity() {
                     text = text
                 )
             }
+        }
+    }
+
+    /**
+     * Heavy AYANA pages (History/System) previously emitted a stream of
+     * TYPE_VIEW_SCROLLED events while the finger/fling was still moving. The
+     * app's own AccessibilityService legitimately treats structural self-events
+     * as perception evidence, so that stream could trigger repeated bounded tree
+     * recovery on the process main thread. Coalesce only this Activity's scroll
+     * accessibility notifications and emit one factual final event after the
+     * viewport settles. External-app accessibility and Settings recovery are
+     * untouched, and assistive services still receive the final scroll state.
+     */
+    private class AyanaContentScrollView(
+        context: Context
+    ) : ScrollView(context) {
+
+        private var coalesceScrollAccessibilityEvents =
+            false
+
+        private var dispatchingCoalescedScrollEvent =
+            false
+
+        private var hasPendingScrollAccessibilityEvent =
+            false
+
+        @Volatile
+        private var lastViewportMotionAt =
+            0L
+
+        private val coalescedScrollEventRunnable =
+            Runnable {
+                flushCoalescedScrollAccessibilityEvent()
+            }
+
+        fun isViewportInMotion(): Boolean {
+            val at =
+                lastViewportMotionAt
+
+            return at > 0L &&
+                SystemClock.elapsedRealtime() -
+                    at <=
+                UI_SCROLL_MOTION_WINDOW_MS
+        }
+
+        override fun onScrollChanged(
+            l: Int,
+            t: Int,
+            oldl: Int,
+            oldt: Int
+        ) {
+            if (
+                t != oldt ||
+                l != oldl
+            ) {
+                lastViewportMotionAt =
+                    SystemClock.elapsedRealtime()
+            }
+
+            super.onScrollChanged(
+                l,
+                t,
+                oldl,
+                oldt
+            )
+        }
+
+        fun setScrollAccessibilityCoalescing(
+            enabled: Boolean
+        ) {
+            if (
+                coalesceScrollAccessibilityEvents ==
+                enabled
+            ) {
+                return
+            }
+
+            coalesceScrollAccessibilityEvents =
+                enabled
+
+            if (!enabled) {
+                removeCallbacks(
+                    coalescedScrollEventRunnable
+                )
+                hasPendingScrollAccessibilityEvent =
+                    false
+            }
+        }
+
+        override fun sendAccessibilityEvent(
+            eventType: Int
+        ) {
+            if (
+                eventType ==
+                    android.view.accessibility.AccessibilityEvent.TYPE_VIEW_SCROLLED &&
+                coalesceScrollAccessibilityEvents &&
+                !dispatchingCoalescedScrollEvent
+            ) {
+                hasPendingScrollAccessibilityEvent =
+                    true
+
+                removeCallbacks(
+                    coalescedScrollEventRunnable
+                )
+
+                postDelayed(
+                    coalescedScrollEventRunnable,
+                    UI_SCROLL_ACCESSIBILITY_DEBOUNCE_MS
+                )
+
+                return
+            }
+
+            super.sendAccessibilityEvent(
+                eventType
+            )
+        }
+
+        private fun flushCoalescedScrollAccessibilityEvent() {
+            if (
+                !hasPendingScrollAccessibilityEvent ||
+                !coalesceScrollAccessibilityEvents
+            ) {
+                return
+            }
+
+            hasPendingScrollAccessibilityEvent =
+                false
+
+            dispatchingCoalescedScrollEvent =
+                true
+
+            try {
+                super.sendAccessibilityEvent(
+                    android.view.accessibility.AccessibilityEvent.TYPE_VIEW_SCROLLED
+                )
+            } finally {
+                dispatchingCoalescedScrollEvent =
+                    false
+            }
+        }
+
+        override fun onDetachedFromWindow() {
+            removeCallbacks(
+                coalescedScrollEventRunnable
+            )
+            hasPendingScrollAccessibilityEvent =
+                false
+            super.onDetachedFromWindow()
         }
     }
 
