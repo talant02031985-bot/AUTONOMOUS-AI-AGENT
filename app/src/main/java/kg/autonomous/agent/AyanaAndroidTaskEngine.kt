@@ -5,27 +5,19 @@ import org.json.JSONObject
 import java.util.Locale
 
 /**
- * AYANA Android Task Engine v5.2 — BIDIRECTIONAL SEMANTIC SCROLL SEARCH.
+ * AYANA Android Task Engine v5.3 — FOREGROUND PACKAGE TRUTH.
  *
- * Compatibility contract:
- * - keeps the v4.x public constructor, ActionGateway and execute(...) signature;
- * - keeps durable checkpoint fields used by AyanaVoiceService/AyanaDurableGoalStore;
- * - keeps one explicit terminal step at the end of every plan;
- * - remains a deterministic local executor. It does not parse user commands.
+ * v5.3 preserves the v5.2 deterministic plan/execution contract and adds one
+ * generic foreground-verification rule for direct app launches:
+ * - AYANA overlay / sibling windows are never sufficient proof of the launched app;
+ * - the exact resolved package must be proven by the primary/interaction context,
+ *   an active/focused application window, or a fresh target-specific Accessibility
+ *   foreground-owner transition;
+ * - a broad packages[] membership alone is not accepted for open_app;
+ * - fresh target ownership evidence counts as observable transition evidence
+ *   even when AYANA's floating overlay masks the primary snapshot fingerprint.
  *
- * Truth changes in v5.0/v5.1/v5.2:
- * - screen change is PROGRESS EVIDENCE only; it can never upgrade a failed action
- *   into SUCCESS;
- * - click_any delegates target selection to AyanaSemanticTargetResolver rather
- *   than maintaining a second fuzzy resolver;
- * - input_text trusts only AyanaScreenIntelligence exact-value verification;
- * - target ambiguity/content inaccessibility fail closed before dispatch;
- * - bounded scroll/retry + transition fingerprints prevent dead-route loops;
- * - every failure carries a concise failure_layer/reason for diagnostics;
- * - v5.2 adds bounded bidirectional semantic scroll-search: when a target is not
- *   visible, AUTO search scans toward one boundary, reverses once on no-progress,
- *   reacquires the screen after every verified scroll, and never upgrades a
- *   scroll/screen change into target SUCCESS.
+ * No application name is hard-coded; every app uses the same rule.
  */
 class AyanaAndroidTaskEngine(
     private val screenIntelligence: AyanaScreenIntelligence,
@@ -41,6 +33,18 @@ class AyanaAndroidTaskEngine(
         fun changeVolume(action: String): JSONObject
     }
 
+    private data class PackageProof(
+        val verified: Boolean,
+        val source: String = "",
+        val expectedPackage: String = "",
+        val observedPackage: String = "",
+        val eventPackage: String = "",
+        val eventAgeMs: Long = -1L,
+        val ownerPackage: String = "",
+        val ownerAgeMs: Long = -1L,
+        val transitionObserved: Boolean = false
+    )
+
     private val targetResolver = AyanaSemanticTargetResolver()
 
     fun execute(
@@ -50,7 +54,6 @@ class AyanaAndroidTaskEngine(
         initialActionsUsed: Int = 0,
         onCheckpoint: ((JSONObject) -> Boolean)? = null
     ): JSONObject {
-
         val goal = plan.optString("goal").trim()
 
         if (isCancelled()) {
@@ -84,7 +87,6 @@ class AyanaAndroidTaskEngine(
 
         val maxActions = plan.optInt("max_actions", DEFAULT_MAX_ACTIONS)
             .coerceIn(1, HARD_MAX_ACTIONS)
-
         val resumeIndex = startIndex.coerceIn(0, steps.length())
         var currentScreen = safeScreenState()
         var actionsUsed = initialActionsUsed.coerceIn(0, maxActions)
@@ -166,7 +168,6 @@ class AyanaAndroidTaskEngine(
             }
 
             if (stepConfirmed) {
-                // One explicit confirmation authorizes at most one sensitive step.
                 confirmationAvailable = false
             }
 
@@ -288,7 +289,6 @@ class AyanaAndroidTaskEngine(
                 if (step.optBoolean("optional", false)) {
                     continue
                 }
-
                 return engineStepFailure(
                     goal = goal,
                     result = result,
@@ -419,9 +419,7 @@ class AyanaAndroidTaskEngine(
             )
 
             "click_any" -> executeClickAny(step, screenBefore, confirmed, remainingBudget)
-
             "input_text" -> executeInputText(step, screenBefore, confirmed)
-
             "scroll" -> executeScroll(step, screenBefore)
 
             "back" -> wrapSemanticAction(
@@ -461,7 +459,6 @@ class AyanaAndroidTaskEngine(
         call: () -> JSONObject,
         screenChangeRequired: Boolean = true
     ): JSONObject {
-
         if (isCancelled()) return cancelledStep(screenBefore)
 
         val raw = try {
@@ -498,18 +495,29 @@ class AyanaAndroidTaskEngine(
 
         if (isCancelled()) return cancelledStep(screenAfter)
 
-        val changed = !sameScreen(screenBefore, screenAfter)
+        val semanticChanged = !sameScreen(screenBefore, screenAfter)
         val accepted = raw.optBoolean("success", false)
         val expected = verifyExpectedScreen(step, screenAfter)
+        val packageProof = verifyDirectPackage(
+            step = step,
+            raw = raw,
+            screenBefore = screenBefore,
+            screenAfter = screenAfter,
+            actionName = actionName
+        )
 
-        val targetSpecificPackageOk = verifyDirectPackage(step, raw, screenAfter, actionName)
+        // A fresh, exact target-package ownership/window event is factual Android
+        // transition evidence. This matters when AYANA's overlay remains visible
+        // and masks the primary snapshot fingerprint after a successful app launch.
+        val observedTransition = semanticChanged || packageProof.transitionObserved
+
         val verified =
             accepted &&
-                targetSpecificPackageOk &&
+                packageProof.verified &&
                 when {
-                    expected != null && screenChangeRequired -> expected && changed
+                    expected != null && screenChangeRequired -> expected && observedTransition
                     expected != null -> expected
-                    screenChangeRequired -> changed
+                    screenChangeRequired -> observedTransition
                     else -> true
                 }
 
@@ -517,8 +525,17 @@ class AyanaAndroidTaskEngine(
             .put("success", verified)
             .put("verified", verified)
             .put("action_accepted", accepted)
-            .put("progress", changed || (verified && !screenChangeRequired))
-            .put("screen_changed", changed)
+            .put("progress", observedTransition || (verified && !screenChangeRequired))
+            .put("screen_changed", semanticChanged)
+            .put("foreground_transition_observed", packageProof.transitionObserved)
+            .put("package_verified", packageProof.verified)
+            .put("package_verification_source", packageProof.source)
+            .put("expected_package", packageProof.expectedPackage)
+            .put("observed_package", packageProof.observedPackage)
+            .put("event_package", packageProof.eventPackage)
+            .put("event_age_ms", packageProof.eventAgeMs)
+            .put("foreground_owner_package", packageProof.ownerPackage)
+            .put("foreground_owner_age_ms", packageProof.ownerAgeMs)
             .put("actions_used", 1)
             .put("action", actionName)
             .put("status", if (verified) "direct_action_verified" else "direct_action_not_verified")
@@ -534,7 +551,6 @@ class AyanaAndroidTaskEngine(
         confirmed: Boolean,
         remainingBudget: Int
     ): JSONObject {
-
         val targets = jsonStringList(step.optJSONArray("targets"))
         if (targets.isEmpty()) {
             return JSONObject()
@@ -557,14 +573,11 @@ class AyanaAndroidTaskEngine(
             0
         }
 
-        val requestedScrollDirection =
-            step.optString("scroll_direction", "auto")
-                .trim()
-                .lowercase(Locale.ROOT)
-
+        val requestedScrollDirection = step.optString("scroll_direction", "auto")
+            .trim()
+            .lowercase(Locale.ROOT)
         val autoScrollSearch = requestedScrollDirection !in setOf("up", "down")
-        var activeScrollDirection =
-            if (requestedScrollDirection == "up") "up" else "down"
+        var activeScrollDirection = if (requestedScrollDirection == "up") "up" else "down"
         var directionReversed = false
 
         var currentScreen = initialScreen
@@ -576,7 +589,9 @@ class AyanaAndroidTaskEngine(
         )
 
         for (pass in 0..maxScrolls) {
-            if (isCancelled()) return cancelledStep(currentScreen).put("actions_used", actionsUsed)
+            if (isCancelled()) {
+                return cancelledStep(currentScreen).put("actions_used", actionsUsed)
+            }
 
             val resolution = targetResolver.resolveAny(
                 screen = currentScreen,
@@ -613,14 +628,10 @@ class AyanaAndroidTaskEngine(
                 val screenAfter = clickResult.optJSONObject("screen") ?: safeScreenState()
                 val changed = clickResult.optBoolean("screen_changed", false) ||
                     !sameScreen(currentScreen, screenAfter)
-
                 val accepted = clickResult.optBoolean("success", false)
                 val expected = verifyExpectedScreen(step, screenAfter)
                 val requireScreenChange = step.optBoolean("require_screen_change", true)
 
-                // Core v5.0 invariant: a changed screen NEVER upgrades a failed
-                // ScreenIntelligence result. The semantic action must itself be
-                // verified first.
                 val verified =
                     accepted &&
                         when {
@@ -634,15 +645,33 @@ class AyanaAndroidTaskEngine(
                     .put("success", verified)
                     .put("verified", verified)
                     .put("progress", changed)
-                    .put("clicked_target", resolution.optJSONObject("candidate")?.optString("text").orEmpty().ifBlank { concrete })
+                    .put(
+                        "clicked_target",
+                        resolution.optJSONObject("candidate")
+                            ?.optString("text")
+                            .orEmpty()
+                            .ifBlank { concrete }
+                    )
                     .put("requested_target", requested)
                     .put("resolved_click_target", concrete)
                     .put("resolver_score", resolution.optInt("score", 0))
                     .put("target_resolution", resolution)
                     .put("actions_used", actionsUsed)
-                    .put("status", if (verified) "click_target_verified" else clickResult.optString("status", "click_target_not_verified"))
-                    .put("reason", if (verified) "click_target_verified" else clickResult.optString("reason", "click_target_not_verified"))
-                    .put("failure_layer", if (verified) "" else clickResult.optString("failure_layer", "verification"))
+                    .put(
+                        "status",
+                        if (verified) "click_target_verified"
+                        else clickResult.optString("status", "click_target_not_verified")
+                    )
+                    .put(
+                        "reason",
+                        if (verified) "click_target_verified"
+                        else clickResult.optString("reason", "click_target_not_verified")
+                    )
+                    .put(
+                        "failure_layer",
+                        if (verified) ""
+                        else clickResult.optString("failure_layer", "verification")
+                    )
                     .put("screen", screenAfter)
             }
 
@@ -655,7 +684,10 @@ class AyanaAndroidTaskEngine(
                     .put("actions_used", actionsUsed)
                     .put("status", resolutionStatus)
                     .put("reason", resolution.optString("reason", resolutionStatus))
-                    .put("terminal_status", if (resolutionStatus == "snapshot_unavailable") "UNSUPPORTED" else "BLOCKED")
+                    .put(
+                        "terminal_status",
+                        if (resolutionStatus == "snapshot_unavailable") "UNSUPPORTED" else "BLOCKED"
+                    )
                     .put("failure_layer", "target_resolver")
                     .put("target_resolution", resolution)
                     .put("screen", currentScreen)
@@ -684,11 +716,6 @@ class AyanaAndroidTaskEngine(
                     scrollResult.optBoolean("viewport_changed", false) ||
                         scrollResult.optBoolean("scroll_event_observed", false)
 
-                // A repeated semantic fingerprint is NOT a cycle when the low-level
-                // accessibility layer has already proved physical viewport motion.
-                // Samsung/AYANA sparse trees can legitimately keep identical text
-                // while the viewport moves. Cycle detection is therefore only a
-                // compatibility guard for legacy/signature-only scroll results.
                 val cycled =
                     scrollVerified &&
                         changed &&
@@ -702,9 +729,6 @@ class AyanaAndroidTaskEngine(
                         seenInDirection.add(afterFingerprint)
                     }
                 } else if (autoScrollSearch && !directionReversed) {
-                    // Reaching a boundary/no-progress in AUTO mode is not a terminal
-                    // executor failure. Reverse exactly once and search the opposite
-                    // direction from the factual current viewport.
                     activeScrollDirection = oppositeScrollDirection(activeScrollDirection)
                     directionReversed = true
                 } else {
@@ -713,8 +737,14 @@ class AyanaAndroidTaskEngine(
                         .put("verified", false)
                         .put("progress", anyProgress)
                         .put("actions_used", actionsUsed)
-                        .put("status", if (cycled) "scroll_cycle_detected" else "scroll_search_boundary_reached")
-                        .put("reason", if (cycled) "scroll_cycle_detected" else "scroll_search_boundary_reached")
+                        .put(
+                            "status",
+                            if (cycled) "scroll_cycle_detected" else "scroll_search_boundary_reached"
+                        )
+                        .put(
+                            "reason",
+                            if (cycled) "scroll_cycle_detected" else "scroll_search_boundary_reached"
+                        )
                         .put("terminal_status", "BLOCKED")
                         .put("failure_layer", "recovery")
                         .put("scroll_direction", activeScrollDirection)
@@ -784,11 +814,11 @@ class AyanaAndroidTaskEngine(
             .put("terminal_status", if (verified) "SUCCESS" else "BLOCKED")
             .put("failure_layer", if (verified) "" else "verification")
             .put("screen", screen)
-            .put("message", if (verified) {
-                "Конечное состояние подтверждено"
-            } else {
-                "Ожидаемые признаки экрана не подтверждены доступным содержимым"
-            })
+            .put(
+                "message",
+                if (verified) "Конечное состояние подтверждено"
+                else "Ожидаемые признаки экрана не подтверждены доступным содержимым"
+            )
     }
 
     private fun wrapSemanticAction(
@@ -810,9 +840,6 @@ class AyanaAndroidTaskEngine(
         val after = result.optJSONObject("screen") ?: safeScreenState()
         val changed = result.optBoolean("screen_changed", false) || !sameScreen(before, after)
         val acceptedAndVerified = result.optBoolean("success", false)
-
-        // v5.0: never use "accepted || changed". A failed semantic action stays
-        // failed even when unrelated UI content changed concurrently.
         val success = acceptedAndVerified && (!progressRequired || changed)
 
         return result
@@ -822,7 +849,10 @@ class AyanaAndroidTaskEngine(
             .put("screen_changed", changed)
             .put("actions_used", 1)
             .put("action", actionName)
-            .put("failure_layer", if (success) "" else result.optString("failure_layer", "verification"))
+            .put(
+                "failure_layer",
+                if (success) "" else result.optString("failure_layer", "verification")
+            )
             .put("screen", after)
     }
 
@@ -838,23 +868,16 @@ class AyanaAndroidTaskEngine(
             "require_screen_change",
             normalizedAction(step) == "click_any"
         )
+        val progress = stepResult.optBoolean("progress", false)
 
         return when {
-            expected != null && requireScreenChange ->
-                expected && stepResult.optBoolean("progress", false)
-
+            expected != null && requireScreenChange -> expected && progress
             expected != null -> expected
-
-            requireScreenChange -> stepResult.optBoolean("progress", false)
-
+            requireScreenChange -> progress
             else -> stepResult.optBoolean("verified", stepResult.optBoolean("success", false))
         }
     }
 
-    /**
-     * Returns true/false when the step declares explicit semantic expectations,
-     * null when the step has no explicit expectation contract.
-     */
     private fun verifyExpectedScreen(
         step: JSONObject,
         screen: JSONObject
@@ -864,7 +887,12 @@ class AyanaAndroidTaskEngine(
         val expectNone = jsonStringList(step.optJSONArray("expect_none"))
         val expectPackage = step.optString("expect_package").trim()
 
-        if (expectAny.isEmpty() && expectAll.isEmpty() && expectNone.isEmpty() && expectPackage.isBlank()) {
+        if (
+            expectAny.isEmpty() &&
+            expectAll.isEmpty() &&
+            expectNone.isEmpty() &&
+            expectPackage.isBlank()
+        ) {
             return null
         }
 
@@ -909,9 +937,10 @@ class AyanaAndroidTaskEngine(
         if (verification.isNotBlank()) result += verification
         appendStrings(screen.optJSONArray("visible_text"), result)
 
-        // With a v5 window contract, never broaden verification into unrelated
-        // sibling windows if the interaction context itself exposed no text.
-        if (result.isNotEmpty() || (windows != null && screen.optString("window_context_mode").isNotBlank())) {
+        if (
+            result.isNotEmpty() ||
+            (windows != null && screen.optString("window_context_mode").isNotBlank())
+        ) {
             return result.distinct()
         }
 
@@ -928,7 +957,10 @@ class AyanaAndroidTaskEngine(
         var latest = safeScreenState()
 
         while (System.currentTimeMillis() < deadline && !isCancelled()) {
-            val ready = latest.optBoolean("snapshot_success", latest.optBoolean("success", false)) &&
+            val ready = latest.optBoolean(
+                "snapshot_success",
+                latest.optBoolean("success", false)
+            ) &&
                 (latest.optInt("node_count", 0) > 0 || latest.optJSONArray("visible_text") != null)
             val changed = !sameScreen(screenBefore, latest)
             val expected = expectedStep?.let { verifyExpectedScreen(it, latest) }
@@ -950,33 +982,214 @@ class AyanaAndroidTaskEngine(
         return latest
     }
 
+    /**
+     * Package verification for direct actions.
+     *
+     * For explicit expect_package outside open_app, preserve v5.2 compatibility.
+     * For open_app, broad packages[] membership is deliberately insufficient: a
+     * sibling/background/overlay window can expose a package without owning the
+     * foreground. Exact launch verification therefore uses foreground-grade proof.
+     */
     private fun verifyDirectPackage(
         step: JSONObject,
         raw: JSONObject,
-        screen: JSONObject,
+        screenBefore: JSONObject,
+        screenAfter: JSONObject,
         actionName: String
-    ): Boolean {
+    ): PackageProof {
         val explicitExpected = step.optString("expect_package").trim()
-        if (explicitExpected.isNotBlank()) {
-            return normalize(screen.optString("package")) == normalize(explicitExpected) ||
-                jsonStringList(screen.optJSONArray("packages")).any {
-                    normalize(it) == normalize(explicitExpected)
-                }
+
+        if (actionName != "open_app" && explicitExpected.isNotBlank()) {
+            val direct = normalize(screenAfter.optString("package")) == normalize(explicitExpected)
+            val listed = jsonStringList(screenAfter.optJSONArray("packages")).any {
+                normalize(it) == normalize(explicitExpected)
+            }
+            return PackageProof(
+                verified = direct || listed,
+                source = when {
+                    direct -> "explicit_primary_package"
+                    listed -> "explicit_package_set"
+                    else -> "explicit_package_not_proven"
+                },
+                expectedPackage = explicitExpected,
+                observedPackage = screenAfter.optString("package"),
+                eventPackage = screenAfter.optString("event_package"),
+                eventAgeMs = screenAfter.optLong("event_age_ms", -1L),
+                ownerPackage = screenAfter.optString("foreground_owner_package"),
+                ownerAgeMs = screenAfter.optLong("foreground_owner_age_ms", -1L),
+                transitionObserved = false
+            )
         }
 
-        // open_app often returns the exact resolved launch package. When that
-        // evidence is available, verify it rather than accepting "some app opened".
         if (actionName == "open_app") {
             val resolvedPackage = raw.optString("package").trim()
-            if (resolvedPackage.isNotBlank()) {
-                return normalize(screen.optString("package")) == normalize(resolvedPackage) ||
-                    jsonStringList(screen.optJSONArray("packages")).any {
-                        normalize(it) == normalize(resolvedPackage)
-                    }
+            val expectedPackage = explicitExpected.ifBlank { resolvedPackage }
+            if (expectedPackage.isNotBlank()) {
+                return foregroundPackageProof(
+                    expectedPackage = expectedPackage,
+                    screenBefore = screenBefore,
+                    screenAfter = screenAfter
+                )
             }
         }
 
-        return true
+        return PackageProof(
+            verified = true,
+            source = "package_not_required",
+            expectedPackage = explicitExpected,
+            observedPackage = screenAfter.optString("package"),
+            eventPackage = screenAfter.optString("event_package"),
+            eventAgeMs = screenAfter.optLong("event_age_ms", -1L),
+            ownerPackage = screenAfter.optString("foreground_owner_package"),
+            ownerAgeMs = screenAfter.optLong("foreground_owner_age_ms", -1L)
+        )
+    }
+
+    private fun foregroundPackageProof(
+        expectedPackage: String,
+        screenBefore: JSONObject,
+        screenAfter: JSONObject
+    ): PackageProof {
+        val expected = normalize(expectedPackage)
+        val primary = screenAfter.optString("package").trim()
+        val interaction = screenAfter.optString("interaction_package").trim()
+        val eventPackage = screenAfter.optString("event_package").trim()
+        val eventAge = screenAfter.optLong("event_age_ms", -1L)
+        val ownerPackage = screenAfter.optString("foreground_owner_package").trim()
+        val ownerAge = screenAfter.optLong("foreground_owner_age_ms", -1L)
+
+        if (normalize(primary) == expected) {
+            return PackageProof(
+                verified = true,
+                source = "primary_package",
+                expectedPackage = expectedPackage,
+                observedPackage = primary,
+                eventPackage = eventPackage,
+                eventAgeMs = eventAge,
+                ownerPackage = ownerPackage,
+                ownerAgeMs = ownerAge,
+                transitionObserved = true
+            )
+        }
+
+        if (normalize(interaction) == expected) {
+            return PackageProof(
+                verified = true,
+                source = "interaction_package",
+                expectedPackage = expectedPackage,
+                observedPackage = interaction,
+                eventPackage = eventPackage,
+                eventAgeMs = eventAge,
+                ownerPackage = ownerPackage,
+                ownerAgeMs = ownerAge,
+                transitionObserved = true
+            )
+        }
+
+        val activeWindowProof = findForegroundWindowProof(screenAfter, expectedPackage)
+        if (activeWindowProof != null) {
+            return PackageProof(
+                verified = true,
+                source = activeWindowProof,
+                expectedPackage = expectedPackage,
+                observedPackage = primary,
+                eventPackage = eventPackage,
+                eventAgeMs = eventAge,
+                ownerPackage = ownerPackage,
+                ownerAgeMs = ownerAge,
+                transitionObserved = true
+            )
+        }
+
+        val beforeOwner = screenBefore.optString("foreground_owner_package").trim()
+        val beforeOwnerAge = screenBefore.optLong("foreground_owner_age_ms", -1L)
+        val ownerNewOrRefreshed = signalIsNewOrRefreshed(
+            expectedPackage = expectedPackage,
+            beforePackage = beforeOwner,
+            beforeAgeMs = beforeOwnerAge,
+            afterPackage = ownerPackage,
+            afterAgeMs = ownerAge,
+            maxFreshAgeMs = FOREGROUND_OWNER_PROOF_MAX_AGE_MS
+        )
+
+        if (ownerNewOrRefreshed) {
+            return PackageProof(
+                verified = true,
+                source = "fresh_foreground_owner",
+                expectedPackage = expectedPackage,
+                observedPackage = primary,
+                eventPackage = eventPackage,
+                eventAgeMs = eventAge,
+                ownerPackage = ownerPackage,
+                ownerAgeMs = ownerAge,
+                transitionObserved = true
+            )
+        }
+
+        return PackageProof(
+            verified = false,
+            source = "foreground_package_not_proven",
+            expectedPackage = expectedPackage,
+            observedPackage = primary,
+            eventPackage = eventPackage,
+            eventAgeMs = eventAge,
+            ownerPackage = ownerPackage,
+            ownerAgeMs = ownerAge,
+            transitionObserved = false
+        )
+    }
+
+    private fun findForegroundWindowProof(
+        screen: JSONObject,
+        expectedPackage: String
+    ): String? {
+        val expected = normalize(expectedPackage)
+        val windows = screen.optJSONArray("windows") ?: return null
+
+        for (index in 0 until windows.length()) {
+            val window = windows.optJSONObject(index) ?: continue
+            if (normalize(window.optString("package")) != expected) continue
+
+            val typeName = normalize(window.optString("type_name"))
+            val applicationLike =
+                typeName.isBlank() ||
+                    typeName.contains("application") ||
+                    window.optInt("type", -1) == 1
+
+            if (!applicationLike) continue
+
+            if (window.optBoolean("focused", false)) {
+                return "focused_application_window"
+            }
+            if (window.optBoolean("active", false)) {
+                return "active_application_window"
+            }
+            if (window.optBoolean("interaction_context", false)) {
+                return "interaction_application_window"
+            }
+        }
+
+        return null
+    }
+
+    private fun signalIsNewOrRefreshed(
+        expectedPackage: String,
+        beforePackage: String,
+        beforeAgeMs: Long,
+        afterPackage: String,
+        afterAgeMs: Long,
+        maxFreshAgeMs: Long
+    ): Boolean {
+        if (normalize(afterPackage) != normalize(expectedPackage)) return false
+        if (afterAgeMs !in 0L..maxFreshAgeMs) return false
+
+        // Different package before => the target signal necessarily belongs to
+        // the post-dispatch transition. If the same package existed before, only
+        // accept a clear age reset; otherwise a stale signal could fake SUCCESS.
+        if (normalize(beforePackage) != normalize(expectedPackage)) return true
+        if (beforeAgeMs < 0L) return true
+
+        return afterAgeMs + SIGNAL_REFRESH_MIN_DELTA_MS < beforeAgeMs
     }
 
     private fun confirmationRequired(
@@ -1021,7 +1234,9 @@ class AyanaAndroidTaskEngine(
         val status = result.optString("status")
         val terminal = result.optString("terminal_status").uppercase(Locale.ROOT)
         if (terminal == "UNSUPPORTED") return false
-        if (status in setOf("ambiguous_target", "ambiguous_editable_target", "secret_input_blocked")) return false
+        if (status in setOf("ambiguous_target", "ambiguous_editable_target", "secret_input_blocked")) {
+            return false
+        }
         return true
     }
 
@@ -1107,11 +1322,6 @@ class AyanaAndroidTaskEngine(
         .put("trace", trace)
         .put("screen", screen)
 
-    /**
-     * Preserve the factual terminal class returned by the concrete executor.
-     * v5.0 exposed ERROR/UNSUPPORTED at step level but the engine-level wrapper
-     * collapsed every non-success into BLOCKED. v5.1 keeps these states distinct.
-     */
     private fun engineStepFailure(
         goal: String,
         result: JSONObject,
@@ -1232,7 +1442,10 @@ class AyanaAndroidTaskEngine(
                     .put("step_id", step?.optString("id").orEmpty())
                     .put("step_action", step?.optString("action").orEmpty())
                     .put("step_success", stepResult?.optBoolean("success", false) ?: false)
-                    .put("requires_confirmation", stepResult?.optBoolean("requires_confirmation", false) ?: false)
+                    .put(
+                        "requires_confirmation",
+                        stepResult?.optBoolean("requires_confirmation", false) ?: false
+                    )
                     .put("in_flight", inFlight)
                     .put("step_status", stepResult?.optString("status").orEmpty())
                     .put("failure_layer", stepResult?.optString("failure_layer").orEmpty())
@@ -1261,6 +1474,10 @@ class AyanaAndroidTaskEngine(
         .put("reason", result.optString("reason"))
         .put("failure_layer", result.optString("failure_layer"))
         .put("actions_used", result.optInt("actions_used", 0))
+        .put("package_verified", result.optBoolean("package_verified", true))
+        .put("package_verification_source", result.optString("package_verification_source"))
+        .put("expected_package", result.optString("expected_package"))
+        .put("observed_package", result.optString("observed_package"))
         .put("before_fingerprint", screenFingerprint(before))
         .put("after_fingerprint", screenFingerprint(after))
 
@@ -1274,7 +1491,15 @@ class AyanaAndroidTaskEngine(
         .put("action_verified", result.optBoolean("verified", result.optBoolean("success", false)))
         .put("screen_changed", result.optBoolean("progress", false))
         .put("explicit_expectation", verifyExpectedScreen(step, screen))
-        .put("proof_source", result.optString("proof_level", result.optString("status")))
+        .put("proof_source", result.optString("package_verification_source").ifBlank {
+            result.optString("proof_level", result.optString("status"))
+        })
+        .put("expected_package", result.optString("expected_package"))
+        .put("observed_package", result.optString("observed_package"))
+        .put("event_package", result.optString("event_package"))
+        .put("event_age_ms", result.optLong("event_age_ms", -1L))
+        .put("foreground_owner_package", result.optString("foreground_owner_package"))
+        .put("foreground_owner_age_ms", result.optLong("foreground_owner_age_ms", -1L))
         .put("screen_fingerprint", screenFingerprint(screen))
 
     private fun transitionFingerprint(
@@ -1335,11 +1560,10 @@ class AyanaAndroidTaskEngine(
 
     private fun viewportFingerprint(screen: JSONObject): String {
         val packageName = screen.optString("package").trim()
-        val contentState =
-            screen.optString(
-                "primary_content_state",
-                screen.optString("content_status")
-            ).trim()
+        val contentState = screen.optString(
+            "primary_content_state",
+            screen.optString("content_status")
+        ).trim()
         val nodes = screen.optJSONArray("nodes")
         val nodeText = StringBuilder()
 
@@ -1347,18 +1571,13 @@ class AyanaAndroidTaskEngine(
             for (index in 0 until nodes.length().coerceAtMost(80)) {
                 val node = nodes.optJSONObject(index) ?: continue
                 val text = node.optString("text").trim()
-                val description =
-                    node.optString(
-                        "content_description",
-                        node.optString("description")
-                    ).trim()
+                val description = node.optString(
+                    "content_description",
+                    node.optString("description")
+                ).trim()
                 val viewId = node.optString("view_id").trim()
 
-                if (
-                    text.isNotBlank() ||
-                    description.isNotBlank() ||
-                    viewId.isNotBlank()
-                ) {
+                if (text.isNotBlank() || description.isNotBlank() || viewId.isNotBlank()) {
                     nodeText
                         .append(text.lowercase(Locale.ROOT))
                         .append('|')
@@ -1382,6 +1601,13 @@ class AyanaAndroidTaskEngine(
         private const val MAX_IDENTICAL_TRANSITION_REPEATS = 2
         private const val DIRECT_ACTION_READY_TIMEOUT_MS = 1600L
         private const val DIRECT_ACTION_POLL_MS = 80L
+
+        // Tight enough to reject stale ownership state, wide enough to cover
+        // the current 1.6 s direct-action observation loop plus Samsung
+        // Accessibility delivery jitter. Generic last-event package data is
+        // diagnostic only and is never accepted as foreground proof.
+        private const val FOREGROUND_OWNER_PROOF_MAX_AGE_MS = 3200L
+        private const val SIGNAL_REFRESH_MIN_DELTA_MS = 120L
 
         private val STATE_CHANGING_MARKERS = setOf(
             "включить", "выключить", "разрешить", "запретить", "удалить",
