@@ -3,16 +3,16 @@ package kg.autonomous.agent
 import java.util.Locale
 
 /**
- * AYANA Structured Local Command Router v1.1 — EXECUTION GUARDS.
+ * AYANA Structured Local Command Router v1.2 — COMPOSITE GATE INTEGRATION.
  *
- * Preserves v1.0 local-first intents and adds fail-closed guards for explicit
- * user constraints that must be honored before any state-changing or generic
- * Agent Core fallback can run.
+ * Preserves the v1.1 fail-closed public parser and the exact same Intent surface.
+ * v1.2 adds parseAtomic(), used only after AyanaCompositeIntentGate has already
+ * preflighted the whole original goal. This lets the composite orchestrator parse
+ * one isolated clause without weakening the normal parse() safety guards.
  *
- * IMPORTANT: v1.1 deliberately reuses the existing Intent surface so it stays
- * binary/source compatible with the v12.11 VoiceService runStructuredLocalCommand
- * dispatcher. Guarded requests return UnknownCapability and therefore terminate
- * through the already-existing UNSUPPORTED path without performing a side effect.
+ * IMPORTANT: ordinary callers must keep using parse(). parseAtomic() is not a
+ * bypass for arbitrary user input; it only skips the whole-command execution-
+ * constraint guard after the caller has proven the clause is atomic.
  */
 object AyanaStructuredLocalCommandRouter {
 
@@ -67,14 +67,34 @@ object AyanaStructuredLocalCommandRouter {
         BLUETOOTH
     }
 
-    fun parse(raw: String): Intent? {
+    fun parse(raw: String): Intent? =
+        parseInternal(
+            raw = raw,
+            applyExecutionConstraintGuard = true
+        )
+
+    /**
+     * Parse one already-preflighted atomic clause. The universal notification,
+     * History and unsupported-state guards remain active. Only the whole-command
+     * composite/confirmation/conditional/environment guard is skipped because
+     * AyanaCompositeIntentGate has already consumed that responsibility.
+     */
+    fun parseAtomic(raw: String): Intent? =
+        parseInternal(
+            raw = raw,
+            applyExecutionConstraintGuard = false
+        )
+
+    private fun parseInternal(
+        raw: String,
+        applyExecutionConstraintGuard: Boolean
+    ): Intent? {
         val c = normalize(raw)
         if (c.isBlank()) return null
 
-        // v1.1 UNIVERSAL FAIL-CLOSED CONSTRAINT GUARDS.
-        // These run before argument extraction so numbers or action verbs inside
-        // a conditional/data block can never be rebound as an executable command.
-        parseExecutionConstraintGuard(c)?.let { return it }
+        if (applyExecutionConstraintGuard) {
+            parseExecutionConstraintGuard(c)?.let { return it }
+        }
         parseNotificationSafetyGuard(c)?.let { return it }
         parseHistoryUnsupportedGuard(c)?.let { return it }
         parseUnsupportedStateQueryGuard(c)?.let { return it }
