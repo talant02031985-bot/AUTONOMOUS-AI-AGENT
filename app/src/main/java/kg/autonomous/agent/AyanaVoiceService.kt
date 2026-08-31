@@ -60,6 +60,11 @@ import kotlin.math.abs
 
 class AyanaVoiceService : Service() {
 
+    // AYANA v12.11.2 PRE-EXECUTION GOAL INTEGRITY + COMPOSITE ORCHESTRATION.
+    // Whole-goal preflight now owns explicit confirmation, supported local
+    // conditions, environment constraints and bounded multi-step local goals
+    // before any first side effect can dispatch. Partial multi-step completion
+    // can never be upgraded to whole-command SUCCESS.
     // AYANA v12.10.2 DEVICE CONTROL TRUTH + NOTIFICATION READ + FOLLOW-UP BOUNDS.
     // v12.10.2 separates read-only notification intent from Settings navigation,
     // adds verified exact media-volume setting, and gives FOLLOW_UP an absolute
@@ -321,6 +326,29 @@ class AyanaVoiceService : Service() {
     @Volatile
     private var pendingLifecycleExpiresAtMs =
         0L
+
+    // v12.11.2 PRE-EXECUTION CONFIRMATION CONTINUATION.
+    // The first command terminates BLOCKED without a side effect and stores only
+    // a short-lived executable payload. A later explicit Да/Нет is resolved
+    // before ordinary routing; positive confirmation is preflighted again.
+    private data class PendingPreExecutionConfirmation(
+        val originalCommand: String,
+        val executableCommand: String,
+        val constraints: AyanaCompositeIntentGate.Constraints,
+        val expiresAtMs: Long
+    )
+
+    @Volatile
+    private var pendingPreExecutionConfirmation:
+        PendingPreExecutionConfirmation? = null
+
+    @Volatile
+    private var confirmedPreExecutionConstraints:
+        AyanaCompositeIntentGate.Constraints? = null
+
+    @Volatile
+    private var confirmedPreExecutionOriginal =
+        ""
 
     // AUTONOMOUS CORE v10: persistent state of the currently executing
     // multi-step device goal. v11 keeps multiple recoverable goals instead of
@@ -3026,6 +3054,15 @@ class AyanaVoiceService : Service() {
             )
 
         if (
+            handlePendingPreExecutionConfirmationInput(
+                originalCommand = originalCommand,
+                silent = silent
+            )
+        ) {
+            return
+        }
+
+        if (
             isShutdownAyanaPhrase(
                 normalized
             )
@@ -3250,6 +3287,72 @@ class AyanaVoiceService : Service() {
             return
         }
 
+        if (confirmedPreExecutionOriginal.isNotBlank()) {
+            commandHistoryStore.addEvent(
+                activeCommandHistoryId,
+                state = "confirmation_granted",
+                message = "Пользователь подтвердил ожидающее действие",
+                details = confirmedPreExecutionOriginal.take(500)
+            )
+            confirmedPreExecutionOriginal =
+                ""
+        }
+
+        // v12.11.2 UNIVERSAL PRE-EXECUTION GOAL GATE.
+        // This is evaluated before any local executor. Data-only/quoted commands
+        // terminate without dispatch; all other gated goals still pass Safety
+        // before their executable clauses are preflighted.
+        val rawPreExecutionDecision =
+            AyanaCompositeIntentGate
+                .analyze(
+                    originalCommand
+                )
+
+        val constraintOverride =
+            confirmedPreExecutionConstraints
+
+        confirmedPreExecutionConstraints =
+            null
+
+        val preExecutionDecision =
+            if (
+                constraintOverride != null &&
+                (
+                    constraintOverride.forbidSettings ||
+                    constraintOverride.forbidNetwork
+                ) &&
+                rawPreExecutionDecision.type ==
+                    AyanaCompositeIntentGate.DecisionType.PASS_THROUGH
+            ) {
+                AyanaCompositeIntentGate.Decision(
+                    type =
+                        AyanaCompositeIntentGate.DecisionType.ENVIRONMENT_CONSTRAINED,
+                    original = originalCommand,
+                    executableCommand = originalCommand,
+                    constraints = constraintOverride,
+                    reason = "confirmed_constraint_continuation"
+                )
+            } else {
+                rawPreExecutionDecision
+            }
+
+        if (
+            preExecutionDecision.type ==
+            AyanaCompositeIntentGate.DecisionType.DATA_ONLY
+        ) {
+            commandHistoryStore.addEvent(
+                activeCommandHistoryId,
+                state = "pre_execution_data_only",
+                message = "Исполняемая фраза распознана только как данные",
+                details = preExecutionDecision.reason.take(240)
+            )
+            finishLocalCommand(
+                "Фраза принята только как данные. Действия на устройстве не выполнялись.",
+                silent
+            )
+            return
+        }
+
         // AUTONOMOUS CORE v10.2 — command-level local Safety gate.
         // Explicit attempts to type credentials are rejected BEFORE Agent Core,
         // so the protection remains effective even if Worker/model routing changes.
@@ -3293,6 +3396,15 @@ class AyanaVoiceService : Service() {
                     "local_command_safety_blocked:" +
                         commandSafetyDecision.riskName
             )
+            return
+        }
+
+        if (
+            handlePreExecutionDecision(
+                decision = preExecutionDecision,
+                silent = silent
+            )
+        ) {
             return
         }
 
@@ -10661,6 +10773,1663 @@ class AyanaVoiceService : Service() {
                 true
             }
         }
+    }
+
+    // =========================================================
+    // PRE-EXECUTION GOAL INTEGRITY v12.11.2
+    // =========================================================
+
+    private enum class PreExecutionCommitState {
+        COMMITTED,
+        NOT_COMMITTED,
+        UNKNOWN
+    }
+
+    private sealed class PreExecutionStep {
+        abstract val label: String
+
+        data class Brightness(
+            val percent: Int
+        ) : PreExecutionStep() {
+            override val label: String = "яркость $percent%"
+        }
+
+        data class RelativeVolume(
+            val delta: Int
+        ) : PreExecutionStep() {
+            override val label: String =
+                if (delta >= 0) {
+                    "громкость +$delta"
+                } else {
+                    "громкость $delta"
+                }
+        }
+
+        data class ExactVolume(
+            val requestedLevel: Int,
+            val requestedScaleMax: Int?,
+            val percent: Boolean
+        ) : PreExecutionStep() {
+            override val label: String =
+                if (requestedScaleMax != null) {
+                    if (percent) {
+                        "громкость $requestedLevel%"
+                    } else {
+                        "громкость $requestedLevel из $requestedScaleMax"
+                    }
+                } else {
+                    "громкость $requestedLevel"
+                }
+        }
+
+        data class OpenApp(
+            val requestedName: String,
+            val packageName: String,
+            val appLabel: String
+        ) : PreExecutionStep() {
+            override val label: String = "открыть $appLabel"
+        }
+    }
+
+    private data class PreExecutionPlan(
+        val steps: List<PreExecutionStep>,
+        val constraints: AyanaCompositeIntentGate.Constraints
+    )
+
+    private data class PreExecutionPlanResult(
+        val plan: PreExecutionPlan? = null,
+        val terminalStatus: String? = null,
+        val message: String = "",
+        val technical: String = ""
+    )
+
+    private data class PreExecutionStepOutcome(
+        val success: Boolean,
+        val commitState: PreExecutionCommitState,
+        val message: String,
+        val technical: String = ""
+    )
+
+    private fun handlePendingPreExecutionConfirmationInput(
+        originalCommand: String,
+        silent: Boolean
+    ): Boolean {
+        val pending =
+            pendingPreExecutionConfirmation
+                ?: return false
+
+        val expired =
+            SystemClock.elapsedRealtime() >
+                pending.expiresAtMs
+
+        if (expired) {
+            pendingPreExecutionConfirmation =
+                null
+
+            if (
+                AyanaCompositeIntentGate.isPositiveConfirmation(
+                    originalCommand
+                ) ||
+                AyanaCompositeIntentGate.isNegativeConfirmation(
+                    originalCommand
+                )
+            ) {
+                beginPreExecutionControlHistory(
+                    originalCommand = originalCommand,
+                    silent = silent
+                )
+                finishLocalCommand(
+                    "Срок подтверждения истёк. Действие не выполнялось.",
+                    silent
+                )
+                return true
+            }
+
+            return false
+        }
+
+        if (
+            AyanaCompositeIntentGate.isPositiveConfirmation(
+                originalCommand
+            )
+        ) {
+            pendingPreExecutionConfirmation =
+                null
+            confirmedPreExecutionConstraints =
+                pending.constraints
+            confirmedPreExecutionOriginal =
+                pending.originalCommand
+
+            executeCommand(
+                originalCommand = pending.executableCommand,
+                silent = silent
+            )
+            return true
+        }
+
+        if (
+            AyanaCompositeIntentGate.isNegativeConfirmation(
+                originalCommand
+            )
+        ) {
+            pendingPreExecutionConfirmation =
+                null
+
+            beginPreExecutionControlHistory(
+                originalCommand = originalCommand,
+                silent = silent
+            )
+
+            commandHistoryStore.addEvent(
+                activeCommandHistoryId,
+                state = "confirmation_declined",
+                message = "Ожидающее действие отменено до dispatch",
+                details = pending.originalCommand.take(500)
+            )
+
+            finishLocalCommand(
+                "Подтверждение отклонено. Действие не выполнялось.",
+                silent
+            )
+            return true
+        }
+
+        // Any unrelated complete command supersedes the old confirmation.
+        pendingPreExecutionConfirmation =
+            null
+        return false
+    }
+
+    private fun beginPreExecutionControlHistory(
+        originalCommand: String,
+        silent: Boolean
+    ) {
+        cancelRequested =
+            false
+
+        activeCommandToken =
+            ++commandGeneration
+
+        activeCommandHistoryId =
+            commandHistoryStore.begin(
+                command = originalCommand,
+                source = if (silent) "text" else "voice"
+            )
+
+        beginExecutionSession(
+            objective = originalCommand,
+            source = if (silent) "text" else "voice",
+            lane = "pre_execution_confirmation",
+            executor = "composite_intent_gate"
+        )
+    }
+
+    private fun handlePreExecutionDecision(
+        decision: AyanaCompositeIntentGate.Decision,
+        silent: Boolean
+    ): Boolean {
+        return when (decision.type) {
+            AyanaCompositeIntentGate.DecisionType.PASS_THROUGH ->
+                false
+
+            AyanaCompositeIntentGate.DecisionType.DATA_ONLY -> {
+                // DATA_ONLY is handled before Safety so quoted commands cannot
+                // accidentally reach any executor.
+                true
+            }
+
+            AyanaCompositeIntentGate.DecisionType.INVALID -> {
+                respondAndResume(
+                    "Команда не содержит исполнимой цели.",
+                    silent,
+                    success = false,
+                    technical = "pre_execution_invalid"
+                )
+                true
+            }
+
+            AyanaCompositeIntentGate.DecisionType.REQUIRE_CONFIRMATION -> {
+                val executable =
+                    decision.executableCommand
+                        ?.trim()
+                        .orEmpty()
+
+                if (executable.isBlank()) {
+                    respondUnsupportedAndResume(
+                        text = "Не удалось однозначно выделить действие, которое нужно подтвердить.",
+                        silent = silent,
+                        technical = "confirmation_payload_unresolved"
+                    )
+                    return true
+                }
+
+                val preflight =
+                    preparePreExecutionGoal(
+                        command = executable,
+                        inheritedConstraints = decision.constraints
+                    )
+
+                if (preflight.plan == null) {
+                    finishPreExecutionPreflightFailure(
+                        preflight,
+                        silent
+                    )
+                    return true
+                }
+
+                pendingPreExecutionConfirmation =
+                    PendingPreExecutionConfirmation(
+                        originalCommand = decision.original,
+                        executableCommand = executable,
+                        constraints = decision.constraints,
+                        expiresAtMs =
+                            SystemClock.elapsedRealtime() +
+                                PRE_EXECUTION_CONFIRMATION_TTL_MS
+                    )
+
+                commandHistoryStore.addEvent(
+                    activeCommandHistoryId,
+                    state = "confirmation_required",
+                    message = "Действие отложено до явного Да/Нет",
+                    details =
+                        "payload=${executable.take(500)}; " +
+                            "forbid_settings=${decision.constraints.forbidSettings}; " +
+                            "forbid_network=${decision.constraints.forbidNetwork}"
+                )
+
+                respondBlockedAndResume(
+                    text =
+                        "Нужно подтверждение. Выполнить: «${executable.take(260)}»? Ответьте «Да» или «Нет».",
+                    silent = silent,
+                    technical = "confirmation_required_pending"
+                )
+                true
+            }
+
+            AyanaCompositeIntentGate.DecisionType.CONDITIONAL -> {
+                val condition =
+                    decision.condition
+
+                val executable =
+                    decision.executableCommand
+                        ?.trim()
+                        .orEmpty()
+
+                if (condition == null || executable.isBlank()) {
+                    respondUnsupportedAndResume(
+                        text =
+                            "Условие нельзя надёжно проверить локально, поэтому действие не выполнялось.",
+                        silent = silent,
+                        technical = "conditional_predicate_unsupported"
+                    )
+                    return true
+                }
+
+                val snapshot =
+                    capturePreExecutionSnapshot()
+
+                val evaluation =
+                    AyanaCompositeIntentGate.evaluate(
+                        condition,
+                        snapshot
+                    )
+
+                commandHistoryStore.addEvent(
+                    activeCommandHistoryId,
+                    state = "condition_evaluated",
+                    message = evaluation.name,
+                    details =
+                        "metric=${condition.metric}; comparator=${condition.comparator}; " +
+                            "value=${condition.value}; scale=${condition.scale ?: -1}; " +
+                            "battery=${snapshot.batteryPercent ?: -1}; " +
+                            "volume=${snapshot.mediaVolumeLevel ?: -1}/${snapshot.mediaVolumeScale ?: -1}; " +
+                            "brightness=${snapshot.brightnessPercent ?: -1}"
+                )
+
+                when (evaluation) {
+                    AyanaCompositeIntentGate.ConditionResult.FALSE -> {
+                        finishLocalCommand(
+                            "Условие не выполнено. Действие не требовалось и не выполнялось.",
+                            silent
+                        )
+                    }
+
+                    AyanaCompositeIntentGate.ConditionResult.UNKNOWN -> {
+                        respondBlockedAndResume(
+                            text =
+                                "Не удалось получить фактическое значение для проверки условия. Действие не выполнялось.",
+                            silent = silent,
+                            technical = "conditional_metric_unavailable"
+                        )
+                    }
+
+                    AyanaCompositeIntentGate.ConditionResult.TRUE -> {
+                        val preflight =
+                            preparePreExecutionGoal(
+                                command = executable,
+                                inheritedConstraints = decision.constraints
+                            )
+
+                        if (preflight.plan == null) {
+                            finishPreExecutionPreflightFailure(
+                                preflight,
+                                silent
+                            )
+                        } else {
+                            executePreExecutionPlan(
+                                plan = preflight.plan,
+                                silent = silent,
+                                successPrefix = "Условие выполнено. "
+                            )
+                        }
+                    }
+                }
+                true
+            }
+
+            AyanaCompositeIntentGate.DecisionType.COMPOSITE,
+            AyanaCompositeIntentGate.DecisionType.ENVIRONMENT_CONSTRAINED -> {
+                val command =
+                    decision.executableCommand
+                        ?.takeIf { it.isNotBlank() }
+                        ?: decision.original
+
+                val preflight =
+                    preparePreExecutionGoal(
+                        command = command,
+                        inheritedConstraints = decision.constraints,
+                        explicitClauses =
+                            if (
+                                decision.type ==
+                                AyanaCompositeIntentGate.DecisionType.COMPOSITE
+                            ) {
+                                decision.clauses
+                            } else {
+                                emptyList()
+                            }
+                    )
+
+                if (preflight.plan == null) {
+                    finishPreExecutionPreflightFailure(
+                        preflight,
+                        silent
+                    )
+                } else {
+                    executePreExecutionPlan(
+                        plan = preflight.plan,
+                        silent = silent,
+                        successPrefix =
+                            if (preflight.plan.steps.size > 1) {
+                                "Составная команда выполнена полностью. "
+                            } else {
+                                ""
+                            }
+                    )
+                }
+                true
+            }
+        }
+    }
+
+    private fun preparePreExecutionGoal(
+        command: String,
+        inheritedConstraints: AyanaCompositeIntentGate.Constraints,
+        explicitClauses: List<String> = emptyList()
+    ): PreExecutionPlanResult {
+        val nested =
+            AyanaCompositeIntentGate.analyze(
+                command
+            )
+
+        val combinedConstraints =
+            AyanaCompositeIntentGate.Constraints(
+                forbidSettings =
+                    inheritedConstraints.forbidSettings ||
+                        nested.constraints.forbidSettings,
+                forbidNetwork =
+                    inheritedConstraints.forbidNetwork ||
+                        nested.constraints.forbidNetwork
+            )
+
+        val clauses =
+            when {
+                explicitClauses.isNotEmpty() ->
+                    explicitClauses
+
+                nested.type ==
+                    AyanaCompositeIntentGate.DecisionType.COMPOSITE ->
+                    nested.clauses
+
+                nested.type ==
+                    AyanaCompositeIntentGate.DecisionType.PASS_THROUGH ->
+                    listOf(command)
+
+                nested.type ==
+                    AyanaCompositeIntentGate.DecisionType.ENVIRONMENT_CONSTRAINED ->
+                    listOf(
+                        nested.executableCommand
+                            ?.takeIf { it.isNotBlank() }
+                            ?: command
+                    )
+
+                else ->
+                    return PreExecutionPlanResult(
+                        terminalStatus =
+                            AyanaCommandHistoryStore.STATUS_UNSUPPORTED,
+                        message =
+                            "Вложенная условная/подтверждаемая цель не может быть выполнена как один локальный шаг.",
+                        technical =
+                            "nested_pre_execution_type=${nested.type.name}"
+                    )
+            }
+
+        if (
+            clauses.isEmpty() ||
+            clauses.size > MAX_PRE_EXECUTION_STEPS
+        ) {
+            return PreExecutionPlanResult(
+                terminalStatus =
+                    AyanaCommandHistoryStore.STATUS_UNSUPPORTED,
+                message =
+                    "Составная команда содержит неподдерживаемое количество шагов.",
+                technical = "pre_execution_steps=${clauses.size}"
+            )
+        }
+
+        val steps =
+            ArrayList<PreExecutionStep>()
+
+        for (clause in clauses) {
+            val safety =
+                try {
+                    safetyPolicy.evaluateUserCommand(
+                        clause
+                    )
+                } catch (_: Exception) {
+                    AyanaSafetyPolicy.Decision(
+                        allowed = false,
+                        requiresConfirmation = false,
+                        riskLevel = AyanaSafetyPolicy.RISK_PROHIBITED,
+                        riskName = "policy_error",
+                        reason = "Локальный Safety Engine не смог проверить шаг составной команды."
+                    )
+                }
+
+            if (!safety.allowed) {
+                return PreExecutionPlanResult(
+                    terminalStatus =
+                        AyanaCommandHistoryStore.STATUS_BLOCKED,
+                    message =
+                        safety.reason.ifBlank {
+                            "Шаг составной команды заблокирован Safety Engine."
+                        },
+                    technical =
+                        "composite_step_safety:${safety.riskName}"
+                )
+            }
+
+            val prepared =
+                prepareAtomicPreExecutionStep(
+                    clause = clause,
+                    constraints = combinedConstraints
+                )
+
+            if (prepared.first == null) {
+                return prepared.second
+            }
+
+            steps.add(
+                prepared.first!!
+            )
+        }
+
+        commandHistoryStore.addEvent(
+            activeCommandHistoryId,
+            state = "composite_preflight_passed",
+            message = "Все обязательные шаги проверены до первого dispatch",
+            details =
+                "steps=${steps.joinToString(" | ") { it.label }.take(1000)}; " +
+                    "forbid_settings=${combinedConstraints.forbidSettings}; " +
+                    "forbid_network=${combinedConstraints.forbidNetwork}"
+        )
+
+        return PreExecutionPlanResult(
+            plan =
+                PreExecutionPlan(
+                    steps = steps,
+                    constraints = combinedConstraints
+                )
+        )
+    }
+
+    private fun prepareAtomicPreExecutionStep(
+        clause: String,
+        constraints: AyanaCompositeIntentGate.Constraints
+    ): Pair<PreExecutionStep?, PreExecutionPlanResult> {
+        val normalized =
+            sanitizeRoutingEnvelope(
+                repairCommonRecognitionForRouting(
+                    normalizeRecognitionText(
+                        clause
+                    )
+                )
+            )
+
+        extractExactMediaVolumeRequest(
+            normalized
+        )
+            ?.let { request ->
+                val scale =
+                    request.requestedScaleMax
+
+                if (
+                    request.requestedLevel < 0 ||
+                    (scale != null &&
+                        (scale <= 0 || request.requestedLevel > scale))
+                ) {
+                    return null to
+                        PreExecutionPlanResult(
+                            message = "Некорректный точный уровень громкости в составной команде.",
+                            technical = "composite_exact_volume_invalid"
+                        )
+                }
+
+                return PreExecutionStep.ExactVolume(
+                    requestedLevel = request.requestedLevel,
+                    requestedScaleMax = request.requestedScaleMax,
+                    percent = request.percent
+                ) to PreExecutionPlanResult()
+            }
+
+        val structured =
+            AyanaStructuredLocalCommandRouter
+                .parseAtomic(
+                    clause
+                )
+
+        when (structured) {
+            is AyanaStructuredLocalCommandRouter.Intent.BrightnessSet -> {
+                if (structured.percent !in 0..100) {
+                    return null to
+                        PreExecutionPlanResult(
+                            message = "Некорректная яркость: ${structured.percent}%.",
+                            technical = "composite_brightness_invalid"
+                        )
+                }
+
+                if (
+                    Build.VERSION.SDK_INT >=
+                    Build.VERSION_CODES.M &&
+                    !Settings.System.canWrite(
+                        this
+                    )
+                ) {
+                    return null to
+                        PreExecutionPlanResult(
+                            terminalStatus =
+                                AyanaCommandHistoryStore.STATUS_BLOCKED,
+                            message =
+                                if (constraints.forbidSettings) {
+                                    "Для яркости нет разрешения WRITE_SETTINGS, а команда запрещает открывать настройки. Ничего не изменено."
+                                } else {
+                                    "Для точной установки яркости требуется разрешение «Изменение системных настроек». Ничего не изменено."
+                                },
+                            technical = "composite_write_settings_required"
+                        )
+                }
+
+                return PreExecutionStep.Brightness(
+                    structured.percent
+                ) to PreExecutionPlanResult()
+            }
+
+            is AyanaStructuredLocalCommandRouter.Intent.RelativeMediaVolume ->
+                return PreExecutionStep.RelativeVolume(
+                    structured.delta
+                ) to PreExecutionPlanResult()
+
+            is AyanaStructuredLocalCommandRouter.Intent.SystemToggle ->
+                return null to
+                    PreExecutionPlanResult(
+                        terminalStatus =
+                            AyanaCommandHistoryStore.STATUS_UNSUPPORTED,
+                        message =
+                            "Шаг ${structured.kind.name} нельзя надёжно выполнить напрямую; составная команда не запускалась.",
+                        technical = "composite_system_toggle_unsupported"
+                    )
+
+            is AyanaStructuredLocalCommandRouter.Intent.UnknownCapability ->
+                return null to
+                    PreExecutionPlanResult(
+                        terminalStatus =
+                            AyanaCommandHistoryStore.STATUS_UNSUPPORTED,
+                        message =
+                            "Шаг «${structured.label}» не поддерживается транзакционным локальным исполнителем.",
+                        technical = "composite_unknown_capability"
+                    )
+
+            null -> Unit
+
+            else ->
+                return null to
+                    PreExecutionPlanResult(
+                        terminalStatus =
+                            AyanaCommandHistoryStore.STATUS_UNSUPPORTED,
+                        message =
+                            "Шаг «${clause.take(180)}» нельзя безопасно объединить с другими изменениями устройства.",
+                        technical =
+                            "composite_structured_step_unsupported:${structured.javaClass.simpleName}"
+                    )
+        }
+
+        val lifecycle =
+            extractLocalAppLifecycleRequest(
+                normalized
+            )
+
+        if (lifecycle != null) {
+            if (lifecycle.first != "open") {
+                return null to
+                    PreExecutionPlanResult(
+                        terminalStatus =
+                            AyanaCommandHistoryStore.STATUS_UNSUPPORTED,
+                        message =
+                            "Закрытие/сворачивание приложения пока не объединяется с другими side-effect шагами.",
+                        technical = "composite_lifecycle_destructive_unsupported"
+                    )
+            }
+
+            if (constraints.forbidNetwork) {
+                return null to
+                    PreExecutionPlanResult(
+                        terminalStatus =
+                            AyanaCommandHistoryStore.STATUS_BLOCKED,
+                        message =
+                            "Команда запрещает интернет. AYANA не может гарантировать, что запускаемое приложение не создаст сетевой трафик, поэтому приложение не открывалось.",
+                        technical = "composite_network_constraint_app_open"
+                    )
+            }
+
+            val target =
+                lifecycle.second
+
+            if (
+                target == FOREGROUND_APP_SENTINEL
+            ) {
+                return null to
+                    PreExecutionPlanResult(
+                        terminalStatus =
+                            AyanaCommandHistoryStore.STATUS_UNSUPPORTED,
+                        message = "Не удалось однозначно определить приложение для составной команды.",
+                        technical = "composite_app_target_missing"
+                    )
+            }
+
+            val resolution =
+                try {
+                    appResolver.resolve(
+                        target
+                    )
+                } catch (_: Exception) {
+                    null
+                }
+
+            if (
+                resolution == null ||
+                !resolution.success ||
+                resolution.packageName.isBlank()
+            ) {
+                return null to
+                    PreExecutionPlanResult(
+                        message = "Приложение $target не найдено. Ни один шаг составной команды не запускался.",
+                        technical = "composite_app_resolution_failed"
+                    )
+            }
+
+            if (
+                constraints.forbidSettings &&
+                resolution.packageName ==
+                    "com.android.settings"
+            ) {
+                return null to
+                    PreExecutionPlanResult(
+                        terminalStatus =
+                            AyanaCommandHistoryStore.STATUS_BLOCKED,
+                        message = "Команда запрещает открывать настройки. Ни один шаг не выполнялся.",
+                        technical = "composite_settings_constraint"
+                    )
+            }
+
+            return PreExecutionStep.OpenApp(
+                requestedName = target,
+                packageName = resolution.packageName,
+                appLabel =
+                    resolution.label.ifBlank {
+                        target
+                    }
+            ) to PreExecutionPlanResult()
+        }
+
+        return null to
+            PreExecutionPlanResult(
+                terminalStatus =
+                    AyanaCommandHistoryStore.STATUS_UNSUPPORTED,
+                message =
+                    "Шаг «${clause.take(180)}» пока не поддерживается локальным составным исполнителем. Ни один шаг не выполнялся.",
+                technical = "composite_atomic_step_unresolved"
+            )
+    }
+
+    private fun finishPreExecutionPreflightFailure(
+        result: PreExecutionPlanResult,
+        silent: Boolean
+    ) {
+        val text =
+            result.message.ifBlank {
+                "Составная команда не прошла предварительную проверку. Ничего не выполнялось."
+            }
+
+        when (result.terminalStatus) {
+            AyanaCommandHistoryStore.STATUS_BLOCKED ->
+                respondBlockedAndResume(
+                    text = text,
+                    silent = silent,
+                    technical = result.technical
+                )
+
+            AyanaCommandHistoryStore.STATUS_UNSUPPORTED ->
+                respondUnsupportedAndResume(
+                    text = text,
+                    silent = silent,
+                    technical = result.technical
+                )
+
+            else ->
+                respondAndResume(
+                    text = text,
+                    silent = silent,
+                    success = false,
+                    technical = result.technical
+                )
+        }
+    }
+
+    private fun capturePreExecutionSnapshot():
+        AyanaCompositeIntentGate.Snapshot {
+        val battery =
+            try {
+                val manager =
+                    getSystemService(
+                        Context.BATTERY_SERVICE
+                    ) as BatteryManager
+
+                manager.getIntProperty(
+                    BatteryManager.BATTERY_PROPERTY_CAPACITY
+                )
+                    .takeIf { it in 0..100 }
+            } catch (_: Exception) {
+                null
+            }
+
+        val audioManager =
+            getSystemService(
+                Context.AUDIO_SERVICE
+            ) as AudioManager
+
+        val volume =
+            try {
+                audioManager.getStreamVolume(
+                    AudioManager.STREAM_MUSIC
+                )
+            } catch (_: Exception) {
+                null
+            }
+
+        val volumeMax =
+            try {
+                audioManager.getStreamMaxVolume(
+                    AudioManager.STREAM_MUSIC
+                )
+            } catch (_: Exception) {
+                null
+            }
+
+        val brightnessRaw =
+            try {
+                Settings.System.getInt(
+                    contentResolver,
+                    Settings.System.SCREEN_BRIGHTNESS
+                )
+            } catch (_: Exception) {
+                null
+            }
+
+        val brightnessPercent =
+            brightnessRaw
+                ?.takeIf { it >= 0 }
+                ?.let {
+                    kotlin.math.round(
+                        it * 100.0 / 255.0
+                    ).toInt()
+                }
+                ?.coerceIn(
+                    0,
+                    100
+                )
+
+        return AyanaCompositeIntentGate.Snapshot(
+            batteryPercent = battery,
+            mediaVolumeLevel = volume,
+            mediaVolumeScale = volumeMax,
+            brightnessPercent = brightnessPercent
+        )
+    }
+
+    private fun executePreExecutionPlan(
+        plan: PreExecutionPlan,
+        silent: Boolean,
+        successPrefix: String
+    ) {
+        executionPhase(
+            phase = "pre_execution_composite",
+            executor = "composite_local_executor"
+        )
+
+        var boundaryOpened =
+            false
+        var dispatchAccepted =
+            false
+        var anyCommitted =
+            false
+        var anyUnknown =
+            false
+
+        fun beginDispatch(detail: String): Boolean {
+            if (boundaryOpened) {
+                return !executionKernel.isCancelled() &&
+                    !cancelRequested &&
+                    !shuttingDown
+            }
+
+            val opened =
+                executionKernel.tryBeginIrreversibleDispatch(
+                    kind =
+                        if (plan.steps.size > 1) {
+                            "composite_goal"
+                        } else {
+                            "pre_execution_goal"
+                        },
+                    detail = detail.take(600)
+                )
+
+            if (opened) {
+                boundaryOpened =
+                    true
+            }
+
+            return opened
+        }
+
+        fun acceptDispatch(detail: String) {
+            if (!dispatchAccepted) {
+                executionKernel.markIrreversibleDispatchAccepted(
+                    detail.take(600)
+                )
+                dispatchAccepted =
+                    true
+            } else {
+                executionKernel.addEvidence(
+                    type = "composite_additional_dispatch",
+                    source = "composite_local_executor",
+                    detail = detail.take(1200),
+                    confidence = 100
+                )
+            }
+        }
+
+        val messages =
+            ArrayList<String>()
+
+        plan.steps.forEachIndexed { index, step ->
+            if (
+                cancelRequested ||
+                executionKernel.isCancelled() ||
+                shuttingDown
+            ) {
+                if (!boundaryOpened) {
+                    finishDeferredCancellationFromExecutor(
+                        source = pendingCancelSource.ifBlank { "button" }
+                    )
+                    return
+                }
+
+                finalizeCompositeSideEffectTruth(
+                    boundaryOpened = boundaryOpened,
+                    dispatchAccepted = dispatchAccepted,
+                    anyCommitted = anyCommitted,
+                    anyUnknown = anyUnknown
+                )
+
+                if (anyCommitted || anyUnknown) {
+                    cancelRequested =
+                        false
+                    respondAndResume(
+                        text =
+                            "Команда остановлена после начала выполнения. Часть изменений могла уже примениться; общий SUCCESS не выставлен.",
+                        silent = silent,
+                        success = false,
+                        technical = "composite_cancel_after_dispatch"
+                    )
+                } else {
+                    finishDeferredCancellationFromExecutor(
+                        source = pendingCancelSource.ifBlank { "button" }
+                    )
+                }
+                return
+            }
+
+            val outcome =
+                executePreExecutionStep(
+                    step = step,
+                    beginDispatch = ::beginDispatch,
+                    acceptDispatch = ::acceptDispatch
+                )
+
+            when (outcome.commitState) {
+                PreExecutionCommitState.COMMITTED ->
+                    anyCommitted = true
+
+                PreExecutionCommitState.UNKNOWN ->
+                    anyUnknown = true
+
+                PreExecutionCommitState.NOT_COMMITTED ->
+                    Unit
+            }
+
+            commandHistoryStore.addEvent(
+                activeCommandHistoryId,
+                state =
+                    if (outcome.success) {
+                        "composite_step_verified"
+                    } else {
+                        "composite_step_failed"
+                    },
+                message =
+                    "${index + 1}/${plan.steps.size}: ${step.label}",
+                details =
+                    "success=${outcome.success}; commit=${outcome.commitState}; " +
+                        "message=${outcome.message.take(500)}; technical=${outcome.technical.take(700)}"
+            )
+
+            if (!outcome.success) {
+                finalizeCompositeSideEffectTruth(
+                    boundaryOpened = boundaryOpened,
+                    dispatchAccepted = dispatchAccepted,
+                    anyCommitted = anyCommitted,
+                    anyUnknown = anyUnknown
+                )
+
+                respondAndResume(
+                    text =
+                        if (anyCommitted) {
+                            "Составная команда выполнена только частично: ${outcome.message} Общий SUCCESS не выставлен."
+                        } else if (anyUnknown) {
+                            "Составная команда не завершена: ${outcome.message} Фактический результат одного из dispatch не подтверждён."
+                        } else {
+                            "Составная команда не выполнена: ${outcome.message}"
+                        },
+                    silent = silent,
+                    success = false,
+                    technical =
+                        "composite_step_failed:index=$index; ${outcome.technical}"
+                )
+                return
+            }
+
+            messages.add(
+                outcome.message
+            )
+        }
+
+        finalizeCompositeSideEffectTruth(
+            boundaryOpened = boundaryOpened,
+            dispatchAccepted = dispatchAccepted,
+            anyCommitted = anyCommitted,
+            anyUnknown = anyUnknown
+        )
+
+        if (anyUnknown) {
+            respondAndResume(
+                text =
+                    "Все шаги были отправлены, но один из результатов не удалось доказать. Общий SUCCESS не выставлен.",
+                silent = silent,
+                success = false,
+                technical = "composite_unknown_terminal"
+            )
+            return
+        }
+
+        commandHistoryStore.addEvent(
+            activeCommandHistoryId,
+            state = "composite_goal_verified",
+            message = "Все обязательные шаги составной цели подтверждены",
+            details =
+                "steps=${plan.steps.size}; committed=$anyCommitted; boundary=$boundaryOpened"
+        )
+
+        finishLocalCommand(
+            successPrefix +
+                messages.joinToString(" "),
+            silent
+        )
+    }
+
+    private fun finalizeCompositeSideEffectTruth(
+        boundaryOpened: Boolean,
+        dispatchAccepted: Boolean,
+        anyCommitted: Boolean,
+        anyUnknown: Boolean
+    ) {
+        if (!boundaryOpened) {
+            return
+        }
+
+        executionKernel.markSideEffectReconciliationStarted(
+            "composite_final_reconciliation"
+        )
+
+        when {
+            anyCommitted ->
+                executionKernel.markSideEffectReconciled(
+                    committed = true,
+                    detail = "composite_any_committed=true"
+                )
+
+            !anyUnknown ->
+                executionKernel.markSideEffectReconciled(
+                    committed = false,
+                    detail =
+                        "composite_no_commit; dispatch_accepted=$dispatchAccepted"
+                )
+
+            else -> {
+                // Unknown post-dispatch outcome intentionally stays RECONCILING.
+                // ExecutionKernel v1.3 will allow only fail-closed ERROR here.
+            }
+        }
+    }
+
+    private fun executePreExecutionStep(
+        step: PreExecutionStep,
+        beginDispatch: (String) -> Boolean,
+        acceptDispatch: (String) -> Unit
+    ): PreExecutionStepOutcome {
+        return when (step) {
+            is PreExecutionStep.Brightness ->
+                executeCompositeBrightnessStep(
+                    step,
+                    beginDispatch,
+                    acceptDispatch
+                )
+
+            is PreExecutionStep.RelativeVolume ->
+                executeCompositeRelativeVolumeStep(
+                    step,
+                    beginDispatch,
+                    acceptDispatch
+                )
+
+            is PreExecutionStep.ExactVolume ->
+                executeCompositeExactVolumeStep(
+                    step,
+                    beginDispatch,
+                    acceptDispatch
+                )
+
+            is PreExecutionStep.OpenApp ->
+                executeCompositeOpenAppStep(
+                    step,
+                    beginDispatch,
+                    acceptDispatch
+                )
+        }
+    }
+
+    private fun executeCompositeBrightnessStep(
+        step: PreExecutionStep.Brightness,
+        beginDispatch: (String) -> Boolean,
+        acceptDispatch: (String) -> Unit
+    ): PreExecutionStepOutcome {
+        val target =
+            ((step.percent / 100.0) * 255.0)
+                .toInt()
+                .coerceIn(0, 255)
+
+        val before =
+            try {
+                Settings.System.getInt(
+                    contentResolver,
+                    Settings.System.SCREEN_BRIGHTNESS
+                )
+            } catch (_: Exception) {
+                -1
+            }
+
+        val beforeMode =
+            try {
+                Settings.System.getInt(
+                    contentResolver,
+                    Settings.System.SCREEN_BRIGHTNESS_MODE,
+                    -1
+                )
+            } catch (_: Exception) {
+                -1
+            }
+
+        if (
+            abs(before - target) <= 2 &&
+            beforeMode ==
+                Settings.System.SCREEN_BRIGHTNESS_MODE_MANUAL
+        ) {
+            return PreExecutionStepOutcome(
+                success = true,
+                commitState =
+                    PreExecutionCommitState.NOT_COMMITTED,
+                message = "Яркость уже установлена на ${step.percent}%."
+            )
+        }
+
+        if (
+            !beginDispatch(
+                "brightness=${step.percent}%"
+            )
+        ) {
+            return PreExecutionStepOutcome(
+                success = false,
+                commitState =
+                    PreExecutionCommitState.NOT_COMMITTED,
+                message = "Изменение яркости отменено до dispatch.",
+                technical = "brightness_dispatch_rejected"
+            )
+        }
+
+        var dispatched =
+            false
+
+        val wroteMode =
+            try {
+                Settings.System.putInt(
+                    contentResolver,
+                    Settings.System.SCREEN_BRIGHTNESS_MODE,
+                    Settings.System.SCREEN_BRIGHTNESS_MODE_MANUAL
+                )
+            } catch (_: Exception) {
+                false
+            }
+
+        if (wroteMode) {
+            dispatched = true
+            acceptDispatch(
+                "brightness_mode_manual"
+            )
+        }
+
+        val wroteBrightness =
+            try {
+                Settings.System.putInt(
+                    contentResolver,
+                    Settings.System.SCREEN_BRIGHTNESS,
+                    target
+                )
+            } catch (_: Exception) {
+                false
+            }
+
+        if (wroteBrightness) {
+            dispatched = true
+            acceptDispatch(
+                "brightness_raw=$target"
+            )
+        }
+
+        val actual =
+            try {
+                Settings.System.getInt(
+                    contentResolver,
+                    Settings.System.SCREEN_BRIGHTNESS
+                )
+            } catch (_: Exception) {
+                -1
+            }
+
+        val mode =
+            try {
+                Settings.System.getInt(
+                    contentResolver,
+                    Settings.System.SCREEN_BRIGHTNESS_MODE,
+                    -1
+                )
+            } catch (_: Exception) {
+                -1
+            }
+
+        val verified =
+            abs(actual - target) <= 2 &&
+                mode ==
+                    Settings.System.SCREEN_BRIGHTNESS_MODE_MANUAL
+
+        val changed =
+            (actual >= 0 && actual != before) ||
+                (mode >= 0 && mode != beforeMode)
+
+        return PreExecutionStepOutcome(
+            success = verified,
+            commitState =
+                when {
+                    verified || changed ->
+                        PreExecutionCommitState.COMMITTED
+
+                    !dispatched ->
+                        PreExecutionCommitState.NOT_COMMITTED
+
+                    else ->
+                        PreExecutionCommitState.UNKNOWN
+                },
+            message =
+                if (verified) {
+                    "Яркость установлена на ${step.percent}%."
+                } else {
+                    "Яркость ${step.percent}% не подтверждена."
+                },
+            technical =
+                "before=$before; target=$target; actual=$actual; " +
+                    "mode_before=$beforeMode; mode=$mode; wrote_mode=$wroteMode; wrote_value=$wroteBrightness"
+        )
+    }
+
+    private fun executeCompositeRelativeVolumeStep(
+        step: PreExecutionStep.RelativeVolume,
+        beginDispatch: (String) -> Boolean,
+        acceptDispatch: (String) -> Unit
+    ): PreExecutionStepOutcome {
+        val audioManager =
+            getSystemService(
+                Context.AUDIO_SERVICE
+            ) as AudioManager
+
+        val before =
+            try {
+                audioManager.getStreamVolume(
+                    AudioManager.STREAM_MUSIC
+                )
+            } catch (_: Exception) {
+                -1
+            }
+
+        val max =
+            try {
+                audioManager.getStreamMaxVolume(
+                    AudioManager.STREAM_MUSIC
+                )
+            } catch (_: Exception) {
+                -1
+            }
+
+        val min =
+            if (
+                Build.VERSION.SDK_INT >=
+                Build.VERSION_CODES.P
+            ) {
+                try {
+                    audioManager.getStreamMinVolume(
+                        AudioManager.STREAM_MUSIC
+                    )
+                } catch (_: Exception) {
+                    0
+                }
+            } else {
+                0
+            }
+
+        if (before < 0 || max < 0) {
+            return PreExecutionStepOutcome(
+                success = false,
+                commitState = PreExecutionCommitState.NOT_COMMITTED,
+                message = "Диапазон громкости недоступен.",
+                technical = "volume_range_unavailable"
+            )
+        }
+
+        val target =
+            (before + step.delta)
+                .coerceIn(min, max)
+
+        if (target == before) {
+            return PreExecutionStepOutcome(
+                success = true,
+                commitState = PreExecutionCommitState.NOT_COMMITTED,
+                message = "Громкость уже на границе: $before из $max."
+            )
+        }
+
+        if (
+            !beginDispatch(
+                "relative_volume:$before->$target"
+            )
+        ) {
+            return PreExecutionStepOutcome(
+                success = false,
+                commitState = PreExecutionCommitState.NOT_COMMITTED,
+                message = "Изменение громкости отменено до dispatch.",
+                technical = "relative_volume_dispatch_rejected"
+            )
+        }
+
+        val dispatched =
+            try {
+                audioManager.setStreamVolume(
+                    AudioManager.STREAM_MUSIC,
+                    target,
+                    AudioManager.FLAG_SHOW_UI
+                )
+                acceptDispatch(
+                    "relative_volume_target=$target"
+                )
+                true
+            } catch (_: Exception) {
+                false
+            }
+
+        val actual =
+            try {
+                audioManager.getStreamVolume(
+                    AudioManager.STREAM_MUSIC
+                )
+            } catch (_: Exception) {
+                -1
+            }
+
+        val verified =
+            actual == target
+
+        return PreExecutionStepOutcome(
+            success = verified,
+            commitState =
+                when {
+                    verified || (actual >= 0 && actual != before) ->
+                        PreExecutionCommitState.COMMITTED
+
+                    !dispatched ->
+                        PreExecutionCommitState.NOT_COMMITTED
+
+                    else ->
+                        PreExecutionCommitState.UNKNOWN
+                },
+            message =
+                if (verified) {
+                    "Громкость изменена: $before → $actual из $max."
+                } else {
+                    "Требуемая громкость $target из $max не подтверждена."
+                },
+            technical =
+                "before=$before; target=$target; actual=$actual; max=$max"
+        )
+    }
+
+    private fun executeCompositeExactVolumeStep(
+        step: PreExecutionStep.ExactVolume,
+        beginDispatch: (String) -> Boolean,
+        acceptDispatch: (String) -> Unit
+    ): PreExecutionStepOutcome {
+        val audioManager =
+            getSystemService(
+                Context.AUDIO_SERVICE
+            ) as AudioManager
+
+        val max =
+            try {
+                audioManager.getStreamMaxVolume(
+                    AudioManager.STREAM_MUSIC
+                )
+            } catch (_: Exception) {
+                -1
+            }
+
+        val min =
+            if (
+                Build.VERSION.SDK_INT >=
+                Build.VERSION_CODES.P
+            ) {
+                try {
+                    audioManager.getStreamMinVolume(
+                        AudioManager.STREAM_MUSIC
+                    )
+                } catch (_: Exception) {
+                    0
+                }
+            } else {
+                0
+            }
+
+        val before =
+            try {
+                audioManager.getStreamVolume(
+                    AudioManager.STREAM_MUSIC
+                )
+            } catch (_: Exception) {
+                -1
+            }
+
+        if (max <= min || before < 0) {
+            return PreExecutionStepOutcome(
+                success = false,
+                commitState = PreExecutionCommitState.NOT_COMMITTED,
+                message = "Точный диапазон громкости недоступен.",
+                technical = "exact_volume_range_unavailable"
+            )
+        }
+
+        val target =
+            if (step.requestedScaleMax != null) {
+                val scale = step.requestedScaleMax
+                if (
+                    scale <= 0 ||
+                    step.requestedLevel !in 0..scale
+                ) {
+                    return PreExecutionStepOutcome(
+                        success = false,
+                        commitState = PreExecutionCommitState.NOT_COMMITTED,
+                        message = "Некорректный точный уровень громкости.",
+                        technical = "exact_volume_invalid"
+                    )
+                }
+
+                (
+                    (
+                        step.requestedLevel.toLong() *
+                            (max - min).toLong() +
+                            scale / 2L
+                        ) /
+                        scale.toLong()
+                    ).toInt() + min
+            } else {
+                if (
+                    step.requestedLevel < min ||
+                    step.requestedLevel > max
+                ) {
+                    return PreExecutionStepOutcome(
+                        success = false,
+                        commitState = PreExecutionCommitState.NOT_COMMITTED,
+                        message = "Уровень ${step.requestedLevel} вне диапазона $min–$max.",
+                        technical = "exact_volume_native_range_invalid"
+                    )
+                }
+                step.requestedLevel
+            }
+
+        if (target == before) {
+            return PreExecutionStepOutcome(
+                success = true,
+                commitState = PreExecutionCommitState.NOT_COMMITTED,
+                message = "Громкость уже установлена: $before из $max."
+            )
+        }
+
+        if (
+            !beginDispatch(
+                "exact_volume:$before->$target"
+            )
+        ) {
+            return PreExecutionStepOutcome(
+                success = false,
+                commitState = PreExecutionCommitState.NOT_COMMITTED,
+                message = "Установка громкости отменена до dispatch.",
+                technical = "exact_volume_dispatch_rejected"
+            )
+        }
+
+        val dispatched =
+            try {
+                audioManager.setStreamVolume(
+                    AudioManager.STREAM_MUSIC,
+                    target,
+                    AudioManager.FLAG_SHOW_UI
+                )
+                acceptDispatch(
+                    "exact_volume_target=$target"
+                )
+                true
+            } catch (_: Exception) {
+                false
+            }
+
+        val actual =
+            try {
+                audioManager.getStreamVolume(
+                    AudioManager.STREAM_MUSIC
+                )
+            } catch (_: Exception) {
+                -1
+            }
+
+        val verified =
+            actual == target
+
+        return PreExecutionStepOutcome(
+            success = verified,
+            commitState =
+                when {
+                    verified || (actual >= 0 && actual != before) ->
+                        PreExecutionCommitState.COMMITTED
+
+                    !dispatched ->
+                        PreExecutionCommitState.NOT_COMMITTED
+
+                    else ->
+                        PreExecutionCommitState.UNKNOWN
+                },
+            message =
+                if (verified) {
+                    "Громкость установлена: $actual из $max."
+                } else {
+                    "Точная громкость $target из $max не подтверждена."
+                },
+            technical =
+                "before=$before; target=$target; actual=$actual; max=$max"
+        )
+    }
+
+    private fun executeCompositeOpenAppStep(
+        step: PreExecutionStep.OpenApp,
+        beginDispatch: (String) -> Boolean,
+        acceptDispatch: (String) -> Unit
+    ): PreExecutionStepOutcome {
+        val before =
+            currentForegroundPackage()
+
+        if (before == step.packageName) {
+            return PreExecutionStepOutcome(
+                success = true,
+                commitState = PreExecutionCommitState.NOT_COMMITTED,
+                message = "${step.appLabel} уже открыт."
+            )
+        }
+
+        if (
+            !beginDispatch(
+                "open_app:${step.packageName}"
+            )
+        ) {
+            return PreExecutionStepOutcome(
+                success = false,
+                commitState = PreExecutionCommitState.NOT_COMMITTED,
+                message = "Открытие ${step.appLabel} отменено до dispatch.",
+                technical = "open_app_dispatch_rejected"
+            )
+        }
+
+        val launch =
+            try {
+                appResolver.launchExactPackage(
+                    step.packageName
+                )
+            } catch (error: Exception) {
+                JSONObject()
+                    .put("success", false)
+                    .put(
+                        "message",
+                        error.message ?: "launch_exception"
+                    )
+            }
+
+        val dispatched =
+            launch.optBoolean(
+                "success",
+                false
+            )
+
+        if (dispatched) {
+            acceptDispatch(
+                "open_app:${step.packageName}"
+            )
+        }
+
+        val after =
+            if (dispatched) {
+                waitForForegroundPackage(
+                    step.packageName
+                )
+            } else {
+                currentForegroundPackage()
+            }
+
+        val verified =
+            dispatched &&
+                after == step.packageName
+
+        return PreExecutionStepOutcome(
+            success = verified,
+            commitState =
+                when {
+                    verified ->
+                        PreExecutionCommitState.COMMITTED
+
+                    !dispatched ->
+                        PreExecutionCommitState.NOT_COMMITTED
+
+                    else ->
+                        PreExecutionCommitState.UNKNOWN
+                },
+            message =
+                if (verified) {
+                    "Открыто приложение ${step.appLabel}."
+                } else {
+                    "Открытие ${step.appLabel} не удалось подтвердить."
+                },
+            technical =
+                "package=${step.packageName}; before=$before; after=$after; " +
+                    "launch_success=$dispatched"
+        )
     }
 
     private fun beginLocalVerifiedSideEffect(
@@ -27503,6 +29272,12 @@ class AyanaVoiceService : Service() {
 
         const val EXTRA_STATUS_STATE =
             "status_state"
+
+        private const val PRE_EXECUTION_CONFIRMATION_TTL_MS =
+            120_000L
+
+        private const val MAX_PRE_EXECUTION_STEPS =
+            4
 
         private const val MAX_DOCX_TRANSLATION_SEGMENTS_PER_BATCH = 64
         private const val MAX_DOCX_TRANSLATION_CHARS_PER_BATCH = 5500
