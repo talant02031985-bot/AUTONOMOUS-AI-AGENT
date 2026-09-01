@@ -65,6 +65,9 @@ class AyanaVoiceService : Service() {
     // conditions, environment constraints and bounded multi-step local goals
     // before any first side effect can dispatch. Partial multi-step completion
     // can never be upgraded to whole-command SUCCESS.
+    // AYANA v12.11.3 NOTIFICATION PRIVACY PROJECTION.
+    // Notification app-name/title projections are resolved before listener transport;
+    // command rendering/history never receive notification bodies for those requests.
     // AYANA v12.10.2 DEVICE CONTROL TRUTH + NOTIFICATION READ + FOLLOW-UP BOUNDS.
     // v12.10.2 separates read-only notification intent from Settings navigation,
     // adds verified exact media-volume setting, and gives FOLLOW_UP an absolute
@@ -8609,14 +8612,28 @@ class AyanaVoiceService : Service() {
     private fun runLocalRecentNotificationsCommand(
         silent: Boolean,
         limit: Int = 8,
-        appFilter: String? = null
+        appFilter: String? = null,
+        projection: String = AyanaNotificationListenerService.PROJECTION_FULL
     ) {
+        val normalizedProjection =
+            when (projection) {
+                AyanaNotificationListenerService.PROJECTION_APP_NAMES_ONLY ->
+                    AyanaNotificationListenerService.PROJECTION_APP_NAMES_ONLY
+
+                AyanaNotificationListenerService.PROJECTION_TITLES ->
+                    AyanaNotificationListenerService.PROJECTION_TITLES
+
+                else ->
+                    AyanaNotificationListenerService.PROJECTION_FULL
+            }
+
         val result =
             AyanaNotificationListenerService
                 .readRecent(
                     context = this,
                     limit = limit,
-                    appFilter = appFilter
+                    appFilter = appFilter,
+                    projection = normalizedProjection
                 )
 
         if (!result.optBoolean("success", false)) {
@@ -8643,7 +8660,14 @@ class AyanaVoiceService : Service() {
 
         if (items.length() == 0) {
             finishLocalCommand(
-                "Последних уведомлений, доступных AYANA, сейчас нет.",
+                if (
+                    normalizedProjection ==
+                    AyanaNotificationListenerService.PROJECTION_APP_NAMES_ONLY
+                ) {
+                    "Приложений с последними уведомлениями, доступными AYANA, сейчас нет."
+                } else {
+                    "Последних уведомлений, доступных AYANA, сейчас нет."
+                },
                 silent
             )
             return
@@ -8652,43 +8676,105 @@ class AyanaVoiceService : Service() {
         val lines =
             ArrayList<String>()
 
-        for (index in 0 until items.length()) {
-            val item = items.optJSONObject(index) ?: continue
-            val app = item.optString("app").trim()
-            val title = item.optString("title").trim()
-            val text = item.optString("text").trim()
+        when (normalizedProjection) {
+            AyanaNotificationListenerService.PROJECTION_APP_NAMES_ONLY -> {
+                val seenApps =
+                    linkedSetOf<String>()
 
-            val content =
-                listOf(title, text)
-                    .filter { it.isNotBlank() }
-                    .distinct()
-                    .joinToString(": ")
-                    .replace(
-                        Regex("\\s+"),
-                        " "
-                    )
-                    .trim()
-                    .take(320)
+                for (index in 0 until items.length()) {
+                    val item = items.optJSONObject(index) ?: continue
+                    val app =
+                        item.optString("app")
+                            .trim()
+                            .ifBlank { "Приложение" }
 
-            lines.add(
-                buildString {
-                    append(index + 1)
-                    append("). ")
-                    append(app.ifBlank { "Приложение" })
-                    if (content.isNotBlank()) {
-                        append(" — ")
-                        append(content)
+                    val dedupeKey =
+                        item.optString("package")
+                            .trim()
+                            .lowercase(Locale.ROOT)
+                            .ifBlank {
+                                app.lowercase(Locale.ROOT)
+                            }
+
+                    if (!seenApps.add(dedupeKey)) {
+                        continue
                     }
+
+                    lines.add(
+                        "${lines.size + 1}). $app"
+                    )
                 }
-            )
+            }
+
+            AyanaNotificationListenerService.PROJECTION_TITLES -> {
+                for (index in 0 until items.length()) {
+                    val item = items.optJSONObject(index) ?: continue
+                    val app =
+                        item.optString("app")
+                            .trim()
+                            .ifBlank { "Приложение" }
+                    val title =
+                        item.optString("title")
+                            .replace(Regex("\\s+"), " ")
+                            .trim()
+                            .take(180)
+
+                    lines.add(
+                        buildString {
+                            append(index + 1)
+                            append("). ")
+                            append(app)
+                            if (title.isNotBlank()) {
+                                append(" — ")
+                                append(title)
+                            }
+                        }
+                    )
+                }
+            }
+
+            else -> {
+                for (index in 0 until items.length()) {
+                    val item = items.optJSONObject(index) ?: continue
+                    val app = item.optString("app").trim()
+                    val title = item.optString("title").trim()
+                    val text = item.optString("text").trim()
+
+                    val content =
+                        listOf(title, text)
+                            .filter { it.isNotBlank() }
+                            .distinct()
+                            .joinToString(": ")
+                            .replace(
+                                Regex("\\s+"),
+                                " "
+                            )
+                            .trim()
+                            .take(320)
+
+                    lines.add(
+                        buildString {
+                            append(index + 1)
+                            append("). ")
+                            append(app.ifBlank { "Приложение" })
+                            if (content.isNotBlank()) {
+                                append(" — ")
+                                append(content)
+                            }
+                        }
+                    )
+                }
+            }
         }
 
         commandHistoryStore.addEvent(
             activeCommandHistoryId,
             state = "notifications_read",
-            message = "Последние уведомления прочитаны локально",
+            message = "Последние уведомления прочитаны локально с privacy projection",
             details =
-                "requested_limit=$limit; app_filter=${appFilter.orEmpty().take(80)}; count=${lines.size}; listener_connected=${result.optBoolean("listener_connected", false)}"
+                "projection=$normalizedProjection; requested_limit=$limit; " +
+                    "app_filter=${appFilter.orEmpty().take(80)}; count=${lines.size}; " +
+                    "listener_connected=${result.optBoolean("listener_connected", false)}"
         )
 
         finishLocalCommand(
@@ -10613,7 +10699,8 @@ class AyanaVoiceService : Service() {
                 runLocalRecentNotificationsCommand(
                     silent = silent,
                     limit = intent.limit ?: 8,
-                    appFilter = intent.appFilter
+                    appFilter = intent.appFilter,
+                    projection = intent.projection.wireValue
                 )
                 true
             }
