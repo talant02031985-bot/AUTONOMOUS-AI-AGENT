@@ -3,12 +3,12 @@ package kg.autonomous.agent
 import java.util.Locale
 
 /**
- * AYANA Structured Local Command Router v1.2 — COMPOSITE GATE INTEGRATION.
+ * AYANA Structured Local Command Router v1.3 — NOTIFICATION PRIVACY PROJECTION.
  *
- * Preserves the v1.1 fail-closed public parser and the exact same Intent surface.
- * v1.2 adds parseAtomic(), used only after AyanaCompositeIntentGate has already
- * preflighted the whole original goal. This lets the composite orchestrator parse
- * one isolated clause without weakening the normal parse() safety guards.
+ * Preserves v1.2 composite-gate integration and adds typed notification privacy
+ * projection. Projection is resolved before notification transport so a request
+ * for app names or titles cannot silently fall back to full notification bodies.
+ * parseAtomic() remains restricted to already-preflighted composite clauses.
  *
  * IMPORTANT: ordinary callers must keep using parse(). parseAtomic() is not a
  * bypass for arbitrary user input; it only skips the whole-command execution-
@@ -17,7 +17,11 @@ import java.util.Locale
 object AyanaStructuredLocalCommandRouter {
 
     sealed class Intent {
-        data class NotificationRead(val limit: Int?, val appFilter: String?) : Intent()
+        data class NotificationRead(
+            val limit: Int?,
+            val appFilter: String?,
+            val projection: NotificationProjection = NotificationProjection.FULL
+        ) : Intent()
         data class RelativeMediaVolume(val delta: Int) : Intent()
         data class DeviceMetric(val metric: Metric) : Intent()
         data object DeviceDiagnostics : Intent()
@@ -41,6 +45,14 @@ object AyanaStructuredLocalCommandRouter {
         data class SystemToggle(val kind: ToggleKind, val enable: Boolean) : Intent()
         data class UnknownCapability(val label: String) : Intent()
         data class CompositeVolumeAndState(val level: Int, val scale: Int) : Intent()
+    }
+
+    enum class NotificationProjection(
+        val wireValue: String
+    ) {
+        APP_NAMES_ONLY("app_names_only"),
+        TITLES("titles"),
+        FULL("full")
     }
 
     enum class Metric {
@@ -212,19 +224,44 @@ object AyanaStructuredLocalCommandRouter {
     private fun parseNotificationSafetyGuard(c: String): Intent? {
         if (!c.contains("уведомлен")) return null
 
-        val privacyProjection =
-            c.contains("только назван") && c.contains("прилож") ||
+        // Supported projections are handled by parseNotificationRead(). Custom
+        // field-level redaction must still fail closed instead of accidentally
+        // falling back to FULL notification content. APP_NAMES_ONLY is the one
+        // safe exception because no notification title/body is transported at all.
+        val appNamesOnlyProjection =
+            (
+                c.contains("только назван") &&
+                    c.contains("прилож")
+                ) ||
                 c.contains("только приложения") ||
-                c.contains("без текста уведом") ||
-                c.contains("не показывай текст") ||
-                c.contains("не показывай содерж") ||
-                c.contains("не показывай имена") ||
-                c.contains("не показывай номер") ||
-                c.contains("не показывай адрес")
+                (
+                    c.contains("названия приложений") &&
+                        (
+                            c.contains("только") ||
+                                c.contains("без текста")
+                            )
+                    ) ||
+                (
+                    c.contains("какие приложения") &&
+                        c.contains("уведомлен")
+                    )
 
-        if (privacyProjection) {
+        val unsupportedCustomRedaction =
+            c.contains("не показывай имена") ||
+                c.contains("не показывай имя") ||
+                c.contains("не показывай номер") ||
+                c.contains("не показывай телефон") ||
+                c.contains("не показывай адрес") ||
+                c.contains("скрой имена") ||
+                c.contains("скрой номера") ||
+                c.contains("скрой адрес")
+
+        if (
+            unsupportedCustomRedaction &&
+            !appNamesOnlyProjection
+        ) {
             return Intent.UnknownCapability(
-                "privacy-projected список уведомлений"
+                "произвольная privacy-redaction уведомлений"
             )
         }
 
@@ -307,6 +344,13 @@ object AyanaStructuredLocalCommandRouter {
         val readIntent =
             c.contains("последн") || c.contains("недавн") || c.contains("текущ") ||
                 c.contains("новые уведом") || c.contains("какие уведом") ||
+                (c.contains("какие приложения") && c.contains("уведом")) ||
+                (c.contains("только назван") && c.contains("прилож")) ||
+                c.contains("только приложения") ||
+                c.contains("только заголов") ||
+                c.contains("без текста уведом") ||
+                c.contains("не показывай текст") ||
+                c.contains("не показывай содерж") ||
                 c.contains("что пришло") || c.contains("прочитай уведом") ||
                 c.contains("прочти уведом") || c.contains("перечисли уведом") ||
                 c.contains("покажи")
@@ -321,10 +365,51 @@ object AyanaStructuredLocalCommandRouter {
             else -> null
         }
 
-        val filter = Regex("""(?:^|\s)(?:от|из)\s+([\p{L}0-9._ -]{2,60})$""")
-            .find(c)?.groupValues?.getOrNull(1)?.trim()?.takeIf { it.isNotBlank() }
+        val filter =
+            Regex(
+                """(?:^|\s)(?:от|из)\s+([\p{L}0-9._ -]{2,60}?)(?=\s+(?:только|без|не\s+показывай)(?:\s|$)|$)"""
+            )
+                .find(c)
+                ?.groupValues
+                ?.getOrNull(1)
+                ?.trim()
+                ?.takeIf { it.isNotBlank() }
 
-        return Intent.NotificationRead(limit, filter)
+        val projection =
+            when {
+                (
+                    c.contains("только назван") &&
+                        c.contains("прилож")
+                    ) ||
+                    c.contains("только приложения") ||
+                    (
+                        c.contains("названия приложений") &&
+                            (
+                                c.contains("только") ||
+                                    c.contains("без текста")
+                                )
+                        ) ||
+                    (
+                        c.contains("какие приложения") &&
+                            c.contains("уведомлен")
+                        ) ->
+                    NotificationProjection.APP_NAMES_ONLY
+
+                c.contains("только заголов") ||
+                    c.contains("без текста уведом") ||
+                    c.contains("не показывай текст") ||
+                    c.contains("не показывай содерж") ->
+                    NotificationProjection.TITLES
+
+                else ->
+                    NotificationProjection.FULL
+            }
+
+        return Intent.NotificationRead(
+            limit = limit,
+            appFilter = filter,
+            projection = projection
+        )
     }
 
     private fun parseRelativeVolume(c: String): Intent? {
