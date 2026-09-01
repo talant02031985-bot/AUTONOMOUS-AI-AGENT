@@ -60,14 +60,20 @@ import kotlin.math.abs
 
 class AyanaVoiceService : Service() {
 
+    // AYANA v12.11.4 SYSTEM SETTINGS TRUTH + OEM RECOVERY.
+    // Top-level Settings navigation now delegates to AyanaSystemSettingsNavigator:
+    // Intent dispatch alone is never SUCCESS; Battery means Battery overview (not
+    // Battery Saver); Date & time inflections stay navigation-safe; Connections
+    // is first-class; and Samsung/OEM sparse-window failures get bounded semantic
+    // recovery before the command is allowed to terminate successfully.
+    // AYANA v12.11.3 NOTIFICATION PRIVACY PROJECTION.
+    // Notification app-name/title projections are resolved before listener transport;
+    // command rendering/history never receive notification bodies for those requests.
     // AYANA v12.11.2 PRE-EXECUTION GOAL INTEGRITY + COMPOSITE ORCHESTRATION.
     // Whole-goal preflight now owns explicit confirmation, supported local
     // conditions, environment constraints and bounded multi-step local goals
     // before any first side effect can dispatch. Partial multi-step completion
     // can never be upgraded to whole-command SUCCESS.
-    // AYANA v12.11.3 NOTIFICATION PRIVACY PROJECTION.
-    // Notification app-name/title projections are resolved before listener transport;
-    // command rendering/history never receive notification bodies for those requests.
     // AYANA v12.10.2 DEVICE CONTROL TRUTH + NOTIFICATION READ + FOLLOW-UP BOUNDS.
     // v12.10.2 separates read-only notification intent from Settings navigation,
     // adds verified exact media-volume setting, and gives FOLLOW_UP an absolute
@@ -435,6 +441,18 @@ class AyanaVoiceService : Service() {
     private val screenIntelligence by lazy {
         AyanaScreenIntelligence(
             applicationContext
+        )
+    }
+
+    private val systemSettingsNavigator by lazy {
+        AyanaSystemSettingsNavigator(
+            context = applicationContext,
+            screenIntelligence = screenIntelligence,
+            shouldCancel = {
+                cancelRequested ||
+                    executionKernel.isCancelled() ||
+                    shuttingDown
+            }
         )
     }
 
@@ -6932,11 +6950,21 @@ class AyanaVoiceService : Service() {
         return when {
 
             hasAny(
-                "оптимизац батар",
-                "оптимизация батар",
-                "экономия батареи для прилож",
-                "игнорирование оптимизац"
+                "подключения",
+                "подключение",
+                "connections",
+                "сеть и интернет",
+                "сети и интернет",
+                "network and internet",
+                "network & internet"
             ) ->
+                "connections"
+
+            (
+                (c.contains("оптимизац") && c.contains("батар")) ||
+                    c.contains("экономия батареи для прилож") ||
+                    c.contains("игнорирование оптимизац")
+                ) ->
                 "battery_optimization"
 
             hasAny(
@@ -7031,10 +7059,20 @@ class AyanaVoiceService : Service() {
             ) ->
                 "security"
 
-            hasAny(
-                "дата и время",
-                "время и дата"
-            ) ->
+            (
+                hasAny(
+                    "дата и время",
+                    "дату и время",
+                    "даты и времени",
+                    "время и дата",
+                    "время и дату",
+                    "date and time"
+                ) ||
+                    (
+                        c.contains("дат") &&
+                            c.contains("врем")
+                        )
+                ) ->
                 "date_time"
 
             hasAny(
@@ -25588,170 +25626,66 @@ class AyanaVoiceService : Service() {
         section: String
     ): JSONObject {
 
-        val action =
-            when (section) {
-
-                "wifi" ->
-                    Settings
-                        .ACTION_WIFI_SETTINGS
-
-                "bluetooth" ->
-                    Settings
-                        .ACTION_BLUETOOTH_SETTINGS
-
-                "sound" ->
-                    Settings
-                        .ACTION_SOUND_SETTINGS
-
-                "display" ->
-                    Settings
-                        .ACTION_DISPLAY_SETTINGS
-
-                "apps" ->
-                    Settings
-                        .ACTION_MANAGE_APPLICATIONS_SETTINGS
-
-                "accessibility" ->
-                    Settings
-                        .ACTION_ACCESSIBILITY_SETTINGS
-
-                "location" ->
-                    Settings
-                        .ACTION_LOCATION_SOURCE_SETTINGS
-
-                "security" ->
-                    Settings
-                        .ACTION_SECURITY_SETTINGS
-
-                "date_time" ->
-                    Settings
-                        .ACTION_DATE_SETTINGS
-
-                "battery" ->
-                    Settings
-                        .ACTION_BATTERY_SAVER_SETTINGS
-
-                "storage" ->
-                    Settings
-                        .ACTION_INTERNAL_STORAGE_SETTINGS
-
-                "notifications" ->
-                    Settings
-                        .ACTION_ALL_APPS_NOTIFICATION_SETTINGS
-
-                "data_usage" ->
-                    Settings
-                        .ACTION_DATA_USAGE_SETTINGS
-
-                "vpn" ->
-                    Settings
-                        .ACTION_VPN_SETTINGS
-
-                "nfc" ->
-                    Settings
-                        .ACTION_NFC_SETTINGS
-
-                "language" ->
-                    Settings
-                        .ACTION_LOCALE_SETTINGS
-
-                "keyboard" ->
-                    Settings
-                        .ACTION_INPUT_METHOD_SETTINGS
-
-                "default_apps" ->
-                    Settings
-                        .ACTION_MANAGE_DEFAULT_APPS_SETTINGS
-
-                "developer_options" ->
-                    Settings
-                        .ACTION_APPLICATION_DEVELOPMENT_SETTINGS
-
-                "device_info" ->
-                    Settings
-                        .ACTION_DEVICE_INFO_SETTINGS
-
-                "privacy" ->
-                    if (
-                        Build.VERSION.SDK_INT >=
-                        Build.VERSION_CODES.Q
-                    ) {
-                        Settings
-                            .ACTION_PRIVACY_SETTINGS
-                    } else {
-                        Settings
-                            .ACTION_SECURITY_SETTINGS
-                    }
-
-                "battery_optimization" ->
-                    Settings
-                        .ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS
-
-                else ->
-                    Settings
-                        .ACTION_SETTINGS
-            }
-
-        return try {
-
-            startActivity(
-                Intent(
-                    action
-                ).apply {
-
-                    addFlags(
-                        Intent.FLAG_ACTIVITY_NEW_TASK
-                    )
-                }
-            )
-
-            toolResult(
-                true,
-                "Открыт раздел настроек: ${
-                    settingsSectionDisplayName(
+        val result =
+            try {
+                systemSettingsNavigator
+                    .open(
                         section
                     )
-                }"
-            )
-                .put(
-                    "section",
-                    section
-                )
-
-        } catch (
-            error: Exception
-        ) {
-
-            try {
-
-                startActivity(
-                    Intent(
-                        Settings.ACTION_SETTINGS
-                    ).apply {
-
-                        addFlags(
-                            Intent.FLAG_ACTIVITY_NEW_TASK
-                        )
-                    }
-                )
-
-                toolResult(
-                    true,
-                    "Точный раздел недоступен; открыты общие настройки"
-                )
-
-            } catch (_: Exception) {
-
+            } catch (error: Exception) {
                 toolResult(
                     false,
-                    "Не удалось открыть настройки: " +
-                        (
-                            error.message
-                                ?: "неизвестная ошибка"
-                            )
+                    "Не удалось открыть и подтвердить системный раздел настроек: " +
+                        (error.message ?: error.javaClass.simpleName)
                 )
+                    .put(
+                        "verified",
+                        false
+                    )
+                    .put(
+                        "terminal_status",
+                        "ERROR"
+                    )
+                    .put(
+                        "section",
+                        section
+                    )
             }
-        }
+
+        commandHistoryStore.addEvent(
+            activeCommandHistoryId,
+            state =
+                if (
+                    result.optBoolean(
+                        "success",
+                        false
+                    ) &&
+                    result.optBoolean(
+                        "verified",
+                        false
+                    )
+                ) {
+                    "settings_section_verified"
+                } else {
+                    "settings_section_verify_failed"
+                },
+            message =
+                result.optString(
+                    "reason",
+                    "settings_navigation"
+                ),
+            details =
+                (
+                    "requested=${section.take(80)}; " +
+                        "canonical=${result.optString("canonical_section").take(80)}; " +
+                        "owner=${result.optBoolean("settings_owner_verified", false)}; " +
+                        "mode=${result.optString("verification_mode").take(120)}; " +
+                        "marker=${result.optString("matched_marker").take(120)}; " +
+                        "terminal=${result.optString("terminal_status").take(32)}"
+                    ).take(700)
+        )
+
+        return result
     }
 
     private fun settingsSectionDisplayName(
@@ -25765,6 +25699,9 @@ class AyanaVoiceService : Service() {
                 )
                 .trim()
         ) {
+            "connections" ->
+                "Подключения"
+
             "wifi" ->
                 "Wi‑Fi"
 
