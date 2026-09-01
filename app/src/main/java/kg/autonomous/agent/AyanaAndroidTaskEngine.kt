@@ -5,10 +5,15 @@ import org.json.JSONObject
 import java.util.Locale
 
 /**
- * AYANA Android Task Engine v5.3 — FOREGROUND PACKAGE TRUTH.
+ * AYANA Android Task Engine v5.4 — FOREGROUND + SETTINGS VERIFICATION TRUTH.
  *
- * v5.3 preserves the v5.2 deterministic plan/execution contract and adds one
- * generic foreground-verification rule for direct app launches:
+ * v5.4 preserves v5.3 exact foreground-package truth and adds a verified
+ * Settings-gateway handoff. open_settings can no longer succeed from Intent
+ * dispatch/screen-change alone: the gateway must prove the requested Settings
+ * section and com.android.settings ownership. A gateway-verified final section
+ * is accepted as factual progress even when AYANA's overlay keeps the generic
+ * screen fingerprint unchanged. v5.3 app-launch rules remain unchanged:
+ *
  * - AYANA overlay / sibling windows are never sufficient proof of the launched app;
  * - the exact resolved package must be proven by the primary/interaction context,
  *   an active/focused application window, or a fresh target-specific Accessibility
@@ -487,9 +492,22 @@ class AyanaAndroidTaskEngine(
                 .put("screen", screenBefore)
         }
 
+        val gatewayVerified = raw.optBoolean("verified", false)
+        val gatewayScreenChanged = raw.optBoolean("screen_changed", false)
+        val gatewayOwnerVerified = raw.optBoolean("settings_owner_verified", false)
+        val gatewaySettingsProof =
+            actionName == "open_settings" &&
+                gatewayVerified &&
+                gatewayOwnerVerified
+
+        // A verified Settings navigator already performed its own bounded
+        // acquisition + same-context section verification. Do not spend another
+        // full ready-screen timeout waiting for a generic fingerprint change that
+        // an overlay/split pane may legitimately hide. Other actions remain on
+        // the existing v5.3 wait contract.
         val screenAfter = awaitReadyScreen(
             screenBefore = screenBefore,
-            screenChangeRequired = screenChangeRequired,
+            screenChangeRequired = screenChangeRequired && !gatewaySettingsProof,
             expectedStep = step
         )
 
@@ -506,13 +524,27 @@ class AyanaAndroidTaskEngine(
             actionName = actionName
         )
 
-        // A fresh, exact target-package ownership/window event is factual Android
-        // transition evidence. This matters when AYANA's overlay remains visible
-        // and masks the primary snapshot fingerprint after a successful app launch.
-        val observedTransition = semanticChanged || packageProof.transitionObserved
+        // v5.4 SETTINGS HANDOFF. A Settings navigator may prove the exact final
+        // section from same-window semantic evidence even when the generic screen
+        // fingerprint remains unchanged under AYANA's overlay. This proof is only
+        // accepted for open_settings and only when the gateway also proved the
+        // factual com.android.settings owner. Other direct actions keep v5.3 truth.
+        val gatewayContractOk =
+            actionName != "open_settings" ||
+                gatewaySettingsProof
+
+        // A fresh exact target-package ownership/window event, a factual gateway
+        // screen-change proof, or a verified Settings final-state handoff counts
+        // as observable transition/final-state evidence. Mere dispatch never does.
+        val observedTransition =
+            semanticChanged ||
+                packageProof.transitionObserved ||
+                (gatewayVerified && gatewayScreenChanged) ||
+                gatewaySettingsProof
 
         val verified =
             accepted &&
+                gatewayContractOk &&
                 packageProof.verified &&
                 when {
                     expected != null && screenChangeRequired -> expected && observedTransition
@@ -526,7 +558,9 @@ class AyanaAndroidTaskEngine(
             .put("verified", verified)
             .put("action_accepted", accepted)
             .put("progress", observedTransition || (verified && !screenChangeRequired))
-            .put("screen_changed", semanticChanged)
+            .put("screen_changed", semanticChanged || (gatewayVerified && gatewayScreenChanged))
+            .put("gateway_verified", gatewayVerified)
+            .put("gateway_settings_proof", gatewaySettingsProof)
             .put("foreground_transition_observed", packageProof.transitionObserved)
             .put("package_verified", packageProof.verified)
             .put("package_verification_source", packageProof.source)
@@ -1018,6 +1052,14 @@ class AyanaAndroidTaskEngine(
                 ownerPackage = screenAfter.optString("foreground_owner_package"),
                 ownerAgeMs = screenAfter.optLong("foreground_owner_age_ms", -1L),
                 transitionObserved = false
+            )
+        }
+
+        if (actionName == "open_settings") {
+            return foregroundPackageProof(
+                expectedPackage = SETTINGS_PACKAGE,
+                screenBefore = screenBefore,
+                screenAfter = screenAfter
             )
         }
 
@@ -1593,6 +1635,7 @@ class AyanaAndroidTaskEngine(
     }
 
     companion object {
+        private const val SETTINGS_PACKAGE = "com.android.settings"
         private const val DEFAULT_MAX_ACTIONS = 8
         private const val HARD_MAX_ACTIONS = 10
         private const val MAX_NO_PROGRESS_STREAK = 2
