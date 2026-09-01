@@ -12,13 +12,17 @@ import org.json.JSONArray
 import org.json.JSONObject
 
 /**
- * AYANA Notification Listener v1.0 — LOCAL NOTIFICATION READ TRUTH.
+ * AYANA Notification Listener v1.2 — PRIVACY PROJECTION BEFORE TRANSPORT.
  *
- * Read-only device capability. It never opens Settings as a substitute for
- * reading notifications and never returns SUCCESS merely because notification
- * access settings exist. Recent notification text is stored locally in AYANA's
- * private SharedPreferences so "последние уведомления" can include notifications
- * that disappeared from the active shade after AYANA observed them.
+ * Preserves the local read-only notification capability and private recent cache.
+ * A caller must choose one of three transport projections:
+ * - app_names_only: app/package metadata only; notification extras are not read for live items;
+ * - titles: app + title only; body/sub-text are never transported;
+ * - full: ordinary data-minimised title/body snippets.
+ *
+ * Projection happens before the JSONObject result leaves this service helper, so
+ * restricted requests cannot leak notification bodies into VoiceService rendering,
+ * execution events, command History, or later presentation layers.
  */
 class AyanaNotificationListenerService : NotificationListenerService() {
 
@@ -104,6 +108,10 @@ class AyanaNotificationListenerService : NotificationListenerService() {
         private const val KEY_HISTORY = "recent_notifications"
         private const val MAX_STORED = 40
 
+        const val PROJECTION_APP_NAMES_ONLY = "app_names_only"
+        const val PROJECTION_TITLES = "titles"
+        const val PROJECTION_FULL = "full"
+
         fun isAccessGranted(context: Context): Boolean {
             return try {
                 val component =
@@ -161,7 +169,8 @@ class AyanaNotificationListenerService : NotificationListenerService() {
         fun readRecent(
             context: Context,
             limit: Int = 8,
-            appFilter: String? = null
+            appFilter: String? = null,
+            projection: String = PROJECTION_FULL
         ): JSONObject {
             if (!isAccessGranted(context)) {
                 return JSONObject()
@@ -173,6 +182,9 @@ class AyanaNotificationListenerService : NotificationListenerService() {
                         "У AYANA нет доступа к чтению уведомлений. Разрешите доступ к уведомлениям для AYANA AI, затем повторите команду."
                     )
             }
+
+            val normalizedProjection =
+                normalizeProjection(projection)
 
             requestRebindIfNeeded(context)
 
@@ -208,7 +220,12 @@ class AyanaNotificationListenerService : NotificationListenerService() {
                         ?.sortedByDescending { it.postTime }
                         ?.forEach { sbn ->
                             if (sbn.packageName != context.packageName) {
-                                val item = snapshotNotification(context, sbn)
+                                val item =
+                                    snapshotNotificationForProjection(
+                                        context = context,
+                                        sbn = sbn,
+                                        projection = normalizedProjection
+                                    )
                                 collected[item.optString("key")] = item
                             }
                         }
@@ -224,10 +241,15 @@ class AyanaNotificationListenerService : NotificationListenerService() {
             }
 
             for (index in 0 until stored.length()) {
-                val item = stored.optJSONObject(index) ?: continue
-                val key = item.optString("key")
+                val source = stored.optJSONObject(index) ?: continue
+                val projected =
+                    projectStoredNotification(
+                        source = source,
+                        projection = normalizedProjection
+                    )
+                val key = projected.optString("key")
                 if (key.isNotBlank() && !collected.containsKey(key)) {
-                    collected[key] = item
+                    collected[key] = projected
                 }
             }
 
@@ -238,50 +260,96 @@ class AyanaNotificationListenerService : NotificationListenerService() {
                     ?.replace('ё', 'е')
                     ?.takeIf { it.isNotBlank() }
 
-            val selected = collected.values
-                .asSequence()
-                .filter { item ->
-                    val title = item.optString("title").trim()
-                    val text = item.optString("text").trim()
-                    val subText = item.optString("sub_text").trim()
+            val filtered =
+                collected.values
+                    .asSequence()
+                    .filter { item ->
+                        val app = item.optString("app").trim()
+                        val packageName = item.optString("package").trim()
 
-                    // Do not surface icon-only/system bookkeeping entries as an
-                    // empty numbered line. They remain in private history and can
-                    // become useful if Android later posts text for the same key.
-                    if (title.isBlank() && text.isBlank() && subText.isBlank()) {
-                        return@filter false
+                        if (app.isBlank() && packageName.isBlank()) {
+                            return@filter false
+                        }
+
+                        if (
+                            normalizedProjection == PROJECTION_FULL
+                        ) {
+                            val title = item.optString("title").trim()
+                            val text = item.optString("text").trim()
+                            val subText = item.optString("sub_text").trim()
+
+                            // Preserve v1.1 behavior for full reads: suppress
+                            // icon-only/system bookkeeping entries.
+                            if (
+                                title.isBlank() &&
+                                text.isBlank() &&
+                                subText.isBlank()
+                            ) {
+                                return@filter false
+                            }
+                        }
+
+                        if (normalizedFilter == null) {
+                            return@filter true
+                        }
+
+                        // An app/source filter is resolved only against app identity.
+                        // Never inspect notification title/body merely to decide
+                        // whether an app-filtered query matches.
+                        val haystack =
+                            listOf(
+                                app,
+                                packageName
+                            )
+                                .joinToString(" ")
+                                .lowercase()
+                                .replace('ё', 'е')
+
+                        haystack.contains(normalizedFilter)
                     }
+                    .sortedByDescending { it.optLong("post_time", 0L) }
 
-                    if (normalizedFilter == null) {
-                        return@filter true
-                    }
+            val boundedLimit =
+                limit.coerceIn(1, 20)
 
-                    val haystack =
-                        listOf(
-                            item.optString("app"),
-                            item.optString("package"),
-                            title
-                        )
-                            .joinToString(" ")
-                            .lowercase()
-                            .replace('ё', 'е')
-
-                    haystack.contains(normalizedFilter)
+            val selected =
+                if (
+                    normalizedProjection == PROJECTION_APP_NAMES_ONLY
+                ) {
+                    // Projection semantics are app-centric, not notification-centric.
+                    // Return each source application at most once, most recent first.
+                    filtered
+                        .distinctBy { item ->
+                            item.optString("package")
+                                .trim()
+                                .lowercase()
+                                .ifBlank {
+                                    item.optString("app")
+                                        .trim()
+                                        .lowercase()
+                                }
+                        }
+                        .take(boundedLimit)
+                        .map { source ->
+                            JSONObject()
+                                .put("key", source.optString("key"))
+                                .put("package", source.optString("package"))
+                                .put("app", source.optString("app"))
+                                .put("post_time", source.optLong("post_time", 0L))
+                                .put("ongoing", source.optBoolean("ongoing", false))
+                        }
+                        .toList()
+                } else {
+                    filtered
+                        .take(boundedLimit)
+                        .map { source ->
+                            projectStoredNotification(
+                                source = source,
+                                projection = normalizedProjection
+                            )
+                        }
+                        .toList()
                 }
-                .sortedByDescending { it.optLong("post_time", 0L) }
-                .take(limit.coerceIn(1, 20))
-                .map { source ->
-                    // Data-minimised result for command/history transport. The
-                    // listener's private cache may hold more text, but ordinary
-                    // "show notifications" never injects a whole email body into
-                    // command history.
-                    JSONObject(source.toString()).apply {
-                        put("title", optString("title").take(180))
-                        put("text", optString("text").replace(Regex("\\s+"), " ").trim().take(280))
-                        put("sub_text", optString("sub_text").take(120))
-                    }
-                }
-                .toList()
 
             if (live == null && selected.isEmpty()) {
                 return JSONObject()
@@ -300,16 +368,156 @@ class AyanaNotificationListenerService : NotificationListenerService() {
             return JSONObject()
                 .put("success", true)
                 .put("listener_connected", live != null)
+                .put("projection", normalizedProjection)
                 .put("count", selected.size)
                 .put("notifications", array)
                 .put(
                     "message",
                     if (selected.isEmpty()) {
-                        "Последних уведомлений, доступных AYANA, сейчас нет."
+                        if (normalizedProjection == PROJECTION_APP_NAMES_ONLY) {
+                            "Приложений с последними уведомлениями, доступными AYANA, сейчас нет."
+                        } else {
+                            "Последних уведомлений, доступных AYANA, сейчас нет."
+                        }
                     } else {
-                        "Получены последние уведомления: ${selected.size}."
+                        if (normalizedProjection == PROJECTION_APP_NAMES_ONLY) {
+                            "Получены приложения с последними уведомлениями: ${selected.size}."
+                        } else {
+                            "Получены последние уведомления: ${selected.size}."
+                        }
                     }
                 )
+        }
+
+        private fun normalizeProjection(
+            value: String
+        ): String =
+            when (
+                value
+                    .trim()
+                    .lowercase()
+            ) {
+                PROJECTION_APP_NAMES_ONLY ->
+                    PROJECTION_APP_NAMES_ONLY
+
+                PROJECTION_TITLES ->
+                    PROJECTION_TITLES
+
+                else ->
+                    PROJECTION_FULL
+            }
+
+        private fun snapshotNotificationForProjection(
+            context: Context,
+            sbn: StatusBarNotification,
+            projection: String
+        ): JSONObject {
+            return when (projection) {
+                PROJECTION_APP_NAMES_ONLY ->
+                    notificationMetadata(
+                        context = context,
+                        sbn = sbn
+                    )
+
+                PROJECTION_TITLES -> {
+                    val metadata =
+                        notificationMetadata(
+                            context = context,
+                            sbn = sbn
+                        )
+                    val title =
+                        sbn.notification
+                            .extras
+                            ?.getCharSequence(Notification.EXTRA_TITLE)
+                            ?.toString()
+                            ?.trim()
+                            .orEmpty()
+
+                    metadata.put(
+                        "title",
+                        title.take(180)
+                    )
+                }
+
+                else ->
+                    projectStoredNotification(
+                        source = snapshotNotification(context, sbn),
+                        projection = PROJECTION_FULL
+                    )
+            }
+        }
+
+        private fun projectStoredNotification(
+            source: JSONObject,
+            projection: String
+        ): JSONObject {
+            val output =
+                JSONObject()
+                    .put("key", source.optString("key"))
+                    .put("package", source.optString("package"))
+                    .put("app", source.optString("app"))
+                    .put("post_time", source.optLong("post_time", 0L))
+                    .put("ongoing", source.optBoolean("ongoing", false))
+
+            when (projection) {
+                PROJECTION_APP_NAMES_ONLY ->
+                    Unit
+
+                PROJECTION_TITLES ->
+                    output.put(
+                        "title",
+                        source.optString("title")
+                            .replace(Regex("\\s+"), " ")
+                            .trim()
+                            .take(180)
+                    )
+
+                else -> {
+                    output.put(
+                        "title",
+                        source.optString("title")
+                            .replace(Regex("\\s+"), " ")
+                            .trim()
+                            .take(180)
+                    )
+                    output.put(
+                        "text",
+                        source.optString("text")
+                            .replace(Regex("\\s+"), " ")
+                            .trim()
+                            .take(280)
+                    )
+                    output.put(
+                        "sub_text",
+                        source.optString("sub_text")
+                            .replace(Regex("\\s+"), " ")
+                            .trim()
+                            .take(120)
+                    )
+                }
+            }
+
+            return output
+        }
+
+        private fun notificationMetadata(
+            context: Context,
+            sbn: StatusBarNotification
+        ): JSONObject {
+            val appLabel = try {
+                val pm = context.packageManager
+                val info = pm.getApplicationInfo(sbn.packageName, 0)
+                pm.getApplicationLabel(info).toString()
+            } catch (_: Exception) {
+                sbn.packageName
+            }
+
+            return JSONObject()
+                .put("key", sbn.key.orEmpty())
+                .put("package", sbn.packageName.orEmpty())
+                .put("app", appLabel)
+                .put("post_time", sbn.postTime)
+                .put("ongoing", sbn.isOngoing)
         }
 
         private fun snapshotNotification(
