@@ -20,11 +20,19 @@ import kotlin.math.min
 import kotlin.math.sin
 
 /**
- * AYANA Core Visualizer v4.0 — DOMINANT ENERGY CORE.
+ * AYANA Core Visualizer v4.1 — SIX-STATE SIGNATURE PALETTE.
  *
  * Visual-only full replacement for the main AYANA visualization window.
  *
  * Device target: Samsung Galaxy Tab S8 landscape.
+ *
+ * v4.1 state palette is fixed 1:1 to the approved six-state specification:
+ * Ожидание      #33E7FF / #00BFD6 / #8AF5FF
+ * Распознавание #18F0FF / #2E8BFF / #A6E8FF
+ * Думаю         #4F7CFF / #8A4DFF / #C2B0FF
+ * Выполняю      #20E6C8 / #17D97A / #9AF8D8
+ * Отвечаю       #6A6CFF / #B04CFF / #D9B8FF
+ * Стоп          #FF4D8D / #FF6A2A / #FFB0C8
  *
  * v4 direction:
  * - large circular core that visually dominates the window;
@@ -1598,12 +1606,12 @@ class AyanaCoreVisualizer(
 
         val labels =
             arrayOf(
-                "Слушаю",
-                "Распознаю",
+                "Ожидание",
+                "Распознавание",
                 "Думаю",
                 "Выполняю",
-                "Проверяю",
-                "Отвечаю"
+                "Отвечаю",
+                "Стоп"
             )
 
         val glyphs =
@@ -1612,8 +1620,8 @@ class AyanaCoreVisualizer(
                 "≋",
                 "◈",
                 "ϟ",
-                "✓",
-                "•••"
+                "•••",
+                "■"
             )
 
         val active =
@@ -1682,7 +1690,7 @@ class AyanaCoreVisualizer(
                     active
 
             val completed =
-                active >= 0 &&
+                active in 1..4 &&
                     index <
                     active
 
@@ -1847,16 +1855,17 @@ class AyanaCoreVisualizer(
             AyanaVoiceService.STATE_EXECUTING ->
                 3
 
-            AyanaVoiceService.STATE_SUCCESS,
-            AyanaVoiceService.STATE_ERROR ->
+            AyanaVoiceService.STATE_SPEAKING,
+            AyanaVoiceService.STATE_TEXT,
+            AyanaVoiceService.STATE_SUCCESS ->
                 4
 
-            AyanaVoiceService.STATE_SPEAKING,
-            AyanaVoiceService.STATE_TEXT ->
+            AyanaVoiceService.STATE_CANCELLED,
+            AyanaVoiceService.STATE_ERROR ->
                 5
 
             else ->
-                -1
+                0
         }
     }
 
@@ -2089,128 +2098,182 @@ class AyanaCoreVisualizer(
         return when (
             state
         ) {
+            // ОЖИДАНИЕ — calm cyan
+            AyanaVoiceService.STATE_LISTENING ->
+                Palette(
+                    primary =
+                        Color.parseColor(
+                            "#33E7FF"
+                        ),
+                    secondary =
+                        Color.parseColor(
+                            "#00BFD6"
+                        ),
+                    accent =
+                        Color.parseColor(
+                            "#8AF5FF"
+                        ),
+                    white =
+                        Color.parseColor(
+                            "#8AF5FF"
+                        ),
+                    deep =
+                        Color.parseColor(
+                            "#041317"
+                        )
+                )
+
+            // РАСПОЗНАВАНИЕ — cyan -> electric blue
+            AyanaVoiceService.STATE_COMMAND ->
+                Palette(
+                    primary =
+                        Color.parseColor(
+                            "#18F0FF"
+                        ),
+                    secondary =
+                        Color.parseColor(
+                            "#2E8BFF"
+                        ),
+                    accent =
+                        Color.parseColor(
+                            "#A6E8FF"
+                        ),
+                    white =
+                        Color.parseColor(
+                            "#A6E8FF"
+                        ),
+                    deep =
+                        Color.parseColor(
+                            "#04111D"
+                        )
+                )
+
+            // ДУМАЮ — deep blue -> violet
             AyanaVoiceService.STATE_THINKING ->
                 Palette(
                     primary =
                         Color.parseColor(
-                            "#55CAFF"
+                            "#4F7CFF"
                         ),
                     secondary =
                         Color.parseColor(
-                            "#536FFF"
+                            "#8A4DFF"
                         ),
                     accent =
                         Color.parseColor(
-                            "#9F55FF"
+                            "#C2B0FF"
                         ),
                     white =
                         Color.parseColor(
-                            "#F8FCFF"
+                            "#C2B0FF"
                         ),
                     deep =
                         Color.parseColor(
-                            "#07101A"
+                            "#0A0820"
                         )
                 )
 
+            // ВЫПОЛНЯЮ — technological teal -> green
             AyanaVoiceService.STATE_EXECUTING ->
                 Palette(
                     primary =
                         Color.parseColor(
-                            "#35F1D1"
+                            "#20E6C8"
                         ),
                     secondary =
                         Color.parseColor(
-                            "#209EFF"
+                            "#17D97A"
                         ),
                     accent =
                         Color.parseColor(
-                            "#6B63FF"
+                            "#9AF8D8"
                         ),
                     white =
                         Color.parseColor(
-                            "#F3FFFC"
+                            "#9AF8D8"
                         ),
                     deep =
                         Color.parseColor(
-                            "#061815"
+                            "#041812"
                         )
                 )
 
+            // ОТВЕЧАЮ — blue-violet -> magenta accent
+            AyanaVoiceService.STATE_SPEAKING,
+            AyanaVoiceService.STATE_TEXT,
             AyanaVoiceService.STATE_SUCCESS ->
                 Palette(
                     primary =
                         Color.parseColor(
-                            "#4DE6B0"
+                            "#6A6CFF"
                         ),
                     secondary =
                         Color.parseColor(
-                            "#33C6D1"
+                            "#B04CFF"
                         ),
                     accent =
                         Color.parseColor(
-                            "#66DFA4"
+                            "#D9B8FF"
                         ),
                     white =
                         Color.parseColor(
-                            "#F5FFF9"
+                            "#D9B8FF"
                         ),
                     deep =
                         Color.parseColor(
-                            "#061812"
+                            "#10071E"
                         )
                 )
 
+            // СТОП — magenta -> red-orange warning
+            AyanaVoiceService.STATE_CANCELLED,
             AyanaVoiceService.STATE_ERROR ->
                 Palette(
                     primary =
                         Color.parseColor(
-                            "#FF6686"
+                            "#FF4D8D"
                         ),
                     secondary =
                         Color.parseColor(
-                            "#DB4670"
+                            "#FF6A2A"
                         ),
                     accent =
                         Color.parseColor(
-                            "#F15BA6"
+                            "#FFB0C8"
                         ),
                     white =
                         Color.parseColor(
-                            "#FFF5F8"
+                            "#FFB0C8"
                         ),
                     deep =
                         Color.parseColor(
-                            "#23070F"
-                        )
-                )
-
-            AyanaVoiceService.STATE_CANCELLED ->
-                Palette(
-                    primary =
-                        Color.parseColor(
-                            "#FFD169"
-                        ),
-                    secondary =
-                        Color.parseColor(
-                            "#EDA13A"
-                        ),
-                    accent =
-                        Color.parseColor(
-                            "#FFB267"
-                        ),
-                    white =
-                        Color.parseColor(
-                            "#FFFCEE"
-                        ),
-                    deep =
-                        Color.parseColor(
-                            "#241707"
+                            "#22060B"
                         )
                 )
 
             else ->
-                Palette.default()
+                Palette(
+                    primary =
+                        Color.parseColor(
+                            "#33E7FF"
+                        ),
+                    secondary =
+                        Color.parseColor(
+                            "#00BFD6"
+                        ),
+                    accent =
+                        Color.parseColor(
+                            "#8AF5FF"
+                        ),
+                    white =
+                        Color.parseColor(
+                            "#8AF5FF"
+                        ),
+                    deep =
+                        Color.parseColor(
+                            "#041317"
+                        )
+                )
         }
     }
 
@@ -2307,23 +2370,23 @@ class AyanaCoreVisualizer(
                 return Palette(
                     primary =
                         Color.parseColor(
-                            "#27E4FF"
+                            "#33E7FF"
                         ),
                     secondary =
                         Color.parseColor(
-                            "#1E8DFF"
+                            "#00BFD6"
                         ),
                     accent =
                         Color.parseColor(
-                            "#9455FF"
+                            "#8AF5FF"
                         ),
                     white =
                         Color.parseColor(
-                            "#F5FDFF"
+                            "#8AF5FF"
                         ),
                     deep =
                         Color.parseColor(
-                            "#06101A"
+                            "#041317"
                         )
                 )
             }
