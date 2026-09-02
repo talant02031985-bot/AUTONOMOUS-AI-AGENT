@@ -8,7 +8,7 @@ import org.json.JSONObject
 import java.util.Locale
 
 /**
- * AYANA System Settings Navigator v1.1 — SETTINGS ROUTING + MASTER-PANE RECOVERY.
+ * AYANA System Settings Navigator v1.1.1 — SETTINGS ROUTING + MASTER-PANE BUILD FIX.
  *
  * v1.1 preserves v1.0 terminal truth and adds the missing Samsung/large-screen
  * recovery layer:
@@ -2052,7 +2052,7 @@ class AyanaSystemSettingsNavigator(
                 Route(
                     section = section,
                     primaryAction =
-                        Settings.ACTION_NOTIFICATION_SETTINGS,
+                        Settings.ACTION_ALL_APPS_NOTIFICATION_SETTINGS,
                     markers =
                         listOf(
                             "Уведомления",
