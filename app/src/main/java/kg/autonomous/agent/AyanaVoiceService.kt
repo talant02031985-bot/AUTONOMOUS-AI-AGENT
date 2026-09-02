@@ -60,6 +60,13 @@ import kotlin.math.abs
 
 class AyanaVoiceService : Service() {
 
+    // AYANA v12.11.5 SETTINGS ROUTING PRECEDENCE + DEVICE CARE.
+    // Preserves v12.11.4 Settings truth/OEM recovery while closing two routing gaps:
+    // Russian genitive «подключений» now maps to Connections, and Samsung
+    // «Обслуживание устройства» is treated as a system Settings destination rather
+    // than an application launch. Generic lifecycle/open-app routing is explicitly
+    // prevented from owning Device Care phrases; terminal SUCCESS still belongs to
+    // AyanaSystemSettingsNavigator verification, never to Intent dispatch alone.
     // AYANA v12.11.4 SYSTEM SETTINGS TRUTH + OEM RECOVERY.
     // Top-level Settings navigation now delegates to AyanaSystemSettingsNavigator:
     // Intent dispatch alone is never SUCCESS; Battery means Battery overview (not
@@ -6952,6 +6959,7 @@ class AyanaVoiceService : Service() {
             hasAny(
                 "подключения",
                 "подключение",
+                "подключений",
                 "connections",
                 "сеть и интернет",
                 "сети и интернет",
@@ -6959,6 +6967,15 @@ class AyanaVoiceService : Service() {
                 "network & internet"
             ) ->
                 "connections"
+
+            hasAny(
+                "обслуживание устройства",
+                "обслуживания устройства",
+                "уход за устройством",
+                "battery and device care",
+                "device care"
+            ) ->
+                "device_care"
 
             (
                 (c.contains("оптимизац") && c.contains("батар")) ||
@@ -25732,6 +25749,9 @@ class AyanaVoiceService : Service() {
             "battery" ->
                 "Батарея"
 
+            "device_care" ->
+                "Обслуживание устройства"
+
             "storage" ->
                 "Хранилище"
 
@@ -29691,6 +29711,9 @@ class AyanaVoiceService : Service() {
                 "разреш",
                 "информац",
                 "батаре",
+                "обслужив",
+                "уход за устрой",
+                "device care",
                 "хранилищ",
                 "мобильн",
                 "поиск",
