@@ -60,6 +60,10 @@ import kotlin.math.abs
 
 class AyanaVoiceService : Service() {
 
+    // AYANA v12.11.6 MULTI-STEP ROUTING INTEGRITY.
+    // A conjunction inside a single Android Settings destination (for example
+    // «дата и время») no longer forces an Agent Core/Planner round-trip.
+    // Real multi-step goals still require explicit sequencing or two action verbs.
     // AYANA v12.11.5 SETTINGS ROUTING PRECEDENCE + DEVICE CARE.
     // Preserves v12.11.4 Settings truth/OEM recovery while closing two routing gaps:
     // Russian genitive «подключений» now maps to Connections, and Samsung
@@ -7149,9 +7153,23 @@ class AyanaVoiceService : Service() {
         command: String
     ): Boolean {
 
-        val connectors =
+        val c =
+            command
+                .lowercase(Locale.ROOT)
+                .replace('ё', 'е')
+                .replace(
+                    Regex("\\s+"),
+                    " "
+                )
+                .trim()
+
+        // v12.11.6 ROUTING INTEGRITY.
+        // A bare conjunction is not proof of a multi-step goal:
+        // «дата и время», «звуки и вибрация», «сеть и интернет» are names of
+        // single Settings destinations. Multi-step ownership requires either
+        // an explicit sequencing connector or at least two actual action verbs.
+        val strongSequenceConnectors =
             listOf(
-                " и ",
                 " потом ",
                 " затем ",
                 " после этого ",
@@ -7159,33 +7177,59 @@ class AyanaVoiceService : Service() {
             )
 
         if (
-            connectors.any {
-                command.contains(it)
+            strongSequenceConnectors.any {
+                c.contains(it)
             }
         ) {
             return true
         }
 
-        val actionWords =
-            listOf(
-                "открой",
-                "запусти",
-                "включи",
-                "найди",
-                "поищи",
-                "нажми",
-                "выбери",
-                "зайди",
-                "перейди",
-                "остановись"
+        val actionPattern =
+            Regex(
+                """(?:^|\s)(?:открой|открыть|запусти|запустить|включи|включить|найди|найти|поищи|поискать|нажми|нажать|выбери|выбрать|зайди|зайти|перейди|перейти|остановись|остановиться)(?=\s|$)"""
             )
 
-        val actionCount =
-            actionWords.count {
-                command.contains(it)
-            }
+        val actionMatches =
+            actionPattern
+                .findAll(c)
+                .count()
 
-        return actionCount >= 2
+        if (actionMatches >= 2) {
+            return true
+        }
+
+        // «и» counts as a step separator only when there is a real action on
+        // both sides. This keeps ordinary compound Settings labels local while
+        // preserving goals such as «открой YouTube и найди музыку».
+        val conjunctionIndex =
+            c.indexOf(" и ")
+
+        if (conjunctionIndex > 0) {
+            val left =
+                c.substring(
+                    0,
+                    conjunctionIndex
+                )
+            val right =
+                c.substring(
+                    conjunctionIndex + 3
+                )
+
+            val leftHasAction =
+                actionPattern.containsMatchIn(left)
+
+            val rightHasAction =
+                actionPattern.containsMatchIn(right)
+
+            if (
+                leftHasAction &&
+                rightHasAction
+            ) {
+                return true
+            }
+        }
+
+        return false
     }
 
     private fun isAppLaunchCommand(
