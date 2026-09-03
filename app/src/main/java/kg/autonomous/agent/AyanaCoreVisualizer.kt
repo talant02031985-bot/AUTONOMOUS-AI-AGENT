@@ -6,13 +6,16 @@ import android.graphics.Color
 import android.graphics.LinearGradient
 import android.graphics.Paint
 import android.graphics.Path
-import android.graphics.PathMeasure
 import android.graphics.RadialGradient
 import android.graphics.RectF
 import android.graphics.Shader
 import android.graphics.Typeface
 import android.os.SystemClock
+import android.view.Gravity
 import android.view.View
+import android.view.ViewGroup
+import android.widget.LinearLayout
+import android.widget.TextView
 import kotlin.math.PI
 import kotlin.math.abs
 import kotlin.math.cos
@@ -20,37 +23,33 @@ import kotlin.math.min
 import kotlin.math.sin
 
 /**
- * AYANA Core Visualizer v7.0 — COGNITIVE MATRIX.
+ * AYANA Core Visualizer v8.0 — AGENT OPERATIONS CORE.
  *
- * New direction after rejecting static-reference and "glowing orb" approaches.
+ * Strong redesign after v7.0 device rejection.
  *
- * Design:
- * - no bitmap / PNG dependency;
- * - no giant decorative sphere;
- * - no AYANA wordmark inside the visualizer;
- * - serious agent-oriented "perception -> reasoning -> action" data flow;
- * - central cognitive matrix built from thin technical geometry;
- * - animated data lanes, packets, scan field, decision spine and neural nodes;
- * - six factual runtime states with six distinct approved palettes;
- * - bottom state rail:
+ * Visual direction:
+ * - bright professional operations HUD, not a decorative orb;
+ * - large central decision core;
+ * - perception lanes enter from the left;
+ * - action/result lanes leave to the right;
+ * - visible rotating segmented rings;
+ * - live inference lattice and routing packets;
+ * - high-contrast scan / decision spine;
+ * - six factual runtime states:
  *   Ожидание / Распознавание / Думаю / Выполняю / Отвечаю / Стоп.
  *
- * State palette:
- * - Ожидание      cyan
- * - Распознавание electric blue
- * - Думаю         indigo/violet
- * - Выполняю      teal/green
- * - Отвечаю       magenta/violet
- * - Стоп          red/orange
+ * Device layout hardening:
+ * - the current MainActivity v7.8 gives too little width to the left status block
+ *   for long state names such as «Распознаю команду»;
+ * - this component performs one bounded host-layout normalization on attach:
+ *   it gives the status column a little more weight and caps the large state
+ *   title to 2 lines / 31sp;
+ * - no navigation, command, accessibility, ORB or service behavior is changed.
  *
- * Motion is synthetic/state-reactive UI animation. It is not presented as
- * measured microphone amplitude or model telemetry.
+ * No bitmap/PNG resources are used.
  *
  * Public integration contract remains unchanged:
  *   AyanaCoreVisualizer(Context)
- *
- * No ORB, Accessibility, routing, TTS, microphone capture or command execution
- * logic is changed here.
  */
 class AyanaCoreVisualizer(
     context: Context
@@ -59,59 +58,42 @@ class AyanaCoreVisualizer(
     private val density =
         resources.displayMetrics.density
 
-    private val fillPaint =
+    private val fill =
         Paint(Paint.ANTI_ALIAS_FLAG)
 
-    private val strokePaint =
+    private val stroke =
         Paint(Paint.ANTI_ALIAS_FLAG).apply {
             style = Paint.Style.STROKE
             strokeCap = Paint.Cap.ROUND
             strokeJoin = Paint.Join.ROUND
         }
 
-    private val glowPaint =
+    private val glow =
         Paint(Paint.ANTI_ALIAS_FLAG).apply {
             style = Paint.Style.STROKE
             strokeCap = Paint.Cap.ROUND
             strokeJoin = Paint.Join.ROUND
         }
 
-    private val textPaint =
+    private val text =
         Paint(Paint.ANTI_ALIAS_FLAG).apply {
             textAlign = Paint.Align.CENTER
-            typeface =
-                Typeface.create(
-                    Typeface.DEFAULT,
-                    Typeface.NORMAL
-                )
         }
 
-    private val dataPath =
+    private val path =
         Path()
 
     private val finePath =
         Path()
 
-    private val corePath =
-        Path()
-
-    private val ringRect =
+    private val ring =
         RectF()
-
-    private val pathMeasure =
-        PathMeasure()
-
-    private val packetPos =
-        FloatArray(2)
-
-    private val packetTan =
-        FloatArray(2)
 
     private var attached =
         false
 
-    private var palette =
-        Palette.waiting()
+    private var hostNormalized =
+        false
 
     init {
         importantForAccessibility =
@@ -127,7 +109,7 @@ class AyanaCoreVisualizer(
             false
 
         setBackgroundColor(
-            Color.BLACK
+            Color.TRANSPARENT
         )
     }
 
@@ -136,6 +118,10 @@ class AyanaCoreVisualizer(
 
         attached =
             true
+
+        post {
+            normalizeHostLayoutOnce()
+        }
 
         postInvalidateOnAnimation()
     }
@@ -159,1695 +145,1720 @@ class AyanaCoreVisualizer(
             return
         }
 
-        val runtimeState =
-            AyanaVoiceService.currentStatusState
+        val state =
+            stateIndex(
+                AyanaVoiceService.currentStatusState
+            )
 
-        val stateIndex =
-            stateIndex(runtimeState)
+        val p =
+            paletteFor(state)
 
-        val motion =
-            motionFor(stateIndex)
-
-        palette =
-            paletteFor(stateIndex)
+        val m =
+            motionFor(state)
 
         val now =
             SystemClock.uptimeMillis()
 
+        val w =
+            width.toFloat()
+
+        val h =
+            height.toFloat()
+
         val compact =
-            height <
+            h <
                 dp(180f)
 
-        val stageHeight =
+        val railHeight =
             if (compact) {
                 0f
             } else {
                 min(
-                    dp(54f),
-                    height *
-                        0.18f
+                    dp(48f),
+                    h *
+                        0.16f
                 )
             }
 
-        val contentBottom =
-            height -
-                stageHeight
+        // The rail overlays the bottom; it does not reduce the central core.
+        val railTop =
+            h -
+                railHeight
 
         val cx =
-            width *
+            w *
                 0.50f
 
         val cy =
-            contentBottom *
-                0.49f
+            h *
+                if (compact) {
+                    0.50f
+                } else {
+                    0.43f
+                }
 
-        val contentTop =
-            dp(8f)
-
-        val contentHeight =
-            (
-                contentBottom -
-                    contentTop
-                )
+        val coreRadius =
+            min(
+                w *
+                    0.265f,
+                h *
+                    0.39f
+            )
                 .coerceAtLeast(
-                    dp(60f)
+                    dp(46f)
                 )
 
-        val coreWidth =
-            min(
-                width *
-                    0.42f,
-                contentHeight *
-                    1.12f
-            )
-
-        val coreHeight =
-            min(
-                contentHeight *
-                    0.72f,
-                coreWidth *
-                    0.72f
-            )
-
-        drawTechnicalBackground(
+        drawPanelBackground(
             canvas = canvas,
             now = now,
-            contentBottom = contentBottom,
-            color = palette.primary,
-            motion = motion
+            p = p,
+            m = m,
+            railTop = railTop
         )
 
-        drawDataCorridors(
+        drawPerceptionInput(
             canvas = canvas,
             now = now,
             cx = cx,
             cy = cy,
-            coreWidth = coreWidth,
-            coreHeight = coreHeight,
-            contentBottom = contentBottom,
-            stateIndex = stateIndex,
-            motion = motion
+            radius = coreRadius,
+            p = p,
+            m = m,
+            state = state
         )
 
-        drawCognitiveMatrix(
+        drawCoreField(
             canvas = canvas,
             now = now,
             cx = cx,
             cy = cy,
-            coreWidth = coreWidth,
-            coreHeight = coreHeight,
-            stateIndex = stateIndex,
-            motion = motion
+            radius = coreRadius,
+            p = p,
+            m = m,
+            state = state
         )
 
-        drawDecisionSpine(
+        drawActionOutput(
             canvas = canvas,
             now = now,
             cx = cx,
             cy = cy,
-            coreWidth = coreWidth,
-            coreHeight = coreHeight,
-            stateIndex = stateIndex,
-            motion = motion
+            radius = coreRadius,
+            p = p,
+            m = m,
+            state = state
         )
 
-        drawFlowPackets(
+        drawPackets(
             canvas = canvas,
             now = now,
             cx = cx,
             cy = cy,
-            coreWidth = coreWidth,
-            coreHeight = coreHeight,
-            contentBottom = contentBottom,
-            stateIndex = stateIndex,
-            motion = motion
+            radius = coreRadius,
+            p = p,
+            m = m,
+            state = state
         )
 
-        drawStateSignature(
+        drawStateOverlay(
             canvas = canvas,
             now = now,
             cx = cx,
             cy = cy,
-            coreWidth = coreWidth,
-            coreHeight = coreHeight,
-            stateIndex = stateIndex,
-            motion = motion
+            radius = coreRadius,
+            p = p,
+            m = m,
+            state = state
         )
 
         if (
-            stageHeight >
+            railHeight >
             0f
         ) {
-            drawStageRail(
+            drawStateRail(
                 canvas = canvas,
-                activeIndex = stateIndex,
-                top = contentBottom,
-                height = stageHeight
+                top = railTop,
+                height = railHeight,
+                active = state
             )
         }
 
         if (attached) {
             postInvalidateDelayed(
-                motion.frameDelayMs
+                m.frameDelayMs
             )
         }
     }
 
-    private fun drawTechnicalBackground(
+    /**
+     * Device screenshot showed a genuine MainActivity layout issue:
+     * the status title can wrap to three lines while visualizer gets most weight.
+     *
+     * This compatibility normalization is intentionally narrow and bounded to
+     * the parent card that already owns this visualizer.
+     */
+    private fun normalizeHostLayoutOnce() {
+        if (
+            hostNormalized
+        ) {
+            return
+        }
+
+        hostNormalized =
+            true
+
+        val card =
+            parent as?
+                LinearLayout
+                ?: return
+
+        if (
+            card.orientation !=
+            LinearLayout.HORIZONTAL ||
+            card.childCount <
+            2
+        ) {
+            return
+        }
+
+        val copy =
+            card.getChildAt(0) as?
+                LinearLayout
+                ?: return
+
+        val ownParams =
+            layoutParams as?
+                LinearLayout.LayoutParams
+
+        val copyParams =
+            copy.layoutParams as?
+                LinearLayout.LayoutParams
+
+        if (
+            ownParams !=
+            null &&
+            copyParams !=
+            null
+        ) {
+            // v7.8 was approximately 0.58 : 1.78.
+            // v8 gives long factual state names enough room without collapsing
+            // the core into a small right-side box.
+            copyParams.weight =
+                0.78f
+
+            ownParams.weight =
+                1.58f
+
+            copy.layoutParams =
+                copyParams
+
+            layoutParams =
+                ownParams
+        }
+
+        // In v7.8 the large title is the second child of the copy column.
+        val title =
+            copy
+                .getChildAt(
+                    1
+                ) as?
+                TextView
+
+        title?.apply {
+            textSize =
+                31f
+
+            maxLines =
+                2
+
+            gravity =
+                Gravity.START or
+                    Gravity.CENTER_VERTICAL
+
+            setLineSpacing(
+                0f,
+                0.94f
+            )
+        }
+
+        card.requestLayout()
+    }
+
+    private fun drawPanelBackground(
         canvas: Canvas,
         now: Long,
-        contentBottom: Float,
-        color: Int,
-        motion: Motion
+        p: Palette,
+        m: Motion,
+        railTop: Float
     ) {
-        val w =
-            width.toFloat()
-
-        val h =
-            contentBottom
-
-        // Very restrained matrix grid.
-        strokePaint.shader =
-            null
-
-        strokePaint.color =
-            Color.parseColor(
-                "#132033"
-            )
-
-        strokePaint.alpha =
-            72
-
-        strokePaint.strokeWidth =
-            dp(0.45f)
-
-        val columns =
-            18
-
-        val rows =
-            9
-
-        for (
-            index in
-            1 until columns
-        ) {
-            val x =
-                w *
-                    index /
-                    columns.toFloat()
-
-            canvas.drawLine(
-                x,
-                h *
-                    0.08f,
-                x,
-                h *
-                    0.92f,
-                strokePaint
-            )
-        }
-
-        for (
-            index in
-            1 until rows
-        ) {
-            val y =
-                h *
-                    index /
-                    rows.toFloat()
-
-            canvas.drawLine(
-                w *
-                    0.03f,
-                y,
-                w *
-                    0.97f,
-                y,
-                strokePaint
-            )
-        }
-
-        // Moving vertical analysis scan.
-        val scanFraction =
-            (
-                (
-                    now %
-                        motion.scanPeriodMs
-                    ).toFloat() /
-                    motion.scanPeriodMs.toFloat()
-                )
-                .coerceIn(
-                    0f,
-                    1f
-                )
-
-        val scanX =
-            w *
-                (
-                    0.07f +
-                        0.86f *
-                            scanFraction
-                    )
-
-        val scanShader =
+        // Deep matte panel.
+        fill.shader =
             LinearGradient(
-                scanX -
-                    dp(28f),
                 0f,
-                scanX +
-                    dp(28f),
                 0f,
+                width.toFloat(),
+                height.toFloat(),
                 intArrayOf(
-                    Color.TRANSPARENT,
-                    withAlpha(
-                        color,
-                        18
+                    Color.parseColor(
+                        "#02050A"
                     ),
-                    withAlpha(
-                        color,
-                        72
+                    Color.parseColor(
+                        "#050B14"
                     ),
-                    withAlpha(
-                        color,
-                        18
-                    ),
-                    Color.TRANSPARENT
+                    Color.parseColor(
+                        "#02050A"
+                    )
                 ),
                 floatArrayOf(
                     0f,
-                    0.25f,
-                    0.50f,
-                    0.75f,
+                    0.52f,
                     1f
                 ),
                 Shader.TileMode.CLAMP
             )
 
-        fillPaint.shader =
-            scanShader
+        fill.alpha =
+            255
 
-        fillPaint.alpha =
-            motion.scanAlpha
+        canvas.drawRect(
+            0f,
+            0f,
+            width.toFloat(),
+            height.toFloat(),
+            fill
+        )
+
+        fill.shader =
+            null
+
+        // High-visibility technical grid.
+        stroke.shader =
+            null
+
+        stroke.color =
+            Color.parseColor(
+                "#1B2C42"
+            )
+
+        stroke.alpha =
+            118
+
+        stroke.strokeWidth =
+            dp(0.48f)
+
+        val columns =
+            16
+
+        val rows =
+            8
+
+        for (
+            i in
+            1 until columns
+        ) {
+            val x =
+                width *
+                    i /
+                    columns.toFloat()
+
+            canvas.drawLine(
+                x,
+                dp(8f),
+                x,
+                railTop -
+                    dp(6f),
+                stroke
+            )
+        }
+
+        for (
+            i in
+            1 until rows
+        ) {
+            val y =
+                railTop *
+                    i /
+                    rows.toFloat()
+
+            canvas.drawLine(
+                dp(8f),
+                y,
+                width -
+                    dp(8f),
+                y,
+                stroke
+            )
+        }
+
+        val scan =
+            (
+                now %
+                    m.scanPeriodMs
+                ).toFloat() /
+                m.scanPeriodMs.toFloat()
+
+        val scanX =
+            width *
+                (
+                    0.05f +
+                        scan *
+                            0.90f
+                    )
+
+        fill.shader =
+            LinearGradient(
+                scanX -
+                    dp(34f),
+                0f,
+                scanX +
+                    dp(34f),
+                0f,
+                intArrayOf(
+                    Color.TRANSPARENT,
+                    withAlpha(
+                        p.primary,
+                        28
+                    ),
+                    withAlpha(
+                        p.primary,
+                        120
+                    ),
+                    withAlpha(
+                        p.primary,
+                        28
+                    ),
+                    Color.TRANSPARENT
+                ),
+                floatArrayOf(
+                    0f,
+                    0.24f,
+                    0.50f,
+                    0.76f,
+                    1f
+                ),
+                Shader.TileMode.CLAMP
+            )
+
+        fill.alpha =
+            m.scanAlpha
 
         canvas.drawRect(
             scanX -
-                dp(28f),
-            h *
-                0.06f,
+                dp(34f),
+            dp(6f),
             scanX +
-                dp(28f),
-            h *
-                0.94f,
-            fillPaint
+                dp(34f),
+            railTop -
+                dp(6f),
+            fill
         )
 
-        fillPaint.shader =
+        fill.shader =
             null
+
+        // Corner registration marks.
+        stroke.color =
+            p.primary
+
+        stroke.alpha =
+            115
+
+        stroke.strokeWidth =
+            dp(0.9f)
+
+        val l =
+            dp(18f)
+
+        canvas.drawLine(
+            dp(10f),
+            dp(10f),
+            dp(10f) + l,
+            dp(10f),
+            stroke
+        )
+
+        canvas.drawLine(
+            dp(10f),
+            dp(10f),
+            dp(10f),
+            dp(10f) + l,
+            stroke
+        )
+
+        canvas.drawLine(
+            width - dp(10f) - l,
+            dp(10f),
+            width - dp(10f),
+            dp(10f),
+            stroke
+        )
+
+        canvas.drawLine(
+            width - dp(10f),
+            dp(10f),
+            width - dp(10f),
+            dp(10f) + l,
+            stroke
+        )
     }
 
-    private fun drawDataCorridors(
+    private fun drawPerceptionInput(
         canvas: Canvas,
         now: Long,
         cx: Float,
         cy: Float,
-        coreWidth: Float,
-        coreHeight: Float,
-        contentBottom: Float,
-        stateIndex: Int,
-        motion: Motion
+        radius: Float,
+        p: Palette,
+        m: Motion,
+        state: Int
     ) {
         val left =
             width *
                 0.035f
 
-        val right =
-            width *
-                0.965f
-
-        val laneOffsets =
-            floatArrayOf(
-                -0.29f,
-                -0.145f,
-                0f,
-                0.145f,
-                0.29f
-            )
-
-        val color =
-            palette.primary
+        val coreLeft =
+            cx -
+                radius *
+                    0.88f
 
         val phase =
             now /
-                motion.flowPeriodMs
+                m.flowPeriodMs
 
-        laneOffsets.forEachIndexed {
-            index,
+        // Perception wave - intentionally strong enough to remain visible.
+        path.reset()
+
+        val samples =
+            72
+
+        for (
+            i in
+            0..samples
+        ) {
+            val t =
+                i /
+                    samples.toFloat()
+
+            val x =
+                left +
+                    (
+                        coreLeft -
+                            left
+                        ) *
+                    t
+
+            val envelope =
+                sin(
+                    PI *
+                        t
+                )
+                    .toFloat()
+                    .coerceAtLeast(
+                        0f
+                    )
+
+            val ampMultiplier =
+                if (
+                    state ==
+                    STATE_RECOGNITION
+                ) {
+                    1.65f
+                } else {
+                    1f
+                }
+
+            val y =
+                cy +
+                    (
+                        sin(
+                            t *
+                                PI *
+                                10.0 +
+                                phase
+                        )
+                            .toFloat() *
+                            0.76f +
+                            sin(
+                                t *
+                                    PI *
+                                    27.0 -
+                                    phase *
+                                        0.81
+                            )
+                                .toFloat() *
+                                0.24f
+                        ) *
+                    radius *
+                    0.13f *
+                    envelope *
+                    ampMultiplier
+
+            if (
+                i ==
+                0
+            ) {
+                path.moveTo(
+                    x,
+                    y
+                )
+            } else {
+                path.lineTo(
+                    x,
+                    y
+                )
+            }
+        }
+
+        glow.shader =
+            corridorGradient(
+                left,
+                coreLeft,
+                p.primary
+            )
+
+        glow.alpha =
+            m.waveGlowAlpha
+
+        glow.strokeWidth =
+            dp(7.0f)
+
+        canvas.drawPath(
+            path,
+            glow
+        )
+
+        stroke.shader =
+            corridorGradient(
+                left,
+                coreLeft,
+                p.primary
+            )
+
+        stroke.alpha =
+            m.waveAlpha
+
+        stroke.strokeWidth =
+            dp(1.55f)
+
+        canvas.drawPath(
+            path,
+            stroke
+        )
+
+        stroke.shader =
+            null
+
+        // Input bus rails.
+        repeat(
+            4
+        ) {
             lane ->
 
             val y =
                 cy +
-                    coreHeight *
-                        lane
-
-            dataPath.reset()
-
-            dataPath.moveTo(
-                left,
-                y +
-                    sin(
-                        phase +
-                            index *
-                                0.77
-                    )
-                        .toFloat() *
-                        dp(2.5f)
-            )
-
-            dataPath.cubicTo(
-                cx -
-                    coreWidth *
-                        0.62f,
-                y -
-                    coreHeight *
-                        (
-                            0.07f +
-                                index *
-                                    0.005f
-                            ),
-                cx -
-                    coreWidth *
-                        0.33f,
-                y +
-                    coreHeight *
-                        0.04f,
-                cx,
-                y
-            )
-
-            dataPath.cubicTo(
-                cx +
-                    coreWidth *
-                        0.33f,
-                y -
-                    coreHeight *
-                        0.04f,
-                cx +
-                    coreWidth *
-                        0.62f,
-                y +
-                    coreHeight *
-                        (
-                            0.07f +
-                                index *
-                                    0.005f
-                            ),
-                right,
-                y +
-                    sin(
-                        phase *
-                            0.91 +
-                            index *
-                                0.83
-                    )
-                        .toFloat() *
-                        dp(2.5f)
-            )
-
-            val laneAlpha =
-                if (
-                    index ==
-                    2
-                ) {
-                    motion.centerLaneAlpha
-                } else {
-                    motion.sideLaneAlpha
-                }
-
-            glowPaint.shader =
-                corridorGradient(
-                    left,
-                    right,
-                    color
-                )
-
-            glowPaint.alpha =
-                laneAlpha /
-                    3
-
-            glowPaint.strokeWidth =
-                dp(
-                    if (
-                        index ==
-                        2
-                    ) {
-                        5.6f
-                    } else {
-                        3.2f
-                    }
-                )
-
-            canvas.drawPath(
-                dataPath,
-                glowPaint
-            )
-
-            strokePaint.shader =
-                corridorGradient(
-                    left,
-                    right,
-                    color
-                )
-
-            strokePaint.alpha =
-                laneAlpha
-
-            strokePaint.strokeWidth =
-                dp(
-                    if (
-                        index ==
-                        2
-                    ) {
-                        1.15f
-                    } else {
-                        0.72f
-                    }
-                )
-
-            canvas.drawPath(
-                dataPath,
-                strokePaint
-            )
-        }
-
-        strokePaint.shader =
-            null
-
-        // Tiny fixed "ports" on left/right reinforce input/action semantics.
-        repeat(4) {
-            index ->
-
-            val y =
-                contentBottom *
                     (
-                        0.22f +
-                            index *
-                                0.18f
-                        )
+                        lane -
+                            1.5f
+                        ) *
+                    radius *
+                    0.22f
 
-            strokePaint.color =
-                Color.parseColor(
-                    "#30425B"
-                )
+            stroke.color =
+                p.secondary
 
-            strokePaint.alpha =
-                170
+            stroke.alpha =
+                96
 
-            strokePaint.strokeWidth =
-                dp(0.85f)
-
-            canvas.drawLine(
-                width *
-                    0.025f,
-                y,
-                width *
-                    0.065f,
-                y,
-                strokePaint
-            )
+            stroke.strokeWidth =
+                dp(0.72f)
 
             canvas.drawLine(
-                width *
-                    0.935f,
+                left,
                 y,
-                width *
-                    0.975f,
+                coreLeft -
+                    dp(8f),
                 y,
-                strokePaint
-            )
-        }
-
-        if (
-            stateIndex ==
-            STATE_STOP
-        ) {
-            strokePaint.color =
-                palette.secondary
-
-            strokePaint.alpha =
-                210
-
-            strokePaint.strokeWidth =
-                dp(1.25f)
-
-            canvas.drawLine(
-                width *
-                    0.10f,
-                cy,
-                width *
-                    0.90f,
-                cy,
-                strokePaint
+                stroke
             )
         }
     }
 
-    private fun drawCognitiveMatrix(
+    private fun drawCoreField(
         canvas: Canvas,
         now: Long,
         cx: Float,
         cy: Float,
-        coreWidth: Float,
-        coreHeight: Float,
-        stateIndex: Int,
-        motion: Motion
+        radius: Float,
+        p: Palette,
+        m: Motion,
+        state: Int
     ) {
-        val breathe =
+        val pulse =
             (
                 0.5 +
                     0.5 *
                         sin(
                             now /
-                                motion.breathePeriodMs
+                                m.breatheMs
                         )
                 )
                 .toFloat()
 
-        val outerW =
-            coreWidth *
-                (
-                    0.88f +
-                        breathe *
-                            0.012f
-                    )
-
-        val outerH =
-            coreHeight *
-                (
-                    0.88f +
-                        breathe *
-                            0.012f
-                    )
-
-        // Central ambient field.
-        fillPaint.shader =
+        // Bright central ambient lens.
+        fill.shader =
             RadialGradient(
                 cx,
                 cy,
-                min(
-                    outerW,
-                    outerH
-                ) *
-                    0.55f,
+                radius *
+                    1.08f,
                 intArrayOf(
                     withAlpha(
-                        palette.primary,
-                        motion.coreGlowAlpha
+                        p.white,
+                        125
                     ),
                     withAlpha(
-                        palette.secondary,
-                        motion.coreGlowAlpha /
+                        p.primary,
+                        m.coreGlowAlpha
+                    ),
+                    withAlpha(
+                        p.secondary,
+                        m.coreGlowAlpha /
                             2
                     ),
                     Color.TRANSPARENT
                 ),
                 floatArrayOf(
                     0f,
-                    0.48f,
+                    0.18f,
+                    0.55f,
                     1f
                 ),
                 Shader.TileMode.CLAMP
             )
 
-        fillPaint.alpha =
+        fill.alpha =
             255
 
-        canvas.drawOval(
-            RectF(
-                cx -
-                    outerW *
-                        0.48f,
-                cy -
-                    outerH *
-                        0.48f,
-                cx +
-                    outerW *
-                        0.48f,
-                cy +
-                    outerH *
-                        0.48f
-            ),
-            fillPaint
-        )
-
-        fillPaint.shader =
-            null
-
-        // Three nested technical polygons.
-        val scales =
-            floatArrayOf(
-                1.0f,
-                0.72f,
-                0.44f
-            )
-
-        scales.forEachIndexed {
-            index,
-            scale ->
-
-            val rotation =
+        canvas.drawCircle(
+            cx,
+            cy,
+            radius *
                 (
-                    now /
-                        (
-                            motion.ringRotationPeriodMs *
-                                (
-                                    1.0 +
-                                        index *
-                                            0.28
-                                    )
-                            )
-                    ) *
-                    motion.direction
-
-            drawHexLattice(
-                canvas = canvas,
-                cx = cx,
-                cy = cy,
-                rx =
-                    outerW *
-                        0.42f *
-                        scale,
-                ry =
-                    outerH *
-                        0.42f *
-                        scale,
-                rotation = rotation,
-                color =
-                    when(index) {
-                        0 ->
-                            palette.primary
-
-                        1 ->
-                            palette.secondary
-
-                        else ->
-                            palette.accent
-                    },
-                alpha =
-                    when(index) {
-                        0 ->
-                            170
-
-                        1 ->
-                            126
-
-                        else ->
-                            94
-                    },
-                widthDp =
-                    when(index) {
-                        0 ->
-                            1.25f
-
-                        1 ->
-                            0.92f
-
-                        else ->
-                            0.70f
-                    }
-            )
-        }
-
-        drawSegmentRings(
-            canvas = canvas,
-            now = now,
-            cx = cx,
-            cy = cy,
-            outerW = outerW,
-            outerH = outerH,
-            motion = motion
+                    0.98f +
+                        pulse *
+                            0.015f
+                    ),
+            fill
         )
 
-        drawNeuralNodes(
-            canvas = canvas,
-            now = now,
-            cx = cx,
-            cy = cy,
-            outerW = outerW,
-            outerH = outerH,
-            stateIndex = stateIndex,
-            motion = motion
-        )
-    }
-
-    private fun drawHexLattice(
-        canvas: Canvas,
-        cx: Float,
-        cy: Float,
-        rx: Float,
-        ry: Float,
-        rotation: Double,
-        color: Int,
-        alpha: Int,
-        widthDp: Float
-    ) {
-        corePath.reset()
-
-        val vertices =
-            6
-
-        for (
-            index in
-            0 until vertices
-        ) {
-            val angle =
-                rotation +
-                    index *
-                        (
-                            PI *
-                                2.0 /
-                                vertices
-                            ) -
-                    PI /
-                        2.0
-
-            val x =
-                cx +
-                    cos(angle)
-                        .toFloat() *
-                    rx
-
-            val y =
-                cy +
-                    sin(angle)
-                        .toFloat() *
-                    ry
-
-            if (
-                index ==
-                0
-            ) {
-                corePath.moveTo(
-                    x,
-                    y
-                )
-            } else {
-                corePath.lineTo(
-                    x,
-                    y
-                )
-            }
-        }
-
-        corePath.close()
-
-        glowPaint.shader =
+        fill.shader =
             null
 
-        glowPaint.color =
-            color
-
-        glowPaint.alpha =
-            alpha /
-                5
-
-        glowPaint.strokeWidth =
-            dp(
-                widthDp *
-                    5f
-            )
-
-        canvas.drawPath(
-            corePath,
-            glowPaint
-        )
-
-        strokePaint.shader =
-            null
-
-        strokePaint.color =
-            color
-
-        strokePaint.alpha =
-            alpha
-
-        strokePaint.strokeWidth =
-            dp(
-                widthDp
-            )
-
-        canvas.drawPath(
-            corePath,
-            strokePaint
-        )
-    }
-
-    private fun drawSegmentRings(
-        canvas: Canvas,
-        now: Long,
-        cx: Float,
-        cy: Float,
-        outerW: Float,
-        outerH: Float,
-        motion: Motion
-    ) {
-        val phase =
-            (
-                now %
-                    motion.segmentPeriodMs
-                ).toFloat() /
-                motion.segmentPeriodMs.toFloat() *
-                360f *
-                motion.direction.toFloat()
-
-        val layers =
-            4
-
+        // Six segmented rings.
         repeat(
-            layers
+            6
         ) {
             layer ->
 
-            val factor =
-                1f -
-                    layer *
-                        0.115f
+            val rr =
+                radius *
+                    (
+                        0.97f -
+                            layer *
+                                0.105f
+                        )
 
-            ringRect.set(
+            ring.set(
                 cx -
-                    outerW *
-                        0.47f *
-                        factor,
+                    rr,
                 cy -
-                    outerH *
-                        0.47f *
-                        factor,
+                    rr,
                 cx +
-                    outerW *
-                        0.47f *
-                        factor,
+                    rr,
                 cy +
-                    outerH *
-                        0.47f *
-                        factor
+                    rr
             )
 
-            val color =
+            val direction =
+                if (
+                    layer %
+                    2 ==
+                    0
+                ) {
+                    1f
+                } else {
+                    -1f
+                }
+
+            val phase =
+                (
+                    now %
+                        (
+                            m.ringPeriodMs +
+                                layer *
+                                    540L
+                            )
+                    ).toFloat() /
+                    (
+                        m.ringPeriodMs +
+                            layer *
+                                540L
+                        ).toFloat() *
+                    360f *
+                    direction
+
+            val layerColor =
                 when(
                     layer %
                         3
                 ) {
                     0 ->
-                        palette.primary
+                        p.primary
 
                     1 ->
-                        palette.secondary
+                        p.secondary
 
                     else ->
-                        palette.accent
+                        p.accent
                 }
 
-            strokePaint.shader =
+            glow.shader =
                 null
 
-            strokePaint.color =
-                color
+            glow.color =
+                layerColor
 
-            strokePaint.alpha =
-                74 -
-                    layer *
-                        9
+            glow.alpha =
+                42
 
-            strokePaint.strokeWidth =
+            glow.strokeWidth =
                 dp(
-                    0.68f +
+                    4.2f -
                         layer *
-                            0.08f
+                            0.38f
                 )
 
             canvas.drawArc(
-                ringRect,
+                ring,
                 phase +
-                    layer *
-                        41f,
-                42f +
-                    layer *
-                        5f,
+                    12f,
+                58f,
                 false,
-                strokePaint
+                glow
             )
 
             canvas.drawArc(
-                ringRect,
+                ring,
                 phase +
-                    122f +
-                    layer *
-                        27f,
-                28f +
-                    layer *
-                        4f,
+                    118f,
+                37f,
                 false,
-                strokePaint
+                glow
             )
 
             canvas.drawArc(
-                ringRect,
+                ring,
                 phase +
-                    226f +
-                    layer *
-                        19f,
-                54f -
-                    layer *
-                        3f,
+                    216f,
+                74f,
                 false,
-                strokePaint
+                glow
             )
-        }
-    }
 
-    private fun drawNeuralNodes(
-        canvas: Canvas,
-        now: Long,
-        cx: Float,
-        cy: Float,
-        outerW: Float,
-        outerH: Float,
-        stateIndex: Int,
-        motion: Motion
-    ) {
-        val count =
-            14
+            stroke.color =
+                layerColor
 
-        val phase =
-            now /
-                motion.nodePeriodMs
+            stroke.alpha =
+                225 -
+                    layer *
+                        22
 
-        repeat(
-            count
-        ) {
-            index ->
-
-            val angle =
-                index *
-                    (
-                        PI *
-                            2.0 /
-                            count
-                        ) +
-                    phase *
-                        motion.direction
-
-            val rx =
-                outerW *
-                    (
-                        0.18f +
-                            (
-                                index %
-                                    3
-                                ) *
-                                0.095f
-                        )
-
-            val ry =
-                outerH *
-                    (
-                        0.18f +
-                            (
-                                index %
-                                    3
-                                ) *
-                                0.095f
-                        )
-
-            val x =
-                cx +
-                    cos(angle)
-                        .toFloat() *
-                    rx
-
-            val y =
-                cy +
-                    sin(angle)
-                        .toFloat() *
-                    ry
-
-            val pulse =
-                (
-                    0.5 +
-                        0.5 *
-                            sin(
-                                phase *
-                                    1.3 +
-                                    index *
-                                        0.89
-                            )
-                    )
-                    .toFloat()
-
-            val nodeColor =
-                when(
-                    index %
-                        3
-                ) {
-                    0 ->
-                        palette.primary
-
-                    1 ->
-                        palette.secondary
-
-                    else ->
-                        palette.accent
-                }
-
-            fillPaint.shader =
-                null
-
-            fillPaint.color =
-                nodeColor
-
-            fillPaint.alpha =
-                (
-                    72 +
-                        pulse *
-                            motion.nodeAlphaRange
-                    )
-                    .toInt()
-                    .coerceIn(
-                        0,
-                        220
-                    )
-
-            canvas.drawCircle(
-                x,
-                y,
+            stroke.strokeWidth =
                 dp(
-                    0.8f +
-                        pulse *
-                            0.9f
-                ),
-                fillPaint
+                    1.35f -
+                        layer *
+                            0.10f
+                )
+
+            canvas.drawArc(
+                ring,
+                phase +
+                    12f,
+                58f,
+                false,
+                stroke
             )
 
-            if (
-                stateIndex ==
-                STATE_THINKING ||
-                stateIndex ==
-                STATE_EXECUTING
-            ) {
-                strokePaint.color =
-                    nodeColor
+            canvas.drawArc(
+                ring,
+                phase +
+                    118f,
+                37f,
+                false,
+                stroke
+            )
 
-                strokePaint.alpha =
-                    34
-
-                strokePaint.strokeWidth =
-                    dp(0.55f)
-
-                canvas.drawLine(
-                    cx,
-                    cy,
-                    x,
-                    y,
-                    strokePaint
-                )
-            }
+            canvas.drawArc(
+                ring,
+                phase +
+                    216f,
+                74f,
+                false,
+                stroke
+            )
         }
-    }
 
-    private fun drawDecisionSpine(
-        canvas: Canvas,
-        now: Long,
-        cx: Float,
-        cy: Float,
-        coreWidth: Float,
-        coreHeight: Float,
-        stateIndex: Int,
-        motion: Motion
-    ) {
-        val top =
-            cy -
-                coreHeight *
-                    0.47f
+        // Angular inference lattice.
+        repeat(
+            3
+        ) {
+            layer ->
 
-        val bottom =
-            cy +
-                coreHeight *
-                    0.47f
+            val rr =
+                radius *
+                    (
+                        0.64f -
+                            layer *
+                                0.13f
+                        )
 
-        strokePaint.shader =
-            LinearGradient(
+            val rotation =
+                now /
+                    (
+                        1800.0 +
+                            layer *
+                                430.0
+                        ) *
+                    (
+                        if (
+                            layer %
+                            2 ==
+                            0
+                        ) {
+                            1.0
+                        } else {
+                            -1.0
+                        }
+                    )
+
+            drawPolygon(
+                canvas = canvas,
+                cx = cx,
+                cy = cy,
+                radius = rr,
+                sides =
+                    if (
+                        layer ==
+                        0
+                    ) {
+                        8
+                    } else {
+                        6
+                    },
+                rotation = rotation,
+                color =
+                    when(layer) {
+                        0 ->
+                            p.primary
+
+                        1 ->
+                            p.secondary
+
+                        else ->
+                            p.accent
+                    },
+                alpha =
+                    198 -
+                        layer *
+                            36,
+                widthDp =
+                    1.15f -
+                        layer *
+                            0.17f
+            )
+        }
+
+        // Central decision nucleus.
+        fill.shader =
+            RadialGradient(
                 cx,
-                top,
-                cx,
-                bottom,
+                cy,
+                radius *
+                    0.23f,
                 intArrayOf(
-                    Color.TRANSPARENT,
+                    Color.WHITE,
+                    p.primary,
                     withAlpha(
-                        palette.primary,
-                        120
-                    ),
-                    palette.white,
-                    withAlpha(
-                        palette.secondary,
-                        120
+                        p.secondary,
+                        155
                     ),
                     Color.TRANSPARENT
                 ),
                 floatArrayOf(
                     0f,
                     0.20f,
-                    0.50f,
-                    0.80f,
+                    0.55f,
                     1f
                 ),
                 Shader.TileMode.CLAMP
             )
 
-        strokePaint.alpha =
-            motion.spineAlpha
-
-        strokePaint.strokeWidth =
-            dp(0.85f)
-
-        canvas.drawLine(
-            cx,
-            top,
-            cx,
-            bottom,
-            strokePaint
-        )
-
-        glowPaint.shader =
-            strokePaint.shader
-
-        glowPaint.alpha =
-            motion.spineGlowAlpha
-
-        glowPaint.strokeWidth =
-            dp(5.0f)
-
-        canvas.drawLine(
-            cx,
-            top,
-            cx,
-            bottom,
-            glowPaint
-        )
-
-        strokePaint.shader =
-            null
-
-        glowPaint.shader =
-            null
-
-        val travel =
-            (
-                (
-                    now %
-                        motion.spinePulsePeriodMs
-                    ).toFloat() /
-                    motion.spinePulsePeriodMs.toFloat()
-                )
-                .coerceIn(
-                    0f,
-                    1f
-                )
-
-        val y =
-            top +
-                (
-                    bottom -
-                        top
-                    ) *
-                travel
-
-        fillPaint.shader =
-            RadialGradient(
-                cx,
-                y,
-                dp(14f),
-                intArrayOf(
-                    Color.WHITE,
-                    withAlpha(
-                        palette.primary,
-                        165
-                    ),
-                    Color.TRANSPARENT
-                ),
-                floatArrayOf(
-                    0f,
-                    0.35f,
-                    1f
-                ),
-                Shader.TileMode.CLAMP
-            )
-
-        fillPaint.alpha =
-            if (
-                stateIndex ==
-                STATE_STOP
-            ) {
-                55
-            } else {
-                180
-            }
+        fill.alpha =
+            245
 
         canvas.drawCircle(
             cx,
-            y,
-            dp(14f),
-            fillPaint
+            cy,
+            radius *
+                (
+                    0.18f +
+                        pulse *
+                            0.015f
+                    ),
+            fill
         )
 
-        fillPaint.shader =
+        fill.shader =
             null
-    }
 
-    private fun drawFlowPackets(
-        canvas: Canvas,
-        now: Long,
-        cx: Float,
-        cy: Float,
-        coreWidth: Float,
-        coreHeight: Float,
-        contentBottom: Float,
-        stateIndex: Int,
-        motion: Motion
-    ) {
-        val left =
-            width *
-                0.035f
-
-        val right =
-            width *
-                0.965f
-
-        val count =
-            motion.packetCount
-
-        if (
-            count <=
-            0
-        ) {
-            return
-        }
+        // Neural nodes and inference edges.
+        val nodes =
+            18
 
         repeat(
-            count
+            nodes
         ) {
-            index ->
+            i ->
 
-            val lane =
-                (
-                    index %
-                        5 -
-                        2
-                    ) *
-                    0.145f
+            val ringIndex =
+                1 +
+                    (
+                        i %
+                            3
+                        )
+
+            val rr =
+                radius *
+                    (
+                        0.27f +
+                            ringIndex *
+                                0.14f
+                        )
+
+            val angle =
+                i *
+                    (
+                        PI *
+                            2.0 /
+                            nodes
+                        ) +
+                    now /
+                        m.nodePeriodMs *
+                        (
+                            if (
+                                i %
+                                2 ==
+                                0
+                            ) {
+                                1.0
+                            } else {
+                                -1.0
+                            }
+                        )
+
+            val x =
+                cx +
+                    cos(angle)
+                        .toFloat() *
+                    rr
 
             val y =
                 cy +
-                    coreHeight *
-                        lane
+                    sin(angle)
+                        .toFloat() *
+                    rr *
+                    0.74f
 
-            dataPath.reset()
-
-            dataPath.moveTo(
-                left,
-                y
-            )
-
-            dataPath.cubicTo(
-                cx -
-                    coreWidth *
-                        0.65f,
-                y -
-                    coreHeight *
-                        0.09f,
-                cx -
-                    coreWidth *
-                        0.25f,
-                y +
-                    coreHeight *
-                        0.06f,
-                cx,
-                y
-            )
-
-            dataPath.cubicTo(
-                cx +
-                    coreWidth *
-                        0.25f,
-                y -
-                    coreHeight *
-                        0.06f,
-                cx +
-                    coreWidth *
-                        0.65f,
-                y +
-                    coreHeight *
-                        0.09f,
-                right,
-                y
-            )
-
-            pathMeasure.setPath(
-                dataPath,
-                false
-            )
-
-            val length =
-                pathMeasure.length
-
-            val direction =
-                if (
-                    stateIndex ==
-                    STATE_ANSWERING ||
-                    stateIndex ==
-                    STATE_EXECUTING
-                ) {
-                    1f
-                } else if (
-                    stateIndex ==
-                    STATE_RECOGNITION
-                ) {
-                    -1f
-                } else {
-                    motion.direction.toFloat()
-                }
-
-            var fraction =
-                (
-                    now /
-                        motion.packetPeriodMs +
-                        index /
-                            count.toDouble()
-                    ) %
-                    1.0
-
-            if (
-                direction <
-                0f
-            ) {
-                fraction =
-                    1.0 -
-                        fraction
-            }
-
-            pathMeasure.getPosTan(
-                (
-                    length *
-                        fraction
-                    )
-                    .toFloat(),
-                packetPos,
-                packetTan
-            )
-
-            val packetColor =
+            val nodeColor =
                 when(
-                    index %
+                    i %
                         3
                 ) {
                     0 ->
-                        palette.primary
+                        p.primary
 
                     1 ->
-                        palette.secondary
+                        p.secondary
 
                     else ->
-                        palette.accent
+                        p.accent
                 }
 
-            fillPaint.shader =
-                null
+            stroke.color =
+                nodeColor
 
-            fillPaint.color =
-                packetColor
+            stroke.alpha =
+                if (
+                    state ==
+                    STATE_THINKING ||
+                    state ==
+                    STATE_EXECUTING
+                ) {
+                    88
+                } else {
+                    42
+                }
 
-            fillPaint.alpha =
-                motion.packetAlpha
+            stroke.strokeWidth =
+                dp(0.55f)
+
+            canvas.drawLine(
+                cx,
+                cy,
+                x,
+                y,
+                stroke
+            )
+
+            fill.color =
+                nodeColor
+
+            fill.alpha =
+                215
 
             canvas.drawCircle(
-                packetPos[0],
-                packetPos[1],
+                x,
+                y,
                 dp(
                     if (
-                        index %
-                            4 ==
-                            0
+                        i %
+                        4 ==
+                        0
                     ) {
                         2.0f
                     } else {
                         1.25f
                     }
                 ),
-                fillPaint
+                fill
             )
         }
+
+        // High-contrast decision spine.
+        stroke.shader =
+            LinearGradient(
+                cx,
+                cy -
+                    radius,
+                cx,
+                cy +
+                    radius,
+                intArrayOf(
+                    Color.TRANSPARENT,
+                    p.primary,
+                    Color.WHITE,
+                    p.secondary,
+                    Color.TRANSPARENT
+                ),
+                floatArrayOf(
+                    0f,
+                    0.24f,
+                    0.50f,
+                    0.76f,
+                    1f
+                ),
+                Shader.TileMode.CLAMP
+            )
+
+        stroke.alpha =
+            m.spineAlpha
+
+        stroke.strokeWidth =
+            dp(0.95f)
+
+        canvas.drawLine(
+            cx,
+            cy -
+                radius *
+                    0.93f,
+            cx,
+            cy +
+                radius *
+                    0.93f,
+            stroke
+        )
+
+        glow.shader =
+            stroke.shader
+
+        glow.alpha =
+            46
+
+        glow.strokeWidth =
+            dp(5f)
+
+        canvas.drawLine(
+            cx,
+            cy -
+                radius *
+                    0.93f,
+            cx,
+            cy +
+                radius *
+                    0.93f,
+            glow
+        )
+
+        stroke.shader =
+            null
+
+        glow.shader =
+            null
     }
 
-    private fun drawStateSignature(
+    private fun drawActionOutput(
         canvas: Canvas,
         now: Long,
         cx: Float,
         cy: Float,
-        coreWidth: Float,
-        coreHeight: Float,
-        stateIndex: Int,
-        motion: Motion
+        radius: Float,
+        p: Palette,
+        m: Motion,
+        state: Int
     ) {
-        when(
-            stateIndex
+        val coreRight =
+            cx +
+                radius *
+                    0.88f
+
+        val right =
+            width *
+                0.965f
+
+        val phase =
+            now /
+                m.flowPeriodMs
+
+        path.reset()
+
+        val samples =
+            72
+
+        for (
+            i in
+            0..samples
         ) {
+            val t =
+                i /
+                    samples.toFloat()
+
+            val x =
+                coreRight +
+                    (
+                        right -
+                            coreRight
+                        ) *
+                    t
+
+            val envelope =
+                sin(
+                    PI *
+                        t
+                )
+                    .toFloat()
+                    .coerceAtLeast(
+                        0f
+                    )
+
+            val ampMultiplier =
+                when(state) {
+                    STATE_EXECUTING ->
+                        1.55f
+
+                    STATE_ANSWERING ->
+                        1.78f
+
+                    else ->
+                        1f
+                }
+
+            val y =
+                cy +
+                    (
+                        sin(
+                            t *
+                                PI *
+                                9.0 +
+                                phase *
+                                    1.07
+                        )
+                            .toFloat() *
+                            0.72f +
+                            sin(
+                                t *
+                                    PI *
+                                    24.0 -
+                                    phase *
+                                        0.76
+                            )
+                                .toFloat() *
+                                0.28f
+                        ) *
+                    radius *
+                    0.13f *
+                    envelope *
+                    ampMultiplier
+
+            if (
+                i ==
+                0
+            ) {
+                path.moveTo(
+                    x,
+                    y
+                )
+            } else {
+                path.lineTo(
+                    x,
+                    y
+                )
+            }
+        }
+
+        glow.shader =
+            corridorGradient(
+                coreRight,
+                right,
+                p.secondary
+            )
+
+        glow.alpha =
+            m.waveGlowAlpha
+
+        glow.strokeWidth =
+            dp(7f)
+
+        canvas.drawPath(
+            path,
+            glow
+        )
+
+        stroke.shader =
+            corridorGradient(
+                coreRight,
+                right,
+                p.secondary
+            )
+
+        stroke.alpha =
+            m.waveAlpha
+
+        stroke.strokeWidth =
+            dp(1.55f)
+
+        canvas.drawPath(
+            path,
+            stroke
+        )
+
+        stroke.shader =
+            null
+
+        repeat(
+            4
+        ) {
+            lane ->
+
+            val y =
+                cy +
+                    (
+                        lane -
+                            1.5f
+                        ) *
+                    radius *
+                    0.22f
+
+            stroke.color =
+                p.primary
+
+            stroke.alpha =
+                92
+
+            stroke.strokeWidth =
+                dp(0.72f)
+
+            canvas.drawLine(
+                coreRight +
+                    dp(8f),
+                y,
+                right,
+                y,
+                stroke
+            )
+        }
+    }
+
+    private fun drawPackets(
+        canvas: Canvas,
+        now: Long,
+        cx: Float,
+        cy: Float,
+        radius: Float,
+        p: Palette,
+        m: Motion,
+        state: Int
+    ) {
+        val left =
+            width *
+                0.045f
+
+        val right =
+            width *
+                0.955f
+
+        val direction =
+            when(state) {
+                STATE_RECOGNITION ->
+                    -1f
+
+                STATE_EXECUTING,
+                STATE_ANSWERING ->
+                    1f
+
+                else ->
+                    m.direction
+            }
+
+        repeat(
+            m.packetCount
+        ) {
+            i ->
+
+            val lane =
+                (
+                    i %
+                        5 -
+                        2
+                    ) *
+                    0.15f
+
+            val y =
+                cy +
+                    radius *
+                        lane
+
+            val raw =
+                (
+                    now /
+                        m.packetPeriodMs +
+                        i /
+                            m.packetCount.toDouble()
+                    ) %
+                    1.0
+
+            val t =
+                if (
+                    direction >=
+                    0f
+                ) {
+                    raw
+                } else {
+                    1.0 -
+                        raw
+                }
+
+            val x =
+                left +
+                    (
+                        right -
+                            left
+                        ) *
+                    t.toFloat()
+
+            val color =
+                when(
+                    i %
+                        3
+                ) {
+                    0 ->
+                        p.primary
+
+                    1 ->
+                        p.secondary
+
+                    else ->
+                        p.accent
+                }
+
+            fill.shader =
+                null
+
+            fill.color =
+                color
+
+            fill.alpha =
+                m.packetAlpha
+
+            canvas.drawCircle(
+                x,
+                y,
+                dp(
+                    if (
+                        i %
+                        4 ==
+                        0
+                    ) {
+                        2.2f
+                    } else {
+                        1.35f
+                    }
+                ),
+                fill
+            )
+        }
+    }
+
+    private fun drawStateOverlay(
+        canvas: Canvas,
+        now: Long,
+        cx: Float,
+        cy: Float,
+        radius: Float,
+        p: Palette,
+        m: Motion,
+        state: Int
+    ) {
+        when(state) {
             STATE_WAITING -> {
-                // Quiet central readiness pulse.
-                drawCorePulse(
+                drawPulseRing(
                     canvas,
                     now,
                     cx,
                     cy,
-                    min(
-                        coreWidth,
-                        coreHeight
-                    ) *
-                        0.10f,
-                    palette.primary,
-                    72,
-                    motion.breathePeriodMs
+                    radius *
+                        0.25f,
+                    p.primary,
+                    105,
+                    1050.0
                 )
             }
 
             STATE_RECOGNITION -> {
-                // Input emphasis: left-edge scan bars.
-                val bars =
-                    14
-
-                repeat(
-                    bars
-                ) {
-                    index ->
-
-                    val x =
-                        width *
-                            (
-                                0.055f +
-                                    index *
-                                        0.010f
-                                )
-
-                    val pulse =
-                        abs(
-                            sin(
-                                now /
-                                    180.0 +
-                                    index *
-                                        0.74
-                            )
-                                .toFloat()
-                        )
-
-                    strokePaint.color =
-                        palette.primary
-
-                    strokePaint.alpha =
-                        (
-                            48 +
-                                pulse *
-                                    120f
-                            )
-                            .toInt()
-
-                    strokePaint.strokeWidth =
-                        dp(0.8f)
-
-                    val half =
-                        dp(
-                            3f +
-                                pulse *
-                                    18f
-                        )
-
-                    canvas.drawLine(
-                        x,
-                        cy -
-                            half,
-                        x,
-                        cy +
-                            half,
-                        strokePaint
-                    )
-                }
+                drawEdgeBars(
+                    canvas = canvas,
+                    now = now,
+                    leftSide = true,
+                    color = p.primary,
+                    strength = 1.0f
+                )
             }
 
             STATE_THINKING -> {
-                drawCorePulse(
+                drawPulseRing(
                     canvas,
                     now,
                     cx,
                     cy,
-                    min(
-                        coreWidth,
-                        coreHeight
-                    ) *
-                        0.15f,
-                    palette.accent,
-                    92,
+                    radius *
+                        0.42f,
+                    p.accent,
+                    135,
                     620.0
                 )
             }
 
             STATE_EXECUTING -> {
-                // Right-side action rail.
-                val y =
-                    cy
+                // Directed action beam.
+                glow.color =
+                    p.secondary
 
-                strokePaint.color =
-                    palette.secondary
+                glow.alpha =
+                    72
 
-                strokePaint.alpha =
-                    205
-
-                strokePaint.strokeWidth =
-                    dp(1.1f)
+                glow.strokeWidth =
+                    dp(8f)
 
                 canvas.drawLine(
                     cx +
-                        coreWidth *
-                            0.38f,
-                    y,
+                        radius *
+                            0.55f,
+                    cy,
                     width *
-                        0.95f,
-                    y,
-                    strokePaint
+                        0.96f,
+                    cy,
+                    glow
+                )
+
+                stroke.color =
+                    Color.WHITE
+
+                stroke.alpha =
+                    200
+
+                stroke.strokeWidth =
+                    dp(0.8f)
+
+                canvas.drawLine(
+                    cx +
+                        radius *
+                            0.55f,
+                    cy,
+                    width *
+                        0.96f,
+                    cy,
+                    stroke
                 )
             }
 
             STATE_ANSWERING -> {
-                // Output emphasis: right-side wave bursts.
-                repeat(
-                    10
-                ) {
-                    index ->
-
-                    val x =
-                        width *
-                            (
-                                0.83f +
-                                    index *
-                                        0.011f
-                                )
-
-                    val pulse =
-                        abs(
-                            sin(
-                                now /
-                                    165.0 +
-                                    index *
-                                        0.83
-                            )
-                                .toFloat()
-                        )
-
-                    strokePaint.color =
-                        palette.primary
-
-                    strokePaint.alpha =
-                        (
-                            50 +
-                                pulse *
-                                    135f
-                            )
-                            .toInt()
-
-                    strokePaint.strokeWidth =
-                        dp(0.85f)
-
-                    val half =
-                        dp(
-                            3f +
-                                pulse *
-                                    20f
-                        )
-
-                    canvas.drawLine(
-                        x,
-                        cy -
-                            half,
-                        x,
-                        cy +
-                            half,
-                        strokePaint
-                    )
-                }
+                drawEdgeBars(
+                    canvas = canvas,
+                    now = now,
+                    leftSide = false,
+                    color = p.primary,
+                    strength = 1.15f
+                )
             }
 
             STATE_STOP -> {
-                // Deliberate interruption mark.
-                strokePaint.color =
-                    palette.primary
+                // Strong unambiguous stop signature.
+                stroke.shader =
+                    null
 
-                strokePaint.alpha =
-                    225
+                stroke.color =
+                    p.primary
 
-                strokePaint.strokeWidth =
-                    dp(1.4f)
+                stroke.alpha =
+                    245
 
-                val halfW =
-                    coreWidth *
-                        0.20f
+                stroke.strokeWidth =
+                    dp(2.2f)
 
-                val halfH =
-                    coreHeight *
-                        0.20f
+                val d =
+                    radius *
+                        0.32f
 
                 canvas.drawLine(
                     cx -
-                        halfW,
+                        d,
                     cy -
-                        halfH,
+                        d,
                     cx +
-                        halfW,
+                        d,
                     cy +
-                        halfH,
-                    strokePaint
+                        d,
+                    stroke
                 )
 
                 canvas.drawLine(
                     cx +
-                        halfW,
+                        d,
                     cy -
-                        halfH,
+                        d,
                     cx -
-                        halfW,
+                        d,
                     cy +
-                        halfH,
-                    strokePaint
+                        d,
+                    stroke
+                )
+
+                fill.color =
+                    p.primary
+
+                fill.alpha =
+                    42
+
+                canvas.drawCircle(
+                    cx,
+                    cy,
+                    radius *
+                        0.48f,
+                    fill
                 )
             }
         }
     }
 
-    private fun drawCorePulse(
+    private fun drawEdgeBars(
+        canvas: Canvas,
+        now: Long,
+        leftSide: Boolean,
+        color: Int,
+        strength: Float
+    ) {
+        repeat(
+            12
+        ) {
+            i ->
+
+            val x =
+                if (leftSide) {
+                    width *
+                        (
+                            0.035f +
+                                i *
+                                    0.011f
+                            )
+                } else {
+                    width *
+                        (
+                            0.845f +
+                                i *
+                                    0.011f
+                            )
+                }
+
+            val pulse =
+                abs(
+                    sin(
+                        now /
+                            170.0 +
+                            i *
+                                0.82
+                    )
+                        .toFloat()
+                )
+
+            val half =
+                dp(
+                    3f +
+                        pulse *
+                            19f *
+                            strength
+                )
+
+            stroke.color =
+                color
+
+            stroke.alpha =
+                (
+                    60 +
+                        pulse *
+                            160f
+                    )
+                    .toInt()
+                    .coerceAtMost(
+                        220
+                    )
+
+            stroke.strokeWidth =
+                dp(0.85f)
+
+            canvas.drawLine(
+                x,
+                height *
+                    0.43f -
+                    half,
+                x,
+                height *
+                    0.43f +
+                    half,
+                stroke
+            )
+        }
+    }
+
+    private fun drawPulseRing(
         canvas: Canvas,
         now: Long,
         cx: Float,
@@ -1868,69 +1879,76 @@ class AyanaCoreVisualizer(
                 )
                 .toFloat()
 
-        fillPaint.shader =
-            RadialGradient(
-                cx,
-                cy,
-                radius *
-                    (
-                        0.85f +
-                            pulse *
-                                0.20f
-                        ),
-                intArrayOf(
-                    withAlpha(
-                        Color.WHITE,
-                        alpha
-                    ),
-                    withAlpha(
-                        color,
-                        alpha
-                    ),
-                    Color.TRANSPARENT
-                ),
-                floatArrayOf(
-                    0f,
-                    0.32f,
-                    1f
-                ),
-                Shader.TileMode.CLAMP
-            )
-
-        fillPaint.alpha =
-            255
-
-        canvas.drawCircle(
-            cx,
-            cy,
+        val rr =
             radius *
                 (
-                    0.85f +
+                    0.88f +
                         pulse *
-                            0.20f
-                    ),
-            fillPaint
+                            0.18f
+                    )
+
+        ring.set(
+            cx -
+                rr,
+            cy -
+                rr,
+            cx +
+                rr,
+            cy +
+                rr
         )
 
-        fillPaint.shader =
+        glow.shader =
             null
+
+        glow.color =
+            color
+
+        glow.alpha =
+            (
+                alpha *
+                    0.30f
+                )
+                .toInt()
+
+        glow.strokeWidth =
+            dp(7f)
+
+        canvas.drawOval(
+            ring,
+            glow
+        )
+
+        stroke.color =
+            color
+
+        stroke.alpha =
+            alpha
+
+        stroke.strokeWidth =
+            dp(1.2f)
+
+        canvas.drawOval(
+            ring,
+            stroke
+        )
     }
 
-    private fun drawStageRail(
+    private fun drawStateRail(
         canvas: Canvas,
-        activeIndex: Int,
         top: Float,
-        height: Float
+        height: Float,
+        active: Int
     ) {
-        fillPaint.shader =
+        fill.shader =
             null
 
-        fillPaint.color =
+        fill.color =
             Color.parseColor(
                 "#02050A"
             )
 
-        fillPaint.alpha =
+        fill.alpha =
             244
 
         canvas.drawRect(
@@ -1938,21 +1956,21 @@ class AyanaCoreVisualizer(
             top,
             width.toFloat(),
             height.toFloat(),
-            fillPaint
+            fill
         )
 
-        strokePaint.shader =
+        stroke.shader =
             null
 
-        strokePaint.color =
+        stroke.color =
             Color.parseColor(
-                "#243147"
+                "#29374D"
             )
 
-        strokePaint.alpha =
-            220
+        stroke.alpha =
+            215
 
-        strokePaint.strokeWidth =
+        stroke.strokeWidth =
             dp(0.75f)
 
         canvas.drawLine(
@@ -1962,7 +1980,7 @@ class AyanaCoreVisualizer(
             width *
                 0.965f,
             top,
-            strokePaint
+            stroke
         )
 
         val labels =
@@ -1977,11 +1995,11 @@ class AyanaCoreVisualizer(
 
         val left =
             width *
-                0.070f
+                0.065f
 
         val right =
             width *
-                0.930f
+                0.935f
 
         val step =
             (
@@ -1996,22 +2014,22 @@ class AyanaCoreVisualizer(
         val nodeY =
             top +
                 height *
-                    0.36f
+                    0.34f
 
         val labelY =
             top +
                 height *
-                    0.81f
+                    0.80f
 
-        strokePaint.color =
+        stroke.color =
             Color.parseColor(
-                "#2C384D"
+                "#334158"
             )
 
-        strokePaint.alpha =
-            175
+        stroke.alpha =
+            185
 
-        strokePaint.strokeWidth =
+        stroke.strokeWidth =
             dp(0.70f)
 
         canvas.drawLine(
@@ -2019,145 +2037,245 @@ class AyanaCoreVisualizer(
             nodeY,
             right,
             nodeY,
-            strokePaint
+            stroke
         )
 
         labels.indices.forEach {
-            index ->
+            i ->
 
             val x =
                 left +
                     step *
-                        index
+                        i
 
-            val active =
-                index ==
-                    activeIndex
+            val selected =
+                i ==
+                    active
 
             val color =
                 paletteFor(
-                    index
+                    i
                 ).primary
 
-            if (active) {
-                fillPaint.color =
+            if (selected) {
+                fill.color =
                     color
 
-                fillPaint.alpha =
-                    34
+                fill.alpha =
+                    44
 
                 canvas.drawCircle(
                     x,
                     nodeY,
-                    dp(16f),
-                    fillPaint
+                    dp(15.5f),
+                    fill
                 )
 
-                strokePaint.color =
+                stroke.color =
                     color
 
-                strokePaint.alpha =
+                stroke.alpha =
                     255
 
-                strokePaint.strokeWidth =
-                    dp(1.20f)
+                stroke.strokeWidth =
+                    dp(1.3f)
 
                 canvas.drawCircle(
                     x,
                     nodeY,
-                    dp(13.5f),
-                    strokePaint
+                    dp(13.2f),
+                    stroke
                 )
 
-                fillPaint.color =
-                    color
+                fill.color =
+                    Color.WHITE
 
-                fillPaint.alpha =
+                fill.alpha =
                     255
 
                 canvas.drawCircle(
                     x,
                     nodeY,
-                    dp(2.7f),
-                    fillPaint
+                    dp(2.6f),
+                    fill
                 )
             } else {
-                strokePaint.color =
+                stroke.color =
                     Color.parseColor(
-                        "#445065"
+                        "#46546A"
                     )
 
-                strokePaint.alpha =
-                    205
+                stroke.alpha =
+                    215
 
-                strokePaint.strokeWidth =
+                stroke.strokeWidth =
                     dp(0.85f)
 
                 canvas.drawCircle(
                     x,
                     nodeY,
-                    dp(11.8f),
-                    strokePaint
+                    dp(11.5f),
+                    stroke
                 )
 
-                fillPaint.color =
+                fill.color =
                     Color.parseColor(
-                        "#69758A"
+                        "#748096"
                     )
 
-                fillPaint.alpha =
-                    200
+                fill.alpha =
+                    210
 
                 canvas.drawCircle(
                     x,
                     nodeY,
-                    dp(1.9f),
-                    fillPaint
+                    dp(1.8f),
+                    fill
                 )
             }
 
-            textPaint.textSize =
+            text.textSize =
                 dp(
-                    if (active) {
-                        9.2f
+                    if (selected) {
+                        9.0f
                     } else {
-                        8.6f
+                        8.4f
                     }
                 )
 
-            textPaint.typeface =
+            text.typeface =
                 Typeface.create(
                     Typeface.DEFAULT,
-                    if (active) {
+                    if (selected) {
                         Typeface.BOLD
                     } else {
                         Typeface.NORMAL
                     }
                 )
 
-            textPaint.color =
-                if (active) {
+            text.color =
+                if (selected) {
                     color
                 } else {
                     Color.parseColor(
-                        "#8490A3"
+                        "#8A96A8"
                     )
                 }
 
-            textPaint.alpha =
-                if (active) {
+            text.alpha =
+                if (selected) {
                     255
                 } else {
                     225
                 }
 
             canvas.drawText(
-                labels[index],
+                labels[i],
                 x,
                 labelY,
-                textPaint
+                text
             )
         }
+    }
+
+    private fun drawPolygon(
+        canvas: Canvas,
+        cx: Float,
+        cy: Float,
+        radius: Float,
+        sides: Int,
+        rotation: Double,
+        color: Int,
+        alpha: Int,
+        widthDp: Float
+    ) {
+        finePath.reset()
+
+        for (
+            i in
+            0 until sides
+        ) {
+            val angle =
+                rotation +
+                    i *
+                        (
+                            PI *
+                                2.0 /
+                                sides
+                            ) -
+                    PI /
+                        2.0
+
+            val x =
+                cx +
+                    cos(angle)
+                        .toFloat() *
+                    radius
+
+            val y =
+                cy +
+                    sin(angle)
+                        .toFloat() *
+                    radius *
+                    0.78f
+
+            if (
+                i ==
+                0
+            ) {
+                finePath.moveTo(
+                    x,
+                    y
+                )
+            } else {
+                finePath.lineTo(
+                    x,
+                    y
+                )
+            }
+        }
+
+        finePath.close()
+
+        glow.shader =
+            null
+
+        glow.color =
+            color
+
+        glow.alpha =
+            alpha /
+                4
+
+        glow.strokeWidth =
+            dp(
+                widthDp *
+                    5f
+            )
+
+        canvas.drawPath(
+            finePath,
+            glow
+        )
+
+        stroke.shader =
+            null
+
+        stroke.color =
+            color
+
+        stroke.alpha =
+            alpha
+
+        stroke.strokeWidth =
+            dp(
+                widthDp
+            )
+
+        canvas.drawPath(
+            finePath,
+            stroke
+        )
     }
 
     private fun corridorGradient(
@@ -2174,24 +2292,24 @@ class AyanaCoreVisualizer(
                 Color.TRANSPARENT,
                 withAlpha(
                     color,
-                    110
+                    130
                 ),
                 color,
                 Color.WHITE,
                 color,
                 withAlpha(
                     color,
-                    110
+                    130
                 ),
                 Color.TRANSPARENT
             ),
             floatArrayOf(
                 0f,
-                0.12f,
-                0.33f,
+                0.11f,
+                0.31f,
                 0.50f,
-                0.67f,
-                0.88f,
+                0.69f,
+                0.89f,
                 1f
             ),
             Shader.TileMode.CLAMP
@@ -2229,172 +2347,252 @@ class AyanaCoreVisualizer(
     }
 
     private fun paletteFor(
-        stateIndex: Int
+        state: Int
     ): Palette {
-        return when(stateIndex) {
+        return when(state) {
             STATE_WAITING ->
-                Palette.waiting()
+                Palette(
+                    primary =
+                        Color.parseColor(
+                            "#27E8F4"
+                        ),
+                    secondary =
+                        Color.parseColor(
+                            "#00B8D4"
+                        ),
+                    accent =
+                        Color.parseColor(
+                            "#8AF5FF"
+                        ),
+                    white =
+                        Color.parseColor(
+                            "#F5FEFF"
+                        )
+                )
 
             STATE_RECOGNITION ->
-                Palette.recognition()
+                Palette(
+                    primary =
+                        Color.parseColor(
+                            "#2494FF"
+                        ),
+                    secondary =
+                        Color.parseColor(
+                            "#1265FF"
+                        ),
+                    accent =
+                        Color.parseColor(
+                            "#A6E8FF"
+                        ),
+                    white =
+                        Color.parseColor(
+                            "#F6FBFF"
+                        )
+                )
 
             STATE_THINKING ->
-                Palette.thinking()
+                Palette(
+                    primary =
+                        Color.parseColor(
+                            "#7654FF"
+                        ),
+                    secondary =
+                        Color.parseColor(
+                            "#A54DFF"
+                        ),
+                    accent =
+                        Color.parseColor(
+                            "#CDBDFF"
+                        ),
+                    white =
+                        Color.parseColor(
+                            "#FBF9FF"
+                        )
+                )
 
             STATE_EXECUTING ->
-                Palette.executing()
+                Palette(
+                    primary =
+                        Color.parseColor(
+                            "#31E978"
+                        ),
+                    secondary =
+                        Color.parseColor(
+                            "#16D6AA"
+                        ),
+                    accent =
+                        Color.parseColor(
+                            "#A1F9D9"
+                        ),
+                    white =
+                        Color.parseColor(
+                            "#F6FFF9"
+                        )
+                )
 
             STATE_ANSWERING ->
-                Palette.answering()
+                Palette(
+                    primary =
+                        Color.parseColor(
+                            "#EF35D0"
+                        ),
+                    secondary =
+                        Color.parseColor(
+                            "#A64DFF"
+                        ),
+                    accent =
+                        Color.parseColor(
+                            "#F3B5FF"
+                        ),
+                    white =
+                        Color.parseColor(
+                            "#FFF8FF"
+                        )
+                )
 
             STATE_STOP ->
-                Palette.stop()
+                Palette(
+                    primary =
+                        Color.parseColor(
+                            "#FF482E"
+                        ),
+                    secondary =
+                        Color.parseColor(
+                            "#FF7A2B"
+                        ),
+                    accent =
+                        Color.parseColor(
+                            "#FFAE8A"
+                        ),
+                    white =
+                        Color.parseColor(
+                            "#FFF8F5"
+                        )
+                )
 
             else ->
-                Palette.waiting()
+                paletteFor(
+                    STATE_WAITING
+                )
         }
     }
 
     private fun motionFor(
-        stateIndex: Int
+        state: Int
     ): Motion {
-        return when(stateIndex) {
+        return when(state) {
             STATE_WAITING ->
                 Motion(
-                    frameDelayMs = 40L,
-                    scanPeriodMs = 5200L,
-                    scanAlpha = 80,
-                    flowPeriodMs = 840.0,
-                    centerLaneAlpha = 142,
-                    sideLaneAlpha = 68,
-                    breathePeriodMs = 1180.0,
-                    coreGlowAlpha = 54,
-                    ringRotationPeriodMs = 8600.0,
-                    segmentPeriodMs = 7600L,
+                    frameDelayMs = 38L,
+                    scanPeriodMs = 4700L,
+                    scanAlpha = 82,
+                    flowPeriodMs = 760.0,
+                    waveGlowAlpha = 66,
+                    waveAlpha = 188,
+                    breatheMs = 1050.0,
+                    coreGlowAlpha = 105,
+                    ringPeriodMs = 6500L,
                     nodePeriodMs = 1550.0,
-                    nodeAlphaRange = 74f,
-                    direction = 1.0,
-                    spineAlpha = 112,
-                    spineGlowAlpha = 28,
-                    spinePulsePeriodMs = 3300L,
-                    packetCount = 7,
-                    packetPeriodMs = 2500.0,
-                    packetAlpha = 150
+                    spineAlpha = 205,
+                    packetCount = 9,
+                    packetPeriodMs = 2450.0,
+                    packetAlpha = 178,
+                    direction = 1f
                 )
 
             STATE_RECOGNITION ->
                 Motion(
-                    frameDelayMs = 30L,
-                    scanPeriodMs = 2400L,
-                    scanAlpha = 118,
-                    flowPeriodMs = 510.0,
-                    centerLaneAlpha = 190,
-                    sideLaneAlpha = 104,
-                    breathePeriodMs = 760.0,
-                    coreGlowAlpha = 76,
-                    ringRotationPeriodMs = 5600.0,
-                    segmentPeriodMs = 4200L,
-                    nodePeriodMs = 980.0,
-                    nodeAlphaRange = 110f,
-                    direction = -1.0,
-                    spineAlpha = 158,
-                    spineGlowAlpha = 42,
-                    spinePulsePeriodMs = 1800L,
-                    packetCount = 12,
-                    packetPeriodMs = 1350.0,
-                    packetAlpha = 190
+                    frameDelayMs = 28L,
+                    scanPeriodMs = 1900L,
+                    scanAlpha = 128,
+                    flowPeriodMs = 360.0,
+                    waveGlowAlpha = 92,
+                    waveAlpha = 230,
+                    breatheMs = 690.0,
+                    coreGlowAlpha = 142,
+                    ringPeriodMs = 3600L,
+                    nodePeriodMs = 850.0,
+                    spineAlpha = 232,
+                    packetCount = 14,
+                    packetPeriodMs = 1120.0,
+                    packetAlpha = 220,
+                    direction = -1f
                 )
 
             STATE_THINKING ->
                 Motion(
-                    frameDelayMs = 32L,
-                    scanPeriodMs = 3600L,
-                    scanAlpha = 96,
-                    flowPeriodMs = 660.0,
-                    centerLaneAlpha = 168,
-                    sideLaneAlpha = 90,
-                    breathePeriodMs = 860.0,
-                    coreGlowAlpha = 88,
-                    ringRotationPeriodMs = 4700.0,
-                    segmentPeriodMs = 3900L,
-                    nodePeriodMs = 820.0,
-                    nodeAlphaRange = 126f,
-                    direction = -1.0,
-                    spineAlpha = 174,
-                    spineGlowAlpha = 48,
-                    spinePulsePeriodMs = 1550L,
-                    packetCount = 14,
-                    packetPeriodMs = 1600.0,
-                    packetAlpha = 202
+                    frameDelayMs = 30L,
+                    scanPeriodMs = 2900L,
+                    scanAlpha = 112,
+                    flowPeriodMs = 510.0,
+                    waveGlowAlpha = 82,
+                    waveAlpha = 214,
+                    breatheMs = 790.0,
+                    coreGlowAlpha = 158,
+                    ringPeriodMs = 3100L,
+                    nodePeriodMs = 690.0,
+                    spineAlpha = 238,
+                    packetCount = 16,
+                    packetPeriodMs = 1380.0,
+                    packetAlpha = 225,
+                    direction = -1f
                 )
 
             STATE_EXECUTING ->
                 Motion(
-                    frameDelayMs = 28L,
-                    scanPeriodMs = 1900L,
-                    scanAlpha = 126,
-                    flowPeriodMs = 430.0,
-                    centerLaneAlpha = 212,
-                    sideLaneAlpha = 116,
-                    breathePeriodMs = 610.0,
-                    coreGlowAlpha = 78,
-                    ringRotationPeriodMs = 3400.0,
-                    segmentPeriodMs = 3100L,
-                    nodePeriodMs = 720.0,
-                    nodeAlphaRange = 132f,
-                    direction = 1.0,
-                    spineAlpha = 190,
-                    spineGlowAlpha = 54,
-                    spinePulsePeriodMs = 1250L,
-                    packetCount = 16,
-                    packetPeriodMs = 1050.0,
-                    packetAlpha = 215
+                    frameDelayMs = 27L,
+                    scanPeriodMs = 1550L,
+                    scanAlpha = 138,
+                    flowPeriodMs = 300.0,
+                    waveGlowAlpha = 104,
+                    waveAlpha = 242,
+                    breatheMs = 540.0,
+                    coreGlowAlpha = 148,
+                    ringPeriodMs = 2500L,
+                    nodePeriodMs = 590.0,
+                    spineAlpha = 245,
+                    packetCount = 18,
+                    packetPeriodMs = 860.0,
+                    packetAlpha = 232,
+                    direction = 1f
                 )
 
             STATE_ANSWERING ->
                 Motion(
-                    frameDelayMs = 29L,
-                    scanPeriodMs = 2200L,
-                    scanAlpha = 112,
-                    flowPeriodMs = 470.0,
-                    centerLaneAlpha = 202,
-                    sideLaneAlpha = 108,
-                    breathePeriodMs = 660.0,
-                    coreGlowAlpha = 84,
-                    ringRotationPeriodMs = 3900.0,
-                    segmentPeriodMs = 3300L,
-                    nodePeriodMs = 760.0,
-                    nodeAlphaRange = 128f,
-                    direction = 1.0,
-                    spineAlpha = 182,
-                    spineGlowAlpha = 50,
-                    spinePulsePeriodMs = 1380L,
-                    packetCount = 15,
-                    packetPeriodMs = 1120.0,
-                    packetAlpha = 210
+                    frameDelayMs = 27L,
+                    scanPeriodMs = 1750L,
+                    scanAlpha = 132,
+                    flowPeriodMs = 320.0,
+                    waveGlowAlpha = 102,
+                    waveAlpha = 238,
+                    breatheMs = 570.0,
+                    coreGlowAlpha = 154,
+                    ringPeriodMs = 2750L,
+                    nodePeriodMs = 620.0,
+                    spineAlpha = 242,
+                    packetCount = 17,
+                    packetPeriodMs = 920.0,
+                    packetAlpha = 230,
+                    direction = 1f
                 )
 
             STATE_STOP ->
                 Motion(
-                    frameDelayMs = 62L,
-                    scanPeriodMs = 8200L,
-                    scanAlpha = 42,
-                    flowPeriodMs = 1200.0,
-                    centerLaneAlpha = 86,
-                    sideLaneAlpha = 38,
-                    breathePeriodMs = 1800.0,
-                    coreGlowAlpha = 42,
-                    ringRotationPeriodMs = 13200.0,
-                    segmentPeriodMs = 11800L,
-                    nodePeriodMs = 2300.0,
-                    nodeAlphaRange = 44f,
-                    direction = -1.0,
-                    spineAlpha = 82,
-                    spineGlowAlpha = 18,
-                    spinePulsePeriodMs = 4800L,
+                    frameDelayMs = 58L,
+                    scanPeriodMs = 7600L,
+                    scanAlpha = 58,
+                    flowPeriodMs = 1100.0,
+                    waveGlowAlpha = 48,
+                    waveAlpha = 145,
+                    breatheMs = 1650.0,
+                    coreGlowAlpha = 98,
+                    ringPeriodMs = 10400L,
+                    nodePeriodMs = 2200.0,
+                    spineAlpha = 170,
                     packetCount = 3,
-                    packetPeriodMs = 3800.0,
-                    packetAlpha = 98
+                    packetPeriodMs = 3600.0,
+                    packetAlpha = 118,
+                    direction = -1f
                 )
 
             else ->
@@ -2437,157 +2635,24 @@ class AyanaCoreVisualizer(
         val secondary: Int,
         val accent: Int,
         val white: Int
-    ) {
-        companion object {
-
-            fun waiting():
-                Palette =
-                Palette(
-                    primary =
-                        Color.parseColor(
-                            "#19DCE7"
-                        ),
-                    secondary =
-                        Color.parseColor(
-                            "#00AFC4"
-                        ),
-                    accent =
-                        Color.parseColor(
-                            "#8AF5FF"
-                        ),
-                    white =
-                        Color.parseColor(
-                            "#F4FEFF"
-                        )
-                )
-
-            fun recognition():
-                Palette =
-                Palette(
-                    primary =
-                        Color.parseColor(
-                            "#1687FF"
-                        ),
-                    secondary =
-                        Color.parseColor(
-                            "#2E8BFF"
-                        ),
-                    accent =
-                        Color.parseColor(
-                            "#A6E8FF"
-                        ),
-                    white =
-                        Color.parseColor(
-                            "#F6FBFF"
-                        )
-                )
-
-            fun thinking():
-                Palette =
-                Palette(
-                    primary =
-                        Color.parseColor(
-                            "#633BFF"
-                        ),
-                    secondary =
-                        Color.parseColor(
-                            "#8A4DFF"
-                        ),
-                    accent =
-                        Color.parseColor(
-                            "#C2B0FF"
-                        ),
-                    white =
-                        Color.parseColor(
-                            "#FBF9FF"
-                        )
-                )
-
-            fun executing():
-                Palette =
-                Palette(
-                    primary =
-                        Color.parseColor(
-                            "#28E06E"
-                        ),
-                    secondary =
-                        Color.parseColor(
-                            "#20E6C8"
-                        ),
-                    accent =
-                        Color.parseColor(
-                            "#9AF8D8"
-                        ),
-                    white =
-                        Color.parseColor(
-                            "#F5FFF9"
-                        )
-                )
-
-            fun answering():
-                Palette =
-                Palette(
-                    primary =
-                        Color.parseColor(
-                            "#E623C7"
-                        ),
-                    secondary =
-                        Color.parseColor(
-                            "#8B4CFF"
-                        ),
-                    accent =
-                        Color.parseColor(
-                            "#F0B1FF"
-                        ),
-                    white =
-                        Color.parseColor(
-                            "#FFF7FF"
-                        )
-                )
-
-            fun stop():
-                Palette =
-                Palette(
-                    primary =
-                        Color.parseColor(
-                            "#FF3B22"
-                        ),
-                    secondary =
-                        Color.parseColor(
-                            "#FF6A2A"
-                        ),
-                    accent =
-                        Color.parseColor(
-                            "#FF9C7A"
-                        ),
-                    white =
-                        Color.parseColor(
-                            "#FFF8F5"
-                        )
-                )
-        }
-    }
+    )
 
     private data class Motion(
         val frameDelayMs: Long,
         val scanPeriodMs: Long,
         val scanAlpha: Int,
         val flowPeriodMs: Double,
-        val centerLaneAlpha: Int,
-        val sideLaneAlpha: Int,
-        val breathePeriodMs: Double,
+        val waveGlowAlpha: Int,
+        val waveAlpha: Int,
+        val breatheMs: Double,
         val coreGlowAlpha: Int,
-        val ringRotationPeriodMs: Double,
-        val segmentPeriodMs: Long,
+        val ringPeriodMs: Long,
         val nodePeriodMs: Double,
-        val nodeAlphaRange: Float,
-        val direction: Double,
         val spineAlpha: Int,
-        val spineGlowAlpha: Int,
-        val spinePulsePeriodMs: Long,
         val packetCount: Int,
         val packetPeriodMs: Double,
-        val packetAlpha: Int
+        val packetAlpha: Int,
+        val direction: Float
     )
 
     companion object {
