@@ -22,9 +22,17 @@ import kotlin.math.min
 import kotlin.math.sin
 
 /**
- * AYANA Core Visualizer v9.0 — AGENT HEXAFLOW.
+ * AYANA Core Visualizer v9.1 — AGENT HEXAFLOW RAIL FIX.
  *
- * Device-driven redesign after v8.0 was visibly too dark.
+ * Device-driven correction after the v9.0 device test exposed a rail-clipping bug.
+ *
+ * Critical v9.1 fix:
+ * - v9.0 drawStateRail() accepted a rail HEIGHT but accidentally used that
+ *   number as the absolute Canvas bottom coordinate.
+ * - On the Tab S8 this inverted the rectangle and visually covered most of the
+ *   visualizer with an opaque dark layer.
+ * - v9.1 computes railBottom = top + railHeight and clips all rail drawing to
+ *   that exact lower strip, so the central AI core can never be covered again.
  *
  * Concept:
  * - one large high-contrast agent decision core;
@@ -269,7 +277,7 @@ class AyanaCoreVisualizer(
             drawStateRail(
                 canvas = canvas,
                 top = railTop,
-                height = railHeight,
+                railHeight = railHeight,
                 active = state
             )
         }
@@ -374,9 +382,9 @@ class AyanaCoreVisualizer(
                 width.toFloat(),
                 height.toFloat(),
                 intArrayOf(
-                    Color.parseColor("#02050A"),
-                    Color.parseColor("#07101A"),
-                    Color.parseColor("#02050A")
+                    Color.parseColor("#03070D"),
+                    Color.parseColor("#091724"),
+                    Color.parseColor("#03070D")
                 ),
                 floatArrayOf(
                     0f,
@@ -1776,9 +1784,53 @@ class AyanaCoreVisualizer(
     private fun drawStateRail(
         canvas: Canvas,
         top: Float,
-        height: Float,
+        railHeight: Float,
         active: Int
     ) {
+        val viewBottom =
+            this.height
+                .toFloat()
+                .coerceAtLeast(0f)
+
+        val safeTop =
+            top.coerceIn(
+                0f,
+                viewBottom
+            )
+
+        val safeHeight =
+            railHeight
+                .coerceAtLeast(0f)
+
+        val railBottom =
+            (
+                safeTop +
+                    safeHeight
+                )
+                .coerceIn(
+                    safeTop,
+                    viewBottom
+                )
+
+        if (
+            railBottom <=
+            safeTop
+        ) {
+            return
+        }
+
+        val saveCount =
+            canvas.save()
+
+        // Hard clipping guard: the rail is physically incapable of painting
+        // over the visual core, even if future layout values are malformed.
+        canvas.clipRect(
+            0f,
+            safeTop,
+            width.toFloat(),
+            railBottom
+        )
+
         fill.shader =
             null
 
@@ -1790,9 +1842,9 @@ class AyanaCoreVisualizer(
 
         canvas.drawRect(
             0f,
-            top,
+            safeTop,
             width.toFloat(),
-            height.toFloat(),
+            railBottom,
             fill
         )
 
@@ -1807,9 +1859,9 @@ class AyanaCoreVisualizer(
 
         canvas.drawLine(
             width * 0.035f,
-            top,
+            safeTop,
             width * 0.965f,
-            top,
+            safeTop,
             stroke
         )
 
@@ -1838,13 +1890,13 @@ class AyanaCoreVisualizer(
                     )
 
         val y =
-            top +
-                height *
+            safeTop +
+                safeHeight *
                     0.40f
 
         val labelY =
-            top +
-                height *
+            safeTop +
+                safeHeight *
                     0.82f
 
         stroke.color =
@@ -1975,6 +2027,10 @@ class AyanaCoreVisualizer(
                 text
             )
         }
+
+        canvas.restoreToCount(
+            saveCount
+        )
     }
 
     private fun drawPolygon(
