@@ -22,9 +22,13 @@ import kotlin.math.min
 import kotlin.math.sin
 
 /**
- * AYANA Core Visualizer v10.0 — NEURAL FABRIC.
+ * AYANA Core Visualizer v10.0.1 — NEURAL FABRIC COMPILE FIX.
  *
  * Full visual direction reset after rejecting orb / radar / HUD metaphors.
+ *
+ * v10.0.1 compile correction:
+ * - fixes highlight-index expression in drawNeuralFabric();
+ * - visual/state/layout behavior is unchanged versus v10.0.
  *
  * This visualizer represents an AI AGENT as a live computational graph:
  * input -> perception -> reasoning -> memory/tool routing -> action/answer.
@@ -736,11 +740,13 @@ class AyanaCoreVisualizer(
                                 5
                             ) ==
                             (
-                                now /
-                                    420L
-                                ) %
-                                5L
-                            .toInt()
+                                (
+                                    now /
+                                        420L
+                                    ) %
+                                    5L
+                                )
+                                .toInt()
 
                     val connectionColor =
                         if (highlight) {
