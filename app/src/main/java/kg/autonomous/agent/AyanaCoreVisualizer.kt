@@ -16,27 +16,27 @@ import android.graphics.Typeface
 import android.os.SystemClock
 import android.view.View
 import kotlin.math.PI
-import kotlin.math.abs
 import kotlin.math.cos
 import kotlin.math.min
 import kotlin.math.sin
 
 /**
- * AYANA Core Visualizer v5.1 — LIVE REFERENCE SIX-STATE.
+ * AYANA Core Visualizer v6.0 — FULL REFERENCE LIVE CORE.
  *
- * Fixes the v5.0 regression where the approved artwork was displayed as a
- * completely static photo.
+ * Strong correction after v5.0/v5.1:
  *
- * Base visuals remain the exact six approved PNG resources. LIVE motion is
- * added without redrawing/recoloring the artwork:
- *
- * - continuous breathing of the approved visual;
- * - animated state-reactive waveform laid over the existing reference waveform;
- * - moving light sweep across the centre;
- * - subtle orbit sparks around the visual;
- * - soft glow pulse;
- * - crossfade between the six factual VoiceService states;
- * - six-state status strip remains bound to factual runtime states.
+ * - Uses six FULL 1536×1152 state references instead of cropped 512×273 strips.
+ * - Preserves the full circular AYANA artwork and the original wordmark.
+ * - The execution strip is overlaid on the lower black area and no longer
+ *   reduces/crops the core.
+ * - Adds restrained live motion over the approved artwork:
+ *     • breathing light intensity;
+ *     • moving waveform energy;
+ *     • rotating telemetry arc highlights;
+ *     • moving centre pulse;
+ *     • crossfade between factual runtime states.
+ * - No procedural replacement of the approved sphere.
+ * - No ORB, routing, TTS, microphone, Accessibility or command logic changes.
  *
  * Required resources in app/src/main/res/drawable-nodpi:
  *   ayana_state_waiting.png
@@ -45,12 +45,6 @@ import kotlin.math.sin
  *   ayana_state_executing.png
  *   ayana_state_answering.png
  *   ayana_state_stop.png
- *
- * Public integration contract remains unchanged:
- *   AyanaCoreVisualizer(Context)
- *
- * No ORB, Accessibility, microphone capture, routing, TTS or command logic is
- * changed by this renderer.
  */
 class AyanaCoreVisualizer(
     context: Context
@@ -86,17 +80,15 @@ class AyanaCoreVisualizer(
     private val textPaint =
         Paint(Paint.ANTI_ALIAS_FLAG).apply {
             textAlign = Paint.Align.CENTER
-            typeface =
-                Typeface.create(
-                    Typeface.DEFAULT,
-                    Typeface.NORMAL
-                )
         }
 
-    private val sourceRect =
+    private val srcRect =
         Rect()
 
-    private val destinationRect =
+    private val dstRect =
+        RectF()
+
+    private val ringRect =
         RectF()
 
     private val wavePath =
@@ -106,7 +98,7 @@ class AyanaCoreVisualizer(
         Path()
 
     private val bitmaps: Array<Bitmap?> =
-        arrayOfNulls(STATE_COUNT)
+        arrayOfNulls(6)
 
     private var loaded =
         false
@@ -162,9 +154,7 @@ class AyanaCoreVisualizer(
     override fun onDraw(
         canvas: Canvas
     ) {
-        super.onDraw(
-            canvas
-        )
+        super.onDraw(canvas)
 
         if (
             width <= 0 ||
@@ -179,9 +169,7 @@ class AyanaCoreVisualizer(
             AyanaVoiceService.currentStatusState
 
         val requestedIndex =
-            stateIndex(
-                runtimeState
-            )
+            stateIndex(runtimeState)
 
         val now =
             SystemClock.uptimeMillis()
@@ -200,78 +188,48 @@ class AyanaCoreVisualizer(
                 now
         }
 
-        val compact =
-            height <
-                dp(180f)
-
-        val stageHeight =
-            if (compact) {
-                0f
-            } else {
-                min(
-                    dp(58f),
-                    height *
-                        0.18f
-                )
-            }
-
-        val imageBottom =
-            height -
-                stageHeight
-
         val motion =
-            motionProfile(
-                currentIndex
+            motionFor(currentIndex)
+
+        val imageBounds =
+            drawReferenceLayer(
+                canvas = canvas,
+                now = now,
+                motion = motion
             )
 
-        drawLiveReferenceArtwork(
+        drawTelemetryRings(
             canvas = canvas,
             now = now,
-            imageBottom = imageBottom,
+            bounds = imageBounds,
+            stateIndex = currentIndex,
             motion = motion
         )
 
         drawLiveWaveform(
             canvas = canvas,
             now = now,
-            imageBottom = imageBottom,
+            bounds = imageBounds,
             stateIndex = currentIndex,
             motion = motion
         )
 
-        drawOrbitSparks(
+        drawCenterTravelPulse(
             canvas = canvas,
             now = now,
-            imageBottom = imageBottom,
+            bounds = imageBounds,
             stateIndex = currentIndex,
             motion = motion
         )
 
-        drawTravelingHighlight(
+        drawStageOverlay(
             canvas = canvas,
-            now = now,
-            imageBottom = imageBottom,
-            stateIndex = currentIndex,
-            motion = motion
+            activeIndex = currentIndex
         )
-
-        if (
-            stageHeight >
-            0f
-        ) {
-            drawStageStrip(
-                canvas = canvas,
-                activeIndex = currentIndex,
-                top = imageBottom,
-                height = stageHeight
-            )
-        }
 
         if (attached) {
             postInvalidateDelayed(
-                frameDelayMs(
-                    currentIndex
-                )
+                frameDelayFor(currentIndex)
             )
         }
     }
@@ -330,30 +288,18 @@ class AyanaCoreVisualizer(
         }
     }
 
-    private fun drawLiveReferenceArtwork(
+    private fun drawReferenceLayer(
         canvas: Canvas,
         now: Long,
-        imageBottom: Float,
-        motion: MotionProfile
-    ) {
+        motion: Motion
+    ): RectF {
         val current =
             bitmaps
-                .getOrNull(
-                    currentIndex
-                )
+                .getOrNull(currentIndex)
 
-        if (
-            current ==
-            null
-        ) {
-            return
+        if (current == null) {
+            return RectF()
         }
-
-        val previous =
-            bitmaps
-                .getOrNull(
-                    previousIndex
-                )
 
         val transition =
             (
@@ -368,55 +314,67 @@ class AyanaCoreVisualizer(
                     1f
                 )
 
-        val breathe =
+        val previous =
+            bitmaps
+                .getOrNull(previousIndex)
+
+        val pulse =
             (
                 0.5 +
                     0.5 *
                         sin(
                             now /
-                                motion.breathePeriodMs
+                                motion.breatheMs
                         )
                 )
                 .toFloat()
 
-        val baseScale =
-            1f +
-                motion.scaleAmplitude *
-                    breathe
+        // Keep geometry practically unchanged. Only a tiny scale breath is used.
+        val scale =
+            0.988f +
+                pulse *
+                    motion.scaleRange
+
+        val bounds =
+            calculateReferenceBounds(
+                current,
+                scale
+            )
 
         if (
-            previous !=
-            null &&
-            previous !==
-            current &&
-            transition <
-            1f
+            previous != null &&
+            previous !== current &&
+            transition < 1f
         ) {
-            drawBitmapFitted(
-                canvas = canvas,
-                bitmap = previous,
-                alpha =
-                    (
-                        255f *
-                            (
-                                1f -
-                                    transition
-                                )
-                        )
-                        .toInt(),
-                imageBottom = imageBottom,
-                scale = 1f
+            val previousBounds =
+                calculateReferenceBounds(
+                    previous,
+                    0.988f
+                )
+
+            drawBitmap(
+                canvas,
+                previous,
+                previousBounds,
+                (
+                    255f *
+                        (
+                            1f -
+                                transition
+                            )
+                    )
+                    .toInt()
             )
         }
 
-        val currentAlpha =
+        drawBitmap(
+            canvas,
+            current,
+            bounds,
             if (
-                previous !=
-                null &&
-                previous !==
-                current &&
-                transition <
-                1f
+                previous != null &&
+                previous !== current &&
+                transition < 1f
             ) {
                 (
                     255f *
@@ -426,109 +384,77 @@ class AyanaCoreVisualizer(
             } else {
                 255
             }
-
-        // Exact approved reference is the base layer.
-        drawBitmapFitted(
-            canvas = canvas,
-            bitmap = current,
-            alpha = currentAlpha,
-            imageBottom = imageBottom,
-            scale = baseScale
         )
 
-        // Second very-low-alpha copy produces a live optical glow without
-        // altering the approved geometry or palette.
-        val glowScale =
-            baseScale +
-                motion.glowScaleExtra *
-                    (
-                        0.35f +
-                            breathe *
-                                0.65f
-                        )
+        // Optical breathing glow: same reference, very low alpha.
+        val glowBounds =
+            RectF(
+                bounds.left -
+                    bounds.width() *
+                        0.006f,
+                bounds.top -
+                    bounds.height() *
+                        0.006f,
+                bounds.right +
+                    bounds.width() *
+                        0.006f,
+                bounds.bottom +
+                    bounds.height() *
+                        0.006f
+            )
 
-        drawBitmapFitted(
-            canvas = canvas,
-            bitmap = current,
-            alpha =
-                (
-                    motion.glowAlphaBase +
-                        breathe *
-                            motion.glowAlphaRange
-                    )
-                    .toInt(),
-            imageBottom = imageBottom,
-            scale = glowScale
+        drawBitmap(
+            canvas,
+            current,
+            glowBounds,
+            (
+                5f +
+                    pulse *
+                        motion.glowAlpha
+                )
+                .toInt()
         )
+
+        return bounds
     }
 
-    private fun drawBitmapFitted(
-        canvas: Canvas,
+    private fun calculateReferenceBounds(
         bitmap: Bitmap,
-        alpha: Int,
-        imageBottom: Float,
         scale: Float
-    ) {
-        sourceRect.set(
-            0,
-            0,
-            bitmap.width,
-            bitmap.height
-        )
-
+    ): RectF {
         val availableWidth =
             width.toFloat()
 
         val availableHeight =
-            imageBottom
-                .coerceAtLeast(
-                    1f
-                )
+            height.toFloat()
 
         val bitmapAspect =
             bitmap.width.toFloat() /
                 bitmap.height.toFloat()
 
-        val areaAspect =
-            availableWidth /
-                availableHeight
+        // Full reference is 4:3. Fit by height so the entire circular artwork
+        // remains visible; black side space blends into the visualizer background.
+        var drawHeight =
+            availableHeight *
+                scale
 
-        val baseWidth: Float
-        val baseHeight: Float
+        var drawWidth =
+            drawHeight *
+                bitmapAspect
 
         if (
-            areaAspect >
-            bitmapAspect
+            drawWidth >
+            availableWidth *
+                0.96f
         ) {
-            baseHeight =
-                availableHeight
+            drawWidth =
+                availableWidth *
+                    0.96f
 
-            baseWidth =
-                baseHeight *
-                    bitmapAspect
-        } else {
-            baseWidth =
-                availableWidth
-
-            baseHeight =
-                baseWidth /
+            drawHeight =
+                drawWidth /
                     bitmapAspect
         }
-
-        val safeScale =
-            scale
-                .coerceIn(
-                    0.985f,
-                    1.035f
-                )
-
-        val drawWidth =
-            baseWidth *
-                safeScale
-
-        val drawHeight =
-            baseHeight *
-                safeScale
 
         val left =
             (
@@ -542,9 +468,10 @@ class AyanaCoreVisualizer(
                 availableHeight -
                     drawHeight
                 ) /
-                2f
+                2f -
+                dp(3f)
 
-        destinationRect.set(
+        return RectF(
             left,
             top,
             left +
@@ -552,59 +479,183 @@ class AyanaCoreVisualizer(
             top +
                 drawHeight
         )
+    }
+
+    private fun drawBitmap(
+        canvas: Canvas,
+        bitmap: Bitmap,
+        bounds: RectF,
+        alpha: Int
+    ) {
+        srcRect.set(
+            0,
+            0,
+            bitmap.width,
+            bitmap.height
+        )
 
         bitmapPaint.alpha =
-            alpha
-                .coerceIn(
-                    0,
-                    255
-                )
+            alpha.coerceIn(
+                0,
+                255
+            )
 
         canvas.drawBitmap(
             bitmap,
-            sourceRect,
-            destinationRect,
+            srcRect,
+            bounds,
             bitmapPaint
+        )
+    }
+
+    private fun drawTelemetryRings(
+        canvas: Canvas,
+        now: Long,
+        bounds: RectF,
+        stateIndex: Int,
+        motion: Motion
+    ) {
+        if (bounds.isEmpty) {
+            return
+        }
+
+        val color =
+            stateColor(stateIndex)
+
+        val cx =
+            bounds.centerX()
+
+        val cy =
+            bounds.centerY()
+
+        // Ring radius derived from the full approved reference geometry.
+        val r =
+            min(
+                bounds.width(),
+                bounds.height()
+            ) *
+                0.355f
+
+        val phase =
+            (
+                now %
+                    motion.ringPeriodMs
+                ).toFloat() /
+                motion.ringPeriodMs.toFloat() *
+                360f *
+                motion.direction
+
+        ringRect.set(
+            cx - r,
+            cy - r,
+            cx + r,
+            cy + r
+        )
+
+        glowPaint.shader =
+            null
+
+        glowPaint.color =
+            color
+
+        glowPaint.alpha =
+            motion.ringGlowAlpha
+
+        glowPaint.strokeWidth =
+            dp(4.5f)
+
+        canvas.drawArc(
+            ringRect,
+            phase,
+            48f,
+            false,
+            glowPaint
+        )
+
+        canvas.drawArc(
+            ringRect,
+            phase + 126f,
+            34f,
+            false,
+            glowPaint
+        )
+
+        canvas.drawArc(
+            ringRect,
+            phase + 232f,
+            58f,
+            false,
+            glowPaint
+        )
+
+        linePaint.shader =
+            null
+
+        linePaint.color =
+            Color.WHITE
+
+        linePaint.alpha =
+            motion.ringLineAlpha
+
+        linePaint.strokeWidth =
+            dp(0.75f)
+
+        canvas.drawArc(
+            ringRect,
+            phase,
+            48f,
+            false,
+            linePaint
+        )
+
+        canvas.drawArc(
+            ringRect,
+            phase + 126f,
+            34f,
+            false,
+            linePaint
+        )
+
+        canvas.drawArc(
+            ringRect,
+            phase + 232f,
+            58f,
+            false,
+            linePaint
         )
     }
 
     private fun drawLiveWaveform(
         canvas: Canvas,
         now: Long,
-        imageBottom: Float,
+        bounds: RectF,
         stateIndex: Int,
-        motion: MotionProfile
+        motion: Motion
     ) {
-        if (
-            stateIndex <
-            0
-        ) {
+        if (bounds.isEmpty) {
             return
         }
 
         val color =
-            stateColor(
-                stateIndex
-            )
+            stateColor(stateIndex)
 
         val left =
             width *
-                0.035f
+                0.025f
 
         val right =
             width *
-                0.965f
-
-        val cy =
-            imageBottom *
-                0.515f
+                0.975f
 
         val span =
             right -
                 left
 
+        val cy =
+            bounds.centerY()
+
         val samples =
-            112
+            126
 
         val phase =
             now /
@@ -612,10 +663,10 @@ class AyanaCoreVisualizer(
 
         val amplitude =
             min(
-                imageBottom *
+                height *
                     motion.waveHeightRatio,
                 dp(
-                    motion.maxWaveHeightDp
+                    motion.waveMaxDp
                 )
             )
 
@@ -635,7 +686,7 @@ class AyanaCoreVisualizer(
                     span *
                         t
 
-            val edgeEnvelope =
+            val envelope =
                 sin(
                     PI *
                         t
@@ -654,25 +705,25 @@ class AyanaCoreVisualizer(
                 )
                     .toFloat()
 
-            val harmonic =
+            val detail =
                 sin(
                     t *
                         PI *
                         motion.detailFrequency -
                         phase *
-                            0.73
+                            0.79
                 )
                     .toFloat() *
-                    0.25f
+                    0.22f
 
             val y =
                 cy +
                     (
                         main +
-                            harmonic
+                            detail
                         ) *
                     amplitude *
-                    edgeEnvelope
+                    envelope
 
             if (index == 0) {
                 wavePath.moveTo(
@@ -690,9 +741,9 @@ class AyanaCoreVisualizer(
                 sin(
                     t *
                         PI *
-                        39.0 +
+                        43.0 +
                         phase *
-                            1.27
+                            1.31
                 )
                     .toFloat()
 
@@ -700,8 +751,8 @@ class AyanaCoreVisualizer(
                 cy +
                     fine *
                     amplitude *
-                    0.22f *
-                    edgeEnvelope
+                    0.18f *
+                    envelope
 
             if (index == 0) {
                 fineWavePath.moveTo(
@@ -726,24 +777,24 @@ class AyanaCoreVisualizer(
                     Color.TRANSPARENT,
                     withAlpha(
                         color,
-                        150
+                        140
                     ),
                     color,
                     Color.WHITE,
                     color,
                     withAlpha(
                         color,
-                        150
+                        140
                     ),
                     Color.TRANSPARENT
                 ),
                 floatArrayOf(
                     0f,
-                    0.13f,
-                    0.30f,
+                    0.12f,
+                    0.31f,
                     0.50f,
                     0.69f,
-                    0.87f,
+                    0.88f,
                     1f
                 ),
                 Shader.TileMode.CLAMP
@@ -799,185 +850,35 @@ class AyanaCoreVisualizer(
         )
     }
 
-    private fun drawOrbitSparks(
+    private fun drawCenterTravelPulse(
         canvas: Canvas,
         now: Long,
-        imageBottom: Float,
+        bounds: RectF,
         stateIndex: Int,
-        motion: MotionProfile
+        motion: Motion
     ) {
-        if (
-            stateIndex <
-            0 ||
-            motion.sparkCount <=
-            0
-        ) {
+        if (bounds.isEmpty) {
             return
         }
 
         val color =
-            stateColor(
-                stateIndex
-            )
-
-        val cx =
-            width *
-                0.50f
-
-        val cy =
-            imageBottom *
-                0.50f
-
-        val radius =
-            min(
-                width *
-                    0.235f,
-                imageBottom *
-                    0.42f
-            )
-
-        val phase =
-            now /
-                motion.sparkPeriodMs
-
-        for (
-            index in
-            0 until motion.sparkCount
-        ) {
-            val angle =
-                phase *
-                    motion.sparkDirection +
-                    index *
-                        (
-                            PI *
-                                2.0 /
-                                motion.sparkCount
-                            )
-
-            val radialPulse =
-                0.97f +
-                    0.025f *
-                        sin(
-                            phase *
-                                0.71 +
-                                index *
-                                    1.37
-                        )
-                            .toFloat()
-
-            val r =
-                radius *
-                    radialPulse
-
-            val x =
-                cx +
-                    cos(
-                        angle
-                    )
-                        .toFloat() *
-                    r
-
-            val y =
-                cy +
-                    sin(
-                        angle
-                    )
-                        .toFloat() *
-                    r *
-                    0.73f
-
-            val pulse =
-                (
-                    0.5 +
-                        0.5 *
-                            sin(
-                                phase *
-                                    1.11 +
-                                    index *
-                                        1.91
-                            )
-                    )
-                    .toFloat()
-
-            fillPaint.shader =
-                null
-
-            fillPaint.color =
-                if (
-                    index %
-                    5 ==
-                    0
-                ) {
-                    Color.WHITE
-                } else {
-                    color
-                }
-
-            fillPaint.alpha =
-                (
-                    45 +
-                        pulse *
-                            motion.sparkAlphaRange
-                    )
-                    .toInt()
-                    .coerceIn(
-                        0,
-                        210
-                    )
-
-            canvas.drawCircle(
-                x,
-                y,
-                dp(
-                    0.45f +
-                        pulse *
-                            0.65f
-                ),
-                fillPaint
-            )
-        }
-    }
-
-    private fun drawTravelingHighlight(
-        canvas: Canvas,
-        now: Long,
-        imageBottom: Float,
-        stateIndex: Int,
-        motion: MotionProfile
-    ) {
-        if (
-            stateIndex <
-            0 ||
-            motion.highlightAlpha <=
-            0
-        ) {
-            return
-        }
-
-        val color =
-            stateColor(
-                stateIndex
-            )
+            stateColor(stateIndex)
 
         val left =
             width *
-                0.12f
+                0.08f
 
         val right =
             width *
-                0.88f
-
-        val cy =
-            imageBottom *
-                0.515f
+                0.92f
 
         val travel =
             (
                 (
                     now %
-                        motion.highlightPeriodMs
+                        motion.pulsePeriodMs
                     ).toFloat() /
-                    motion.highlightPeriodMs.toFloat()
+                    motion.pulsePeriodMs.toFloat()
                 )
                 .coerceIn(
                     0f,
@@ -992,34 +893,37 @@ class AyanaCoreVisualizer(
                     ) *
                 travel
 
+        val y =
+            bounds.centerY()
+
         fillPaint.shader =
             RadialGradient(
                 x,
-                cy,
-                dp(22f),
+                y,
+                dp(19f),
                 intArrayOf(
                     Color.WHITE,
                     withAlpha(
                         color,
-                        155
+                        145
                     ),
                     Color.TRANSPARENT
                 ),
                 floatArrayOf(
                     0f,
-                    0.28f,
+                    0.30f,
                     1f
                 ),
                 Shader.TileMode.CLAMP
             )
 
         fillPaint.alpha =
-            motion.highlightAlpha
+            motion.pulseAlpha
 
         canvas.drawCircle(
             x,
-            cy,
-            dp(22f),
+            y,
+            dp(19f),
             fillPaint
         )
 
@@ -1027,12 +931,65 @@ class AyanaCoreVisualizer(
             null
     }
 
-    private fun drawStageStrip(
+    private fun drawStageOverlay(
         canvas: Canvas,
-        activeIndex: Int,
-        top: Float,
-        height: Float
+        activeIndex: Int
     ) {
+        val stripHeight =
+            min(
+                dp(55f),
+                height *
+                    0.19f
+            )
+
+        val top =
+            height -
+                stripHeight
+
+        // Transparent-black overlay only at the bottom. It does not resize image.
+        fillPaint.shader =
+            null
+
+        fillPaint.color =
+            Color.parseColor(
+                "#03060D"
+            )
+
+        fillPaint.alpha =
+            218
+
+        canvas.drawRect(
+            0f,
+            top,
+            width.toFloat(),
+            height.toFloat(),
+            fillPaint
+        )
+
+        linePaint.shader =
+            null
+
+        linePaint.color =
+            Color.parseColor(
+                "#26334A"
+            )
+
+        linePaint.alpha =
+            220
+
+        linePaint.strokeWidth =
+            dp(0.75f)
+
+        canvas.drawLine(
+            width *
+                0.035f,
+            top,
+            width *
+                0.965f,
+            top,
+            linePaint
+        )
+
         val labels =
             arrayOf(
                 "Ожидание",
@@ -1063,24 +1020,21 @@ class AyanaCoreVisualizer(
 
         val nodeY =
             top +
-                height *
-                    0.34f
+                stripHeight *
+                    0.35f
 
         val labelY =
             top +
-                height *
-                    0.79f
-
-        linePaint.shader =
-            null
+                stripHeight *
+                    0.80f
 
         linePaint.color =
             Color.parseColor(
-                "#2B3548"
+                "#2A354B"
             )
 
         linePaint.alpha =
-            190
+            185
 
         linePaint.strokeWidth =
             dp(0.75f)
@@ -1107,24 +1061,19 @@ class AyanaCoreVisualizer(
                     activeIndex
 
             val color =
-                stateColor(
-                    index
-                )
+                stateColor(index)
 
             if (active) {
-                fillPaint.shader =
-                    null
-
                 fillPaint.color =
                     color
 
                 fillPaint.alpha =
-                    38
+                    35
 
                 canvas.drawCircle(
                     x,
                     nodeY,
-                    dp(17.5f),
+                    dp(17f),
                     fillPaint
                 )
 
@@ -1140,7 +1089,7 @@ class AyanaCoreVisualizer(
                 canvas.drawCircle(
                     x,
                     nodeY,
-                    dp(14.6f),
+                    dp(14.5f),
                     linePaint
                 )
 
@@ -1153,13 +1102,13 @@ class AyanaCoreVisualizer(
                 canvas.drawCircle(
                     x,
                     nodeY,
-                    dp(3.2f),
+                    dp(3.0f),
                     fillPaint
                 )
             } else {
                 linePaint.color =
                     Color.parseColor(
-                        "#3B465A"
+                        "#414A5D"
                     )
 
                 linePaint.alpha =
@@ -1171,13 +1120,13 @@ class AyanaCoreVisualizer(
                 canvas.drawCircle(
                     x,
                     nodeY,
-                    dp(12.8f),
+                    dp(12.5f),
                     linePaint
                 )
 
                 fillPaint.color =
                     Color.parseColor(
-                        "#647086"
+                        "#657084"
                     )
 
                 fillPaint.alpha =
@@ -1186,7 +1135,7 @@ class AyanaCoreVisualizer(
                 canvas.drawCircle(
                     x,
                     nodeY,
-                    dp(2.2f),
+                    dp(2.1f),
                     fillPaint
                 )
             }
@@ -1194,7 +1143,7 @@ class AyanaCoreVisualizer(
             textPaint.textSize =
                 dp(
                     if (active) {
-                        9.4f
+                        9.5f
                     } else {
                         8.8f
                     }
@@ -1215,7 +1164,7 @@ class AyanaCoreVisualizer(
                     color
                 } else {
                     Color.parseColor(
-                        "#7E899C"
+                        "#7D899D"
                     )
                 }
 
@@ -1238,9 +1187,7 @@ class AyanaCoreVisualizer(
     private fun stateIndex(
         state: String
     ): Int {
-        return when (
-            state
-        ) {
+        return when (state) {
             AyanaVoiceService.STATE_LISTENING ->
                 STATE_WAITING
 
@@ -1270,215 +1217,181 @@ class AyanaCoreVisualizer(
     private fun stateColor(
         index: Int
     ): Int {
-        return when (
-            index
-        ) {
+        return when(index) {
             STATE_WAITING ->
-                Color.parseColor(
-                    "#19DCE7"
-                )
+                Color.parseColor("#19DCE7")
 
             STATE_RECOGNITION ->
-                Color.parseColor(
-                    "#1687FF"
-                )
+                Color.parseColor("#1687FF")
 
             STATE_THINKING ->
-                Color.parseColor(
-                    "#633BFF"
-                )
+                Color.parseColor("#633BFF")
 
             STATE_EXECUTING ->
-                Color.parseColor(
-                    "#28E06E"
-                )
+                Color.parseColor("#28E06E")
 
             STATE_ANSWERING ->
-                Color.parseColor(
-                    "#E623C7"
-                )
+                Color.parseColor("#E623C7")
 
             STATE_STOP ->
-                Color.parseColor(
-                    "#FF3B22"
-                )
+                Color.parseColor("#FF3B22")
 
             else ->
-                Color.parseColor(
-                    "#19DCE7"
-                )
+                Color.parseColor("#19DCE7")
         }
     }
 
-    private fun motionProfile(
+    private fun motionFor(
         index: Int
-    ): MotionProfile {
-        return when (
-            index
-        ) {
+    ): Motion {
+        return when(index) {
             STATE_WAITING ->
-                MotionProfile(
-                    breathePeriodMs = 1050.0,
-                    scaleAmplitude = 0.008f,
-                    glowScaleExtra = 0.008f,
-                    glowAlphaBase = 7f,
-                    glowAlphaRange = 15f,
-                    wavePeriodMs = 620.0,
-                    waveHeightRatio = 0.045f,
-                    maxWaveHeightDp = 13f,
+                Motion(
+                    breatheMs = 1150.0,
+                    scaleRange = 0.007f,
+                    glowAlpha = 12f,
+                    wavePeriodMs = 650.0,
+                    waveHeightRatio = 0.030f,
+                    waveMaxDp = 10f,
                     mainFrequency = 7.0,
                     detailFrequency = 21.0,
-                    waveGlowAlpha = 48,
-                    waveGlowWidthDp = 5.4f,
-                    waveAlpha = 122,
+                    waveGlowAlpha = 46,
+                    waveGlowWidthDp = 5.0f,
+                    waveAlpha = 118,
                     waveWidthDp = 0.92f,
-                    fineWaveAlpha = 38,
-                    sparkCount = 12,
-                    sparkPeriodMs = 1800.0,
-                    sparkDirection = 1.0,
-                    sparkAlphaRange = 72f,
-                    highlightAlpha = 54,
-                    highlightPeriodMs = 3300L
+                    fineWaveAlpha = 35,
+                    ringPeriodMs = 7200L,
+                    direction = 1f,
+                    ringGlowAlpha = 24,
+                    ringLineAlpha = 70,
+                    pulsePeriodMs = 3400L,
+                    pulseAlpha = 56
                 )
 
             STATE_RECOGNITION ->
-                MotionProfile(
-                    breathePeriodMs = 690.0,
-                    scaleAmplitude = 0.010f,
-                    glowScaleExtra = 0.010f,
-                    glowAlphaBase = 10f,
-                    glowAlphaRange = 20f,
-                    wavePeriodMs = 370.0,
-                    waveHeightRatio = 0.072f,
-                    maxWaveHeightDp = 21f,
+                Motion(
+                    breatheMs = 720.0,
+                    scaleRange = 0.009f,
+                    glowAlpha = 17f,
+                    wavePeriodMs = 390.0,
+                    waveHeightRatio = 0.055f,
+                    waveMaxDp = 18f,
                     mainFrequency = 9.0,
                     detailFrequency = 27.0,
-                    waveGlowAlpha = 68,
-                    waveGlowWidthDp = 6.2f,
-                    waveAlpha = 165,
-                    waveWidthDp = 1.12f,
-                    fineWaveAlpha = 48,
-                    sparkCount = 16,
-                    sparkPeriodMs = 1250.0,
-                    sparkDirection = 1.0,
-                    sparkAlphaRange = 96f,
-                    highlightAlpha = 76,
-                    highlightPeriodMs = 2200L
+                    waveGlowAlpha = 64,
+                    waveGlowWidthDp = 6.0f,
+                    waveAlpha = 155,
+                    waveWidthDp = 1.08f,
+                    fineWaveAlpha = 45,
+                    ringPeriodMs = 4800L,
+                    direction = 1f,
+                    ringGlowAlpha = 34,
+                    ringLineAlpha = 90,
+                    pulsePeriodMs = 2200L,
+                    pulseAlpha = 72
                 )
 
             STATE_THINKING ->
-                MotionProfile(
-                    breathePeriodMs = 860.0,
-                    scaleAmplitude = 0.012f,
-                    glowScaleExtra = 0.011f,
-                    glowAlphaBase = 9f,
-                    glowAlphaRange = 18f,
+                Motion(
+                    breatheMs = 900.0,
+                    scaleRange = 0.010f,
+                    glowAlpha = 16f,
                     wavePeriodMs = 520.0,
-                    waveHeightRatio = 0.055f,
-                    maxWaveHeightDp = 16f,
+                    waveHeightRatio = 0.044f,
+                    waveMaxDp = 14f,
                     mainFrequency = 8.0,
                     detailFrequency = 31.0,
                     waveGlowAlpha = 58,
-                    waveGlowWidthDp = 5.8f,
-                    waveAlpha = 150,
-                    waveWidthDp = 1.04f,
-                    fineWaveAlpha = 54,
-                    sparkCount = 18,
-                    sparkPeriodMs = 1450.0,
-                    sparkDirection = -1.0,
-                    sparkAlphaRange = 92f,
-                    highlightAlpha = 66,
-                    highlightPeriodMs = 2700L
+                    waveGlowWidthDp = 5.7f,
+                    waveAlpha = 145,
+                    waveWidthDp = 1.02f,
+                    fineWaveAlpha = 50,
+                    ringPeriodMs = 5600L,
+                    direction = -1f,
+                    ringGlowAlpha = 32,
+                    ringLineAlpha = 86,
+                    pulsePeriodMs = 2700L,
+                    pulseAlpha = 66
                 )
 
             STATE_EXECUTING ->
-                MotionProfile(
-                    breathePeriodMs = 540.0,
-                    scaleAmplitude = 0.012f,
-                    glowScaleExtra = 0.012f,
-                    glowAlphaBase = 11f,
-                    glowAlphaRange = 22f,
-                    wavePeriodMs = 310.0,
-                    waveHeightRatio = 0.075f,
-                    maxWaveHeightDp = 23f,
+                Motion(
+                    breatheMs = 560.0,
+                    scaleRange = 0.010f,
+                    glowAlpha = 20f,
+                    wavePeriodMs = 320.0,
+                    waveHeightRatio = 0.060f,
+                    waveMaxDp = 20f,
                     mainFrequency = 10.0,
                     detailFrequency = 29.0,
-                    waveGlowAlpha = 78,
-                    waveGlowWidthDp = 6.8f,
-                    waveAlpha = 182,
-                    waveWidthDp = 1.20f,
-                    fineWaveAlpha = 52,
-                    sparkCount = 20,
-                    sparkPeriodMs = 980.0,
-                    sparkDirection = 1.0,
-                    sparkAlphaRange = 108f,
-                    highlightAlpha = 86,
-                    highlightPeriodMs = 1800L
+                    waveGlowAlpha = 76,
+                    waveGlowWidthDp = 6.5f,
+                    waveAlpha = 180,
+                    waveWidthDp = 1.18f,
+                    fineWaveAlpha = 50,
+                    ringPeriodMs = 3600L,
+                    direction = 1f,
+                    ringGlowAlpha = 42,
+                    ringLineAlpha = 100,
+                    pulsePeriodMs = 1750L,
+                    pulseAlpha = 82
                 )
 
             STATE_ANSWERING ->
-                MotionProfile(
-                    breathePeriodMs = 620.0,
-                    scaleAmplitude = 0.011f,
-                    glowScaleExtra = 0.011f,
-                    glowAlphaBase = 10f,
-                    glowAlphaRange = 21f,
-                    wavePeriodMs = 340.0,
-                    waveHeightRatio = 0.068f,
-                    maxWaveHeightDp = 20f,
+                Motion(
+                    breatheMs = 650.0,
+                    scaleRange = 0.009f,
+                    glowAlpha = 18f,
+                    wavePeriodMs = 350.0,
+                    waveHeightRatio = 0.054f,
+                    waveMaxDp = 18f,
                     mainFrequency = 9.0,
                     detailFrequency = 25.0,
-                    waveGlowAlpha = 74,
-                    waveGlowWidthDp = 6.4f,
-                    waveAlpha = 178,
-                    waveWidthDp = 1.18f,
-                    fineWaveAlpha = 50,
-                    sparkCount = 18,
-                    sparkPeriodMs = 1120.0,
-                    sparkDirection = -1.0,
-                    sparkAlphaRange = 102f,
-                    highlightAlpha = 82,
-                    highlightPeriodMs = 1950L
+                    waveGlowAlpha = 70,
+                    waveGlowWidthDp = 6.2f,
+                    waveAlpha = 172,
+                    waveWidthDp = 1.14f,
+                    fineWaveAlpha = 48,
+                    ringPeriodMs = 4100L,
+                    direction = -1f,
+                    ringGlowAlpha = 38,
+                    ringLineAlpha = 96,
+                    pulsePeriodMs = 1950L,
+                    pulseAlpha = 78
                 )
 
             STATE_STOP ->
-                MotionProfile(
-                    breathePeriodMs = 1550.0,
-                    scaleAmplitude = 0.004f,
-                    glowScaleExtra = 0.004f,
-                    glowAlphaBase = 4f,
-                    glowAlphaRange = 8f,
-                    wavePeriodMs = 980.0,
-                    waveHeightRatio = 0.026f,
-                    maxWaveHeightDp = 8f,
+                Motion(
+                    breatheMs = 1700.0,
+                    scaleRange = 0.003f,
+                    glowAlpha = 7f,
+                    wavePeriodMs = 1050.0,
+                    waveHeightRatio = 0.018f,
+                    waveMaxDp = 6f,
                     mainFrequency = 5.0,
                     detailFrequency = 15.0,
-                    waveGlowAlpha = 34,
-                    waveGlowWidthDp = 4.0f,
-                    waveAlpha = 92,
-                    waveWidthDp = 0.82f,
-                    fineWaveAlpha = 28,
-                    sparkCount = 6,
-                    sparkPeriodMs = 2500.0,
-                    sparkDirection = -1.0,
-                    sparkAlphaRange = 48f,
-                    highlightAlpha = 32,
-                    highlightPeriodMs = 4200L
+                    waveGlowAlpha = 26,
+                    waveGlowWidthDp = 3.5f,
+                    waveAlpha = 74,
+                    waveWidthDp = 0.78f,
+                    fineWaveAlpha = 24,
+                    ringPeriodMs = 12000L,
+                    direction = -1f,
+                    ringGlowAlpha = 14,
+                    ringLineAlpha = 52,
+                    pulsePeriodMs = 4800L,
+                    pulseAlpha = 28
                 )
 
             else ->
-                motionProfile(
-                    STATE_WAITING
-                )
+                motionFor(STATE_WAITING)
         }
     }
 
-    private fun frameDelayMs(
+    private fun frameDelayFor(
         index: Int
     ): Long {
-        return when (
-            index
-        ) {
+        return when(index) {
             STATE_RECOGNITION,
             STATE_EXECUTING,
             STATE_ANSWERING ->
@@ -1491,7 +1404,7 @@ class AyanaCoreVisualizer(
                 38L
 
             STATE_STOP ->
-                58L
+                60L
 
             else ->
                 40L
@@ -1503,20 +1416,13 @@ class AyanaCoreVisualizer(
         alpha: Int
     ): Int {
         return Color.argb(
-            alpha
-                .coerceIn(
-                    0,
-                    255
-                ),
-            Color.red(
-                color
+            alpha.coerceIn(
+                0,
+                255
             ),
-            Color.green(
-                color
-            ),
-            Color.blue(
-                color
-            )
+            Color.red(color),
+            Color.green(color),
+            Color.blue(color)
         )
     }
 
@@ -1527,15 +1433,13 @@ class AyanaCoreVisualizer(
             density
     }
 
-    private data class MotionProfile(
-        val breathePeriodMs: Double,
-        val scaleAmplitude: Float,
-        val glowScaleExtra: Float,
-        val glowAlphaBase: Float,
-        val glowAlphaRange: Float,
+    private data class Motion(
+        val breatheMs: Double,
+        val scaleRange: Float,
+        val glowAlpha: Float,
         val wavePeriodMs: Double,
         val waveHeightRatio: Float,
-        val maxWaveHeightDp: Float,
+        val waveMaxDp: Float,
         val mainFrequency: Double,
         val detailFrequency: Double,
         val waveGlowAlpha: Int,
@@ -1543,12 +1447,12 @@ class AyanaCoreVisualizer(
         val waveAlpha: Int,
         val waveWidthDp: Float,
         val fineWaveAlpha: Int,
-        val sparkCount: Int,
-        val sparkPeriodMs: Double,
-        val sparkDirection: Double,
-        val sparkAlphaRange: Float,
-        val highlightAlpha: Int,
-        val highlightPeriodMs: Long
+        val ringPeriodMs: Long,
+        val direction: Float,
+        val ringGlowAlpha: Int,
+        val ringLineAlpha: Int,
+        val pulsePeriodMs: Long,
+        val pulseAlpha: Int
     )
 
     companion object {
@@ -1570,9 +1474,6 @@ class AyanaCoreVisualizer(
 
         private const val STATE_STOP =
             5
-
-        private const val STATE_COUNT =
-            6
 
         private const val TRANSITION_MS =
             180f
