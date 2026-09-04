@@ -18,9 +18,9 @@ import kotlin.math.min
 import kotlin.math.sin
 
 /**
- * AYANA Core Visualizer v14.0 — LIVE AI ENERGY CORE
+ * AYANA Core Visualizer v15.0 — LIVE QUANTUM WEAVE
  *
- * Procedural live renderer based on the approved six-state AYANA reference:
+ * Dense procedural live renderer based directly on the approved six-state AYANA reference:
  *
  * 1. ОЖИДАНИЕ       — cyan / calm coherent energy field
  * 2. РАСПОЗНАВАНИЕ  — electric blue / inbound analysis scan
@@ -111,17 +111,18 @@ class AyanaCoreVisualizer(
 
         val edge = dp(10f)
 
-        // The largest decorative element is <= 1.16R.
+        // The largest decorative element is <= 1.10R.
+        // v15 uses more of the available hero window while preserving hard bounds.
         val maxRByHeight =
-            (h * 0.50f - edge) / 1.16f
+            (h * 0.50f - edge) / 1.10f
 
         val maxRByWidth =
-            (w * 0.50f - edge) / 1.16f
+            (w * 0.50f - edge) / 1.10f
 
         val preferred =
             min(
-                h * 0.415f,
-                w * 0.315f
+                h * 0.455f,
+                w * 0.350f
             )
 
         val radius =
@@ -211,6 +212,7 @@ class AyanaCoreVisualizer(
         }
     }
 
+
     private fun drawBackdrop(
         canvas: Canvas,
         cx: Float,
@@ -219,47 +221,73 @@ class AyanaCoreVisualizer(
         palette: Palette,
         state: Int
     ) {
+        // Deep background bloom: bright enough to feel alive, but the center
+        // remains dark enough for the custom AYANA signature to stay crisp.
         fill.shader =
             RadialGradient(
                 cx,
                 cy,
-                radius * 1.16f,
+                radius * 1.10f,
                 intArrayOf(
-                    withAlpha(palette.primary, if (state == STATE_STOP) 38 else 66),
-                    withAlpha(palette.secondary, if (state == STATE_STOP) 18 else 34),
+                    withAlpha(Color.WHITE, if (state == STATE_STOP) 18 else 42),
+                    withAlpha(palette.primary, if (state == STATE_STOP) 46 else 96),
+                    withAlpha(palette.secondary, if (state == STATE_STOP) 25 else 58),
                     Color.TRANSPARENT
                 ),
                 floatArrayOf(
                     0f,
-                    0.58f,
+                    0.24f,
+                    0.64f,
                     1f
                 ),
                 Shader.TileMode.CLAMP
             )
 
         fill.alpha = 255
-        canvas.drawCircle(
-            cx,
-            cy,
-            radius * 1.16f,
-            fill
-        )
+        canvas.drawCircle(cx, cy, radius * 1.10f, fill)
         fill.shader = null
 
-        // Very faint center-axis reference, like the approved artwork,
-        // but not a dashboard grid.
-        stroke.color = withAlpha(palette.primary, 34)
-        stroke.alpha = 120
-        stroke.strokeWidth = dp(0.55f)
+        // Bright central carrier beam from the approved reference.
+        val left = cx - radius * 1.08f
+        val right = cx + radius * 1.08f
 
-        canvas.drawLine(
-            cx - radius * 1.12f,
-            cy,
-            cx + radius * 1.12f,
-            cy,
-            stroke
-        )
+        val carrier =
+            LinearGradient(
+                left,
+                cy,
+                right,
+                cy,
+                intArrayOf(
+                    Color.TRANSPARENT,
+                    palette.primary,
+                    Color.WHITE,
+                    palette.primary,
+                    Color.TRANSPARENT
+                ),
+                floatArrayOf(
+                    0f,
+                    0.24f,
+                    0.50f,
+                    0.76f,
+                    1f
+                ),
+                Shader.TileMode.CLAMP
+            )
+
+        glow.shader = carrier
+        glow.alpha = if (state == STATE_STOP) 36 else 88
+        glow.strokeWidth = dp(8.5f)
+        canvas.drawLine(left, cy, right, cy, glow)
+
+        stroke.shader = carrier
+        stroke.alpha = if (state == STATE_STOP) 90 else 225
+        stroke.strokeWidth = dp(0.95f)
+        canvas.drawLine(left, cy, right, cy, stroke)
+
+        glow.shader = null
+        stroke.shader = null
     }
+
 
     private fun drawWaveform(
         canvas: Canvas,
@@ -274,84 +302,74 @@ class AyanaCoreVisualizer(
         path.reset()
         finePath.reset()
 
-        val left = cx - radius * 1.14f
-        val right = cx + radius * 1.14f
-        val samples = 112
-
+        val left = cx - radius * 1.08f
+        val right = cx + radius * 1.08f
+        val samples = 132
         val phase = now / motion.wavePeriodMs
 
         val stateBoost =
             when(state) {
-                STATE_RECOGNITION -> 1.55f
-                STATE_EXECUTING -> 1.34f
-                STATE_ANSWERING -> 1.50f
-                STATE_STOP -> 0.42f
-                else -> 1f
+                STATE_RECOGNITION -> 1.72f
+                STATE_THINKING -> 1.16f
+                STATE_EXECUTING -> 1.46f
+                STATE_ANSWERING -> 1.62f
+                STATE_STOP -> 0.36f
+                else -> 1.12f
             }
 
         for (i in 0..samples) {
             val t = i / samples.toFloat()
             val x = left + (right - left) * t
 
-            val centerDistance =
+            val edgeWeight =
                 abs(
                     (x - cx) /
-                        (radius * 1.14f)
+                        (radius * 1.08f)
                 )
                     .coerceIn(0f, 1f)
 
+            // Reference-like waveform: stronger on the left/right edges,
+            // quieter while crossing the luminous center.
             val envelope =
                 (
-                    0.28f +
-                        0.72f *
-                            centerDistance
+                    0.20f +
+                        0.80f *
+                            edgeWeight
                     )
-                    .coerceIn(0.28f, 1f)
+                    .coerceIn(0.20f, 1f)
 
             val main =
                 sin(
-                    t *
-                        PI *
-                        motion.waveCycles +
+                    t * PI * motion.waveCycles +
                         phase
                 )
                     .toFloat()
 
-            val detail =
+            val harmonic1 =
                 sin(
-                    t *
-                        PI *
-                        34.0 -
-                        phase *
-                            0.73
+                    t * PI * 31.0 -
+                        phase * 0.71
                 )
                     .toFloat() *
-                    0.26f
+                    0.30f
 
-            val responseDetail =
-                if (state == STATE_ANSWERING) {
-                    sin(
-                        t *
-                            PI *
-                            18.0 +
-                            phase *
-                                1.35
-                    )
-                        .toFloat() *
-                        0.20f
-                } else {
-                    0f
-                }
+            val harmonic2 =
+                sin(
+                    t * PI * 53.0 +
+                        phase * 1.13
+                )
+                    .toFloat() *
+                    0.11f
 
             val y =
                 cy +
                     (
                         main +
-                            detail +
-                            responseDetail
+                            harmonic1 +
+                            harmonic2
                     ) *
                     radius *
-                    0.12f *
+                    0.155f *
                     envelope *
                     stateBoost
 
@@ -363,11 +381,8 @@ class AyanaCoreVisualizer(
 
             val fine =
                 sin(
-                    t *
-                        PI *
-                        62.0 +
-                        phase *
-                            1.12
+                    t * PI * 76.0 +
+                        phase * 1.29
                 )
                     .toFloat()
 
@@ -375,7 +390,7 @@ class AyanaCoreVisualizer(
                 cy +
                     fine *
                     radius *
-                    0.038f *
+                    0.050f *
                     envelope *
                     stateBoost
 
@@ -409,34 +424,86 @@ class AyanaCoreVisualizer(
                 Shader.TileMode.CLAMP
             )
 
+        // Multi-pass glow gives much more energy than one thin Android line.
         glow.shader = gradient
-        glow.alpha = motion.waveGlowAlpha
-        glow.strokeWidth = dp(7.5f)
+        glow.alpha = if (state == STATE_STOP) 28 else motion.waveGlowAlpha
+        glow.strokeWidth = dp(11f)
+        canvas.drawPath(path, glow)
+
+        glow.alpha = if (state == STATE_STOP) 36 else 76
+        glow.strokeWidth = dp(5.5f)
         canvas.drawPath(path, glow)
 
         stroke.shader = gradient
-        stroke.alpha = motion.waveAlpha
-        stroke.strokeWidth = dp(1.55f)
+        stroke.alpha = if (state == STATE_STOP) 112 else motion.waveAlpha
+        stroke.strokeWidth = dp(1.65f)
         canvas.drawPath(path, stroke)
 
         stroke.shader = null
         glow.shader = null
 
         stroke.color = Color.WHITE
-        stroke.alpha =
-            if (state == STATE_STOP) {
-                38
-            } else {
-                92
-            }
-        stroke.strokeWidth = dp(0.52f)
+        stroke.alpha = if (state == STATE_STOP) 32 else 110
+        stroke.strokeWidth = dp(0.48f)
         canvas.drawPath(finePath, stroke)
+
+        // Dense spectral spikes on the outside of the energy sphere.
+        val spikeCount = 84
+        for (i in 0 until spikeCount) {
+            val t = i / (spikeCount - 1).toFloat()
+            val x = left + (right - left) * t
+            val centerDistance = abs((x - cx) / radius)
+
+            if (centerDistance < 0.70f) continue
+
+            val pulse =
+                abs(
+                    sin(
+                        now / 210.0 +
+                            i * 1.37
+                    )
+                        .toFloat()
+                )
+
+            val half =
+                radius *
+                    (
+                        0.020f +
+                            pulse * 0.105f
+                    ) *
+                    stateBoost
+
+            stroke.color =
+                when(i % 3) {
+                    0 -> palette.primary
+                    1 -> Color.WHITE
+                    else -> palette.secondary
+                }
+
+            stroke.alpha =
+                if (state == STATE_STOP) {
+                    50 + (pulse * 65f).toInt()
+                } else {
+                    76 + (pulse * 145f).toInt()
+                }
+
+            stroke.strokeWidth = dp(if (i % 6 == 0) 0.85f else 0.48f)
+
+            canvas.drawLine(
+                x,
+                cy - half,
+                x,
+                cy + half,
+                stroke
+            )
+        }
     }
 
     /**
      * Braided inner field. The lines are deliberately non-uniform and
      * continuously phase-shifted so this is a real live renderer, not a photo.
      */
+
     private fun drawEnergyRibbons(
         canvas: Canvas,
         now: Long,
@@ -449,107 +516,127 @@ class AyanaCoreVisualizer(
     ) {
         val ribbonCount =
             when(state) {
-                STATE_WAITING -> 9
-                STATE_RECOGNITION -> 11
-                STATE_THINKING -> 14
-                STATE_EXECUTING -> 12
-                STATE_ANSWERING -> 11
-                STATE_STOP -> 7
-                else -> 9
+                STATE_WAITING -> 18
+                STATE_RECOGNITION -> 20
+                STATE_THINKING -> 24
+                STATE_EXECUTING -> 21
+                STATE_ANSWERING -> 20
+                STATE_STOP -> 12
+                else -> 18
             }
 
         for (ribbon in 0 until ribbonCount) {
             path.reset()
 
-            val points = 112
+            val points = 144
+
             val phase =
                 now /
                     motion.ribbonPeriodMs +
-                    ribbon *
-                        0.63
+                    ribbon * 0.49
 
-            val skew =
-                (
-                    ribbon -
-                        (ribbonCount - 1) *
-                            0.5f
-                    ) /
-                    ribbonCount.toFloat()
+            val centered =
+                ribbon -
+                    (ribbonCount - 1) *
+                        0.5f
+
+            val family =
+                ribbon % 4
 
             for (i in 0..points) {
-                val t =
-                    i /
-                        points.toFloat()
+                val t = i / points.toFloat()
 
                 val angle =
-                    t *
-                        PI *
-                        2.0 +
+                    t * PI * 2.0 +
                         phase *
-                            (
-                                if (ribbon % 2 == 0) {
-                                    1.0
-                                } else {
-                                    -0.86
-                                }
-                            )
+                            when(family) {
+                                0 -> 1.00
+                                1 -> -0.86
+                                2 -> 0.72
+                                else -> -0.61
+                            }
 
-                val warp =
+                val lobe =
                     sin(
                         angle *
                             (
                                 2.0 +
-                                    ribbon %
-                                        3
+                                    family
                                 ) +
-                            phase *
-                                0.72
+                            phase * 0.63
                     )
                         .toFloat()
 
                 val micro =
                     sin(
-                        angle *
-                            5.0 -
-                            phase *
-                                0.56
+                        angle * 7.0 -
+                            phase * 0.41 +
+                            ribbon * 0.33
                     )
                         .toFloat()
+
+                val familyTilt =
+                    when(family) {
+                        0 -> 0.80f
+                        1 -> 0.67f
+                        2 -> 0.90f
+                        else -> 0.74f
+                    }
 
                 val base =
                     radius *
                         (
-                            0.64f +
-                                skew *
-                                    0.12f
+                            0.55f +
+                                centered / ribbonCount.toFloat() *
+                                    0.16f
                             )
 
                 val rr =
                     base *
                         (
                             1f +
-                                warp *
-                                    motion.ribbonWarp +
-                                micro *
-                                    0.025f
+                                lobe * motion.ribbonWarp +
+                                micro * 0.035f
                             )
+
+                // Additional precession creates the dense woven sphere seen in
+                // the reference instead of thin orbital circles.
+                val px =
+                    sin(
+                        phase * 0.44 +
+                            ribbon * 0.71
+                    )
+                        .toFloat() *
+                        radius *
+                        0.055f
+
+                val py =
+                    cos(
+                        phase * 0.39 +
+                            ribbon * 0.53
+                    )
+                        .toFloat() *
+                        radius *
+                        0.045f
 
                 val x =
                     cx +
                         cos(angle)
                             .toFloat() *
-                        rr
+                            rr +
+                        px *
+                            sin(angle * 2.0)
+                                .toFloat()
 
                 val y =
                     cy +
                         sin(angle)
                             .toFloat() *
-                        rr *
-                        (
-                            0.78f +
-                                skew *
-                                    0.18f
-                            )
+                            rr *
+                            familyTilt +
+                        py *
+                            cos(angle * 3.0)
+                                .toFloat()
 
                 if (i == 0) {
                     path.moveTo(x, y)
@@ -559,44 +646,60 @@ class AyanaCoreVisualizer(
             }
 
             val color =
-                when(ribbon % 3) {
-                    0 -> palette.primary
-                    1 -> palette.secondary
-                    else -> palette.accent
+                when(ribbon % 5) {
+                    0 -> Color.WHITE
+                    1 -> palette.primary
+                    2 -> palette.secondary
+                    3 -> palette.accent
+                    else -> palette.primary
                 }
 
+            // Every few ribbons receive a large bloom pass.
             if (ribbon % 4 == 0) {
-                glow.color = color
-                glow.alpha =
-                    if (state == STATE_STOP) {
-                        24
+                glow.color =
+                    if (color == Color.WHITE) {
+                        palette.primary
                     } else {
-                        42
+                        color
                     }
-                glow.strokeWidth = dp(5.4f)
+
+                glow.alpha =
+                    when(state) {
+                        STATE_STOP -> 26
+                        STATE_THINKING -> 72
+                        else -> 58
+                    }
+
+                glow.strokeWidth = dp(if (ribbon % 8 == 0) 9f else 6f)
                 canvas.drawPath(path, glow)
             }
 
             stroke.color = color
+
             stroke.alpha =
                 when(state) {
-                    STATE_THINKING -> 156
-                    STATE_EXECUTING -> 150
-                    STATE_STOP -> 92
-                    else -> 132
+                    STATE_WAITING -> if (color == Color.WHITE) 205 else 172
+                    STATE_RECOGNITION -> if (color == Color.WHITE) 230 else 195
+                    STATE_THINKING -> if (color == Color.WHITE) 238 else 210
+                    STATE_EXECUTING -> if (color == Color.WHITE) 230 else 198
+                    STATE_ANSWERING -> if (color == Color.WHITE) 232 else 202
+                    STATE_STOP -> if (color == Color.WHITE) 92 else 116
+                    else -> 170
                 }
+
             stroke.strokeWidth =
                 dp(
-                    if (ribbon % 5 == 0) {
-                        1.05f
-                    } else {
-                        0.72f
+                    when {
+                        color == Color.WHITE -> 1.18f
+                        ribbon % 5 == 0 -> 1.05f
+                        else -> 0.78f
                     }
                 )
 
             canvas.drawPath(path, stroke)
         }
     }
+
 
     private fun drawCoreRings(
         canvas: Canvas,
@@ -613,28 +716,29 @@ class AyanaCoreVisualizer(
                 0.5 +
                     0.5 *
                         sin(
-                            now /
-                                motion.breathePeriodMs
+                            now / motion.breathePeriodMs
                         )
                 )
                 .toFloat()
 
-        // Inner luminous lens.
+        // Dark glass-like center surrounded by a luminous lens.
         fill.shader =
             RadialGradient(
                 cx,
                 cy,
-                radius * 0.62f,
+                radius * 0.66f,
                 intArrayOf(
-                    withAlpha(Color.WHITE, if (state == STATE_STOP) 100 else 205),
-                    withAlpha(palette.primary, if (state == STATE_STOP) 95 else 178),
-                    withAlpha(palette.secondary, if (state == STATE_STOP) 52 else 86),
+                    withAlpha(Color.WHITE, if (state == STATE_STOP) 70 else 170),
+                    withAlpha(palette.primary, if (state == STATE_STOP) 82 else 190),
+                    withAlpha(palette.secondary, if (state == STATE_STOP) 50 else 110),
+                    withAlpha(Color.parseColor("#02050A"), 238),
                     Color.TRANSPARENT
                 ),
                 floatArrayOf(
                     0f,
-                    0.20f,
-                    0.60f,
+                    0.16f,
+                    0.40f,
+                    0.70f,
                     1f
                 ),
                 Shader.TileMode.CLAMP
@@ -646,75 +750,74 @@ class AyanaCoreVisualizer(
             cy,
             radius *
                 (
-                    0.52f +
-                        pulse *
-                            0.018f
+                    0.58f +
+                        pulse * 0.015f
                     ),
             fill
         )
         fill.shader = null
 
-        // Concentric technical rings.
-        for (ringIndex in 0 until 8) {
+        // Dense concentric computation rings.
+        for (ringIndex in 0 until 12) {
             val rr =
                 radius *
                     (
-                        0.24f +
-                            ringIndex *
-                                0.082f
+                        0.20f +
+                            ringIndex * 0.058f
                         )
 
             stroke.color =
-                when(ringIndex % 3) {
-                    0 -> palette.primary
-                    1 -> palette.secondary
+                when(ringIndex % 4) {
+                    0 -> Color.WHITE
+                    1 -> palette.primary
+                    2 -> palette.secondary
                     else -> palette.accent
                 }
 
             stroke.alpha =
-                if (state == STATE_STOP) {
-                    58 + ringIndex * 4
-                } else {
-                    76 + ringIndex * 8
+                when(state) {
+                    STATE_STOP -> 38 + ringIndex * 5
+                    else -> 62 + ringIndex * 10
                 }
+                    .coerceAtMost(205)
 
             stroke.strokeWidth =
                 dp(
-                    if (ringIndex % 3 == 0) {
-                        0.95f
-                    } else {
-                        0.58f
+                    when {
+                        ringIndex % 4 == 0 -> 0.90f
+                        ringIndex % 3 == 0 -> 0.72f
+                        else -> 0.48f
                     }
                 )
 
-            canvas.drawCircle(
-                cx,
-                cy,
-                rr,
-                stroke
-            )
+            canvas.drawCircle(cx, cy, rr, stroke)
         }
 
-        // Small center point = computational focus, not a separate orb.
-        fill.color = Color.WHITE
-        fill.alpha =
-            if (state == STATE_STOP) {
-                135
-            } else {
-                245
-            }
-        canvas.drawCircle(
-            cx,
-            cy,
-            dp(2.1f),
-            fill
-        )
+        // Computational focus.
+        fill.shader =
+            RadialGradient(
+                cx,
+                cy,
+                radius * 0.12f,
+                intArrayOf(
+                    Color.WHITE,
+                    palette.primary,
+                    Color.TRANSPARENT
+                ),
+                floatArrayOf(0f, 0.28f, 1f),
+                Shader.TileMode.CLAMP
+            )
+
+        fill.alpha = if (state == STATE_STOP) 120 else 245
+        canvas.drawCircle(cx, cy, radius * 0.12f, fill)
+        fill.shader = null
     }
 
     /**
      * Outer halo made from points and tangential streaks instead of drawArc(),
      * keeping the renderer compatible with the isolated compile harness.
      */
+
     private fun drawOuterTelemetry(
         canvas: Canvas,
         now: Long,
@@ -725,19 +828,104 @@ class AyanaCoreVisualizer(
         motion: Motion,
         state: Int
     ) {
-        val outerR = radius * 1.02f
-        val haloR = radius * 1.105f
+        val rotation = now / motion.haloPeriodMs
 
-        val rotation =
-            now /
-                motion.haloPeriodMs
+        // Several segmented rotating rings.
+        for (ringIndex in 0 until 5) {
+            val rr =
+                radius *
+                    (
+                        0.82f +
+                            ringIndex * 0.050f
+                        )
 
+            val segmentCount =
+                42 +
+                    ringIndex * 7
+
+            val spin =
+                rotation *
+                    (
+                        if (ringIndex % 2 == 0) {
+                            1.0
+                        } else {
+                            -0.72
+                        }
+                    )
+
+            for (segment in 0 until segmentCount) {
+                if ((segment + ringIndex * 2) % 5 == 1) continue
+                if ((segment + ringIndex) % 11 == 4) continue
+
+                val a1 =
+                    segment *
+                        PI *
+                        2.0 /
+                        segmentCount +
+                        spin
+
+                val arcLen =
+                    PI *
+                        2.0 /
+                        segmentCount *
+                        (
+                            if (segment % 4 == 0) {
+                                0.82
+                            } else {
+                                0.58
+                            }
+                        )
+
+                val a2 = a1 + arcLen
+
+                val x1 = cx + cos(a1).toFloat() * rr
+                val y1 = cy + sin(a1).toFloat() * rr
+                val x2 = cx + cos(a2).toFloat() * rr
+                val y2 = cy + sin(a2).toFloat() * rr
+
+                val color =
+                    when((segment + ringIndex) % 4) {
+                        0 -> Color.WHITE
+                        1 -> palette.primary
+                        2 -> palette.secondary
+                        else -> palette.accent
+                    }
+
+                if (segment % 9 == 0) {
+                    glow.color =
+                        if (color == Color.WHITE) palette.primary else color
+                    glow.alpha = if (state == STATE_STOP) 18 else 46
+                    glow.strokeWidth = dp(4.8f)
+                    canvas.drawLine(x1, y1, x2, y2, glow)
+                }
+
+                stroke.color = color
+                stroke.alpha =
+                    if (state == STATE_STOP) {
+                        48 + ringIndex * 9
+                    } else {
+                        94 + ringIndex * 17
+                    }
+                stroke.strokeWidth =
+                    dp(
+                        if (segment % 7 == 0) {
+                            0.90f
+                        } else {
+                            0.55f
+                        }
+                    )
+
+                canvas.drawLine(x1, y1, x2, y2, stroke)
+            }
+        }
+
+        // Dense sparkle halo.
         val points =
             when(state) {
-                STATE_THINKING -> 84
-                STATE_EXECUTING -> 76
-                STATE_STOP -> 58
-                else -> 70
+                STATE_THINKING -> 150
+                STATE_EXECUTING -> 136
+                STATE_STOP -> 86
+                else -> 124
             }
 
         for (i in 0 until points) {
@@ -748,109 +936,78 @@ class AyanaCoreVisualizer(
                     points +
                     rotation *
                         (
-                            if (i % 2 == 0) {
-                                1.0
-                            } else {
-                                -0.38
-                            }
+                            if (i % 2 == 0) 1.0 else -0.46
                         )
 
-            val sparkle =
+            val pulse =
                 (
                     0.5 +
                         0.5 *
                             sin(
-                                now /
-                                    360.0 +
-                                    i *
-                                        0.91
+                                now / 260.0 +
+                                    i * 0.93
                             )
                     )
                     .toFloat()
 
             val rr =
-                outerR +
+                radius *
+                    (
+                        0.97f +
+                            (
+                                i %
+                                    5
+                                ) *
+                                0.021f
+                        ) +
                     sin(
-                        i *
-                            1.73 +
-                            rotation
+                        now / 730.0 +
+                            i * 1.41
                     )
                         .toFloat() *
                         radius *
-                        0.032f
+                        0.012f
 
-            val x =
-                cx +
-                    cos(angle)
-                        .toFloat() *
-                    rr
-
-            val y =
-                cy +
-                    sin(angle)
-                        .toFloat() *
-                    rr
+            val x = cx + cos(angle).toFloat() * rr
+            val y = cy + sin(angle).toFloat() * rr
 
             val color =
-                when(i % 3) {
-                    0 -> palette.primary
-                    1 -> palette.secondary
+                when(i % 4) {
+                    0 -> Color.WHITE
+                    1 -> palette.primary
+                    2 -> palette.secondary
                     else -> palette.accent
                 }
 
             fill.color = color
             fill.alpha =
-                (
-                    if (state == STATE_STOP) {
-                        55
-                    } else {
-                        80
-                    } +
-                        sparkle *
-                            if (state == STATE_STOP) {
-                                105f
-                            } else {
-                                155f
-                            }
-                    )
-                    .toInt()
-                    .coerceAtMost(245)
+                if (state == STATE_STOP) {
+                    45 + (pulse * 90f).toInt()
+                } else {
+                    72 + (pulse * 170f).toInt()
+                }
 
             canvas.drawCircle(
                 x,
                 y,
                 dp(
-                    0.8f +
-                        sparkle *
-                            1.25f
+                    when {
+                        i % 17 == 0 -> 2.3f
+                        i % 7 == 0 -> 1.55f
+                        else -> 0.82f
+                    }
                 ),
                 fill
             )
 
-            if (i % 7 == 0) {
-                val tx =
-                    -sin(angle)
-                        .toFloat()
-
-                val ty =
-                    cos(angle)
-                        .toFloat()
-
-                val half =
-                    dp(
-                        2.5f +
-                            sparkle *
-                                5.5f
-                    )
+            if (i % 13 == 0) {
+                val tx = -sin(angle).toFloat()
+                val ty = cos(angle).toFloat()
+                val half = dp(3f + pulse * 5f)
 
                 stroke.color = color
-                stroke.alpha =
-                    if (state == STATE_STOP) {
-                        85
-                    } else {
-                        165
-                    }
-                stroke.strokeWidth = dp(0.70f)
+                stroke.alpha = if (state == STATE_STOP) 60 else 175
+                stroke.strokeWidth = dp(0.60f)
 
                 canvas.drawLine(
                     x - tx * half,
@@ -860,55 +1017,6 @@ class AyanaCoreVisualizer(
                     stroke
                 )
             }
-        }
-
-        // Sparse outer points.
-        for (i in 0 until 32) {
-            val angle =
-                i *
-                    PI *
-                    2.0 /
-                    32.0 -
-                    rotation *
-                        0.44
-
-            val rr =
-                haloR +
-                    sin(
-                        now /
-                            820.0 +
-                            i
-                    )
-                        .toFloat() *
-                        radius *
-                        0.018f
-
-            fill.color =
-                if (i % 2 == 0) {
-                    palette.primary
-                } else {
-                    palette.secondary
-                }
-
-            fill.alpha =
-                if (state == STATE_STOP) {
-                    65
-                } else {
-                    115
-                }
-
-            canvas.drawCircle(
-                cx +
-                    cos(angle)
-                        .toFloat() *
-                        rr,
-                cy +
-                    sin(angle)
-                        .toFloat() *
-                        rr,
-                dp(0.8f),
-                fill
-            )
         }
     }
 
@@ -1598,6 +1706,7 @@ class AyanaCoreVisualizer(
         )
     }
 
+
     private fun drawWordmark(
         canvas: Canvas,
         cx: Float,
@@ -1606,60 +1715,129 @@ class AyanaCoreVisualizer(
         palette: Palette,
         state: Int
     ) {
-        val size =
-            radius *
-                0.31f
-
-        text.textSize = size
-        text.color =
+        // Custom geometric AYANA signature. It avoids the ordinary Android
+        // bold font that made v14 look like a logo pasted over a screensaver.
+        val color =
             if (state == STATE_STOP) {
                 palette.secondary
             } else {
                 palette.primary
             }
-        text.alpha =
-            if (state == STATE_STOP) {
-                210
-            } else {
-                245
-            }
 
-        // A subtle halo behind the name, not a bitmap.
-        fill.shader =
-            RadialGradient(
-                cx,
-                cy,
-                radius * 0.42f,
-                intArrayOf(
-                    withAlpha(Color.WHITE, if (state == STATE_STOP) 30 else 58),
-                    withAlpha(palette.primary, if (state == STATE_STOP) 26 else 46),
-                    Color.TRANSPARENT
-                ),
-                floatArrayOf(
-                    0f,
-                    0.44f,
-                    1f
-                ),
-                Shader.TileMode.CLAMP
+        val totalWidth = radius * 1.12f
+        val glyphH = radius * 0.22f
+        val gap = radius * 0.055f
+
+        // Relative glyph widths: A Y A N A
+        val widths =
+            floatArrayOf(
+                0.19f,
+                0.18f,
+                0.19f,
+                0.22f,
+                0.19f
             )
 
-        fill.alpha = 255
-        canvas.drawCircle(
-            cx,
-            cy,
-            radius * 0.42f,
-            fill
-        )
-        fill.shader = null
+        val usable =
+            totalWidth -
+                gap * 4f
 
-        canvas.drawText(
-            "AYANA",
-            cx,
-            cy +
-                size *
-                    0.34f,
-            text
-        )
+        var x =
+            cx -
+                totalWidth *
+                    0.50f
+
+        glow.color = color
+        glow.alpha = if (state == STATE_STOP) 46 else 78
+        glow.strokeWidth = dp(7f)
+
+        stroke.color =
+            if (state == STATE_STOP) {
+                color
+            } else {
+                Color.WHITE
+            }
+        stroke.alpha = if (state == STATE_STOP) 215 else 238
+        stroke.strokeWidth = dp(1.45f)
+
+        widths.forEachIndexed { index, proportion ->
+            val gw = usable * proportion
+            val centerX = x + gw * 0.50f
+
+            drawAyanaGlyph(
+                canvas = canvas,
+                glyphIndex = index,
+                centerX = centerX,
+                centerY = cy,
+                width = gw,
+                height = glyphH,
+                glowColor = color,
+                mainColor =
+                    if (state == STATE_STOP) {
+                        color
+                    } else {
+                        Color.WHITE
+                    }
+            )
+
+            x += gw + gap
+        }
+    }
+
+    private fun drawAyanaGlyph(
+        canvas: Canvas,
+        glyphIndex: Int,
+        centerX: Float,
+        centerY: Float,
+        width: Float,
+        height: Float,
+        glowColor: Int,
+        mainColor: Int
+    ) {
+        val left = centerX - width * 0.50f
+        val right = centerX + width * 0.50f
+        val top = centerY - height * 0.50f
+        val bottom = centerY + height * 0.50f
+        val mid = centerY
+
+        fun segment(
+            x1: Float,
+            y1: Float,
+            x2: Float,
+            y2: Float
+        ) {
+            glow.color = glowColor
+            glow.alpha = 68
+            glow.strokeWidth = dp(6f)
+            canvas.drawLine(x1, y1, x2, y2, glow)
+
+            stroke.color = mainColor
+            stroke.alpha = 235
+            stroke.strokeWidth = dp(1.35f)
+            canvas.drawLine(x1, y1, x2, y2, stroke)
+        }
+
+        when(glyphIndex) {
+            0, 2, 4 -> {
+                // Stylized Λ-shaped A from the approved reference.
+                segment(left, bottom, centerX, top)
+                segment(centerX, top, right, bottom)
+            }
+
+            1 -> {
+                // Y.
+                segment(left, top, centerX, mid)
+                segment(right, top, centerX, mid)
+                segment(centerX, mid, centerX, bottom)
+            }
+
+            else -> {
+                // N.
+                segment(left, bottom, left, top)
+                segment(left, top, right, bottom)
+                segment(right, bottom, right, top)
+            }
+        }
     }
 
     private fun stateIndex(
@@ -1755,7 +1933,7 @@ class AyanaCoreVisualizer(
                     waveCycles = 7.0,
                     waveAlpha = 205,
                     waveGlowAlpha = 58,
-                    ribbonPeriodMs = 1650.0,
+                    ribbonPeriodMs = 1450.0,
                     ribbonWarp = 0.105f,
                     haloPeriodMs = 5400.0
                 )
@@ -1768,7 +1946,7 @@ class AyanaCoreVisualizer(
                     waveCycles = 9.2,
                     waveAlpha = 245,
                     waveGlowAlpha = 86,
-                    ribbonPeriodMs = 920.0,
+                    ribbonPeriodMs = 780.0,
                     ribbonWarp = 0.125f,
                     haloPeriodMs = 2600.0
                 )
@@ -1781,7 +1959,7 @@ class AyanaCoreVisualizer(
                     waveCycles = 8.5,
                     waveAlpha = 232,
                     waveGlowAlpha = 78,
-                    ribbonPeriodMs = 720.0,
+                    ribbonPeriodMs = 610.0,
                     ribbonWarp = 0.165f,
                     haloPeriodMs = 2050.0
                 )
@@ -1794,7 +1972,7 @@ class AyanaCoreVisualizer(
                     waveCycles = 9.5,
                     waveAlpha = 245,
                     waveGlowAlpha = 88,
-                    ribbonPeriodMs = 650.0,
+                    ribbonPeriodMs = 560.0,
                     ribbonWarp = 0.135f,
                     haloPeriodMs = 1750.0
                 )
@@ -1807,7 +1985,7 @@ class AyanaCoreVisualizer(
                     waveCycles = 8.8,
                     waveAlpha = 242,
                     waveGlowAlpha = 86,
-                    ribbonPeriodMs = 760.0,
+                    ribbonPeriodMs = 650.0,
                     ribbonWarp = 0.125f,
                     haloPeriodMs = 2200.0
                 )
