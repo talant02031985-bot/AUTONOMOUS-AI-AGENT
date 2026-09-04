@@ -7,7 +7,6 @@ import android.graphics.LinearGradient
 import android.graphics.Paint
 import android.graphics.Path
 import android.graphics.RadialGradient
-import android.graphics.RectF
 import android.graphics.Shader
 import android.graphics.Typeface
 import android.os.SystemClock
@@ -16,28 +15,32 @@ import android.view.View
 import android.widget.LinearLayout
 import android.widget.TextView
 import kotlin.math.PI
+import kotlin.math.abs
 import kotlin.math.sin
 
 /**
- * AYANA Core Visualizer v12.0 — AGENT EXECUTION TRACE
+ * AYANA Core Visualizer v13.0.1 — AGENT CAUSAL FIELD
  *
- * The visualizer represents AYANA as an execution pipeline, not as an orb,
- * radar, decorative neural network or a static picture:
+ * Visual direction reset after rejecting panel / radio / dashboard metaphors.
  *
- * ВХОД -> ПОНИМАНИЕ -> ПЛАН -> ДЕЙСТВИЕ -> ПРОВЕРКА -> ОТВЕТ
+ * This visualizer represents an AI agent as a live causal field:
+ * one goal thread enters, branches while reasoning, touches memory/context,
+ * selects an action path, passes an evidence gate and converges into a result.
  *
- * Factual runtime mapping comes only from AyanaVoiceService.currentStatusState.
- * AYANA currently has no separate VERIFYING public state, therefore the
- * verification node is shown as architecture but is never falsely claimed as
- * the current runtime state.
+ * It is intentionally NOT:
+ * - a radar;
+ * - a glowing orb;
+ * - a row of buttons;
+ * - a Soviet-style control panel;
+ * - a static PNG;
+ * - a fake CPU/model load indicator.
  *
- * Supporting resources:
- * КОНТЕКСТ / ПАМЯТЬ / ЭКРАН / ИНСТРУМЕНТЫ
+ * Runtime state comes only from AyanaVoiceService.currentStatusState.
+ * Animation is state-reactive UI motion, not claimed as literal hidden model
+ * telemetry or measured microphone amplitude.
  *
- * Motion is state-reactive UI animation; it is not claimed to be measured CPU,
- * token, microphone-amplitude or internal-model telemetry.
- *
- * No ORB, routing, TTS, microphone, Accessibility or command logic is changed.
+ * Visual-only component. No ORB, routing, TTS, microphone, Accessibility or
+ * Android execution behavior is modified.
  */
 class AyanaCoreVisualizer(
     context: Context
@@ -74,8 +77,6 @@ class AyanaCoreVisualizer(
         }
 
     private val path = Path()
-    private val rect = RectF()
-
     private var attached = false
     private var hostNormalized = false
 
@@ -104,29 +105,21 @@ class AyanaCoreVisualizer(
 
         if (width <= 0 || height <= 0) return
 
-        val serviceState = AyanaVoiceService.currentStatusState
-        val stage = stageFor(serviceState)
-        val palette = paletteFor(serviceState)
+        val state = stateFor(AyanaVoiceService.currentStatusState)
+        val palette = paletteFor(state)
         val now = SystemClock.uptimeMillis()
 
-        val compact = height < dp(180f)
-
         drawBackground(canvas, palette)
-
-        if (compact) {
-            drawCompact(canvas, now, stage, palette)
-        } else {
-            drawFull(canvas, now, stage, palette)
-        }
+        drawCausalField(canvas, now, state, palette)
 
         if (attached) {
-            postInvalidateDelayed(frameDelayFor(stage))
+            postInvalidateDelayed(frameDelayFor(state))
         }
     }
 
     /**
-     * Bounded layout correction for the existing home hero card only.
-     * It prevents long factual titles from collapsing into three lines.
+     * Keeps the already proven hero-card proportion correction local to this
+     * visual component. No other MainActivity behavior is changed.
      */
     private fun normalizeHostLayoutOnce() {
         if (hostNormalized) return
@@ -140,8 +133,8 @@ class AyanaCoreVisualizer(
         val copyParams = copy.layoutParams as? LinearLayout.LayoutParams
 
         if (visualParams != null && copyParams != null) {
-            copyParams.weight = 0.72f
-            visualParams.weight = 1.64f
+            copyParams.weight = 0.70f
+            visualParams.weight = 1.66f
             copy.layoutParams = copyParams
             layoutParams = visualParams
         }
@@ -167,11 +160,11 @@ class AyanaCoreVisualizer(
                 width.toFloat(),
                 height.toFloat(),
                 intArrayOf(
-                    Color.parseColor("#02060C"),
-                    Color.parseColor("#07101A"),
-                    Color.parseColor("#03070D")
+                    Color.parseColor("#01040A"),
+                    Color.parseColor("#06101B"),
+                    Color.parseColor("#02050B")
                 ),
-                floatArrayOf(0f, 0.52f, 1f),
+                floatArrayOf(0f, 0.50f, 1f),
                 Shader.TileMode.CLAMP
             )
 
@@ -179,274 +172,555 @@ class AyanaCoreVisualizer(
         canvas.drawRect(0f, 0f, width.toFloat(), height.toFloat(), fill)
         fill.shader = null
 
-        stroke.color = Color.parseColor("#183149")
-        stroke.alpha = 42
+        // Sparse depth grid. It is structural, not a control-panel frame.
+        stroke.color = Color.parseColor("#13263A")
+        stroke.alpha = 34
         stroke.strokeWidth = dp(0.45f)
 
-        for (column in 1 until 14) {
-            val x = width * column / 14f
-            canvas.drawLine(x, dp(8f), x, height - dp(8f), stroke)
+        for (column in 1 until 13) {
+            val x = width * column / 13f
+            canvas.drawLine(
+                x,
+                height * 0.07f,
+                x,
+                height * 0.93f,
+                stroke
+            )
         }
 
         for (row in 1 until 7) {
             val y = height * row / 7f
-            canvas.drawLine(dp(8f), y, width - dp(8f), y, stroke)
+            canvas.drawLine(
+                width * 0.03f,
+                y,
+                width * 0.97f,
+                y,
+                stroke
+            )
         }
 
-        rect.set(dp(6f), dp(6f), width - dp(6f), height - dp(6f))
-        stroke.color = withAlpha(palette.primary, 70)
-        stroke.alpha = 145
-        stroke.strokeWidth = dp(0.7f)
-        canvas.drawRoundRect(rect, dp(12f), dp(12f), stroke)
+        // Very subtle active-state bloom behind the working field.
+        val cx = width * 0.53f
+        val cy = height * 0.50f
+        val radius = minOf(width, height) * 0.42f
+
+        fill.shader =
+            RadialGradient(
+                cx,
+                cy,
+                radius,
+                intArrayOf(
+                    withAlpha(palette.primary, 40),
+                    withAlpha(palette.secondary, 18),
+                    Color.TRANSPARENT
+                ),
+                floatArrayOf(0f, 0.48f, 1f),
+                Shader.TileMode.CLAMP
+            )
+
+        fill.alpha = 255
+        canvas.drawCircle(cx, cy, radius, fill)
+        fill.shader = null
     }
 
-    private fun drawFull(
+    private fun drawCausalField(
         canvas: Canvas,
         now: Long,
-        stage: Stage,
+        state: AgentState,
         palette: Palette
     ) {
         val w = width.toFloat()
         val h = height.toFloat()
 
-        val left = w * 0.075f
-        val right = w * 0.925f
-        val busY = h * 0.47f
-        val step = (right - left) / 5f
+        val left = w * 0.035f
+        val right = w * 0.965f
+        val centerY = h * 0.50f
 
-        drawHeader(canvas, stage, palette, h * 0.11f)
+        val memoryX = w * 0.31f
+        val memoryY = h * 0.20f
 
-        // Main execution bus.
-        stroke.color = Color.parseColor("#2A3B50")
-        stroke.alpha = 215
-        stroke.strokeWidth = dp(1.1f)
-        canvas.drawLine(left, busY, right, busY, stroke)
+        val goalX = w * 0.50f
+        val goalY = h * 0.44f
 
-        val activeIndex = activeStageIndex(stage)
+        val toolX = w * 0.67f
+        val toolY = h * 0.78f
 
-        if (activeIndex > 0 && stage != Stage.STOP) {
-            val activeX = left + step * activeIndex
-            stroke.shader =
-                LinearGradient(
-                    left,
-                    busY,
-                    activeX,
-                    busY,
-                    intArrayOf(
-                        withAlpha(palette.primary, 150),
-                        palette.primary,
-                        palette.accent
-                    ),
-                    floatArrayOf(0f, 0.72f, 1f),
-                    Shader.TileMode.CLAMP
-                )
-            stroke.alpha = 230
-            stroke.strokeWidth = dp(2.2f)
-            canvas.drawLine(left, busY, activeX, busY, stroke)
-            stroke.shader = null
-        }
+        val evidenceX = w * 0.82f
+        val evidenceY = h * 0.50f
 
-        val titles =
-            arrayOf(
-                "ВХОД",
-                "ПОНИМАНИЕ",
-                "ПЛАН",
-                "ДЕЙСТВИЕ",
-                "ПРОВЕРКА",
-                "ОТВЕТ"
-            )
-
-        val subtitles =
-            arrayOf(
-                "голос / текст",
-                "намерение",
-                "цель и шаги",
-                "инструмент",
-                "evidence",
-                "результат"
-            )
-
-        repeat(6) { index ->
-            val x = left + step * index
-            drawStageNode(
-                canvas = canvas,
-                now = now,
-                x = x,
-                y = busY,
-                index = index,
-                visualState = stageVisualState(index, stage),
-                title = titles[index],
-                subtitle = subtitles[index],
-                palette = palette
-            )
-        }
-
-        drawRuntimeResources(
-            canvas = canvas,
-            now = now,
-            y = h * 0.79f,
-            stage = stage,
-            palette = palette
-        )
-
-        drawActivePackets(
+        drawInputWave(
             canvas = canvas,
             now = now,
             left = left,
-            step = step,
-            busY = busY,
-            stage = stage,
+            right = w * 0.24f,
+            centerY = centerY,
+            state = state,
             palette = palette
         )
 
-        // Explicit architecture truth: no fake VERIFYING state.
-        if (stage == Stage.EXECUTING) {
-            val verifyX = left + step * 4f
-            text.textSize = dp(7.2f)
-            text.color = Color.parseColor("#718198")
-            text.alpha = 205
-            canvas.drawText(
-                "следующий архитектурный этап",
-                verifyX,
-                busY + dp(49f),
-                text
-            )
-        }
+        // Quiet support fields. No button boxes.
+        drawMemoryField(
+            canvas = canvas,
+            now = now,
+            x = memoryX,
+            y = memoryY,
+            state = state,
+            palette = palette
+        )
 
-        if (stage == Stage.STOP) {
-            drawStopBarrier(
+        drawToolField(
+            canvas = canvas,
+            now = now,
+            x = toolX,
+            y = toolY,
+            state = state,
+            palette = palette
+        )
+
+        drawEvidenceGate(
+            canvas = canvas,
+            now = now,
+            x = evidenceX,
+            centerY = evidenceY,
+            state = state,
+            palette = palette
+        )
+
+        drawGoalThread(
+            canvas = canvas,
+            now = now,
+            left = w * 0.18f,
+            right = w * 0.90f,
+            centerY = centerY,
+            goalY = goalY,
+            memoryY = memoryY,
+            toolY = toolY,
+            state = state,
+            palette = palette
+        )
+
+        drawGoalSeed(
+            canvas = canvas,
+            now = now,
+            x = goalX,
+            y = goalY,
+            state = state,
+            palette = palette
+        )
+
+        drawOutputWave(
+            canvas = canvas,
+            now = now,
+            left = evidenceX + w * 0.035f,
+            right = right,
+            centerY = centerY,
+            state = state,
+            palette = palette
+        )
+
+        drawParticles(
+            canvas = canvas,
+            now = now,
+            state = state,
+            palette = palette
+        )
+
+        drawMicroLegend(
+            canvas = canvas,
+            state = state,
+            palette = palette
+        )
+
+        if (state == AgentState.STOP) {
+            drawStopCut(
                 canvas = canvas,
-                x = left + step * 3.5f,
-                top = h * 0.20f,
-                bottom = h * 0.88f,
+                x = evidenceX - w * 0.025f,
                 palette = palette
             )
         }
     }
 
-    private fun drawCompact(
+    /**
+     * Dominant visual: a causal thread with several nearby hypothesis strands.
+     * It changes topology by state instead of lighting fixed dashboard buttons.
+     */
+    private fun drawGoalThread(
         canvas: Canvas,
         now: Long,
-        stage: Stage,
+        left: Float,
+        right: Float,
+        centerY: Float,
+        goalY: Float,
+        memoryY: Float,
+        toolY: Float,
+        state: AgentState,
         palette: Palette
     ) {
+        val strandCount =
+            when(state) {
+                AgentState.WAITING -> 3
+                AgentState.RECOGNITION -> 5
+                AgentState.THINKING -> 8
+                AgentState.EXECUTING -> 6
+                AgentState.ANSWERING -> 5
+                AgentState.STOP -> 2
+            }
+
+        for (strand in 0 until strandCount) {
+            path.reset()
+
+            val samples = 88
+            val offsetIndex = strand - (strandCount - 1) * 0.5f
+
+            for (i in 0..samples) {
+                val t = i / samples.toFloat()
+                val x = left + (right - left) * t
+
+                val stateAmplitude =
+                    when(state) {
+                        AgentState.WAITING -> height * 0.018f
+                        AgentState.RECOGNITION -> height * 0.034f
+                        AgentState.THINKING -> height * 0.082f
+                        AgentState.EXECUTING -> height * 0.045f
+                        AgentState.ANSWERING -> height * 0.038f
+                        AgentState.STOP -> height * 0.012f
+                    }
+
+                val branchEnvelope =
+                    (
+                        sin(PI * t)
+                            .toFloat()
+                            .coerceAtLeast(0f)
+                    )
+
+                val thinkingBurst =
+                    if (state == AgentState.THINKING) {
+                        sin(t * PI * 3.0 + strand * 0.55).toFloat()
+                    } else {
+                        sin(t * PI * 1.4 + strand * 0.40).toFloat()
+                    }
+
+                var y =
+                    centerY +
+                        offsetIndex *
+                            height *
+                            0.018f +
+                        thinkingBurst *
+                            stateAmplitude *
+                            branchEnvelope
+
+                // The selected causal path bends toward real support areas.
+                if (state == AgentState.THINKING) {
+                    val memoryPull =
+                        triangularInfluence(
+                            t,
+                            0.30f,
+                            0.20f
+                        )
+
+                    val goalPull =
+                        triangularInfluence(
+                            t,
+                            0.48f,
+                            0.18f
+                        )
+
+                    y +=
+                        (
+                            memoryY -
+                                centerY
+                        ) *
+                        memoryPull *
+                        (
+                            if (strand % 3 == 0) 0.32f else 0.08f
+                        )
+
+                    y +=
+                        (
+                            goalY -
+                                centerY
+                        ) *
+                        goalPull *
+                        0.22f
+                }
+
+                if (state == AgentState.EXECUTING) {
+                    val toolPull =
+                        triangularInfluence(
+                            t,
+                            0.68f,
+                            0.23f
+                        )
+
+                    y +=
+                        (
+                            toolY -
+                                centerY
+                        ) *
+                        toolPull *
+                        (
+                            if (strand == strandCount / 2) 0.58f else 0.16f
+                        )
+                }
+
+                if (state == AgentState.ANSWERING) {
+                    val evidencePull =
+                        triangularInfluence(
+                            t,
+                            0.82f,
+                            0.20f
+                        )
+
+                    y +=
+                        (
+                            centerY -
+                                y
+                        ) *
+                        evidencePull *
+                        0.76f
+                }
+
+                if (i == 0) {
+                    path.moveTo(x, y)
+                } else {
+                    path.lineTo(x, y)
+                }
+            }
+
+            val selected =
+                when(state) {
+                    AgentState.WAITING ->
+                        strand == strandCount / 2
+
+                    AgentState.RECOGNITION ->
+                        strand == strandCount / 2
+
+                    AgentState.THINKING ->
+                        strand == strandCount / 2 ||
+                            strand == strandCount / 2 - 1
+
+                    AgentState.EXECUTING ->
+                        strand == strandCount / 2
+
+                    AgentState.ANSWERING ->
+                        strand == strandCount / 2
+
+                    AgentState.STOP ->
+                        false
+                }
+
+            val strandColor =
+                if (selected) {
+                    Color.WHITE
+                } else if (strand % 2 == 0) {
+                    palette.primary
+                } else {
+                    palette.secondary
+                }
+
+            if (selected) {
+                glow.color = palette.primary
+                glow.alpha = if (state == AgentState.STOP) 18 else 70
+                glow.strokeWidth = dp(7f)
+                canvas.drawPath(path, glow)
+            }
+
+            stroke.color = strandColor
+            stroke.alpha =
+                when {
+                    state == AgentState.STOP -> 55
+                    selected -> 235
+                    state == AgentState.THINKING -> 125
+                    else -> 82
+                }
+
+            stroke.strokeWidth =
+                dp(
+                    if (selected) {
+                        1.25f
+                    } else {
+                        0.62f
+                    }
+                )
+
+            canvas.drawPath(path, stroke)
+        }
+
+        drawCrossLinks(
+            canvas = canvas,
+            now = now,
+            state = state,
+            palette = palette
+        )
+
+        drawTravelPackets(
+            canvas = canvas,
+            now = now,
+            left = left,
+            right = right,
+            centerY = centerY,
+            state = state,
+            palette = palette
+        )
+    }
+
+    private fun drawCrossLinks(
+        canvas: Canvas,
+        now: Long,
+        state: AgentState,
+        palette: Palette
+    ) {
+        if (
+            state != AgentState.THINKING &&
+            state != AgentState.EXECUTING
+        ) {
+            return
+        }
+
         val w = width.toFloat()
         val h = height.toFloat()
 
-        val left = w * 0.06f
-        val right = w * 0.94f
-        val y = h * 0.58f
-        val step = (right - left) / 5f
+        val count =
+            if (state == AgentState.THINKING) 12 else 6
 
-        boldText.textSize = dp(8.5f)
-        boldText.color = palette.primary
-        boldText.alpha = 245
-        canvas.drawText(stageTitle(stage), w * 0.50f, h * 0.24f, boldText)
+        for (i in 0 until count) {
+            val x1 =
+                w *
+                    (
+                        0.28f +
+                            (i % 6) *
+                                0.075f
+                    )
 
-        stroke.color = Color.parseColor("#2A3B50")
-        stroke.alpha = 205
-        stroke.strokeWidth = dp(0.9f)
-        canvas.drawLine(left, y, right, y, stroke)
+            val y1 =
+                h *
+                    (
+                        0.28f +
+                            (i % 3) *
+                                0.18f
+                    )
 
-        repeat(6) { index ->
-            val x = left + step * index
-            val state = stageVisualState(index, stage)
-            val color =
-                when(state) {
-                    NodeState.ACTIVE -> palette.primary
-                    NodeState.COMPLETE -> withAlpha(palette.primary, 180)
-                    NodeState.FUTURE -> Color.parseColor("#4D5A6D")
-                    NodeState.STOPPED -> palette.primary
+            val x2 =
+                x1 +
+                    w *
+                        (
+                            0.10f +
+                                (i % 2) *
+                                    0.05f
+                        )
+
+            val y2 =
+                h *
+                    (
+                        0.34f +
+                            ((i + 1) % 3) *
+                                0.16f
+                    ) +
+                    sin(now / 700.0 + i)
+                        .toFloat() *
+                        dp(4f)
+
+            stroke.color =
+                if (i % 2 == 0) {
+                    palette.primary
+                } else {
+                    palette.secondary
                 }
 
-            if (state == NodeState.ACTIVE) {
-                glow.color = color
-                glow.alpha = 78
-                glow.strokeWidth = dp(6f)
-                canvas.drawCircle(x, y, dp(8f), glow)
+            stroke.alpha =
+                if (state == AgentState.THINKING) 70 else 44
+
+            stroke.strokeWidth = dp(0.55f)
+            canvas.drawLine(x1, y1, x2, y2, stroke)
+        }
+    }
+
+    private fun drawTravelPackets(
+        canvas: Canvas,
+        now: Long,
+        left: Float,
+        right: Float,
+        centerY: Float,
+        state: AgentState,
+        palette: Palette
+    ) {
+        val count =
+            when(state) {
+                AgentState.WAITING -> 4
+                AgentState.RECOGNITION -> 8
+                AgentState.THINKING -> 14
+                AgentState.EXECUTING -> 10
+                AgentState.ANSWERING -> 9
+                AgentState.STOP -> 2
             }
 
-            fill.color = color
-            fill.alpha = if (state == NodeState.FUTURE) 135 else 245
+        for (i in 0 until count) {
+            val t =
+                (
+                    (
+                        now /
+                            packetPeriodFor(state) +
+                            i /
+                                count.toDouble()
+                        ) %
+                        1.0
+                    ).toFloat()
+
+            val x = left + (right - left) * t
+
+            val y =
+                centerY +
+                    sin(
+                        t * PI * 4.0 +
+                            i * 0.71 +
+                            now / 1100.0
+                    )
+                        .toFloat() *
+                        height *
+                        if (state == AgentState.THINKING) 0.075f else 0.035f
+
+            fill.color =
+                when {
+                    i % 5 == 0 -> Color.WHITE
+                    i % 2 == 0 -> palette.primary
+                    else -> palette.secondary
+                }
+
+            fill.alpha =
+                if (state == AgentState.STOP) 80 else 215
+
             canvas.drawCircle(
                 x,
                 y,
-                dp(if (state == NodeState.ACTIVE) 3.2f else 2f),
+                dp(
+                    if (i % 5 == 0) {
+                        2.1f
+                    } else {
+                        1.15f
+                    }
+                ),
                 fill
             )
         }
-
-        drawActivePackets(canvas, now, left, step, y, stage, palette)
     }
 
-    private fun drawHeader(
-        canvas: Canvas,
-        stage: Stage,
-        palette: Palette,
-        y: Float
-    ) {
-        boldText.textSize = dp(9.8f)
-        boldText.color = Color.parseColor("#DCE8F5")
-        boldText.alpha = 235
-        canvas.drawText("AGENT EXECUTION", width * 0.19f, y, boldText)
-
-        val badge = stageTitle(stage)
-        boldText.textSize = dp(8.5f)
-
-        val badgeWidth =
-            maxOf(
-                dp(82f),
-                boldText.measureText(badge) + dp(24f)
-            )
-
-        rect.set(
-            width - dp(16f) - badgeWidth,
-            y - dp(14f),
-            width - dp(16f),
-            y + dp(7f)
-        )
-
-        fill.color = withAlpha(palette.primary, 24)
-        fill.alpha = 255
-        canvas.drawRoundRect(rect, dp(9f), dp(9f), fill)
-
-        stroke.color = withAlpha(palette.primary, 155)
-        stroke.alpha = 220
-        stroke.strokeWidth = dp(0.75f)
-        canvas.drawRoundRect(rect, dp(9f), dp(9f), stroke)
-
-        boldText.color = palette.primary
-        boldText.alpha = 250
-        canvas.drawText(badge, rect.centerX(), y, boldText)
-    }
-
-    private fun drawStageNode(
+    private fun drawGoalSeed(
         canvas: Canvas,
         now: Long,
         x: Float,
         y: Float,
-        index: Int,
-        visualState: NodeState,
-        title: String,
-        subtitle: String,
+        state: AgentState,
         palette: Palette
     ) {
-        val active = visualState == NodeState.ACTIVE
-        val complete = visualState == NodeState.COMPLETE
-
-        val color =
-            when {
-                visualState == NodeState.STOPPED -> palette.primary
-                active -> palette.primary
-                complete -> withAlpha(palette.primary, 185)
-                else -> Color.parseColor("#4A586B")
-            }
+        val active =
+            state == AgentState.THINKING ||
+                state == AgentState.EXECUTING
 
         val pulse =
             (
                 0.5 +
                     0.5 *
-                        sin(now / 420.0 + index * 0.85)
+                        sin(now / 520.0)
                 ).toFloat()
 
         if (active) {
@@ -454,524 +728,734 @@ class AyanaCoreVisualizer(
                 RadialGradient(
                     x,
                     y,
-                    dp(25f),
+                    dp(38f),
                     intArrayOf(
-                        withAlpha(palette.primary, 110),
-                        withAlpha(palette.primary, 26),
+                        withAlpha(Color.WHITE, 120),
+                        withAlpha(palette.primary, 105),
+                        withAlpha(palette.secondary, 42),
                         Color.TRANSPARENT
                     ),
-                    floatArrayOf(0f, 0.46f, 1f),
+                    floatArrayOf(0f, 0.25f, 0.58f, 1f),
                     Shader.TileMode.CLAMP
                 )
+
             fill.alpha = 255
-            canvas.drawCircle(x, y, dp(25f), fill)
+            canvas.drawCircle(x, y, dp(38f), fill)
             fill.shader = null
         }
 
-        rect.set(
-            x - dp(19f),
-            y - dp(18f),
-            x + dp(19f),
-            y + dp(18f)
-        )
+        // Open causal diamond: not a button and not an orb.
+        path.reset()
+        path.moveTo(x, y - dp(13f))
+        path.lineTo(x + dp(20f), y)
+        path.lineTo(x, y + dp(13f))
+        path.lineTo(x - dp(20f), y)
+        path.close()
+
+        stroke.color =
+            if (active) {
+                palette.primary
+            } else {
+                Color.parseColor("#4E6177")
+            }
+
+        stroke.alpha = if (active) 235 else 130
+        stroke.strokeWidth = dp(if (active) 1.4f else 0.8f)
+        canvas.drawPath(path, stroke)
+
+        if (active) {
+            glow.color = palette.primary
+            glow.alpha = 70
+            glow.strokeWidth = dp(6f)
+            canvas.drawPath(path, glow)
+        }
 
         fill.color =
             if (active) {
-                withAlpha(palette.primary, 28)
-            } else {
-                Color.parseColor("#08111B")
-            }
-        fill.alpha = 255
-        canvas.drawRoundRect(rect, dp(8f), dp(8f), fill)
-
-        stroke.color = color
-        stroke.alpha =
-            when {
-                active -> 245
-                complete -> 185
-                else -> 120
-            }
-        stroke.strokeWidth = dp(if (active) 1.3f else 0.8f)
-        canvas.drawRoundRect(rect, dp(8f), dp(8f), stroke)
-
-        drawStageIcon(
-            canvas = canvas,
-            index = index,
-            x = x,
-            y = y,
-            radius = dp(if (active) 8.3f + pulse * 0.6f else 7.5f),
-            color = if (active) Color.WHITE else color
-        )
-
-        boldText.textSize = dp(8.2f)
-        boldText.color =
-            if (active) {
                 Color.WHITE
             } else {
-                Color.parseColor("#B4C0D0")
-            }
-        boldText.alpha = if (visualState == NodeState.FUTURE) 150 else 235
-        canvas.drawText(title, x, y + dp(35f), boldText)
-
-        text.textSize = dp(6.9f)
-        text.color = Color.parseColor("#758499")
-        text.alpha = if (visualState == NodeState.FUTURE) 130 else 205
-        canvas.drawText(subtitle, x, y + dp(46f), text)
-    }
-
-    private fun drawStageIcon(
-        canvas: Canvas,
-        index: Int,
-        x: Float,
-        y: Float,
-        radius: Float,
-        color: Int
-    ) {
-        stroke.color = color
-        stroke.alpha = 230
-        stroke.strokeWidth = dp(1f)
-
-        when(index) {
-            0 -> {
-                canvas.drawLine(x - radius, y, x + radius * 0.55f, y, stroke)
-                canvas.drawLine(
-                    x + radius * 0.55f,
-                    y,
-                    x + radius * 0.10f,
-                    y - radius * 0.45f,
-                    stroke
-                )
-                canvas.drawLine(
-                    x + radius * 0.55f,
-                    y,
-                    x + radius * 0.10f,
-                    y + radius * 0.45f,
-                    stroke
-                )
+                palette.primary
             }
 
-            1 -> {
-                canvas.drawLine(x - radius * 0.75f, y, x, y, stroke)
-                canvas.drawLine(
-                    x,
-                    y,
-                    x + radius * 0.65f,
-                    y - radius * 0.52f,
-                    stroke
-                )
-                canvas.drawLine(
-                    x,
-                    y,
-                    x + radius * 0.65f,
-                    y + radius * 0.52f,
-                    stroke
-                )
-                fill.color = color
-                fill.alpha = 235
-                canvas.drawCircle(x, y, dp(1.5f), fill)
+        fill.alpha =
+            if (state == AgentState.STOP) {
+                80
+            } else {
+                220
             }
 
-            2 -> {
-                repeat(3) { row ->
-                    val yy = y + (row - 1) * radius * 0.48f
-                    fill.color = color
-                    fill.alpha = 235
-                    canvas.drawCircle(x - radius * 0.70f, yy, dp(1.3f), fill)
-                    canvas.drawLine(
-                        x - radius * 0.40f,
-                        yy,
-                        x + radius * 0.70f,
-                        yy,
-                        stroke
-                    )
+        canvas.drawCircle(
+            x,
+            y,
+            dp(
+                if (active) {
+                    2.5f + pulse * 0.6f
+                } else {
+                    1.7f
                 }
-            }
+            ),
+            fill
+        )
 
-            3 -> {
-                canvas.drawLine(
-                    x - radius * 0.65f,
-                    y + radius * 0.65f,
-                    x + radius * 0.65f,
-                    y - radius * 0.65f,
-                    stroke
-                )
-                canvas.drawCircle(
-                    x - radius * 0.58f,
-                    y + radius * 0.58f,
-                    radius * 0.20f,
-                    stroke
-                )
-            }
-
-            4 -> {
-                canvas.drawLine(
-                    x - radius * 0.65f,
-                    y,
-                    x - radius * 0.15f,
-                    y + radius * 0.48f,
-                    stroke
-                )
-                canvas.drawLine(
-                    x - radius * 0.15f,
-                    y + radius * 0.48f,
-                    x + radius * 0.70f,
-                    y - radius * 0.55f,
-                    stroke
-                )
-            }
-
-            else -> {
-                rect.set(
-                    x - radius * 0.72f,
-                    y - radius * 0.52f,
-                    x + radius * 0.72f,
-                    y + radius * 0.45f
-                )
-                canvas.drawRoundRect(
-                    rect,
-                    radius * 0.28f,
-                    radius * 0.28f,
-                    stroke
-                )
-                path.reset()
-                path.moveTo(x - radius * 0.25f, y + radius * 0.45f)
-                path.lineTo(x - radius * 0.10f, y + radius * 0.78f)
-                path.lineTo(x + radius * 0.12f, y + radius * 0.45f)
-                canvas.drawPath(path, stroke)
-            }
-        }
+        text.textSize = dp(7.5f)
+        text.color = Color.parseColor("#8190A4")
+        text.alpha = 205
+        canvas.drawText("ЦЕЛЬ", x, y + dp(29f), text)
     }
 
-    private fun drawRuntimeResources(
+    private fun drawMemoryField(
         canvas: Canvas,
         now: Long,
+        x: Float,
         y: Float,
-        stage: Stage,
+        state: AgentState,
         palette: Palette
     ) {
-        val resources =
-            arrayOf(
-                ResourceSpec("КОНТЕКСТ", ResourceType.CONTEXT),
-                ResourceSpec("ПАМЯТЬ", ResourceType.MEMORY),
-                ResourceSpec("ЭКРАН", ResourceType.SCREEN),
-                ResourceSpec("ИНСТРУМЕНТЫ", ResourceType.TOOLS)
+        val active = state == AgentState.THINKING
+
+        repeat(4) { row ->
+            val yy = y + (row - 1.5f) * dp(5f)
+            val width =
+                dp(
+                    20f -
+                        row *
+                            2f
+                )
+
+            stroke.color =
+                if (active) {
+                    palette.secondary
+                } else {
+                    Color.parseColor("#405169")
+                }
+
+            stroke.alpha = if (active) 190 else 85
+            stroke.strokeWidth = dp(if (active) 1f else 0.6f)
+
+            canvas.drawLine(
+                x - width,
+                yy,
+                x + width,
+                yy,
+                stroke
             )
-
-        val left = width * 0.18f
-        val right = width * 0.82f
-        val step = (right - left) / 3f
-
-        repeat(resources.size) { index ->
-            val spec = resources[index]
-            val x = left + step * index
-            val active = resourceActive(spec.type, stage)
-            val color =
-                if (active) {
-                    palette.accent
-                } else {
-                    Color.parseColor("#506075")
-                }
-
-            if (active) {
-                glow.color = color
-                glow.alpha = 48
-                glow.strokeWidth = dp(5f)
-                canvas.drawCircle(x, y, dp(10f), glow)
-            }
-
-            rect.set(x - dp(8f), y - dp(8f), x + dp(8f), y + dp(8f))
-            fill.color = Color.parseColor("#07101A")
-            fill.alpha = 255
-            canvas.drawRoundRect(rect, dp(5f), dp(5f), fill)
-
-            stroke.color = color
-            stroke.alpha = if (active) 230 else 120
-            stroke.strokeWidth = dp(if (active) 1f else 0.65f)
-            canvas.drawRoundRect(rect, dp(5f), dp(5f), stroke)
-
-            drawResourceIcon(canvas, spec.type, x, y, color)
-
-            text.textSize = dp(7.3f)
-            text.color =
-                if (active) {
-                    Color.parseColor("#DCE8F5")
-                } else {
-                    Color.parseColor("#758499")
-                }
-            text.alpha = if (active) 235 else 175
-            canvas.drawText(spec.title, x, y + dp(21f), text)
-
-            if (active) {
-                val pulse =
-                    (
-                        0.5 +
-                            0.5 *
-                                sin(now / 360.0 + index)
-                        ).toFloat()
-                fill.color = color
-                fill.alpha = (120 + pulse * 110f).toInt()
-                canvas.drawCircle(x + dp(13f), y - dp(8f), dp(1.7f), fill)
-            }
         }
-    }
 
-    private fun drawResourceIcon(
-        canvas: Canvas,
-        type: ResourceType,
-        x: Float,
-        y: Float,
-        color: Int
-    ) {
-        stroke.color = color
-        stroke.alpha = 220
-        stroke.strokeWidth = dp(0.85f)
-
-        when(type) {
-            ResourceType.CONTEXT -> {
-                canvas.drawLine(x - dp(4f), y - dp(3f), x + dp(4f), y - dp(3f), stroke)
-                canvas.drawLine(x - dp(4f), y, x + dp(2f), y, stroke)
-                canvas.drawLine(x - dp(4f), y + dp(3f), x + dp(4f), y + dp(3f), stroke)
-            }
-
-            ResourceType.MEMORY -> {
-                repeat(3) { row ->
-                    val yy = y + (row - 1) * dp(3f)
-                    canvas.drawLine(x - dp(4f), yy, x + dp(4f), yy, stroke)
-                }
-            }
-
-            ResourceType.SCREEN -> {
-                rect.set(x - dp(4.5f), y - dp(3.5f), x + dp(4.5f), y + dp(3.5f))
-                canvas.drawRoundRect(rect, dp(1f), dp(1f), stroke)
-            }
-
-            ResourceType.TOOLS -> {
-                canvas.drawLine(x - dp(4f), y + dp(4f), x + dp(4f), y - dp(4f), stroke)
-                canvas.drawCircle(x - dp(3f), y + dp(3f), dp(1.5f), stroke)
-            }
-        }
-    }
-
-    private fun drawActivePackets(
-        canvas: Canvas,
-        now: Long,
-        left: Float,
-        step: Float,
-        busY: Float,
-        stage: Stage,
-        palette: Palette
-    ) {
-        val activeIndex = activeStageIndex(stage)
-
-        if (activeIndex <= 0 || stage == Stage.STOP) return
-
-        val segmentStart = left + step * (activeIndex - 1)
-        val segmentEnd = left + step * activeIndex
-
-        repeat(3) { packet ->
+        if (active) {
             val t =
                 (
                     (
-                        now / 850.0 +
-                            packet / 3.0
-                        ) %
+                        now / 1050.0
+                    ) %
                         1.0
                     ).toFloat()
 
-            val x =
-                segmentStart +
-                    (segmentEnd - segmentStart) *
-                    t
-
-            fill.color = if (packet == 1) Color.WHITE else palette.primary
+            fill.color = Color.WHITE
             fill.alpha = 230
             canvas.drawCircle(
+                x - dp(18f) + dp(36f) * t,
+                y - dp(8f),
+                dp(1.7f),
+                fill
+            )
+        }
+
+        text.textSize = dp(7.2f)
+        text.color = Color.parseColor("#718198")
+        text.alpha = 180
+        canvas.drawText("ПАМЯТЬ / КОНТЕКСТ", x, y - dp(20f), text)
+    }
+
+    private fun drawToolField(
+        canvas: Canvas,
+        now: Long,
+        x: Float,
+        y: Float,
+        state: AgentState,
+        palette: Palette
+    ) {
+        val active = state == AgentState.EXECUTING
+
+        val positions =
+            arrayOf(
+                Pair(-18f, -7f),
+                Pair(0f, 0f),
+                Pair(18f, 7f)
+            )
+
+        positions.forEachIndexed { index, p ->
+            val px = x + dp(p.first)
+            val py = y + dp(p.second)
+
+            fill.color =
+                if (active && index == 1) {
+                    Color.WHITE
+                } else if (active) {
+                    palette.primary
+                } else {
+                    Color.parseColor("#4A5A70")
+                }
+
+            fill.alpha = if (active) 230 else 110
+            canvas.drawCircle(
+                px,
+                py,
+                dp(if (active && index == 1) 2.5f else 1.7f),
+                fill
+            )
+
+            if (index > 0) {
+                val prev = positions[index - 1]
+                stroke.color =
+                    if (active) {
+                        palette.primary
+                    } else {
+                        Color.parseColor("#405169")
+                    }
+                stroke.alpha = if (active) 155 else 70
+                stroke.strokeWidth = dp(0.7f)
+                canvas.drawLine(
+                    x + dp(prev.first),
+                    y + dp(prev.second),
+                    px,
+                    py,
+                    stroke
+                )
+            }
+        }
+
+        if (active) {
+            val pulse =
+                abs(
+                    sin(
+                        now / 280.0
+                    )
+                        .toFloat()
+                )
+
+            glow.color = palette.primary
+            glow.alpha = (30 + pulse * 55f).toInt()
+            glow.strokeWidth = dp(5f)
+            canvas.drawCircle(x, y, dp(10f), glow)
+        }
+
+        text.textSize = dp(7.2f)
+        text.color = Color.parseColor("#718198")
+        text.alpha = 180
+        canvas.drawText("ИНСТРУМЕНТЫ", x, y + dp(24f), text)
+    }
+
+    private fun drawEvidenceGate(
+        canvas: Canvas,
+        now: Long,
+        x: Float,
+        centerY: Float,
+        state: AgentState,
+        palette: Palette
+    ) {
+        val active =
+            state == AgentState.EXECUTING ||
+                state == AgentState.ANSWERING
+
+        val half = height * 0.18f
+
+        stroke.color =
+            if (active) {
+                palette.secondary
+            } else {
+                Color.parseColor("#405169")
+            }
+
+        stroke.alpha = if (active) 180 else 72
+        stroke.strokeWidth = dp(if (active) 1f else 0.65f)
+
+        canvas.drawLine(
+            x - dp(5f),
+            centerY - half,
+            x - dp(5f),
+            centerY + half,
+            stroke
+        )
+
+        canvas.drawLine(
+            x + dp(5f),
+            centerY - half,
+            x + dp(5f),
+            centerY + half,
+            stroke
+        )
+
+        if (active) {
+            val t =
+                (
+                    (
+                        now / 980.0
+                    ) %
+                        1.0
+                    ).toFloat()
+
+            val py =
+                centerY -
+                    half +
+                    half *
+                        2f *
+                        t
+
+            fill.shader =
+                RadialGradient(
+                    x,
+                    py,
+                    dp(16f),
+                    intArrayOf(
+                        Color.WHITE,
+                        withAlpha(palette.primary, 125),
+                        Color.TRANSPARENT
+                    ),
+                    floatArrayOf(0f, 0.32f, 1f),
+                    Shader.TileMode.CLAMP
+                )
+            fill.alpha = 235
+            canvas.drawCircle(x, py, dp(16f), fill)
+            fill.shader = null
+        }
+
+        text.textSize = dp(7.2f)
+        text.color = Color.parseColor("#718198")
+        text.alpha = 180
+        canvas.drawText(
+            "EVIDENCE",
+            x,
+            centerY - half - dp(10f),
+            text
+        )
+    }
+
+    private fun drawInputWave(
+        canvas: Canvas,
+        now: Long,
+        left: Float,
+        right: Float,
+        centerY: Float,
+        state: AgentState,
+        palette: Palette
+    ) {
+        drawEdgeWave(
+            canvas = canvas,
+            now = now,
+            left = left,
+            right = right,
+            centerY = centerY,
+            state = state,
+            palette = palette,
+            inputSide = true
+        )
+    }
+
+    private fun drawOutputWave(
+        canvas: Canvas,
+        now: Long,
+        left: Float,
+        right: Float,
+        centerY: Float,
+        state: AgentState,
+        palette: Palette
+    ) {
+        drawEdgeWave(
+            canvas = canvas,
+            now = now,
+            left = left,
+            right = right,
+            centerY = centerY,
+            state = state,
+            palette = palette,
+            inputSide = false
+        )
+    }
+
+    private fun drawEdgeWave(
+        canvas: Canvas,
+        now: Long,
+        left: Float,
+        right: Float,
+        centerY: Float,
+        state: AgentState,
+        palette: Palette,
+        inputSide: Boolean
+    ) {
+        if (right <= left) return
+
+        path.reset()
+
+        val samples = 52
+        val phase = now / 310.0
+
+        val active =
+            if (inputSide) {
+                state == AgentState.RECOGNITION
+            } else {
+                state == AgentState.ANSWERING
+            }
+
+        val amplitude =
+            height *
+                if (active) {
+                    0.11f
+                } else {
+                    0.045f
+                }
+
+        for (i in 0..samples) {
+            val t = i / samples.toFloat()
+            val x = left + (right - left) * t
+
+            val envelope =
+                sin(PI * t)
+                    .toFloat()
+                    .coerceAtLeast(0f)
+
+            val y =
+                centerY +
+                    (
+                        sin(
+                            t *
+                                PI *
+                                10.0 +
+                                phase
+                        )
+                            .toFloat() +
+                            sin(
+                                t *
+                                    PI *
+                                    27.0 -
+                                    phase *
+                                        0.72
+                            )
+                                .toFloat() *
+                                0.24f
+                        ) *
+                        amplitude *
+                        envelope
+
+            if (i == 0) {
+                path.moveTo(x, y)
+            } else {
+                path.lineTo(x, y)
+            }
+        }
+
+        val c1 =
+            if (inputSide) {
+                palette.primary
+            } else {
+                palette.secondary
+            }
+
+        val c2 =
+            if (inputSide) {
+                palette.secondary
+            } else {
+                palette.primary
+            }
+
+        val gradient =
+            LinearGradient(
+                left,
+                centerY,
+                right,
+                centerY,
+                intArrayOf(
+                    Color.TRANSPARENT,
+                    c1,
+                    Color.WHITE,
+                    c2,
+                    Color.TRANSPARENT
+                ),
+                floatArrayOf(0f, 0.22f, 0.50f, 0.78f, 1f),
+                Shader.TileMode.CLAMP
+            )
+
+        glow.shader = gradient
+        glow.alpha = if (active) 82 else 34
+        glow.strokeWidth = dp(if (active) 7f else 4f)
+        canvas.drawPath(path, glow)
+
+        stroke.shader = gradient
+        stroke.alpha = if (active) 240 else 135
+        stroke.strokeWidth = dp(if (active) 1.4f else 0.8f)
+        canvas.drawPath(path, stroke)
+
+        glow.shader = null
+        stroke.shader = null
+    }
+
+    private fun drawParticles(
+        canvas: Canvas,
+        now: Long,
+        state: AgentState,
+        palette: Palette
+    ) {
+        val count =
+            when(state) {
+                AgentState.WAITING -> 12
+                AgentState.RECOGNITION -> 18
+                AgentState.THINKING -> 28
+                AgentState.EXECUTING -> 22
+                AgentState.ANSWERING -> 20
+                AgentState.STOP -> 6
+            }
+
+        for (i in 0 until count) {
+            val phase =
+                now /
+                    (
+                        1300.0 +
+                            i *
+                                37.0
+                        ) +
+                    i *
+                        0.73
+
+            val x =
+                width *
+                    (
+                        0.12f +
+                            (
+                                (
+                                    i *
+                                        0.071f
+                                    ) %
+                                    0.76f
+                                )
+                        )
+
+            val y =
+                height *
+                    0.50f +
+                    sin(phase)
+                        .toFloat() *
+                        height *
+                        (
+                            0.16f +
+                                (
+                                    i %
+                                        4
+                                    ) *
+                                    0.025f
+                            )
+
+            fill.color =
+                when(i % 3) {
+                    0 -> palette.primary
+                    1 -> palette.secondary
+                    else -> Color.WHITE
+                }
+
+            fill.alpha =
+                if (state == AgentState.STOP) {
+                    50
+                } else {
+                    80 + (i % 4) * 28
+                }
+
+            canvas.drawCircle(
                 x,
-                busY,
-                dp(if (packet == 1) 2f else 1.3f),
+                y,
+                dp(
+                    if (i % 7 == 0) {
+                        1.7f
+                    } else {
+                        0.9f
+                    }
+                ),
                 fill
             )
         }
     }
 
-    private fun drawStopBarrier(
+    private fun drawMicroLegend(
+        canvas: Canvas,
+        state: AgentState,
+        palette: Palette
+    ) {
+        boldText.textSize = dp(7.4f)
+        boldText.color = palette.primary
+        boldText.alpha = 215
+
+        canvas.drawText(
+            stateCaption(state),
+            width * 0.84f,
+            height * 0.10f,
+            boldText
+        )
+
+        text.textSize = dp(6.8f)
+        text.color = Color.parseColor("#6E7D92")
+        text.alpha = 160
+
+        canvas.drawText(
+            "CAUSAL FIELD",
+            width * 0.16f,
+            height * 0.10f,
+            text
+        )
+    }
+
+    private fun drawStopCut(
         canvas: Canvas,
         x: Float,
-        top: Float,
-        bottom: Float,
         palette: Palette
     ) {
         fill.color = withAlpha(palette.primary, 24)
         fill.alpha = 255
-        canvas.drawRect(x - dp(4f), top, x + dp(4f), bottom, fill)
+
+        canvas.drawRect(
+            x - dp(5f),
+            height * 0.18f,
+            x + dp(5f),
+            height * 0.82f,
+            fill
+        )
 
         stroke.color = Color.WHITE
         stroke.alpha = 235
         stroke.strokeWidth = dp(1.8f)
 
-        val cy = (top + bottom) * 0.50f
-        canvas.drawLine(x - dp(8f), cy - dp(8f), x + dp(8f), cy + dp(8f), stroke)
-        canvas.drawLine(x + dp(8f), cy - dp(8f), x - dp(8f), cy + dp(8f), stroke)
+        val cy = height * 0.50f
+
+        canvas.drawLine(
+            x - dp(9f),
+            cy - dp(9f),
+            x + dp(9f),
+            cy + dp(9f),
+            stroke
+        )
+
+        canvas.drawLine(
+            x + dp(9f),
+            cy - dp(9f),
+            x - dp(9f),
+            cy + dp(9f),
+            stroke
+        )
     }
 
-    private fun stageVisualState(
-        index: Int,
-        stage: Stage
-    ): NodeState {
-        if (stage == Stage.STOP) return NodeState.STOPPED
-
-        val active = activeStageIndex(stage)
-        return when {
-            index == active -> NodeState.ACTIVE
-            index < active -> NodeState.COMPLETE
-            else -> NodeState.FUTURE
-        }
+    private fun triangularInfluence(
+        t: Float,
+        center: Float,
+        halfWidth: Float
+    ): Float {
+        val d = abs(t - center)
+        return (1f - d / halfWidth).coerceIn(0f, 1f)
     }
 
-    private fun activeStageIndex(
-        stage: Stage
-    ): Int {
-        return when(stage) {
-            Stage.INPUT -> 0
-            Stage.UNDERSTAND -> 1
-            Stage.PLAN -> 2
-            Stage.EXECUTING -> 3
-            Stage.RESPONSE -> 5
-            Stage.STOP -> 3
-        }
-    }
-
-    private fun resourceActive(
-        type: ResourceType,
-        stage: Stage
-    ): Boolean {
-        return when(stage) {
-            Stage.INPUT ->
-                type == ResourceType.CONTEXT
-
-            Stage.UNDERSTAND ->
-                type == ResourceType.CONTEXT
-
-            Stage.PLAN ->
-                type == ResourceType.CONTEXT ||
-                    type == ResourceType.MEMORY
-
-            Stage.EXECUTING ->
-                type == ResourceType.SCREEN ||
-                    type == ResourceType.TOOLS
-
-            Stage.RESPONSE ->
-                type == ResourceType.CONTEXT
-
-            Stage.STOP ->
-                false
-        }
-    }
-
-    private fun stageFor(
+    private fun stateFor(
         serviceState: String
-    ): Stage {
+    ): AgentState {
         return when(serviceState) {
             AyanaVoiceService.STATE_LISTENING ->
-                Stage.INPUT
+                AgentState.WAITING
 
             AyanaVoiceService.STATE_COMMAND ->
-                Stage.UNDERSTAND
+                AgentState.RECOGNITION
 
             AyanaVoiceService.STATE_THINKING ->
-                Stage.PLAN
+                AgentState.THINKING
 
             AyanaVoiceService.STATE_EXECUTING ->
-                Stage.EXECUTING
+                AgentState.EXECUTING
 
             AyanaVoiceService.STATE_SPEAKING,
             AyanaVoiceService.STATE_TEXT,
             AyanaVoiceService.STATE_SUCCESS ->
-                Stage.RESPONSE
+                AgentState.ANSWERING
 
             AyanaVoiceService.STATE_CANCELLED,
             AyanaVoiceService.STATE_ERROR ->
-                Stage.STOP
+                AgentState.STOP
 
             else ->
-                Stage.INPUT
+                AgentState.WAITING
         }
     }
 
-    private fun stageTitle(
-        stage: Stage
+    private fun stateCaption(
+        state: AgentState
     ): String {
-        return when(stage) {
-            Stage.INPUT -> "ОЖИДАНИЕ ВХОДА"
-            Stage.UNDERSTAND -> "ПОНИМАНИЕ КОМАНДЫ"
-            Stage.PLAN -> "ФОРМИРОВАНИЕ ПЛАНА"
-            Stage.EXECUTING -> "ВЫПОЛНЕНИЕ"
-            Stage.RESPONSE -> "ФОРМИРОВАНИЕ ОТВЕТА"
-            Stage.STOP -> "ОСТАНОВЛЕНО"
+        return when(state) {
+            AgentState.WAITING -> "ОЖИДАНИЕ"
+            AgentState.RECOGNITION -> "РАСПОЗНАВАНИЕ"
+            AgentState.THINKING -> "РЕШЕНИЕ"
+            AgentState.EXECUTING -> "ДЕЙСТВИЕ"
+            AgentState.ANSWERING -> "ОТВЕТ"
+            AgentState.STOP -> "СТОП"
         }
     }
 
     private fun paletteFor(
-        serviceState: String
+        state: AgentState
     ): Palette {
-        return when(serviceState) {
-            AyanaVoiceService.STATE_LISTENING ->
+        return when(state) {
+            AgentState.WAITING ->
                 Palette(
-                    Color.parseColor("#24DDE8"),
-                    Color.parseColor("#32A7FF")
+                    Color.parseColor("#22DDE8"),
+                    Color.parseColor("#2D8CFF")
                 )
 
-            AyanaVoiceService.STATE_COMMAND ->
+            AgentState.RECOGNITION ->
                 Palette(
-                    Color.parseColor("#2389FF"),
-                    Color.parseColor("#56C8FF")
+                    Color.parseColor("#248BFF"),
+                    Color.parseColor("#36D5FF")
                 )
 
-            AyanaVoiceService.STATE_THINKING ->
+            AgentState.THINKING ->
                 Palette(
-                    Color.parseColor("#7254FF"),
-                    Color.parseColor("#A765FF")
+                    Color.parseColor("#7354FF"),
+                    Color.parseColor("#B45CFF")
                 )
 
-            AyanaVoiceService.STATE_EXECUTING ->
+            AgentState.EXECUTING ->
                 Palette(
-                    Color.parseColor("#31E27A"),
+                    Color.parseColor("#30E37A"),
                     Color.parseColor("#18CFC1")
                 )
 
-            AyanaVoiceService.STATE_SPEAKING,
-            AyanaVoiceService.STATE_TEXT,
-            AyanaVoiceService.STATE_SUCCESS ->
+            AgentState.ANSWERING ->
                 Palette(
-                    Color.parseColor("#E53BC8"),
-                    Color.parseColor("#9B54FF")
+                    Color.parseColor("#E83BCB"),
+                    Color.parseColor("#9656FF")
                 )
 
-            AyanaVoiceService.STATE_CANCELLED,
-            AyanaVoiceService.STATE_ERROR ->
+            AgentState.STOP ->
                 Palette(
                     Color.parseColor("#FF4933"),
                     Color.parseColor("#FF7A2B")
                 )
+        }
+    }
 
-            else ->
-                Palette(
-                    Color.parseColor("#24DDE8"),
-                    Color.parseColor("#32A7FF")
-                )
+    private fun packetPeriodFor(
+        state: AgentState
+    ): Double {
+        return when(state) {
+            AgentState.WAITING -> 3000.0
+            AgentState.RECOGNITION -> 1200.0
+            AgentState.THINKING -> 900.0
+            AgentState.EXECUTING -> 760.0
+            AgentState.ANSWERING -> 820.0
+            AgentState.STOP -> 4200.0
         }
     }
 
     private fun frameDelayFor(
-        stage: Stage
+        state: AgentState
     ): Long {
-        return when(stage) {
-            Stage.INPUT -> 50L
-            Stage.UNDERSTAND -> 32L
-            Stage.PLAN -> 34L
-            Stage.EXECUTING -> 30L
-            Stage.RESPONSE -> 32L
-            Stage.STOP -> 90L
+        return when(state) {
+            AgentState.WAITING -> 48L
+            AgentState.RECOGNITION -> 30L
+            AgentState.THINKING -> 28L
+            AgentState.EXECUTING -> 27L
+            AgentState.ANSWERING -> 28L
+            AgentState.STOP -> 90L
         }
     }
 
@@ -990,36 +1474,17 @@ class AyanaCoreVisualizer(
     private fun dp(value: Float): Float =
         value * density
 
-    private enum class Stage {
-        INPUT,
-        UNDERSTAND,
-        PLAN,
+    private enum class AgentState {
+        WAITING,
+        RECOGNITION,
+        THINKING,
         EXECUTING,
-        RESPONSE,
+        ANSWERING,
         STOP
     }
 
-    private enum class NodeState {
-        ACTIVE,
-        COMPLETE,
-        FUTURE,
-        STOPPED
-    }
-
-    private enum class ResourceType {
-        CONTEXT,
-        MEMORY,
-        SCREEN,
-        TOOLS
-    }
-
-    private data class ResourceSpec(
-        val title: String,
-        val type: ResourceType
-    )
-
     private data class Palette(
         val primary: Int,
-        val accent: Int
+        val secondary: Int
     )
 }
