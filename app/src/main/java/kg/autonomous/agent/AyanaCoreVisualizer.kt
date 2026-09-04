@@ -18,9 +18,9 @@ import kotlin.math.min
 import kotlin.math.sin
 
 /**
- * AYANA Core Visualizer v15.0 — LIVE QUANTUM WEAVE
+ * AYANA Core Visualizer v16.0 — AGENT RESONANCE ENGINE
  *
- * Dense procedural live renderer based directly on the approved six-state AYANA reference:
+ * High-density procedural live renderer rebuilt after device review of v15. The goal is the approved AYANA energy reference, but as a real state-reactive Android animation:
  *
  * 1. ОЖИДАНИЕ       — cyan / calm coherent energy field
  * 2. РАСПОЗНАВАНИЕ  — electric blue / inbound analysis scan
@@ -111,18 +111,18 @@ class AyanaCoreVisualizer(
 
         val edge = dp(10f)
 
-        // The largest decorative element is <= 1.10R.
-        // v15 uses more of the available hero window while preserving hard bounds.
+        // v16 deliberately fills the hero window. The outermost decorative
+        // layer remains mathematically bounded inside the View.
         val maxRByHeight =
-            (h * 0.50f - edge) / 1.10f
+            (h * 0.50f - edge) / 1.035f
 
         val maxRByWidth =
-            (w * 0.50f - edge) / 1.10f
+            (w * 0.50f - edge) / 1.035f
 
         val preferred =
             min(
-                h * 0.455f,
-                w * 0.350f
+                h * 0.485f,
+                w * 0.405f
             )
 
         val radius =
@@ -137,6 +137,16 @@ class AyanaCoreVisualizer(
 
         drawBackdrop(
             canvas = canvas,
+            cx = cx,
+            cy = cy,
+            radius = radius,
+            palette = palette,
+            state = state
+        )
+
+        drawPlasmaVolume(
+            canvas = canvas,
+            now = now,
             cx = cx,
             cy = cy,
             radius = radius,
@@ -163,6 +173,16 @@ class AyanaCoreVisualizer(
             radius = radius,
             palette = palette,
             motion = motion,
+            state = state
+        )
+
+        drawCognitiveCorona(
+            canvas = canvas,
+            now = now,
+            cx = cx,
+            cy = cy,
+            radius = radius,
+            palette = palette,
             state = state
         )
 
@@ -227,11 +247,11 @@ class AyanaCoreVisualizer(
             RadialGradient(
                 cx,
                 cy,
-                radius * 1.10f,
+                radius * 1.035f,
                 intArrayOf(
-                    withAlpha(Color.WHITE, if (state == STATE_STOP) 18 else 42),
-                    withAlpha(palette.primary, if (state == STATE_STOP) 46 else 96),
-                    withAlpha(palette.secondary, if (state == STATE_STOP) 25 else 58),
+                    withAlpha(Color.WHITE, if (state == STATE_STOP) 28 else 78),
+                    withAlpha(palette.primary, if (state == STATE_STOP) 58 else 148),
+                    withAlpha(palette.secondary, if (state == STATE_STOP) 34 else 92),
                     Color.TRANSPARENT
                 ),
                 floatArrayOf(
@@ -244,12 +264,12 @@ class AyanaCoreVisualizer(
             )
 
         fill.alpha = 255
-        canvas.drawCircle(cx, cy, radius * 1.10f, fill)
+        canvas.drawCircle(cx, cy, radius * 1.035f, fill)
         fill.shader = null
 
         // Bright central carrier beam from the approved reference.
-        val left = cx - radius * 1.08f
-        val right = cx + radius * 1.08f
+        val left = dp(2f)
+        val right = width.toFloat() - dp(2f)
 
         val carrier =
             LinearGradient(
@@ -289,6 +309,170 @@ class AyanaCoreVisualizer(
     }
 
 
+
+    /**
+     * Volumetric plasma mass. v15 was too thin on the real Galaxy Tab S8;
+     * overlapping radial fields give the live core depth without using PNGs.
+     */
+    private fun drawPlasmaVolume(
+        canvas: Canvas,
+        now: Long,
+        cx: Float,
+        cy: Float,
+        radius: Float,
+        palette: Palette,
+        state: Int
+    ) {
+        val blobCount =
+            when(state) {
+                STATE_THINKING -> 18
+                STATE_EXECUTING -> 15
+                STATE_ANSWERING -> 16
+                STATE_STOP -> 9
+                else -> 13
+            }
+
+        for (i in 0 until blobCount) {
+            val angle = now / (1500.0 + i * 41.0) + i * 0.73
+            val orbit = radius * (0.08f + (i % 5) * 0.045f)
+            val bx = cx + cos(angle).toFloat() * orbit
+            val by = cy + sin(angle * (1.15 + (i % 3) * 0.11)).toFloat() * orbit * 0.78f
+            val color =
+                when(i % 4) {
+                    0 -> Color.WHITE
+                    1 -> palette.primary
+                    2 -> palette.secondary
+                    else -> palette.accent
+                }
+            val blobR = radius * (0.22f + (i % 4) * 0.035f)
+
+            fill.shader =
+                RadialGradient(
+                    bx,
+                    by,
+                    blobR,
+                    intArrayOf(
+                        withAlpha(color, if (state == STATE_STOP) 24 else 86),
+                        withAlpha(
+                            if (color == Color.WHITE) palette.primary else color,
+                            if (state == STATE_STOP) 18 else 52
+                        ),
+                        Color.TRANSPARENT
+                    ),
+                    floatArrayOf(0f, 0.38f, 1f),
+                    Shader.TileMode.CLAMP
+                )
+            fill.alpha = 255
+            canvas.drawCircle(bx, by, blobR, fill)
+            fill.shader = null
+        }
+
+        fill.shader =
+            RadialGradient(
+                cx,
+                cy,
+                radius * 0.36f,
+                intArrayOf(
+                    withAlpha(Color.WHITE, if (state == STATE_STOP) 80 else 230),
+                    withAlpha(palette.primary, if (state == STATE_STOP) 90 else 190),
+                    withAlpha(palette.secondary, if (state == STATE_STOP) 38 else 80),
+                    Color.TRANSPARENT
+                ),
+                floatArrayOf(0f, 0.22f, 0.58f, 1f),
+                Shader.TileMode.CLAMP
+            )
+        fill.alpha = 255
+        canvas.drawCircle(cx, cy, radius * 0.36f, fill)
+        fill.shader = null
+    }
+
+    /**
+     * AI-agent-specific state corona: branching hypotheses while thinking,
+     * a directed action jet during execution, coherent resonance while answering,
+     * and fracture on stop. No button/dashboard metaphor.
+     */
+    private fun drawCognitiveCorona(
+        canvas: Canvas,
+        now: Long,
+        cx: Float,
+        cy: Float,
+        radius: Float,
+        palette: Palette,
+        state: Int
+    ) {
+        when(state) {
+            STATE_THINKING -> {
+                val nodes = 26
+                for (i in 0 until nodes) {
+                    val a = i * PI * 2.0 / nodes + sin(now / 1700.0 + i * 0.37) * 0.18
+                    val rr = radius * (0.82f + (i % 4) * 0.045f)
+                    val x = cx + cos(a).toFloat() * rr
+                    val y = cy + sin(a).toFloat() * rr
+                    val j = (i * 7 + 5) % nodes
+                    val b = j * PI * 2.0 / nodes - sin(now / 1350.0 + j) * 0.13
+                    val rr2 = radius * (0.80f + (j % 3) * 0.055f)
+                    val x2 = cx + cos(b).toFloat() * rr2
+                    val y2 = cy + sin(b).toFloat() * rr2
+
+                    stroke.color = if (i % 3 == 0) palette.accent else palette.primary
+                    stroke.alpha = if (i % 4 == 0) 110 else 66
+                    stroke.strokeWidth = dp(0.62f)
+                    canvas.drawLine(x, y, x2, y2, stroke)
+
+                    fill.color = if (i % 5 == 0) Color.WHITE else palette.primary
+                    fill.alpha = if (i % 5 == 0) 245 else 180
+                    canvas.drawCircle(x, y, dp(if (i % 5 == 0) 2.1f else 1.15f), fill)
+                }
+            }
+
+            STATE_EXECUTING -> {
+                val start = cx + radius * 0.36f
+                val end = width.toFloat() - dp(5f)
+                glow.color = palette.primary
+                glow.alpha = 98
+                glow.strokeWidth = dp(12f)
+                canvas.drawLine(start, cy, end, cy, glow)
+                stroke.color = Color.WHITE
+                stroke.alpha = 235
+                stroke.strokeWidth = dp(1.15f)
+                canvas.drawLine(start, cy, end, cy, stroke)
+            }
+
+            STATE_ANSWERING -> {
+                val phase = (now % 1300L).toFloat() / 1300f
+                for (i in 0 until 4) {
+                    val rr = radius * (0.48f + phase * 0.46f + i * 0.06f)
+                    if (rr > radius * 0.98f) continue
+                    stroke.color = if (i % 2 == 0) palette.primary else palette.secondary
+                    stroke.alpha = (185 - phase * 125f - i * 16).toInt().coerceAtLeast(20)
+                    stroke.strokeWidth = dp(1.1f)
+                    canvas.drawCircle(cx, cy, rr, stroke)
+                }
+            }
+
+            STATE_STOP -> {
+                for (i in 0 until 22) {
+                    if (i % 4 == 1) continue
+                    val a = i * PI * 2.0 / 22.0
+                    val r1 = radius * (0.80f + (i % 3) * 0.04f)
+                    val r2 = r1 + radius * 0.15f
+                    stroke.color = if (i % 2 == 0) palette.primary else palette.secondary
+                    stroke.alpha = 175
+                    stroke.strokeWidth = dp(1.2f)
+                    canvas.drawLine(
+                        cx + cos(a).toFloat() * r1,
+                        cy + sin(a).toFloat() * r1,
+                        cx + cos(a).toFloat() * r2,
+                        cy + sin(a).toFloat() * r2,
+                        stroke
+                    )
+                }
+            }
+
+            else -> Unit
+        }
+    }
+
     private fun drawWaveform(
         canvas: Canvas,
         now: Long,
@@ -302,8 +486,8 @@ class AyanaCoreVisualizer(
         path.reset()
         finePath.reset()
 
-        val left = cx - radius * 1.08f
-        val right = cx + radius * 1.08f
+        val left = dp(2f)
+        val right = width.toFloat() - dp(2f)
         val samples = 132
         val phase = now / motion.wavePeriodMs
 
@@ -324,7 +508,7 @@ class AyanaCoreVisualizer(
             val edgeWeight =
                 abs(
                     (x - cx) /
-                        (radius * 1.08f)
+                        (width * 0.50f)
                 )
                     .coerceIn(0f, 1f)
 
@@ -369,7 +553,7 @@ class AyanaCoreVisualizer(
                             harmonic2
                     ) *
                     radius *
-                    0.155f *
+                    0.205f *
                     envelope *
                     stateBoost
 
@@ -427,16 +611,16 @@ class AyanaCoreVisualizer(
         // Multi-pass glow gives much more energy than one thin Android line.
         glow.shader = gradient
         glow.alpha = if (state == STATE_STOP) 28 else motion.waveGlowAlpha
-        glow.strokeWidth = dp(11f)
+        glow.strokeWidth = dp(15f)
         canvas.drawPath(path, glow)
 
         glow.alpha = if (state == STATE_STOP) 36 else 76
-        glow.strokeWidth = dp(5.5f)
+        glow.strokeWidth = dp(8f)
         canvas.drawPath(path, glow)
 
         stroke.shader = gradient
         stroke.alpha = if (state == STATE_STOP) 112 else motion.waveAlpha
-        stroke.strokeWidth = dp(1.65f)
+        stroke.strokeWidth = dp(2.05f)
         canvas.drawPath(path, stroke)
 
         stroke.shader = null
@@ -448,13 +632,13 @@ class AyanaCoreVisualizer(
         canvas.drawPath(finePath, stroke)
 
         // Dense spectral spikes on the outside of the energy sphere.
-        val spikeCount = 84
+        val spikeCount = 128
         for (i in 0 until spikeCount) {
             val t = i / (spikeCount - 1).toFloat()
             val x = left + (right - left) * t
             val centerDistance = abs((x - cx) / radius)
 
-            if (centerDistance < 0.70f) continue
+            if (centerDistance < 0.58f) continue
 
             val pulse =
                 abs(
@@ -469,7 +653,7 @@ class AyanaCoreVisualizer(
                 radius *
                     (
                         0.020f +
-                            pulse * 0.105f
+                            pulse * 0.145f
                     ) *
                     stateBoost
 
@@ -516,19 +700,19 @@ class AyanaCoreVisualizer(
     ) {
         val ribbonCount =
             when(state) {
-                STATE_WAITING -> 18
-                STATE_RECOGNITION -> 20
-                STATE_THINKING -> 24
-                STATE_EXECUTING -> 21
-                STATE_ANSWERING -> 20
-                STATE_STOP -> 12
-                else -> 18
+                STATE_WAITING -> 28
+                STATE_RECOGNITION -> 32
+                STATE_THINKING -> 38
+                STATE_EXECUTING -> 34
+                STATE_ANSWERING -> 32
+                STATE_STOP -> 18
+                else -> 28
             }
 
         for (ribbon in 0 until ribbonCount) {
             path.reset()
 
-            val points = 144
+            val points = 176
 
             val phase =
                 now /
@@ -586,9 +770,9 @@ class AyanaCoreVisualizer(
                 val base =
                     radius *
                         (
-                            0.55f +
+                            0.60f +
                                 centered / ribbonCount.toFloat() *
-                                    0.16f
+                                    0.22f
                             )
 
                 val rr =
@@ -596,7 +780,7 @@ class AyanaCoreVisualizer(
                         (
                             1f +
                                 lobe * motion.ribbonWarp +
-                                micro * 0.035f
+                                micro * 0.052f
                             )
 
                 // Additional precession creates the dense woven sphere seen in
@@ -670,7 +854,7 @@ class AyanaCoreVisualizer(
                         else -> 58
                     }
 
-                glow.strokeWidth = dp(if (ribbon % 8 == 0) 9f else 6f)
+                glow.strokeWidth = dp(if (ribbon % 8 == 0) 13f else 8f)
                 canvas.drawPath(path, glow)
             }
 
@@ -678,11 +862,11 @@ class AyanaCoreVisualizer(
 
             stroke.alpha =
                 when(state) {
-                    STATE_WAITING -> if (color == Color.WHITE) 205 else 172
-                    STATE_RECOGNITION -> if (color == Color.WHITE) 230 else 195
-                    STATE_THINKING -> if (color == Color.WHITE) 238 else 210
-                    STATE_EXECUTING -> if (color == Color.WHITE) 230 else 198
-                    STATE_ANSWERING -> if (color == Color.WHITE) 232 else 202
+                    STATE_WAITING -> if (color == Color.WHITE) 238 else 205
+                    STATE_RECOGNITION -> if (color == Color.WHITE) 248 else 220
+                    STATE_THINKING -> if (color == Color.WHITE) 252 else 230
+                    STATE_EXECUTING -> if (color == Color.WHITE) 248 else 222
+                    STATE_ANSWERING -> if (color == Color.WHITE) 250 else 224
                     STATE_STOP -> if (color == Color.WHITE) 92 else 116
                     else -> 170
                 }
@@ -690,9 +874,9 @@ class AyanaCoreVisualizer(
             stroke.strokeWidth =
                 dp(
                     when {
-                        color == Color.WHITE -> 1.18f
-                        ribbon % 5 == 0 -> 1.05f
-                        else -> 0.78f
+                        color == Color.WHITE -> 1.55f
+                        ribbon % 5 == 0 -> 1.30f
+                        else -> 0.92f
                     }
                 )
 
@@ -726,11 +910,11 @@ class AyanaCoreVisualizer(
             RadialGradient(
                 cx,
                 cy,
-                radius * 0.66f,
+                radius * 0.74f,
                 intArrayOf(
-                    withAlpha(Color.WHITE, if (state == STATE_STOP) 70 else 170),
-                    withAlpha(palette.primary, if (state == STATE_STOP) 82 else 190),
-                    withAlpha(palette.secondary, if (state == STATE_STOP) 50 else 110),
+                    withAlpha(Color.WHITE, if (state == STATE_STOP) 86 else 235),
+                    withAlpha(palette.primary, if (state == STATE_STOP) 102 else 238),
+                    withAlpha(palette.secondary, if (state == STATE_STOP) 64 else 154),
                     withAlpha(Color.parseColor("#02050A"), 238),
                     Color.TRANSPARENT
                 ),
@@ -750,20 +934,20 @@ class AyanaCoreVisualizer(
             cy,
             radius *
                 (
-                    0.58f +
-                        pulse * 0.015f
+                    0.66f +
+                        pulse * 0.018f
                     ),
             fill
         )
         fill.shader = null
 
         // Dense concentric computation rings.
-        for (ringIndex in 0 until 12) {
+        for (ringIndex in 0 until 6) {
             val rr =
                 radius *
                     (
-                        0.20f +
-                            ringIndex * 0.058f
+                        0.30f +
+                            ringIndex * 0.095f
                         )
 
             stroke.color =
@@ -831,17 +1015,17 @@ class AyanaCoreVisualizer(
         val rotation = now / motion.haloPeriodMs
 
         // Several segmented rotating rings.
-        for (ringIndex in 0 until 5) {
+        for (ringIndex in 0 until 7) {
             val rr =
                 radius *
                     (
-                        0.82f +
-                            ringIndex * 0.050f
+                        0.74f +
+                            ringIndex * 0.043f
                         )
 
             val segmentCount =
-                42 +
-                    ringIndex * 7
+                54 +
+                    ringIndex * 8
 
             val spin =
                 rotation *
@@ -922,10 +1106,10 @@ class AyanaCoreVisualizer(
         // Dense sparkle halo.
         val points =
             when(state) {
-                STATE_THINKING -> 150
-                STATE_EXECUTING -> 136
-                STATE_STOP -> 86
-                else -> 124
+                STATE_THINKING -> 240
+                STATE_EXECUTING -> 210
+                STATE_STOP -> 120
+                else -> 190
             }
 
         for (i in 0 until points) {
@@ -953,12 +1137,12 @@ class AyanaCoreVisualizer(
             val rr =
                 radius *
                     (
-                        0.97f +
+                        0.91f +
                             (
                                 i %
                                     5
                                 ) *
-                                0.021f
+                                0.018f
                         ) +
                     sin(
                         now / 730.0 +
@@ -992,8 +1176,8 @@ class AyanaCoreVisualizer(
                 y,
                 dp(
                     when {
-                        i % 17 == 0 -> 2.3f
-                        i % 7 == 0 -> 1.55f
+                        i % 17 == 0 -> 2.9f
+                        i % 7 == 0 -> 1.85f
                         else -> 0.82f
                     }
                 ),
@@ -1724,9 +1908,9 @@ class AyanaCoreVisualizer(
                 palette.primary
             }
 
-        val totalWidth = radius * 1.12f
-        val glyphH = radius * 0.22f
-        val gap = radius * 0.055f
+        val totalWidth = radius * 1.42f
+        val glyphH = radius * 0.31f
+        val gap = radius * 0.050f
 
         // Relative glyph widths: A Y A N A
         val widths =
@@ -1749,7 +1933,7 @@ class AyanaCoreVisualizer(
 
         glow.color = color
         glow.alpha = if (state == STATE_STOP) 46 else 78
-        glow.strokeWidth = dp(7f)
+        glow.strokeWidth = dp(12f)
 
         stroke.color =
             if (state == STATE_STOP) {
@@ -1758,7 +1942,7 @@ class AyanaCoreVisualizer(
                 Color.WHITE
             }
         stroke.alpha = if (state == STATE_STOP) 215 else 238
-        stroke.strokeWidth = dp(1.45f)
+        stroke.strokeWidth = dp(2.15f)
 
         widths.forEachIndexed { index, proportion ->
             val gw = usable * proportion
