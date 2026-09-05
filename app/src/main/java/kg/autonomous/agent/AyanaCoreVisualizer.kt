@@ -6,36 +6,44 @@ import android.graphics.Color
 import android.graphics.LinearGradient
 import android.graphics.Paint
 import android.graphics.Path
-import android.graphics.RuntimeShader
+import android.graphics.RadialGradient
 import android.graphics.Shader
-import android.os.Build
 import android.os.SystemClock
 import android.view.View
 import kotlin.math.PI
 import kotlin.math.abs
+import kotlin.math.cos
 import kotlin.math.min
 import kotlin.math.sin
 
 /**
- * AYANA Core Visualizer v19.0 â€” REFERENCE MATCH
+ * AYANA Core Visualizer v19.2 — SIX PALETTE MATCH
  *
- * Fixed visual geometry based on the approved six-state AYANA reference:
- * luminous braided circular core + outer particle halo + horizontal waveform +
- * geometric AYANA wordmark.
+ * Corrective rebuild after v19 device failure.
  *
- * The SHAPE stays the same in all states. Only palette, speed and intensity
- * change. No dashboards, no nodes, no buttons, no extra agent-map graphics.
+ * IMPORTANT:
+ * - NO RuntimeShader/AGSL: v19 produced overexposure and square artifacts on-device.
+ * - One clean core geometry across all six states.
+ * - Only palette, speed and intensity change by state.
+ * - No extra dashboards, nodes, buttons, load meters or "agent maps".
+ * - No PNG/JPEG.
+ * - No ORB / routing / TTS / microphone / Accessibility changes.
  *
- * Android 13+ uses AGSL RuntimeShader for a dense volumetric live core.
- * The Galaxy Tab S8 / Android 15 uses this path.
- *
- * No PNG/JPEG dependency. No ORB, routing, TTS, mic or Accessibility changes.
+ * States:
+ * WAITING       cyan
+ * RECOGNITION   electric blue
+ * THINKING      indigo-violet
+ * EXECUTING     green
+ * ANSWERING     magenta
+ * STOP          red-orange
  */
 class AyanaCoreVisualizer(
     context: Context
 ) : View(context) {
 
     private val density = resources.displayMetrics.density
+
+    private val fill = Paint(Paint.ANTI_ALIAS_FLAG)
 
     private val stroke =
         Paint(Paint.ANTI_ALIAS_FLAG).apply {
@@ -54,13 +62,6 @@ class AyanaCoreVisualizer(
     private val path = Path()
 
     private var attached = false
-
-    private val shaderBridge: ShaderBridge? =
-        if (Build.VERSION.SDK_INT >= 33) {
-            Api33ShaderBridge()
-        } else {
-            null
-        }
 
     init {
         importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_NO
@@ -95,27 +96,21 @@ class AyanaCoreVisualizer(
         val h = height.toFloat()
         val cx = w * 0.50f
         val cy = h * 0.50f
-        val margin = dp(4f)
 
         val radius =
             min(
-                (h * 0.50f - margin) / 1.01f,
-                min(
-                    (w * 0.50f - margin) / 1.01f,
-                    min(h * 0.49f, w * 0.43f)
-                )
-            ).coerceAtLeast(dp(42f))
+                h * 0.445f,
+                w * 0.305f
+            )
+                .coerceAtLeast(dp(42f))
 
-        shaderBridge?.draw(
+        drawBlackField(
             canvas = canvas,
-            width = w,
-            height = h,
-            timeSeconds = now / 1000f * motion.speed,
-            primary = palette.primary,
-            secondary = palette.secondary,
-            accent = palette.accent,
-            energy = motion.energy
-        ) ?: drawFallback(canvas, cx, cy, radius, palette)
+            cx = cx,
+            cy = cy,
+            radius = radius,
+            palette = palette
+        )
 
         drawWaveform(
             canvas = canvas,
@@ -127,7 +122,45 @@ class AyanaCoreVisualizer(
             motion = motion
         )
 
-        drawWordmark(
+        drawCoreGlow(
+            canvas = canvas,
+            cx = cx,
+            cy = cy,
+            radius = radius,
+            palette = palette,
+            motion = motion,
+            now = now
+        )
+
+        drawLissajousRibbons(
+            canvas = canvas,
+            now = now,
+            cx = cx,
+            cy = cy,
+            radius = radius,
+            palette = palette,
+            motion = motion
+        )
+
+        drawReferenceRings(
+            canvas = canvas,
+            cx = cx,
+            cy = cy,
+            radius = radius,
+            palette = palette
+        )
+
+        drawHaloParticles(
+            canvas = canvas,
+            now = now,
+            cx = cx,
+            cy = cy,
+            radius = radius,
+            palette = palette,
+            motion = motion
+        )
+
+        drawAyanaWordmark(
             canvas = canvas,
             cx = cx,
             cy = cy,
@@ -140,8 +173,43 @@ class AyanaCoreVisualizer(
         }
     }
 
+    private fun drawBlackField(
+        canvas: Canvas,
+        cx: Float,
+        cy: Float,
+        radius: Float,
+        palette: Palette
+    ) {
+        fill.shader =
+            RadialGradient(
+                cx,
+                cy,
+                radius * 1.15f,
+                intArrayOf(
+                    withAlpha(palette.primary, 34),
+                    withAlpha(palette.secondary, 12),
+                    Color.TRANSPARENT
+                ),
+                floatArrayOf(
+                    0f,
+                    0.56f,
+                    1f
+                ),
+                Shader.TileMode.CLAMP
+            )
+
+        fill.alpha = 255
+        canvas.drawCircle(
+            cx,
+            cy,
+            radius * 1.15f,
+            fill
+        )
+        fill.shader = null
+    }
+
     /**
-     * Same waveform geometry in all states, exactly like the reference.
+     * Reference-style waveform: strong on both sides, quieter through the core.
      */
     private fun drawWaveform(
         canvas: Canvas,
@@ -156,35 +224,60 @@ class AyanaCoreVisualizer(
 
         val left = dp(1f)
         val right = width.toFloat() - dp(1f)
-        val samples = 196
+        val samples = 184
         val phase = now / motion.wavePeriodMs
 
         for (i in 0..samples) {
             val t = i / samples.toFloat()
             val x = left + (right - left) * t
 
-            val distance =
-                abs((x - cx) / (width * 0.50f))
+            val normalizedDistance =
+                abs(
+                    (x - cx) /
+                        (width * 0.50f)
+                )
                     .coerceIn(0f, 1f)
 
             val envelope =
-                (0.08f + distance * 1.02f)
+                (
+                    0.08f +
+                        normalizedDistance *
+                            0.98f
+                    )
                     .coerceIn(0.08f, 1f)
 
             val main =
-                sin(t * PI * 8.2 + phase).toFloat()
+                sin(
+                    t * PI * 8.0 +
+                        phase
+                )
+                    .toFloat()
 
             val detail =
-                sin(t * PI * 33.0 - phase * 0.74).toFloat() * 0.31f
+                sin(
+                    t * PI * 29.0 -
+                        phase * 0.73
+                )
+                    .toFloat() *
+                    0.24f
 
             val fine =
-                sin(t * PI * 81.0 + phase * 1.17).toFloat() * 0.105f
+                sin(
+                    t * PI * 67.0 +
+                        phase * 1.12
+                )
+                    .toFloat() *
+                    0.08f
 
             val y =
                 cy +
-                    (main + detail + fine) *
+                    (
+                        main +
+                            detail +
+                            fine
+                    ) *
                     radius *
-                    0.185f *
+                    0.145f *
                     envelope *
                     motion.waveStrength
 
@@ -208,72 +301,647 @@ class AyanaCoreVisualizer(
                     palette.secondary,
                     Color.TRANSPARENT
                 ),
-                floatArrayOf(0f, 0.23f, 0.50f, 0.77f, 1f),
+                floatArrayOf(
+                    0f,
+                    0.24f,
+                    0.50f,
+                    0.76f,
+                    1f
+                ),
                 Shader.TileMode.CLAMP
             )
 
         glow.shader = gradient
-        glow.alpha = 100
-        glow.strokeWidth = dp(16f)
+        glow.alpha = 56
+        glow.strokeWidth = dp(10f)
         canvas.drawPath(path, glow)
 
-        glow.alpha = 65
-        glow.strokeWidth = dp(8f)
+        glow.alpha = 34
+        glow.strokeWidth = dp(5f)
         canvas.drawPath(path, glow)
 
         stroke.shader = gradient
-        stroke.alpha = 245
-        stroke.strokeWidth = dp(1.75f)
+        stroke.alpha = 220
+        stroke.strokeWidth = dp(1.25f)
         canvas.drawPath(path, stroke)
 
         glow.shader = null
         stroke.shader = null
+
+        drawSpectrum(
+            canvas = canvas,
+            now = now,
+            cx = cx,
+            cy = cy,
+            radius = radius,
+            palette = palette,
+            motion = motion
+        )
+    }
+
+    private fun drawSpectrum(
+        canvas: Canvas,
+        now: Long,
+        cx: Float,
+        cy: Float,
+        radius: Float,
+        palette: Palette,
+        motion: Motion
+    ) {
+        val count = 104
+        val exclusion = radius * 0.74f
+
+        for (i in 0 until count) {
+            val x =
+                width *
+                    i /
+                    (count - 1).toFloat()
+
+            val d = abs(x - cx)
+
+            if (d < exclusion) continue
+
+            val edge =
+                (
+                    (d - exclusion) /
+                        (width * 0.50f - exclusion)
+                    )
+                    .coerceIn(0f, 1f)
+
+            val pulse =
+                abs(
+                    sin(
+                        now / 250.0 +
+                            i * 0.67
+                    )
+                        .toFloat()
+                )
+
+            val h =
+                radius *
+                    (
+                        0.018f +
+                            edge * 0.075f +
+                            pulse * 0.065f
+                        ) *
+                    motion.waveStrength
+
+            val color =
+                when(i % 4) {
+                    0 -> Color.WHITE
+                    1 -> palette.primary
+                    2 -> palette.secondary
+                    else -> palette.accent
+                }
+
+            glow.color = color
+            glow.alpha = 26
+            glow.strokeWidth = dp(2.4f)
+
+            canvas.drawLine(
+                x,
+                cy - h,
+                x,
+                cy + h,
+                glow
+            )
+
+            stroke.color = color
+            stroke.alpha = 105
+            stroke.strokeWidth = dp(0.45f)
+
+            canvas.drawLine(
+                x,
+                cy - h,
+                x,
+                cy + h,
+                stroke
+            )
+        }
     }
 
     /**
-     * Geometric Î›YÎ›NÎ› signature. No font or bitmap dependency.
+     * Controlled volumetric glow.
+     * Intentionally much dimmer than v19 to prevent blown-out white core.
      */
-    private fun drawWordmark(
+    private fun drawCoreGlow(
+        canvas: Canvas,
+        cx: Float,
+        cy: Float,
+        radius: Float,
+        palette: Palette,
+        motion: Motion,
+        now: Long
+    ) {
+        val pulse =
+            (
+                0.5 +
+                    0.5 *
+                        sin(now / motion.breathePeriodMs)
+                )
+                .toFloat()
+
+        fill.shader =
+            RadialGradient(
+                cx,
+                cy,
+                radius * 0.73f,
+                intArrayOf(
+                    withAlpha(Color.WHITE, 112),
+                    withAlpha(palette.primary, 145),
+                    withAlpha(palette.secondary, 74),
+                    withAlpha(palette.primary, 24),
+                    Color.TRANSPARENT
+                ),
+                floatArrayOf(
+                    0f,
+                    0.20f,
+                    0.50f,
+                    0.74f,
+                    1f
+                ),
+                Shader.TileMode.CLAMP
+            )
+
+        fill.alpha = 255
+        canvas.drawCircle(
+            cx,
+            cy,
+            radius *
+                (
+                    0.70f +
+                        pulse * 0.015f
+                    ),
+            fill
+        )
+        fill.shader = null
+
+        // Small white-hot center only, not the whole core.
+        fill.shader =
+            RadialGradient(
+                cx,
+                cy,
+                radius * 0.22f,
+                intArrayOf(
+                    withAlpha(Color.WHITE, 170),
+                    withAlpha(palette.primary, 82),
+                    Color.TRANSPARENT
+                ),
+                floatArrayOf(
+                    0f,
+                    0.36f,
+                    1f
+                ),
+                Shader.TileMode.CLAMP
+            )
+
+        fill.alpha = 255
+        canvas.drawCircle(
+            cx,
+            cy,
+            radius * 0.22f,
+            fill
+        )
+        fill.shader = null
+    }
+
+    /**
+     * Reference-style luminous energy loops.
+     * Uses controlled Lissajous paths instead of dense random scribbles.
+     */
+    private fun drawLissajousRibbons(
+        canvas: Canvas,
+        now: Long,
+        cx: Float,
+        cy: Float,
+        radius: Float,
+        palette: Palette,
+        motion: Motion
+    ) {
+        val ribbonCount = 24
+
+        for (ribbon in 0 until ribbonCount) {
+            path.reset()
+
+            val samples = 156
+            val phase =
+                now /
+                    motion.ribbonPeriodMs +
+                    ribbon * 0.41
+
+            val family =
+                ribbon % 4
+
+            val ax =
+                when(family) {
+                    0 -> 3.0
+                    1 -> 4.0
+                    2 -> 5.0
+                    else -> 6.0
+                }
+
+            val ay =
+                when(family) {
+                    0 -> 4.0
+                    1 -> 5.0
+                    2 -> 6.0
+                    else -> 7.0
+                }
+
+            val scale =
+                0.74f +
+                    (ribbon % 6) * 0.018f
+
+            val rx =
+                radius *
+                    scale
+
+            val ry =
+                radius *
+                    (
+                        0.63f +
+                            (ribbon % 5) * 0.022f
+                        )
+
+            for (i in 0..samples) {
+                val t =
+                    i /
+                        samples.toFloat()
+
+                val a =
+                    t *
+                        PI *
+                        2.0
+
+                val x =
+                    cx +
+                        sin(
+                            ax * a +
+                                phase
+                        )
+                            .toFloat() *
+                        rx *
+                        0.72f
+
+                val y =
+                    cy +
+                        sin(
+                            ay * a -
+                                phase * 0.86 +
+                                ribbon * 0.12
+                        )
+                            .toFloat() *
+                        ry *
+                        0.72f
+
+                if (i == 0) {
+                    path.moveTo(x, y)
+                } else {
+                    path.lineTo(x, y)
+                }
+            }
+
+            val color =
+                when(ribbon % 5) {
+                    0 -> Color.WHITE
+                    1 -> palette.primary
+                    2 -> palette.secondary
+                    3 -> palette.accent
+                    else -> palette.primary
+                }
+
+            if (ribbon % 4 == 0) {
+                glow.color = color
+                glow.alpha = 30
+                glow.strokeWidth = dp(7f)
+                canvas.drawPath(path, glow)
+            }
+
+            stroke.color = color
+            stroke.alpha =
+                if (color == Color.WHITE) {
+                    190
+                } else {
+                    155
+                }
+
+            stroke.strokeWidth =
+                dp(
+                    if (color == Color.WHITE) {
+                        1.05f
+                    } else {
+                        0.68f
+                    }
+                )
+
+            canvas.drawPath(path, stroke)
+        }
+    }
+
+    private fun drawReferenceRings(
         canvas: Canvas,
         cx: Float,
         cy: Float,
         radius: Float,
         palette: Palette
     ) {
-        val glyphH = radius * 0.34f
-        val widths =
-            floatArrayOf(
-                glyphH * 0.72f,
-                glyphH * 0.72f,
-                glyphH * 0.72f,
-                glyphH * 0.78f,
-                glyphH * 0.72f
+        for (i in 0 until 5) {
+            val rr =
+                radius *
+                    (
+                        0.28f +
+                            i * 0.095f
+                        )
+
+            stroke.color =
+                when(i % 3) {
+                    0 -> palette.primary
+                    1 -> palette.secondary
+                    else -> Color.WHITE
+                }
+
+            stroke.alpha =
+                48 +
+                    i * 9
+
+            stroke.strokeWidth =
+                dp(
+                    if (i % 2 == 0) {
+                        0.65f
+                    } else {
+                        0.42f
+                    }
+                )
+
+            canvas.drawCircle(
+                cx,
+                cy,
+                rr,
+                stroke
             )
-        val gap = radius * 0.048f
-        val total = widths.sum() + gap * 4f
-        val startX = cx - total * 0.50f
-        val top = cy - glyphH * 0.50f
-        val bottom = cy + glyphH * 0.50f
+        }
+    }
 
-        glow.color = palette.primary
-        glow.alpha = 128
-        glow.strokeWidth = dp(14f)
-        drawWordmarkGeometry(canvas, startX, top, bottom, widths, gap, glow)
+    /**
+     * Clean round halo particles. No square AGSL artifacts.
+     */
+    private fun drawHaloParticles(
+        canvas: Canvas,
+        now: Long,
+        cx: Float,
+        cy: Float,
+        radius: Float,
+        palette: Palette,
+        motion: Motion
+    ) {
+        val count = 88
+        val rotation = now / motion.haloPeriodMs
 
-        glow.color = palette.secondary
-        glow.alpha = 70
-        glow.strokeWidth = dp(8f)
-        drawWordmarkGeometry(canvas, startX, top, bottom, widths, gap, glow)
+        for (i in 0 until count) {
+            val angle =
+                i *
+                    PI *
+                    2.0 /
+                    count +
+                    rotation *
+                        (
+                            if (i % 2 == 0) {
+                                1.0
+                            } else {
+                                -0.38
+                            }
+                        )
+
+            val shell =
+                when(i % 4) {
+                    0 -> 0.88f
+                    1 -> 0.93f
+                    2 -> 0.98f
+                    else -> 1.025f
+                }
+
+            val rr =
+                radius *
+                    shell
+
+            val x =
+                cx +
+                    cos(angle)
+                        .toFloat() *
+                    rr
+
+            val y =
+                cy +
+                    sin(angle)
+                        .toFloat() *
+                    rr
+
+            val sparkle =
+                (
+                    0.5 +
+                        0.5 *
+                            sin(
+                                now / 380.0 +
+                                    i * 0.91
+                            )
+                    )
+                    .toFloat()
+
+            val color =
+                when(i % 4) {
+                    0 -> Color.WHITE
+                    1 -> palette.primary
+                    2 -> palette.secondary
+                    else -> palette.accent
+                }
+
+            fill.color = color
+            fill.alpha =
+                (
+                    70 +
+                        sparkle * 130f
+                    )
+                    .toInt()
+
+            canvas.drawCircle(
+                x,
+                y,
+                dp(
+                    if (i % 17 == 0) {
+                        1.8f
+                    } else {
+                        0.70f
+                    }
+                ),
+                fill
+            )
+
+            if (i % 22 == 0) {
+                drawStar(
+                    canvas = canvas,
+                    x = x,
+                    y = y,
+                    size =
+                        dp(
+                            3.8f +
+                                sparkle * 3.0f
+                        ),
+                    color = color
+                )
+            }
+        }
+    }
+
+    private fun drawStar(
+        canvas: Canvas,
+        x: Float,
+        y: Float,
+        size: Float,
+        color: Int
+    ) {
+        glow.color = color
+        glow.alpha = 36
+        glow.strokeWidth = dp(3f)
+
+        canvas.drawLine(
+            x - size,
+            y,
+            x + size,
+            y,
+            glow
+        )
+
+        canvas.drawLine(
+            x,
+            y - size,
+            x,
+            y + size,
+            glow
+        )
 
         stroke.color = Color.WHITE
-        stroke.alpha = 250
-        stroke.strokeWidth = dp(2.20f)
-        drawWordmarkGeometry(canvas, startX, top, bottom, widths, gap, stroke)
+        stroke.alpha = 165
+        stroke.strokeWidth = dp(0.55f)
 
+        canvas.drawLine(
+            x - size,
+            y,
+            x + size,
+            y,
+            stroke
+        )
+
+        canvas.drawLine(
+            x,
+            y - size,
+            x,
+            y + size,
+            stroke
+        )
+    }
+
+    /**
+     * Reference wordmark: dark center with bright cyan/white edges.
+     */
+    private fun drawAyanaWordmark(
+        canvas: Canvas,
+        cx: Float,
+        cy: Float,
+        radius: Float,
+        palette: Palette
+    ) {
+        val glyphHeight =
+            radius *
+                0.30f
+
+        val widths =
+            floatArrayOf(
+                glyphHeight * 0.72f,
+                glyphHeight * 0.72f,
+                glyphHeight * 0.72f,
+                glyphHeight * 0.78f,
+                glyphHeight * 0.72f
+            )
+
+        val gap =
+            radius *
+                0.048f
+
+        val totalWidth =
+            widths.sum() +
+                gap * 4f
+
+        val startX =
+            cx -
+                totalWidth * 0.50f
+
+        val top =
+            cy -
+                glyphHeight * 0.50f
+
+        val bottom =
+            cy +
+                glyphHeight * 0.50f
+
+        // Outer glow.
+        glow.color = palette.primary
+        glow.alpha = 86
+        glow.strokeWidth = dp(10f)
+
+        drawWordmarkGeometry(
+            canvas,
+            startX,
+            top,
+            bottom,
+            widths,
+            gap,
+            glow
+        )
+
+        // Bright edge.
+        stroke.color = Color.WHITE
+        stroke.alpha = 230
+        stroke.strokeWidth = dp(4.0f)
+
+        drawWordmarkGeometry(
+            canvas,
+            startX,
+            top,
+            bottom,
+            widths,
+            gap,
+            stroke
+        )
+
+        // Colored inner edge.
         stroke.color = palette.primary
-        stroke.alpha = 185
-        stroke.strokeWidth = dp(0.75f)
-        drawWordmarkGeometry(canvas, startX, top, bottom, widths, gap, stroke)
+        stroke.alpha = 235
+        stroke.strokeWidth = dp(2.5f)
+
+        drawWordmarkGeometry(
+            canvas,
+            startX,
+            top,
+            bottom,
+            widths,
+            gap,
+            stroke
+        )
+
+        // Dark core of the stroke so the letters remain readable over the glow.
+        stroke.color = Color.parseColor("#07121A")
+        stroke.alpha = 245
+        stroke.strokeWidth = dp(1.2f)
+
+        drawWordmarkGeometry(
+            canvas,
+            startX,
+            top,
+            bottom,
+            widths,
+            gap,
+            stroke
+        )
     }
 
     private fun drawWordmarkGeometry(
@@ -286,15 +954,59 @@ class AyanaCoreVisualizer(
         paint: Paint
     ) {
         var x = startX
-        drawLambda(canvas, x, top, bottom, widths[0], paint)
+
+        drawLambda(
+            canvas,
+            x,
+            top,
+            bottom,
+            widths[0],
+            paint
+        )
+
         x += widths[0] + gap
-        drawY(canvas, x, top, bottom, widths[1], paint)
+
+        drawY(
+            canvas,
+            x,
+            top,
+            bottom,
+            widths[1],
+            paint
+        )
+
         x += widths[1] + gap
-        drawLambda(canvas, x, top, bottom, widths[2], paint)
+
+        drawLambda(
+            canvas,
+            x,
+            top,
+            bottom,
+            widths[2],
+            paint
+        )
+
         x += widths[2] + gap
-        drawN(canvas, x, top, bottom, widths[3], paint)
+
+        drawN(
+            canvas,
+            x,
+            top,
+            bottom,
+            widths[3],
+            paint
+        )
+
         x += widths[3] + gap
-        drawLambda(canvas, x, top, bottom, widths[4], paint)
+
+        drawLambda(
+            canvas,
+            x,
+            top,
+            bottom,
+            widths[4],
+            paint
+        )
     }
 
     private fun drawLambda(
@@ -305,9 +1017,25 @@ class AyanaCoreVisualizer(
         width: Float,
         paint: Paint
     ) {
-        val center = left + width * 0.50f
-        canvas.drawLine(left, bottom, center, top, paint)
-        canvas.drawLine(center, top, left + width, bottom, paint)
+        val center =
+            left +
+                width * 0.50f
+
+        canvas.drawLine(
+            left,
+            bottom,
+            center,
+            top,
+            paint
+        )
+
+        canvas.drawLine(
+            center,
+            top,
+            left + width,
+            bottom,
+            paint
+        )
     }
 
     private fun drawY(
@@ -318,11 +1046,40 @@ class AyanaCoreVisualizer(
         width: Float,
         paint: Paint
     ) {
-        val center = left + width * 0.50f
-        val fork = top + (bottom - top) * 0.45f
-        canvas.drawLine(left, top, center, fork, paint)
-        canvas.drawLine(left + width, top, center, fork, paint)
-        canvas.drawLine(center, fork, center, bottom, paint)
+        val center =
+            left +
+                width * 0.50f
+
+        val fork =
+            top +
+                (
+                    bottom - top
+                    ) *
+                    0.45f
+
+        canvas.drawLine(
+            left,
+            top,
+            center,
+            fork,
+            paint
+        )
+
+        canvas.drawLine(
+            left + width,
+            top,
+            center,
+            fork,
+            paint
+        )
+
+        canvas.drawLine(
+            center,
+            fork,
+            center,
+            bottom,
+            paint
+        )
     }
 
     private fun drawN(
@@ -333,160 +1090,191 @@ class AyanaCoreVisualizer(
         width: Float,
         paint: Paint
     ) {
-        canvas.drawLine(left, bottom, left, top, paint)
-        canvas.drawLine(left, top, left + width, bottom, paint)
-        canvas.drawLine(left + width, bottom, left + width, top, paint)
-    }
+        canvas.drawLine(
+            left,
+            bottom,
+            left,
+            top,
+            paint
+        )
 
-    private fun drawFallback(
-        canvas: Canvas,
-        cx: Float,
-        cy: Float,
-        radius: Float,
-        palette: Palette
-    ) {
-        val fallback = Paint(Paint.ANTI_ALIAS_FLAG)
-        fallback.shader =
-            android.graphics.RadialGradient(
-                cx,
-                cy,
-                radius * 0.88f,
-                intArrayOf(
-                    Color.WHITE,
-                    palette.primary,
-                    palette.secondary,
-                    Color.TRANSPARENT
-                ),
-                floatArrayOf(0f, 0.22f, 0.60f, 1f),
-                Shader.TileMode.CLAMP
-            )
-        fallback.alpha = 245
-        canvas.drawCircle(cx, cy, radius * 0.88f, fallback)
-    }
+        canvas.drawLine(
+            left,
+            top,
+            left + width,
+            bottom,
+            paint
+        )
 
-    private fun stateFor(state: String): AgentState {
-        return when(state) {
-            AyanaVoiceService.STATE_LISTENING -> AgentState.WAITING
-            AyanaVoiceService.STATE_COMMAND -> AgentState.RECOGNITION
-            AyanaVoiceService.STATE_THINKING -> AgentState.THINKING
-            AyanaVoiceService.STATE_EXECUTING -> AgentState.EXECUTING
-            AyanaVoiceService.STATE_SPEAKING,
-            AyanaVoiceService.STATE_TEXT,
-            AyanaVoiceService.STATE_SUCCESS -> AgentState.ANSWERING
-            AyanaVoiceService.STATE_CANCELLED,
-            AyanaVoiceService.STATE_ERROR -> AgentState.STOP
-            else -> AgentState.WAITING
-        }
-    }
-
-    private fun paletteFor(state: AgentState): Palette {
-        return when(state) {
-            AgentState.WAITING ->
-                Palette(
-                    Color.parseColor("#10E8ED"),
-                    Color.parseColor("#00C8FF"),
-                    Color.parseColor("#B9FFFF")
-                )
-            AgentState.RECOGNITION ->
-                Palette(
-                    Color.parseColor("#167FFF"),
-                    Color.parseColor("#00C8FF"),
-                    Color.parseColor("#B4E7FF")
-                )
-            AgentState.THINKING ->
-                Palette(
-                    Color.parseColor("#6748FF"),
-                    Color.parseColor("#9B48FF"),
-                    Color.parseColor("#D8C6FF")
-                )
-            AgentState.EXECUTING ->
-                Palette(
-                    Color.parseColor("#20E16C"),
-                    Color.parseColor("#00D0A5"),
-                    Color.parseColor("#A6FFD4")
-                )
-            AgentState.ANSWERING ->
-                Palette(
-                    Color.parseColor("#F32BC4"),
-                    Color.parseColor("#AE47FF"),
-                    Color.parseColor("#FFB6EB")
-                )
-            AgentState.STOP ->
-                Palette(
-                    Color.parseColor("#FF3A22"),
-                    Color.parseColor("#FF7817"),
-                    Color.parseColor("#FFAF87")
-                )
-        }
-    }
-
-    private fun motionFor(state: AgentState): Motion {
-        return when(state) {
-            AgentState.WAITING -> Motion(38L, 0.70f, 760.0, 0.88f, 0.90f)
-            AgentState.RECOGNITION -> Motion(28L, 1.08f, 410.0, 1.03f, 1.04f)
-            AgentState.THINKING -> Motion(27L, 1.18f, 470.0, 1.08f, 1.00f)
-            AgentState.EXECUTING -> Motion(26L, 1.22f, 350.0, 1.10f, 1.07f)
-            AgentState.ANSWERING -> Motion(27L, 1.14f, 370.0, 1.06f, 1.06f)
-            AgentState.STOP -> Motion(82L, 0.18f, 1200.0, 0.68f, 0.52f)
-        }
-    }
-
-    private fun dp(value: Float): Float = value * density
-
-    private interface ShaderBridge {
-        fun draw(
-            canvas: Canvas,
-            width: Float,
-            height: Float,
-            timeSeconds: Float,
-            primary: Int,
-            secondary: Int,
-            accent: Int,
-            energy: Float
+        canvas.drawLine(
+            left + width,
+            bottom,
+            left + width,
+            top,
+            paint
         )
     }
 
-    private class Api33ShaderBridge : ShaderBridge {
+    private fun stateFor(
+        state: String
+    ): AgentState {
+        return when(state) {
+            AyanaVoiceService.STATE_LISTENING ->
+                AgentState.WAITING
 
-        private val shader = RuntimeShader(AGSL_SOURCE)
-        private val paint = Paint(Paint.ANTI_ALIAS_FLAG)
+            AyanaVoiceService.STATE_COMMAND ->
+                AgentState.RECOGNITION
 
-        override fun draw(
-            canvas: Canvas,
-            width: Float,
-            height: Float,
-            timeSeconds: Float,
-            primary: Int,
-            secondary: Int,
-            accent: Int,
-            energy: Float
-        ) {
-            shader.setFloatUniform("uResolution", width, height)
-            shader.setFloatUniform("uTime", timeSeconds)
-            shader.setFloatUniform("uEnergy", energy)
-            shader.setFloatUniform(
-                "uPrimary",
-                Color.red(primary) / 255f,
-                Color.green(primary) / 255f,
-                Color.blue(primary) / 255f
-            )
-            shader.setFloatUniform(
-                "uSecondary",
-                Color.red(secondary) / 255f,
-                Color.green(secondary) / 255f,
-                Color.blue(secondary) / 255f
-            )
-            shader.setFloatUniform(
-                "uAccent",
-                Color.red(accent) / 255f,
-                Color.green(accent) / 255f,
-                Color.blue(accent) / 255f
-            )
+            AyanaVoiceService.STATE_THINKING ->
+                AgentState.THINKING
 
-            paint.shader = shader
-            canvas.drawRect(0f, 0f, width, height, paint)
-            paint.shader = null
+            AyanaVoiceService.STATE_EXECUTING ->
+                AgentState.EXECUTING
+
+            AyanaVoiceService.STATE_SPEAKING,
+            AyanaVoiceService.STATE_TEXT,
+            AyanaVoiceService.STATE_SUCCESS ->
+                AgentState.ANSWERING
+
+            AyanaVoiceService.STATE_CANCELLED,
+            AyanaVoiceService.STATE_ERROR ->
+                AgentState.STOP
+
+            else ->
+                AgentState.WAITING
         }
+    }
+
+    private fun paletteFor(
+        state: AgentState
+    ): Palette {
+        return when(state) {
+            AgentState.WAITING ->
+                Palette(
+                    primary = Color.parseColor("#00F7FF"),
+                    secondary = Color.parseColor("#00C9E8"),
+                    accent = Color.parseColor("#A7FFFF")
+                )
+
+            AgentState.RECOGNITION ->
+                Palette(
+                    primary = Color.parseColor("#1378FF"),
+                    secondary = Color.parseColor("#00A8FF"),
+                    accent = Color.parseColor("#B5DEFF")
+                )
+
+            AgentState.THINKING ->
+                Palette(
+                    primary = Color.parseColor("#5635FF"),
+                    secondary = Color.parseColor("#8A38FF"),
+                    accent = Color.parseColor("#C9B7FF")
+                )
+
+            AgentState.EXECUTING ->
+                Palette(
+                    primary = Color.parseColor("#16E66B"),
+                    secondary = Color.parseColor("#00C98C"),
+                    accent = Color.parseColor("#A0FFD0")
+                )
+
+            AgentState.ANSWERING ->
+                Palette(
+                    primary = Color.parseColor("#FF28C8"),
+                    secondary = Color.parseColor("#D52CFF"),
+                    accent = Color.parseColor("#FFB0EF")
+                )
+
+            AgentState.STOP ->
+                Palette(
+                    primary = Color.parseColor("#FF3425"),
+                    secondary = Color.parseColor("#FF7200"),
+                    accent = Color.parseColor("#FFB08D")
+                )
+        }
+    }
+
+    private fun motionFor(
+        state: AgentState
+    ): Motion {
+        return when(state) {
+            AgentState.WAITING ->
+                Motion(
+                    frameDelayMs = 38L,
+                    breathePeriodMs = 1050.0,
+                    wavePeriodMs = 820.0,
+                    waveStrength = 0.78f,
+                    ribbonPeriodMs = 1900.0,
+                    haloPeriodMs = 5600.0
+                )
+
+            AgentState.RECOGNITION ->
+                Motion(
+                    frameDelayMs = 28L,
+                    breathePeriodMs = 760.0,
+                    wavePeriodMs = 430.0,
+                    waveStrength = 1.02f,
+                    ribbonPeriodMs = 1250.0,
+                    haloPeriodMs = 3200.0
+                )
+
+            AgentState.THINKING ->
+                Motion(
+                    frameDelayMs = 27L,
+                    breathePeriodMs = 700.0,
+                    wavePeriodMs = 500.0,
+                    waveStrength = 0.92f,
+                    ribbonPeriodMs = 1050.0,
+                    haloPeriodMs = 2700.0
+                )
+
+            AgentState.EXECUTING ->
+                Motion(
+                    frameDelayMs = 26L,
+                    breathePeriodMs = 620.0,
+                    wavePeriodMs = 360.0,
+                    waveStrength = 1.05f,
+                    ribbonPeriodMs = 900.0,
+                    haloPeriodMs = 2300.0
+                )
+
+            AgentState.ANSWERING ->
+                Motion(
+                    frameDelayMs = 27L,
+                    breathePeriodMs = 680.0,
+                    wavePeriodMs = 390.0,
+                    waveStrength = 1.03f,
+                    ribbonPeriodMs = 980.0,
+                    haloPeriodMs = 2600.0
+                )
+
+            AgentState.STOP ->
+                Motion(
+                    frameDelayMs = 80L,
+                    breathePeriodMs = 1500.0,
+                    wavePeriodMs = 1200.0,
+                    waveStrength = 0.48f,
+                    ribbonPeriodMs = 3000.0,
+                    haloPeriodMs = 9000.0
+                )
+        }
+    }
+
+    private fun withAlpha(
+        color: Int,
+        alpha: Int
+    ): Int {
+        return Color.argb(
+            alpha.coerceIn(0, 255),
+            Color.red(color),
+            Color.green(color),
+            Color.blue(color)
+        )
+    }
+
+    private fun dp(
+        value: Float
+    ): Float {
+        return value * density
     }
 
     private enum class AgentState {
@@ -506,122 +1294,10 @@ class AyanaCoreVisualizer(
 
     private data class Motion(
         val frameDelayMs: Long,
-        val speed: Float,
+        val breathePeriodMs: Double,
         val wavePeriodMs: Double,
-        val energy: Float,
-        val waveStrength: Float
+        val waveStrength: Float,
+        val ribbonPeriodMs: Double,
+        val haloPeriodMs: Double
     )
-
-    companion object {
-
-        /**
-         * ONE fixed geometry for all six states.
-         * Palette / speed / energy are the only state-dependent shader inputs.
-         */
-        private const val AGSL_SOURCE = """
-            uniform float2 uResolution;
-            uniform float uTime;
-            uniform float uEnergy;
-            uniform float3 uPrimary;
-            uniform float3 uSecondary;
-            uniform float3 uAccent;
-
-            float hash21(float2 p) {
-                p = fract(p * float2(123.34, 456.21));
-                p += dot(p, p + 45.32);
-                return fract(p.x * p.y);
-            }
-
-            float ringGlow(float r, float target, float width) {
-                return exp(-abs(r - target) / width);
-            }
-
-            float field(float2 p, float t) {
-                float r = length(p);
-                float a = atan(p.y, p.x);
-                float v = 0.0;
-                v += sin(a * 6.0 + t * 1.25 + sin(r * 13.0 - t));
-                v += sin(a * 9.0 - t * 1.10 + cos(r * 18.0 + t * 0.8));
-                v += sin(a * 13.0 + t * 0.92 + sin(r * 24.0 - t * 0.9));
-                v += sin((p.x + p.y) * 18.0 + t * 1.20);
-                v += sin((p.x - p.y) * 22.0 - t * 1.00);
-                return v / 5.0;
-            }
-
-            half4 main(float2 fragCoord) {
-                float2 p =
-                    (fragCoord - 0.5 * uResolution) /
-                    min(uResolution.x, uResolution.y);
-
-                float r = length(p);
-                float a = atan(p.y, p.x);
-                float t = uTime;
-
-                float3 color = float3(0.0);
-
-                // Dense luminous center.
-                float hot = exp(-r * r * 55.0);
-                float core = exp(-r * r * 15.0);
-                float f = 0.5 + 0.5 * field(p * 1.45, t);
-                f = smoothstep(0.08, 0.92, f);
-                float mask = 1.0 - smoothstep(0.15, 0.50, r);
-
-                color += uPrimary * core * 1.60 * uEnergy;
-                color += uSecondary * f * mask * 0.95 * uEnergy;
-                color += uAccent * pow(f, 3.2) * mask * 0.62 * uEnergy;
-                color += float3(1.0) * hot * 1.75 * uEnergy;
-
-                // Smooth braided luminous filaments.
-                for (int i = 0; i < 24; i++) {
-                    float fi = float(i);
-                    float direction = mod(fi, 2.0) < 1.0 ? 1.0 : -0.86;
-                    float phase = t * (0.42 + fi * 0.017) * direction + fi * 0.61;
-
-                    float target =
-                        0.245 +
-                        0.055 * sin(a * (2.0 + mod(fi, 5.0)) + phase) +
-                        0.028 * sin(a * (4.0 + mod(fi, 3.0)) - phase * 0.72);
-
-                    float d = abs(r - target);
-                    float ribbon = exp(-d * (250.0 + mod(fi, 4.0) * 38.0));
-                    float pulse = 0.58 + 0.42 * sin(a * (3.0 + mod(fi, 4.0)) + phase * 1.55);
-
-                    float3 rc =
-                        mod(fi, 3.0) < 1.0
-                            ? uPrimary
-                            : (mod(fi, 3.0) < 2.0 ? uSecondary : uAccent);
-
-                    color += rc * ribbon * (0.48 + 0.38 * pulse) * uEnergy;
-                }
-
-                // Concentric luminous structure.
-                for (int k = 0; k < 6; k++) {
-                    float fk = float(k);
-                    float rr = 0.14 + fk * 0.050;
-                    float rg = ringGlow(r, rr, 0.0045 + fk * 0.00025);
-                    float3 rc = mod(fk, 2.0) < 1.0 ? uPrimary : uSecondary;
-                    color += rc * rg * (0.16 + 0.08 * sin(t * 0.6 + fk));
-                }
-
-                // Outer luminous ring.
-                color += uPrimary * ringGlow(r, 0.39, 0.012) * 0.32;
-                color += uSecondary * ringGlow(r, 0.425, 0.006) * 0.20;
-
-                // Particle halo around the outer ring.
-                float2 cell = floor(p * 48.0);
-                float n = hash21(cell);
-                float band = 1.0 - smoothstep(0.05, 0.18, abs(r - 0.43));
-                float spark = step(0.91, n) * band *
-                    (0.30 + 0.70 * abs(sin(t * 2.1 + n * 13.0)));
-
-                color += mix(uPrimary, float3(1.0), n) * spark * 1.20 * uEnergy;
-
-                float fade = 1.0 - smoothstep(0.50, 0.66, r);
-                color *= 0.84 + 0.16 * fade;
-
-                float alpha = clamp(max(max(color.r, color.g), color.b), 0.0, 1.0);
-                return half4(half3(color), half(alpha));
-            }
-        """
-    }
 }
