@@ -6,7 +6,7 @@ import org.json.JSONObject
 import java.util.Locale
 
 /**
- * AYANA Screen Intelligence v4.4 — Settings sparse-content native-query fallback + exact input truth.
+ * AYANA Screen Intelligence v4.5 — VERIFIED FOREGROUND FUSION + Settings sparse-content recovery.
  *
  * v4.4 preserves v4.3/v4.2 truth and extends the same fail-closed recovery
  * path for sparse Samsung Settings snapshots: if the normal semantic resolver reports
@@ -28,7 +28,6 @@ class AyanaScreenIntelligence(
     context: Context
 ) {
 
-    @Suppress("unused")
     private val appContext =
         context.applicationContext
 
@@ -1054,7 +1053,17 @@ class AyanaScreenIntelligence(
         signature: String
     ): JSONObject =
         JSONObject()
-            .put("package", screen.optString("package"))
+            .put(
+                "package",
+                screen.optString(
+                    "effective_foreground_package",
+                    screen.optString(
+                        "interaction_package",
+                        screen.optString("package")
+                    )
+                )
+            )
+            .put("raw_package", screen.optString("package"))
             .put("root_class", screen.optString("root_class"))
             .put("primary_content_state", screen.optString("primary_content_state", "unknown"))
             .put("primary_content_available", screen.optBoolean("primary_content_available", false))
@@ -1073,6 +1082,47 @@ class AyanaScreenIntelligence(
 
         val snapshotSuccess =
             snapshot.optBoolean("success", false)
+
+        val rawInteractionPackage =
+            snapshot
+                .optString(
+                    "interaction_package",
+                    snapshot.optString("package")
+                )
+                .trim()
+
+        val foregroundOwnerPackage =
+            snapshot
+                .optString(
+                    "foreground_owner_package"
+                )
+                .trim()
+
+        // v4.5: AYANA's floating overlay belongs to the same package as the main
+        // app and must never mask a separately verified external foreground owner.
+        // Only override an own-app raw interaction package; never let a stale owner
+        // replace one external application with another.
+        val effectiveForegroundPackage =
+            when {
+                rawInteractionPackage.isNotBlank() &&
+                    rawInteractionPackage != appContext.packageName ->
+                    rawInteractionPackage
+
+                foregroundOwnerPackage.isNotBlank() &&
+                    foregroundOwnerPackage != appContext.packageName ->
+                    foregroundOwnerPackage
+
+                rawInteractionPackage.isNotBlank() ->
+                    rawInteractionPackage
+
+                else ->
+                    foregroundOwnerPackage
+            }
+
+        val ayanaOverlayOwnershipSuppressed =
+            rawInteractionPackage == appContext.packageName &&
+                effectiveForegroundPackage.isNotBlank() &&
+                effectiveForegroundPackage != appContext.packageName
 
         val contentState =
             snapshot
@@ -1112,6 +1162,31 @@ class AyanaScreenIntelligence(
 
         return snapshot
             .put("source", "android_accessibility")
+            .put("perception_fusion_version", 1)
+            .put("raw_interaction_package", rawInteractionPackage)
+            .put("effective_foreground_package", effectiveForegroundPackage)
+            .put("interaction_package", effectiveForegroundPackage)
+            .put(
+                "ayana_overlay_ownership_suppressed",
+                ayanaOverlayOwnershipSuppressed
+            )
+            .put(
+                "foreground_owner_confidence",
+                when {
+                    effectiveForegroundPackage.isBlank() ->
+                        "unknown"
+
+                    ayanaOverlayOwnershipSuppressed ->
+                        "verified_external_owner_over_own_overlay"
+
+                    effectiveForegroundPackage ==
+                        rawInteractionPackage ->
+                        "primary_accessibility_window"
+
+                    else ->
+                        "foreground_owner_fallback"
+                }
+            )
             .put(
                 "content_contract_version",
                 snapshot.optInt("content_contract_version", 2)
