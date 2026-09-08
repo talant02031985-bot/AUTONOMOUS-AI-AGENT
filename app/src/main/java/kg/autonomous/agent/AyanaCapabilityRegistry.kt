@@ -10,7 +10,7 @@ import org.json.JSONArray
 import org.json.JSONObject
 
 /**
- * AYANA Device Capability Registry v2.8 — DEVICE CONTROL + NOTIFICATION READ TRUTH.
+ * AYANA Device Capability Registry v3.0 — AUTONOMY / PERCEPTION / LATENCY TRUTH.
  *
  * Single machine-readable source of truth for:
  * 1) what this build implements;
@@ -273,7 +273,272 @@ class AyanaCapabilityRegistry(
                 )
         }
 
+
         editor.apply()
+    }
+
+    /**
+     * Classifies the last Agent Core transport latency from measured Android-side
+     * phase telemetry. This never guesses model quality; it only identifies where
+     * wall-clock time was spent in the most recent HTTP transaction.
+     */
+    fun agentCoreLatencySnapshot(): JSONObject {
+
+        val totalMs =
+            prefs.getLong(
+                KEY_AGENT_CORE_PERF_TOTAL,
+                -1L
+            )
+
+        val prepareMs =
+            prefs.getLong(
+                KEY_AGENT_CORE_PERF_PREPARE,
+                -1L
+            )
+
+        val uploadMs =
+            prefs.getLong(
+                KEY_AGENT_CORE_PERF_UPLOAD,
+                -1L
+            )
+
+        val headersWaitMs =
+            prefs.getLong(
+                KEY_AGENT_CORE_PERF_HEADERS_WAIT,
+                -1L
+            )
+
+        val bodyReadMs =
+            prefs.getLong(
+                KEY_AGENT_CORE_PERF_BODY_READ,
+                -1L
+            )
+
+        val jsonParseMs =
+            prefs.getLong(
+                KEY_AGENT_CORE_PERF_JSON_PARSE,
+                -1L
+            )
+
+        val safeTotal =
+            totalMs.coerceAtLeast(0L)
+
+        val headersSharePct =
+            if (
+                safeTotal > 0L &&
+                headersWaitMs >= 0L
+            ) {
+                (
+                    headersWaitMs
+                        .coerceAtMost(safeTotal)
+                        .toDouble() /
+                        safeTotal.toDouble() *
+                        100.0
+                    )
+                    .toInt()
+                    .coerceIn(0, 100)
+            } else {
+                -1
+            }
+
+        val classification =
+            when {
+                totalMs < 0L ->
+                    "NO_DATA"
+
+                totalMs <= 3500L ->
+                    "FAST"
+
+                headersSharePct >= 75 &&
+                    headersWaitMs >= 4000L ->
+                    "MODEL_OR_SERVER_WAIT"
+
+                prepareMs >= 2500L ->
+                    "ANDROID_PREPARE_SLOW"
+
+                uploadMs >= 2500L ->
+                    "UPLOAD_SLOW"
+
+                bodyReadMs >= 2500L ->
+                    "RESPONSE_BODY_SLOW"
+
+                jsonParseMs >= 1000L ->
+                    "ANDROID_PARSE_SLOW"
+
+                totalMs >= 12000L ->
+                    "HIGH_LATENCY_UNCLASSIFIED"
+
+                else ->
+                    "MODERATE"
+            }
+
+        val bottleneck =
+            when (classification) {
+                "MODEL_OR_SERVER_WAIT" ->
+                    "headers_wait"
+
+                "ANDROID_PREPARE_SLOW" ->
+                    "prepare"
+
+                "UPLOAD_SLOW" ->
+                    "upload"
+
+                "RESPONSE_BODY_SLOW" ->
+                    "body_read"
+
+                "ANDROID_PARSE_SLOW" ->
+                    "json_parse"
+
+                "FAST" ->
+                    "none"
+
+                "NO_DATA" ->
+                    "unknown"
+
+                else ->
+                    "mixed"
+            }
+
+        return JSONObject()
+            .put("classification", classification)
+            .put("bottleneck", bottleneck)
+            .put("total_ms", totalMs)
+            .put("prepare_ms", prepareMs)
+            .put("upload_ms", uploadMs)
+            .put("headers_wait_ms", headersWaitMs)
+            .put("body_read_ms", bodyReadMs)
+            .put("json_parse_ms", jsonParseMs)
+            .put("headers_share_pct", headersSharePct)
+            .put(
+                "server_wait_dominant",
+                classification == "MODEL_OR_SERVER_WAIT"
+            )
+    }
+
+    /**
+     * Compact local self-review input used by VoiceService without a network
+     * round-trip. It contains only machine-observed/runtime capability facts.
+     */
+    fun selfReviewSnapshot(): JSONObject {
+
+        val base =
+            snapshot()
+
+        val runtime =
+            base.optJSONObject("runtime")
+                ?: JSONObject()
+
+        val lastLatency =
+            agentCoreLatencySnapshot()
+
+        val priorities =
+            JSONArray()
+                .put(
+                    JSONObject()
+                        .put("id", "execution_autonomy")
+                        .put(
+                            "status",
+                            if (
+                                runtime.optInt(
+                                    "recoverable_goal_count",
+                                    0
+                                ) >= 0
+                            ) {
+                                "FOUNDATION_PRESENT"
+                            } else {
+                                "UNKNOWN"
+                            }
+                        )
+                        .put(
+                            "next",
+                            "multi-step acceptance, bounded replan and whole-goal terminal truth"
+                        )
+                )
+                .put(
+                    JSONObject()
+                        .put("id", "perception_fusion")
+                        .put(
+                            "status",
+                            if (
+                                runtime.optBoolean(
+                                    "accessibility_connected",
+                                    false
+                                )
+                            ) {
+                                "AVAILABLE_FOR_TEST"
+                            } else {
+                                "BLOCKED_BY_ACCESSIBILITY"
+                            }
+                        )
+                        .put(
+                            "next",
+                            "fuse Accessibility window ownership with screen evidence; live visual fallback remains separate"
+                        )
+                )
+                .put(
+                    JSONObject()
+                        .put("id", "development_agent")
+                        .put("status", "FOUNDATION_ONLY")
+                        .put(
+                            "next",
+                            "authenticated repository workspace, build runner, tests, rollback and confirmed commit/push"
+                        )
+                )
+                .put(
+                    JSONObject()
+                        .put("id", "external_integrations")
+                        .put("status", "NOT_IMPLEMENTED")
+                        .put(
+                            "next",
+                            "scoped mail/calendar/files executors with explicit permissions and confirmation"
+                        )
+                )
+                .put(
+                    JSONObject()
+                        .put("id", "agent_core_latency")
+                        .put(
+                            "status",
+                            lastLatency.optString(
+                                "classification",
+                                "NO_DATA"
+                            )
+                        )
+                        .put(
+                            "next",
+                            if (
+                                lastLatency.optBoolean(
+                                    "server_wait_dominant",
+                                    false
+                                )
+                            ) {
+                                "prefer deterministic/local routes for self-review and device facts; keep server delay separate from Android performance"
+                            } else {
+                                "continue phase telemetry and optimize the measured bottleneck"
+                            }
+                        )
+                )
+
+        return JSONObject()
+            .put("success", true)
+            .put("build", BUILD_LABEL)
+            .put("runtime", runtime)
+            .put("latency", lastLatency)
+            .put("priorities", priorities)
+            .put(
+                "baseline",
+                JSONArray()
+                    .put("wake_tts_stop")
+                    .put("app_resolver")
+                    .put("safety_engine")
+                    .put("durable_goals")
+                    .put("planner")
+                    .put("memory_v2")
+                    .put("tasks_v2")
+                    .put("strict_terminal_verification")
+                    .put("artifact_engine")
+                    .put("notification_reading")
+                    .put("exact_media_volume")
+            )
     }
 
     fun snapshot(): JSONObject {
@@ -652,6 +917,30 @@ class AyanaCapabilityRegistry(
                         KEY_AGENT_CORE_PERF_HTTP_CODE,
                         -1
                     )
+                )
+                .put(
+                    "agent_core_latency_class",
+                    agentCoreLatencySnapshot()
+                        .optString(
+                            "classification",
+                            "NO_DATA"
+                        )
+                )
+                .put(
+                    "agent_core_latency_bottleneck",
+                    agentCoreLatencySnapshot()
+                        .optString(
+                            "bottleneck",
+                            "unknown"
+                        )
+                )
+                .put(
+                    "agent_core_headers_share_pct",
+                    agentCoreLatencySnapshot()
+                        .optInt(
+                            "headers_share_pct",
+                            -1
+                        )
                 )
                 .put(
                     "tts_last_ok",
@@ -1125,8 +1414,8 @@ class AyanaCapabilityRegistry(
             "artifact_generation",
             implemented = true,
             available = true,
-            deviceConfirmed = false,
-            note = "v12.7 creates and verifies TXT/DOCX/PDF/XLSX/JPEG and graph-JPEG files locally, then publishes only to Downloads/AYANA; pending device acceptance"
+            deviceConfirmed = true,
+            note = "device-confirmed on target tablet for TXT/DOCX/PDF/XLSX/JPEG and graph-JPEG; local verify-before-publish to Downloads/AYANA"
         )
 
         capability(
@@ -1134,8 +1423,8 @@ class AyanaCapabilityRegistry(
             "docx_style_preserving_transform",
             implemented = true,
             available = true,
-            deviceConfirmed = false,
-            note = "v12.7 translates staged DOCX by preserving the original OOXML package and replacing only validated Word text nodes; output is re-opened, verified and published to Downloads/AYANA; pending device acceptance"
+            deviceConfirmed = true,
+            note = "device-confirmed style-preserving DOCX translation: original OOXML package retained, validated Word text nodes replaced, output re-opened and verified"
         )
 
         capability(
@@ -1143,8 +1432,8 @@ class AyanaCapabilityRegistry(
             "docx_translation",
             implemented = true,
             available = true,
-            deviceConfirmed = false,
-            note = "v12.7 style-preserving DOCX translation supports ru/en/ky/de/fr/es/tr target languages through bounded validated translation batches; pending device acceptance"
+            deviceConfirmed = true,
+            note = "device-confirmed style-preserving DOCX translation; supported targets ru/en/ky/de/fr/es/tr with bounded validated batches"
         )
 
         capability(
@@ -1190,6 +1479,51 @@ class AyanaCapabilityRegistry(
             available = accessibilityConnected,
             deviceConfirmed = false,
             note = "Samsung App Info -> Permissions can be reached physically, but the combined terminal verifier still has a known window-list edge; do not advertise it as universally device-confirmed"
+        )
+
+        capability(
+            capabilities,
+            "capability_truth_grounding",
+            implemented = true,
+            available = true,
+            deviceConfirmed = false,
+            note = "v12.12 local self-review is generated from Capability Registry/runtime facts instead of generic model assumptions; pending full device acceptance"
+        )
+
+        capability(
+            capabilities,
+            "agent_core_latency_classification",
+            implemented = true,
+            available = prefs.getLong(KEY_AGENT_CORE_PERF_TOTAL, -1L) >= 0L,
+            deviceConfirmed = false,
+            note = "v12.12 classifies measured prepare/upload/headers/body/parse phases and separates server/model wait from Android-side work"
+        )
+
+        capability(
+            capabilities,
+            "perception_owner_fusion",
+            implemented = true,
+            available = accessibilityConnected,
+            deviceConfirmed = false,
+            note = "v12.12 exposes effective foreground package so AYANA overlay ownership cannot be confused with a verified external foreground app; pending acceptance"
+        )
+
+        capability(
+            capabilities,
+            "autonomous_execution_loop",
+            implemented = true,
+            available = true,
+            deviceConfirmed = false,
+            note = "existing Planner/Durable Goals/checkpoints/bounded replan/terminal verification are treated as one controlled execution loop; full multi-step acceptance still required"
+        )
+
+        capability(
+            capabilities,
+            "development_agent_transaction",
+            implemented = false,
+            available = false,
+            deviceConfirmed = false,
+            note = "analysis/source generation exists, but authenticated project workspace + build/test/rollback transaction executor is not yet implemented on Android"
         )
 
         capability(
@@ -1315,7 +1649,11 @@ class AyanaCapabilityRegistry(
             )
 
             append(
-                "github_repository_write=false; github_commit_push=false; android_apk_build=false; direct_apk_delivery=false; external_account_actions=false; "
+                "github_repository_write=false; github_commit_push=false; android_apk_build=false; direct_apk_delivery=false; external_account_actions=false; development_agent_transaction=false; "
+            )
+
+            append(
+                "local_self_review=true; capability_truth_grounding=true; perception_owner_fusion=true; autonomous_execution_loop=true; "
             )
 
             append(
@@ -1486,6 +1824,24 @@ class AyanaCapabilityRegistry(
                 runtime.optLong(
                     "agent_core_perf_headers_wait_ms",
                     -1L
+                )
+            )
+            append(
+                "; agent_core_latency_class="
+            )
+            append(
+                runtime.optString(
+                    "agent_core_latency_class",
+                    "NO_DATA"
+                )
+            )
+            append(
+                "; agent_core_latency_bottleneck="
+            )
+            append(
+                runtime.optString(
+                    "agent_core_latency_bottleneck",
+                    "unknown"
                 )
             )
             append(
@@ -1699,7 +2055,7 @@ class AyanaCapabilityRegistry(
     companion object {
 
         const val BUILD_LABEL =
-            "v12.10.2_device_control_notification_truth_build_candidate"
+            "v12.12.0_autonomy_perception_truth_build_candidate"
 
         private const val PREFS_NAME =
             "ayana_capability_runtime_v11"
