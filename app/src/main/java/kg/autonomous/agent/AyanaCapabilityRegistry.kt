@@ -10,6 +10,11 @@ import org.json.JSONArray
 import org.json.JSONObject
 
 /**
+ * AYANA Device Capability Registry v3.2 — WHOLE-GOAL / ARTIFACT / RECOVERY TRUTH.
+ * v3.2 preserves v3.1 acceptance truth and records v12.14 whole-goal routing,
+ * artifact orchestration, bounded Agent Core timeout recovery and extended Accessibility
+ * semantic extraction as separate machine-readable capabilities.
+ *
  * AYANA Device Capability Registry v3.1 — ACCEPTANCE / AUTONOMY / PERCEPTION / LATENCY TRUTH.
  *
  * Single machine-readable source of truth for:
@@ -221,7 +226,11 @@ class AyanaCapabilityRegistry(
         val packageName =
             snapshot
                 .optString(
-                    "package"
+                    "effective_foreground_package",
+                    snapshot.optString(
+                        "interaction_package",
+                        snapshot.optString("package")
+                    )
                 )
                 .trim()
 
@@ -1159,7 +1168,11 @@ class AyanaCapabilityRegistry(
                     "screen_primary_package",
                     screenSnapshot
                         ?.optString(
-                            "package"
+                            "effective_foreground_package",
+                            screenSnapshot.optString(
+                                "interaction_package",
+                                screenSnapshot.optString("package")
+                            )
                         )
                         .orEmpty()
                 )
@@ -1313,8 +1326,8 @@ class AyanaCapabilityRegistry(
             "relative_media_volume_delta",
             implemented = true,
             available = true,
-            deviceConfirmed = false,
-            note = "v12.11 preserves numeric delta (+N/-N) and verifies actual post-write level"
+            deviceConfirmed = true,
+            note = "device-confirmed on target tablet for -1 and -3 deltas with verified post-write level"
         )
 
         capability(
@@ -1322,8 +1335,8 @@ class AyanaCapabilityRegistry(
             "exact_screen_brightness_set",
             implemented = true,
             available = writeSettingsAllowed,
-            deviceConfirmed = false,
-            note = "v12.11 requires WRITE_SETTINGS and verifies manual-mode + post-write brightness; never substitutes opening Settings"
+            deviceConfirmed = true,
+            note = "device-confirmed on target tablet at 20/80/40 percent with read-back verification and invalid-range rejection"
         )
 
         capability(
@@ -1367,8 +1380,8 @@ class AyanaCapabilityRegistry(
             "app_task_removal",
             implemented = true,
             available = accessibilityConnected,
-            deviceConfirmed = false,
-            note = "v12.1 verified Recents task-removal executor; pending device confirmation; never claims force-stop/process kill"
+            deviceConfirmed = true,
+            note = "device-confirmed on target tablet for YouTube and Chrome via verified Recents task removal; never claims force-stop/process kill"
         )
 
         capability(
@@ -1563,8 +1576,8 @@ class AyanaCapabilityRegistry(
             "settings_intent_attestation",
             implemented = true,
             available = accessibilityConnected,
-            deviceConfirmed = false,
-            note = "v12.0 fuses exact Settings intent target with fresh same-window semantic surface evidence; no app-specific aliases"
+            deviceConfirmed = true,
+            note = "device-confirmed on target tablet for YouTube App Info using exact-intent + same-window semantic surface evidence"
         )
 
         capability(
@@ -1572,8 +1585,8 @@ class AyanaCapabilityRegistry(
             "app_detail_permissions_navigation",
             implemented = true,
             available = accessibilityConnected,
-            deviceConfirmed = false,
-            note = "Samsung App Info -> Permissions can be reached physically, but the combined terminal verifier still has a known window-list edge; do not advertise it as universally device-confirmed"
+            deviceConfirmed = true,
+            note = "device-confirmed on target Galaxy Tab S8 for YouTube App Info -> Permissions with app_info_click terminal verification"
         )
 
         capability(
@@ -1581,8 +1594,8 @@ class AyanaCapabilityRegistry(
             "local_acceptance_test_engine",
             implemented = true,
             available = true,
-            deviceConfirmed = false,
-            note = "v12.13 local QUICK_HEALTH / CAPABILITY_AUDIT / FULL_ACCEPTANCE engine; zero Agent Core turns; full mode includes reversible memory/reminder/volume/brightness and verified Settings restore; pending device acceptance"
+            deviceConfirmed = true,
+            note = "device-confirmed v12.13 FULL_ACCEPTANCE and CAPABILITY_AUDIT with zero Agent Core turns and READY_WITH_LIMITATIONS truth"
         )
 
         capability(
@@ -1590,8 +1603,8 @@ class AyanaCapabilityRegistry(
             "capability_truth_grounding",
             implemented = true,
             available = true,
-            deviceConfirmed = false,
-            note = "v12.12 local self-review is generated from Capability Registry/runtime facts instead of generic model assumptions; pending full device acceptance"
+            deviceConfirmed = true,
+            note = "device-confirmed through local capability audit/self-review using Capability Registry/runtime facts instead of generic model assumptions"
         )
 
         capability(
@@ -1599,8 +1612,8 @@ class AyanaCapabilityRegistry(
             "agent_core_latency_classification",
             implemented = true,
             available = prefs.getLong(KEY_AGENT_CORE_PERF_TOTAL, -1L) >= 0L,
-            deviceConfirmed = false,
-            note = "v12.12 classifies measured prepare/upload/headers/body/parse phases and separates server/model wait from Android-side work"
+            deviceConfirmed = true,
+            note = "device-confirmed telemetry classifies measured prepare/upload/headers/body/parse phases and repeatedly identified MODEL_OR_SERVER_WAIT"
         )
 
         capability(
@@ -1608,8 +1621,8 @@ class AyanaCapabilityRegistry(
             "perception_owner_fusion",
             implemented = true,
             available = accessibilityConnected,
-            deviceConfirmed = false,
-            note = "v12.12 exposes effective foreground package so AYANA overlay ownership cannot be confused with a verified external foreground app; pending acceptance"
+            deviceConfirmed = true,
+            note = "device-confirmed by voice over YouTube: effective foreground owner remained com.google.android.youtube despite AYANA overlay"
         )
 
         capability(
@@ -1618,7 +1631,43 @@ class AyanaCapabilityRegistry(
             implemented = true,
             available = true,
             deviceConfirmed = false,
-            note = "existing Planner/Durable Goals/checkpoints/bounded replan/terminal verification are treated as one controlled execution loop; full multi-step acceptance still required"
+            note = "Planner/Durable Goals/checkpoints/bounded replan/terminal verification remain the controlled execution loop; v12.14 adds whole-goal guards for verified app-open extensions, read-only multi-metric aggregation and artifact deliverables"
+        )
+
+        capability(
+            capabilities,
+            "whole_goal_routing_guard",
+            implemented = true,
+            available = true,
+            deviceConfirmed = false,
+            note = "v12.14 prevents a single local executor from swallowing required sibling deliverables; includes multi-metric aggregation and verified lifecycle-extension collapse"
+        )
+
+        capability(
+            capabilities,
+            "artifact_whole_goal_orchestration",
+            implemented = true,
+            available = true,
+            deviceConfirmed = false,
+            note = "v12.14 explicit file/document/graph requests bypass greedy single-intent local routes, gather required factual inputs first, then require verified create_artifact evidence"
+        )
+
+        capability(
+            capabilities,
+            "agent_core_timeout_recovery",
+            implemented = true,
+            available = true,
+            deviceConfirmed = false,
+            note = "v12.14 uses an 18 s Agent Core read timeout with one bounded side-effect-safe retry before surfacing a recoverable error"
+        )
+
+        capability(
+            capabilities,
+            "extended_accessibility_semantics",
+            implemented = true,
+            available = accessibilityConnected,
+            deviceConfirmed = false,
+            note = "Accessibility v7.2 adds hint/state/pane/tooltip semantics to same-window text recovery; it does not claim OCR/Vision when apps expose no readable accessibility content"
         )
 
         capability(
@@ -2188,7 +2237,7 @@ class AyanaCapabilityRegistry(
     companion object {
 
         const val BUILD_LABEL =
-            "v12.13.0_autonomous_acceptance_engine_build_candidate"
+            "v12.14.0_whole_goal_integrity_artifact_recovery_build_candidate"
 
         private const val PREFS_NAME =
             "ayana_capability_runtime_v11"

@@ -5,6 +5,11 @@ import org.json.JSONObject
 import java.util.Locale
 
 /**
+ * AYANA Acceptance Test Engine v1.1.
+ * v1.1 adds a pure whole-goal routing regression probe for the device-proven v12.13
+ * failures: verified app-open suffixes, Settings>Apps final-target collapse, multi-metric
+ * aggregation, and explicit artifact deliverable ownership.
+ *
  * AYANA Acceptance Test Engine v1.0.
  *
  * Separates three different truths that were previously conflated:
@@ -503,7 +508,7 @@ class AyanaAcceptanceTestEngine(
         }
 
     companion object {
-        const val ENGINE_VERSION = "1.0"
+        const val ENGINE_VERSION = "1.1"
 
         const val STATUS_PASS = "PASS"
         const val STATUS_WARNING = "WARNING"
@@ -542,6 +547,7 @@ class AyanaAcceptanceTestEngine(
         const val PROBE_BRIGHTNESS_ROUNDTRIP = "brightness_roundtrip"
         const val PROBE_SETTINGS_ROUNDTRIP = "settings_roundtrip"
         const val PROBE_FOREGROUND_FUSION = "foreground_fusion"
+        const val PROBE_WHOLE_GOAL_ROUTING = "whole_goal_routing"
         const val PROBE_KNOWN_LIMITS = "known_limits"
 
         private val TESTS =
@@ -713,6 +719,13 @@ class AyanaAcceptanceTestEngine(
                     id = "FUNC-012",
                     title = "Foreground owner / overlay fusion",
                     probeId = PROBE_FOREGROUND_FUSION,
+                    critical = true,
+                    modes = setOf(Mode.FULL_ACCEPTANCE)
+                ),
+                TestSpec(
+                    id = "FUNC-013",
+                    title = "Whole-goal routing / artifact ownership",
+                    probeId = PROBE_WHOLE_GOAL_ROUTING,
                     critical = true,
                     modes = setOf(Mode.FULL_ACCEPTANCE)
                 )

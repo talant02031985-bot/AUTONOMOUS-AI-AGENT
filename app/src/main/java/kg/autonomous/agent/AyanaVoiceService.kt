@@ -60,6 +60,16 @@ import kotlin.math.abs
 
 class AyanaVoiceService : Service() {
 
+    // AYANA v12.14.0 WHOLE-GOAL INTEGRITY + ARTIFACT ROUTING + AGENT RECOVERY.
+    // Fixes device-proven v12.13 regressions without changing frozen PASS lanes:
+    // - app-open + foreground-verification is treated as one verified lifecycle goal;
+    // - safe Settings>Apps final targets collapse directly to the requested app detail page;
+    // - multi-metric read-only requests are aggregated instead of being swallowed by one metric;
+    // - any explicit artifact deliverable keeps whole-goal ownership and reaches create_artifact;
+    // - Agent Core machine terminal status can no longer turn an explicit capability refusal into SUCCESS;
+    // - one bounded timeout retry is allowed before a recoverable Agent Core error is surfaced.
+    // Existing STOP, lifecycle close truth, notifications, exact volume/brightness, Memory,
+    // reminders, Settings verification and artifact publish verification stay intact.
     // AYANA v12.13.0 AUTONOMOUS ACCEPTANCE ENGINE + LOCAL TEST ROUTING.
     // Self-test requests are split into QUICK_HEALTH / CAPABILITY_AUDIT / FULL_ACCEPTANCE
     // and execute locally with zero Agent Core turns. Full acceptance combines live
@@ -3460,6 +3470,208 @@ class AyanaVoiceService : Service() {
             return
         }
 
+        // v12.14 NEGATIVE CAPABILITY TERMINAL TRUTH.
+        // Known unavailable execution lanes fail locally as UNSUPPORTED instead of
+        // spending an Agent Core turn and then recording a natural-language refusal
+        // as SUCCESS. Source/patch generation remains supported and is not blocked.
+        unsupportedExecutionCapabilityReason(
+            originalCommand
+        )
+            ?.let { reason ->
+                commandHistoryStore.addEvent(
+                    activeCommandHistoryId,
+                    state = "capability_execution_unsupported",
+                    message = "Запрошен отсутствующий execution capability",
+                    details = originalCommand.take(600)
+                )
+                respondUnsupportedAndResume(
+                    text = reason,
+                    silent = silent,
+                    technical = "known_execution_capability_unavailable"
+                )
+                return
+            }
+
+        // v12.14 WHOLE-GOAL ROUTING GUARDS.
+        // These are evaluated after Safety but before generic composite/local fast paths.
+        // Their purpose is not to "special-case" brands; it is to preserve the user's
+        // full terminal criterion when one clause would otherwise greedily consume it.
+        extractVerifiedAppOpenRequest(
+            originalCommand
+        )
+            ?.let { request ->
+                val launchResolution =
+                    try {
+                        appResolver.resolve(request.first)
+                    } catch (_: Exception) {
+                        null
+                    }
+
+                val verificationResolution =
+                    request.second
+                        ?.takeIf { it.isNotBlank() }
+                        ?.let { verifyName ->
+                            try {
+                                appResolver.resolve(verifyName)
+                            } catch (_: Exception) {
+                                null
+                            }
+                        }
+
+                val sameTarget =
+                    verificationResolution == null ||
+                        (
+                            launchResolution != null &&
+                                launchResolution.success &&
+                                verificationResolution.success &&
+                                launchResolution.packageName.isNotBlank() &&
+                                launchResolution.packageName == verificationResolution.packageName
+                            )
+
+                val wholeGoalCollapseAllowed =
+                    sameTarget &&
+                        preExecutionDecision.type !in
+                            setOf(
+                                AyanaCompositeIntentGate.DecisionType.DATA_ONLY,
+                                AyanaCompositeIntentGate.DecisionType.INVALID,
+                                AyanaCompositeIntentGate.DecisionType.REQUIRE_CONFIRMATION,
+                                AyanaCompositeIntentGate.DecisionType.CONDITIONAL
+                            ) &&
+                        !preExecutionDecision.constraints.forbidNetwork &&
+                        !(
+                            preExecutionDecision.constraints.forbidSettings &&
+                                launchResolution?.packageName == "com.android.settings"
+                            )
+
+                if (wholeGoalCollapseAllowed) {
+                    commandHistoryStore.addEvent(
+                        activeCommandHistoryId,
+                        state = "whole_goal_lifecycle_verification",
+                        message = "App launch + foreground verification collapsed to one verified lifecycle goal",
+                        details =
+                            "app=${request.first.take(160)}; verify=${request.second.orEmpty().take(160)}"
+                    )
+                    clearPendingLifecycleContext()
+                    handleLocalAppLifecycleRequest(
+                        action = "open",
+                        requestedName = request.first,
+                        silent = silent
+                    )
+                    return
+                }
+            }
+
+        extractCompositeAppDetailFinalGoal(
+            originalCommand
+        )
+            ?.takeIf {
+                preExecutionDecision.type !in
+                    setOf(
+                        AyanaCompositeIntentGate.DecisionType.DATA_ONLY,
+                        AyanaCompositeIntentGate.DecisionType.INVALID,
+                        AyanaCompositeIntentGate.DecisionType.REQUIRE_CONFIRMATION,
+                        AyanaCompositeIntentGate.DecisionType.CONDITIONAL
+                    ) &&
+                    !preExecutionDecision.constraints.forbidSettings
+            }
+            ?.let { goal ->
+                commandHistoryStore.addEvent(
+                    activeCommandHistoryId,
+                    state = "whole_goal_app_detail",
+                    message = "Составной Settings-маршрут свёрнут к конечной проверяемой цели",
+                    details =
+                        "app=${goal.appName.take(180)}; section=${goal.section}"
+                )
+
+                val result =
+                    agentOpenAppSettings(
+                        requestedName = goal.appName,
+                        section = goal.section
+                    )
+
+                val message =
+                    result.optString(
+                        "message",
+                        if (result.optBoolean("success", false)) {
+                            "Открыт запрошенный раздел приложения ${goal.appName}."
+                        } else {
+                            "Не удалось подтвердить запрошенный раздел приложения ${goal.appName}."
+                        }
+                    )
+
+                if (
+                    result.optBoolean("success", false) &&
+                    result.optBoolean("verified", true)
+                ) {
+                    finishLocalCommand(
+                        message,
+                        silent
+                    )
+                } else {
+                    respondAndResume(
+                        text = message,
+                        silent = silent,
+                        success = false,
+                        terminalStatus =
+                            when (result.optString("terminal_status").uppercase(Locale.ROOT)) {
+                                "BLOCKED" -> AyanaCommandHistoryStore.STATUS_BLOCKED
+                                "UNSUPPORTED" -> AyanaCommandHistoryStore.STATUS_UNSUPPORTED
+                                else -> null
+                            },
+                        technical =
+                            "whole_goal_app_detail_unverified:${result.optString("reason", result.optString("status"))}"
+                    )
+                }
+                return
+            }
+
+        val requestedAggregateMetrics =
+            extractRequestedAggregateMetrics(
+                originalCommand
+            )
+
+        if (
+            requestedAggregateMetrics.size >= 2 &&
+            preExecutionDecision.type !in
+                setOf(
+                    AyanaCompositeIntentGate.DecisionType.DATA_ONLY,
+                    AyanaCompositeIntentGate.DecisionType.INVALID,
+                    AyanaCompositeIntentGate.DecisionType.REQUIRE_CONFIRMATION,
+                    AyanaCompositeIntentGate.DecisionType.CONDITIONAL
+                )
+        ) {
+            runLocalMultiMetricCommand(
+                metrics = requestedAggregateMetrics,
+                silent = silent
+            )
+            return
+        }
+
+        val explicitArtifactGoal =
+            requestsArtifactDeliverable(
+                originalCommand
+            )
+
+        if (
+            explicitArtifactGoal &&
+            shouldDelegateArtifactWholeGoalToAgent(
+                preExecutionDecision
+            )
+        ) {
+            commandHistoryStore.addEvent(
+                activeCommandHistoryId,
+                state = "artifact_whole_goal_handoff",
+                message = "Запрошенный артефакт сохраняет владение всей исходной целью",
+                details =
+                    "pre_execution=${preExecutionDecision.type.name}; command=${originalCommand.take(420)}"
+            )
+            askAyana(
+                originalCommand,
+                silent
+            )
+            return
+        }
+
         if (
             handlePreExecutionDecision(
                 decision = preExecutionDecision,
@@ -3475,6 +3687,21 @@ class AyanaVoiceService : Service() {
             ?.let {
                 request ->
                 runLocalTextInputCommand(
+                    request = request,
+                    silent = silent
+                )
+                return
+            }
+
+        // v12.14 VOLUME TARGET PRECEDENCE.
+        // A phrase such as «уменьши громкость до 2» names an absolute target,
+        // not a -1 relative delta. Resolve exact target semantics before the
+        // structured relative-volume router so History and post-write truth agree.
+        extractExactMediaVolumeRequest(
+            routingNormalized
+        )
+            ?.let { request ->
+                runLocalExactMediaVolumeCommand(
                     request = request,
                     silent = silent
                 )
@@ -3664,21 +3891,6 @@ class AyanaVoiceService : Service() {
             )
             return
         }
-
-        // v12.10.2 VERIFIED EXACT MEDIA VOLUME.
-        // This runs before relative up/down routing and before Agent Core so an
-        // unsupported model response cannot turn a non-executed exact request into
-        // terminal SUCCESS.
-        extractExactMediaVolumeRequest(
-            routingNormalized
-        )
-            ?.let { request ->
-                runLocalExactMediaVolumeCommand(
-                    request = request,
-                    silent = silent
-                )
-                return
-            }
 
         // BASIC LOCAL CALCULATOR v8.9
         // Simple two-number arithmetic must not spend a network round-trip.
@@ -6970,6 +7182,566 @@ class AyanaVoiceService : Service() {
         return target
     }
 
+    private fun unsupportedExecutionCapabilityReason(
+        command: String
+    ): String? {
+        val c =
+            command
+                .lowercase(Locale.ROOT)
+                .replace('ё', 'е')
+                .replace(Regex("\\s+"), " ")
+                .trim()
+
+        if (c.isBlank()) {
+            return null
+        }
+
+        val informationalPrefix =
+            listOf(
+                "почему ",
+                "зачем ",
+                "как ",
+                "что ",
+                "какие ",
+                "расскажи ",
+                "объясни ",
+                "можешь ли ",
+                "умеешь ли "
+            ).any { c.startsWith(it) }
+
+        if (informationalPrefix) {
+            return null
+        }
+
+        val githubWrite =
+            (c.contains("github") || c.contains("гитхаб")) &&
+                listOf(
+                    "измени",
+                    "изменить",
+                    "запиши",
+                    "записать",
+                    "обнови",
+                    "обновить",
+                    "загрузи",
+                    "загрузить",
+                    "удали",
+                    "удалить",
+                    "commit",
+                    "коммит",
+                    "push",
+                    "пуш"
+                ).any { c.contains(it) }
+
+        val commitPush =
+            (
+                c.contains("commit") ||
+                    c.contains("коммит") ||
+                    c.contains("push") ||
+                    c.contains("пуш")
+                ) &&
+                listOf(
+                    "сделай",
+                    "сделать",
+                    "выполни",
+                    "выполнить",
+                    "запусти",
+                    "запустить",
+                    "отправь",
+                    "отправить"
+                ).any { c.contains(it) }
+
+        val apkBuildOrDelivery =
+            (c.contains("apk") || c.contains("апк")) &&
+                (
+                    c.contains("собери") ||
+                        c.contains("собрать") ||
+                        c.contains("сборк") ||
+                        c.contains("подпиши") ||
+                        c.contains("подписать") ||
+                        c.contains("готовый apk") ||
+                        c.contains("готовый апк") ||
+                        c.contains("дай мне apk") ||
+                        c.contains("дай мне апк") ||
+                        c.contains("передай apk") ||
+                        c.contains("передай апк")
+                    )
+
+        if (!githubWrite && !commitPush && !apkBuildOrDelivery) {
+            return null
+        }
+
+        val unavailable =
+            mutableListOf<String>()
+
+        if (githubWrite) {
+            unavailable += "запись изменений в GitHub"
+        }
+        if (commitPush) {
+            unavailable += "commit/push"
+        }
+        if (apkBuildOrDelivery) {
+            unavailable += "сборка/подписание/выдача готового APK"
+        }
+
+        return
+            "Эта задача сейчас не может быть выполнена напрямую: в AYANA нет ${unavailable.distinct().joinToString(", ")}. " +
+                "Я могу подготовить исходники или патч, но не буду отмечать отсутствующие repository/build действия как выполненные."
+    }
+
+    private data class DirectAppDetailFinalGoal(
+        val appName: String,
+        val section: String
+    )
+
+    /**
+     * v12.14: A verification suffix does not create a second side effect.
+     * "Открой Камеру и проверь, что на переднем плане Камера" is one app-open
+     * goal whose existing lifecycle executor already verifies the fresh package.
+     */
+    private fun extractVerifiedAppOpenRequest(
+        command: String
+    ): Pair<String, String?>? {
+        val c =
+            normalizeLifecycleRoutingText(
+                command
+            )
+
+        val match =
+            Regex(
+                """^(?:открой|открыть|запусти|запустить|включи|включить)(?:\s+мне)?\s+(?:приложени\p{L}*\s+|программ\p{L}*\s+)?(.+?)\s+и\s+(?:проверь|проверить|убедись|убедиться|подтверди|подтвердить)(?=\s|[,.:;!?—-]|$)(.*)$"""
+            )
+                .find(c)
+                ?: return null
+
+        val target =
+            match.groupValues
+                .getOrNull(1)
+                .orEmpty()
+                .trim()
+
+        val verificationTail =
+            match.groupValues
+                .getOrNull(2)
+                .orEmpty()
+                .trim()
+
+        if (
+            target.isBlank() ||
+            verificationTail.isBlank() ||
+            target in LIFECYCLE_INVALID_TARGETS
+        ) {
+            return null
+        }
+
+        val foregroundIntent =
+            verificationTail.contains("передн") &&
+                (
+                    verificationTail.contains("план") ||
+                        verificationTail.contains("экран")
+                    ) ||
+                verificationTail.contains("foreground")
+
+        if (!foregroundIntent) {
+            return null
+        }
+
+        val verifyTarget =
+            Regex(
+                """(?:^|[,\s])(?:что\s+)?(?:на\s+)?(?:передн\p{L}*\s+(?:план\p{L}*|экран\p{L}*)|foreground)(?:\s+сейчас)?(?:\s+именно)?(?:\s+(?:находится|открыт[ао]?|это))?\s+(.+)$"""
+            )
+                .find(verificationTail)
+                ?.groupValues
+                ?.getOrNull(1)
+                ?.trim()
+                ?.trim(' ', '"', '«', '»', '.', ',', '!', '?')
+                ?.takeIf { it.isNotBlank() }
+
+        return target to verifyTarget
+    }
+
+    /**
+     * Collapses a safe read-only Settings>Apps path to its observable final target.
+     * This preserves the user's goal while avoiding a brittle literal navigation route.
+     */
+    private fun extractCompositeAppDetailFinalGoal(
+        command: String
+    ): DirectAppDetailFinalGoal? {
+        val appTarget =
+            extractSettingsAppSearchTarget(
+                command
+            )
+                ?.trim()
+                ?.takeIf { it.isNotBlank() }
+                ?: return null
+
+        val c =
+            command
+                .lowercase(Locale.ROOT)
+                .replace('ё', 'е')
+                .replace(Regex("\\s+"), " ")
+                .trim()
+
+        // Require an explicit continuation to a final app-detail section.
+        if (
+            !c.contains(" и ") &&
+            !c.contains(" затем ") &&
+            !c.contains(" потом ") &&
+            !c.contains(" после этого ")
+        ) {
+            return null
+        }
+
+        val section =
+            when {
+                c.contains("разрешен") -> "permissions"
+                c.contains("батаре") || c.contains("аккумулятор") -> "battery"
+                c.contains("хранилищ") || c.contains("памят") -> "storage"
+                c.contains("мобильн") && c.contains("данн") -> "mobile_data"
+                c.contains("уведомлен") -> "notifications"
+                c.contains("открыт") && c.contains("по умолч") -> "open_by_default"
+                c.contains("ссылк") && c.contains("по умолч") -> "open_by_default"
+                c.contains("язык") -> "language"
+                c.contains("информац") || c.contains("сведени") -> "info"
+                else -> null
+            }
+                ?: return null
+
+        return DirectAppDetailFinalGoal(
+            appName = appTarget,
+            section = section
+        )
+    }
+
+    private enum class AggregateMetric {
+        BATTERY,
+        NETWORK,
+        STORAGE,
+        MEDIA_VOLUME,
+        BRIGHTNESS,
+        ORIENTATION
+    }
+
+    /**
+     * Detect read-only multi-metric requests before the single-metric structured router.
+     * A state-changing or artifact-producing goal is deliberately excluded.
+     */
+    private fun extractRequestedAggregateMetrics(
+        command: String
+    ): Set<AggregateMetric> {
+        if (requestsArtifactDeliverable(command)) {
+            return emptySet()
+        }
+
+        val c =
+            command
+                .lowercase(Locale.ROOT)
+                .replace('ё', 'е')
+                .replace(Regex("\\s+"), " ")
+                .trim()
+
+        val readIntent =
+            listOf(
+                "проверь",
+                "покажи",
+                "скажи",
+                "какой",
+                "какая",
+                "каково",
+                "сколько",
+                "состояние",
+                "статус"
+            ).any { c.contains(it) }
+
+        if (!readIntent) {
+            return emptySet()
+        }
+
+        val stateChangingMarkers =
+            listOf(
+                "установи",
+                "установить",
+                "открой",
+                "открыть",
+                "запусти",
+                "запустить",
+                "зайди",
+                "зайти",
+                "перейди",
+                "перейти",
+                "нажми",
+                "нажать",
+                "выбери",
+                "выбрать",
+                "найди",
+                "найти",
+                "создай",
+                "создать",
+                "сделай",
+                "сделать",
+                "измени",
+                "изменить",
+                "увелич",
+                "уменьш",
+                "включи",
+                "выключи",
+                "закрой",
+                "сверни",
+                "удали",
+                "очисти"
+            )
+
+        if (stateChangingMarkers.any { c.contains(it) }) {
+            return emptySet()
+        }
+
+        val result =
+            linkedSetOf<AggregateMetric>()
+
+        if (c.contains("батар") || c.contains("заряд") || c.contains("аккумулятор")) {
+            result += AggregateMetric.BATTERY
+        }
+
+        if (
+            c.contains("интернет") ||
+            c.contains("подключен") ||
+            c.contains("сеть") ||
+            c.contains("wi-fi") ||
+            c.contains("wifi")
+        ) {
+            result += AggregateMetric.NETWORK
+        }
+
+        if (c.contains("хранилищ") || c.contains("свободн") && c.contains("мест")) {
+            result += AggregateMetric.STORAGE
+        }
+
+        if (c.contains("громкост")) {
+            result += AggregateMetric.MEDIA_VOLUME
+        }
+
+        if (c.contains("яркост")) {
+            result += AggregateMetric.BRIGHTNESS
+        }
+
+        if (c.contains("ориентац") || c.contains("альбомн") || c.contains("портретн")) {
+            result += AggregateMetric.ORIENTATION
+        }
+
+        return result
+    }
+
+    private fun runLocalMultiMetricCommand(
+        metrics: Set<AggregateMetric>,
+        silent: Boolean
+    ) {
+        executionPhase(
+            phase = "local_multi_device_metric",
+            executor = "multi_device_metric_executor"
+        )
+
+        val state =
+            try {
+                agentGetDeviceState()
+            } catch (_: Exception) {
+                JSONObject()
+            }
+
+        val parts =
+            mutableListOf<String>()
+
+        val missing =
+            mutableListOf<String>()
+
+        for (metric in metrics) {
+            when (metric) {
+                AggregateMetric.BATTERY -> {
+                    val battery = state.optInt("battery_percent", -1)
+                    if (battery >= 0) {
+                        parts +=
+                            "заряд батареи $battery%" +
+                                if (state.optBoolean("charging", false)) " (заряжается)" else ""
+                    } else {
+                        missing += "battery"
+                    }
+                }
+
+                AggregateMetric.NETWORK -> {
+                    if (state.has("network_connected")) {
+                        val connected = state.optBoolean("network_connected", false)
+                        val validated = state.optBoolean("network_validated", false)
+                        val transport = state.optString("network_transport", "unknown")
+                        parts +=
+                            if (connected) {
+                                "интернет подключён" +
+                                    (
+                                        if (validated) {
+                                            " и подтверждён Android"
+                                        } else {
+                                            " (доступ в интернет не подтверждён)"
+                                        }
+                                    ) +
+                                    (
+                                        if (
+                                            transport.isNotBlank() &&
+                                            transport != "unknown" &&
+                                            transport != "none"
+                                        ) {
+                                            " через $transport"
+                                        } else {
+                                            ""
+                                        }
+                                    )
+                            } else {
+                                "интернет не подключён"
+                            }
+                    } else {
+                        missing += "network"
+                    }
+                }
+
+                AggregateMetric.STORAGE -> {
+                    val free = state.optLong("storage_free_bytes", -1L)
+                    val total = state.optLong("storage_total_bytes", -1L)
+                    if (free >= 0L && total > 0L) {
+                        parts += "хранилище: свободно ${formatStorageGiB(free)} ГБ из ${formatStorageGiB(total)} ГБ"
+                    } else {
+                        missing += "storage"
+                    }
+                }
+
+                AggregateMetric.MEDIA_VOLUME -> {
+                    val current = state.optInt("media_volume", -1)
+                    val max = state.optInt("media_volume_max", -1)
+                    if (current >= 0 && max > 0) {
+                        parts += "громкость мультимедиа $current из $max"
+                    } else {
+                        missing += "media_volume"
+                    }
+                }
+
+                AggregateMetric.BRIGHTNESS -> {
+                    val brightness = state.optInt("brightness_percent", -1)
+                    if (brightness >= 0) {
+                        parts += "яркость примерно $brightness%"
+                    } else {
+                        missing += "brightness"
+                    }
+                }
+
+                AggregateMetric.ORIENTATION -> {
+                    val orientation = state.optString("orientation")
+                    if (orientation.isNotBlank() && orientation != "unknown") {
+                        parts +=
+                            "ориентация " +
+                                when (orientation) {
+                                    "landscape" -> "альбомная"
+                                    "portrait" -> "портретная"
+                                    else -> orientation
+                                }
+                    } else {
+                        missing += "orientation"
+                    }
+                }
+            }
+        }
+
+        commandHistoryStore.addEvent(
+            activeCommandHistoryId,
+            state = if (missing.isEmpty()) "multi_metric_verified" else "multi_metric_incomplete",
+            message =
+                if (missing.isEmpty()) {
+                    "Все запрошенные метрики устройства получены"
+                } else {
+                    "Часть запрошенных метрик устройства недоступна"
+                },
+            details =
+                "requested=${metrics.joinToString(",")}; missing=${missing.joinToString(",")}; state=${state.toString().take(1200)}"
+        )
+
+        val answer =
+            if (parts.isEmpty()) {
+                "Не удалось получить запрошенные параметры устройства."
+            } else {
+                "Состояние планшета: ${parts.joinToString("; ")}."
+            }
+
+        if (missing.isEmpty()) {
+            finishLocalCommand(
+                answer,
+                silent
+            )
+        } else {
+            respondAndResume(
+                text = answer + " Не получены: ${missing.joinToString(", ")}.",
+                silent = silent,
+                success = false,
+                technical = "multi_metric_incomplete:${missing.joinToString(",")}"
+            )
+        }
+    }
+
+    private fun requestsArtifactDeliverable(
+        command: String
+    ): Boolean {
+        val c =
+            command
+                .lowercase(Locale.ROOT)
+                .replace('ё', 'е')
+                .replace(Regex("\\s+"), " ")
+                .trim()
+
+        val action =
+            Regex(
+                """(?:^|\s)(?:создай|создать|сделай|сделать|сгенерируй|сгенерировать|сохрани|сохранить|экспортируй|экспортировать|подготовь|подготовить|сформируй|сформировать|выгрузи|выгрузить)(?=\s|$)"""
+            )
+                .containsMatchIn(c) ||
+                Regex("""(?:^|\s)дай\s+(?:мне\s+)?(?:готовый\s+)?[^.!?]{0,80}\bфайл\b""")
+                    .containsMatchIn(c)
+
+        if (!action) {
+            return false
+        }
+
+        return listOf(
+            "файл",
+            "документ",
+            "txt",
+            "docx",
+            "word",
+            "ворд",
+            "pdf",
+            "пдф",
+            "xlsx",
+            "excel",
+            "эксел",
+            "jpeg",
+            "jpg",
+            "изображен",
+            "график",
+            "диаграмм"
+        ).any { marker ->
+            c.contains(marker)
+        }
+    }
+
+    private fun shouldDelegateArtifactWholeGoalToAgent(
+        decision: AyanaCompositeIntentGate.Decision
+    ): Boolean {
+        if (
+            decision.constraints.forbidNetwork ||
+            decision.type == AyanaCompositeIntentGate.DecisionType.DATA_ONLY ||
+            decision.type == AyanaCompositeIntentGate.DecisionType.INVALID ||
+            decision.type == AyanaCompositeIntentGate.DecisionType.REQUIRE_CONFIRMATION ||
+            decision.type == AyanaCompositeIntentGate.DecisionType.CONDITIONAL
+        ) {
+            return false
+        }
+
+        return decision.type == AyanaCompositeIntentGate.DecisionType.PASS_THROUGH ||
+            decision.type == AyanaCompositeIntentGate.DecisionType.COMPOSITE ||
+            decision.type == AyanaCompositeIntentGate.DecisionType.ENVIRONMENT_CONSTRAINED
+    }
+
     private fun extractDirectSystemSettingsSection(
         command: String
     ): String? {
@@ -7245,7 +8017,7 @@ class AyanaVoiceService : Service() {
 
         val actionPattern =
             Regex(
-                """(?:^|\s)(?:открой|открыть|запусти|запустить|включи|включить|найди|найти|поищи|поискать|нажми|нажать|выбери|выбрать|зайди|зайти|перейди|перейти|остановись|остановиться)(?=\s|$)"""
+                """(?:^|\s)(?:открой|открыть|запусти|запустить|включи|включить|найди|найти|поищи|поискать|нажми|нажать|выбери|выбрать|зайди|зайти|перейди|перейти|проверь|проверить|убедись|убедиться|подтверди|подтвердить|остановись|остановиться)(?=\s|$)"""
             )
 
         val actionMatches =
@@ -8958,12 +9730,21 @@ class AyanaVoiceService : Service() {
             return null
         }
 
+        val directionalTargetIntent =
+            (
+                c.contains("уменьш") ||
+                    c.contains("увелич")
+                ) &&
+                Regex("""(?:^|\s)до\s+\d{1,3}(?:\s|$)""")
+                    .containsMatchIn(c)
+
         val setIntent =
             c.contains("установ") ||
                 c.contains("постав") ||
                 c.contains("выстав") ||
                 c.contains("задай") ||
-                c.contains("сделай громкость")
+                c.contains("сделай громкость") ||
+                directionalTargetIntent
 
         if (!setIntent) {
             return null
@@ -11667,9 +12448,14 @@ class AyanaVoiceService : Service() {
                     )
         }
 
+        val lifecycleNormalized =
+            stripLifecycleForegroundVerificationSuffix(
+                normalized
+            )
+
         val lifecycle =
             extractLocalAppLifecycleRequest(
-                normalized
+                lifecycleNormalized
             )
 
         if (lifecycle != null) {
@@ -11763,6 +12549,68 @@ class AyanaVoiceService : Service() {
                     "Шаг «${clause.take(180)}» пока не поддерживается локальным составным исполнителем. Ни один шаг не выполнялся.",
                 technical = "composite_atomic_step_unresolved"
             )
+    }
+
+    /**
+     * Removes only a terminal verification extension that is already guaranteed by
+     * executeCompositeOpenAppStep(). Any other second action remains untouched and
+     * therefore still fails closed during preflight.
+     */
+    private fun stripLifecycleForegroundVerificationSuffix(
+        clause: String
+    ): String {
+        val c =
+            normalizeLifecycleRoutingText(
+                clause
+            )
+
+        val request =
+            extractVerifiedAppOpenRequest(
+                c
+            )
+                ?: return c
+
+        val verifyTarget =
+            request.second
+                ?.trim()
+                .orEmpty()
+
+        // A suffix without a separate named target (for example "проверь, что
+        // приложение на переднем плане") is verification of the launched app.
+        if (verifyTarget.isBlank()) {
+            return "открой ${request.first}"
+        }
+
+        val launchResolution =
+            try {
+                appResolver.resolve(request.first)
+            } catch (_: Exception) {
+                null
+            }
+
+        val verifyResolution =
+            try {
+                appResolver.resolve(verifyTarget)
+            } catch (_: Exception) {
+                null
+            }
+
+        val samePackage =
+            launchResolution != null &&
+                verifyResolution != null &&
+                launchResolution.success &&
+                verifyResolution.success &&
+                launchResolution.packageName.isNotBlank() &&
+                launchResolution.packageName ==
+                    verifyResolution.packageName
+
+        return if (samePackage) {
+            "открой ${request.first}"
+        } else {
+            // Keep the clause untouched so preflight fails closed instead of
+            // silently discarding a different terminal verification target.
+            c
+        }
     }
 
     private fun finishPreExecutionPreflightFailure(
@@ -15511,6 +16359,9 @@ class AyanaVoiceService : Service() {
             AyanaAcceptanceTestEngine.PROBE_FOREGROUND_FUSION ->
                 acceptanceForegroundFusionProbe()
 
+            AyanaAcceptanceTestEngine.PROBE_WHOLE_GOAL_ROUTING ->
+                acceptanceWholeGoalRoutingProbe()
+
             AyanaAcceptanceTestEngine.PROBE_KNOWN_LIMITS ->
                 acceptanceKnownLimitsProbe()
 
@@ -15729,6 +16580,9 @@ class AyanaVoiceService : Service() {
                 "capability_truth_grounding",
                 "perception_owner_fusion",
                 "autonomous_execution_loop",
+                "whole_goal_routing_guard",
+                "artifact_whole_goal_orchestration",
+                "agent_core_timeout_recovery",
                 "local_acceptance_test_engine"
             )
 
@@ -16770,6 +17624,119 @@ class AyanaVoiceService : Service() {
                     .put("effective_foreground_package", effective)
                     .put("owner_confidence", confidence)
                     .put("overlay_suppressed", screen.optBoolean("ayana_overlay_ownership_suppressed", false))
+        )
+    }
+
+    private fun acceptanceWholeGoalRoutingProbe(): JSONObject {
+        val lifecycle =
+            extractVerifiedAppOpenRequest(
+                "открой приложение Камера и проверь, что на переднем плане именно камера"
+            )
+
+        val appDetail =
+            extractCompositeAppDetailFinalGoal(
+                "открой настройки приложений, найди YouTube и зайди в разрешения"
+            )
+
+        val metrics =
+            extractRequestedAggregateMetrics(
+                "проверь состояние устройства по трём параметрам: заряд батареи, подключение к интернету и свободное место в хранилище, затем дай один общий результат"
+            )
+
+        val volumeTarget =
+            extractExactMediaVolumeRequest(
+                "уменьшить громкость до 2"
+            )
+
+        val unsupportedDevelopmentAction =
+            unsupportedExecutionCapabilityReason(
+                "измени код AYANA в GitHub, сделай commit, запусти сборку APK и дай мне готовый APK"
+            )
+
+        val informationalDevelopmentQuestion =
+            unsupportedExecutionCapabilityReason(
+                "почему AYANA пока не может собрать APK"
+            )
+
+        val artifactCommand =
+            "проверь свободное место в хранилище и создай TXT-файл с этим результатом"
+
+        val artifact =
+            requestsArtifactDeliverable(
+                artifactCommand
+            )
+
+        val artifactMetricsSuppressed =
+            extractRequestedAggregateMetrics(
+                artifactCommand
+            ).isEmpty()
+
+        val mixedSideEffectMetricsSuppressed =
+            extractRequestedAggregateMetrics(
+                "проверь батарею и интернет и открой Chrome"
+            ).isEmpty()
+
+        val lifecycleOk =
+            lifecycle != null &&
+                lifecycle.first.contains("камера") &&
+                lifecycle.second?.contains("камера") == true
+
+        val appDetailOk =
+            appDetail != null &&
+                appDetail.section == "permissions" &&
+                appDetail.appName.contains("youtube")
+
+        val metricsOk =
+            AggregateMetric.BATTERY in metrics &&
+                AggregateMetric.NETWORK in metrics &&
+                AggregateMetric.STORAGE in metrics &&
+                metrics.size == 3
+
+        val volumeTargetOk =
+            volumeTarget?.requestedLevel == 2 &&
+                volumeTarget.requestedScaleMax == null &&
+                !volumeTarget.percent
+
+        val unsupportedTerminalOk =
+            !unsupportedDevelopmentAction.isNullOrBlank() &&
+                informationalDevelopmentQuestion == null
+
+        val ok =
+            lifecycleOk &&
+                appDetailOk &&
+                metricsOk &&
+                volumeTargetOk &&
+                unsupportedTerminalOk &&
+                artifact &&
+                artifactMetricsSuppressed &&
+                mixedSideEffectMetricsSuppressed
+
+        return acceptanceProbeResult(
+            status =
+                if (ok) {
+                    AyanaAcceptanceTestEngine.STATUS_PASS
+                } else {
+                    AyanaAcceptanceTestEngine.STATUS_FAIL
+                },
+            message =
+                if (ok) {
+                    "Whole-goal routing guard распознал lifecycle verification, App Detail final target, 3-метрический read-only запрос и artifact deliverable без greedy metric interception."
+                } else {
+                    "Whole-goal routing regression: lifecycle=$lifecycleOk, app_detail=$appDetailOk, metrics=$metricsOk, volume_target=$volumeTargetOk, unsupported_terminal=$unsupportedTerminalOk, artifact=$artifact, artifact_metric_guard=$artifactMetricsSuppressed, mixed_metric_guard=$mixedSideEffectMetricsSuppressed."
+                },
+            evidenceScope = "live_pure_contract",
+            verified = ok,
+            evidence =
+                JSONObject()
+                    .put("lifecycle_ok", lifecycleOk)
+                    .put("app_detail_ok", appDetailOk)
+                    .put("metrics_ok", metricsOk)
+                    .put("volume_target_ok", volumeTargetOk)
+                    .put("unsupported_terminal_ok", unsupportedTerminalOk)
+                    .put("artifact_ok", artifact)
+                    .put("artifact_metric_guard", artifactMetricsSuppressed)
+                    .put("mixed_metric_guard", mixedSideEffectMetricsSuppressed)
+                    .put("metric_count", metrics.size)
         )
     }
 
@@ -18486,7 +19453,7 @@ class AyanaVoiceService : Service() {
                     )
 
                     val response =
-                        callAgentCore(
+                        callAgentCoreWithRecovery(
                             message =
                                 nextMessage,
                             previousResponseId =
@@ -18510,7 +19477,8 @@ class AyanaVoiceService : Service() {
                                     "text"
                                 } else {
                                     "voice"
-                                }
+                                },
+                            commandToken = commandToken
                         )
 
                     collectCompletionArtifactEvidence(
@@ -18640,6 +19608,39 @@ class AyanaVoiceService : Service() {
                                         "Готово."
                                     }
 
+                            when (
+                                response
+                                    .optString(
+                                        "terminal_status"
+                                    )
+                                    .uppercase(Locale.ROOT)
+                            ) {
+                                "UNSUPPORTED" -> {
+                                    finalSuccess = false
+                                    finalTerminalStatus =
+                                        AyanaCommandHistoryStore.STATUS_UNSUPPORTED
+                                }
+
+                                "BLOCKED" -> {
+                                    finalSuccess = false
+                                    finalTerminalStatus =
+                                        AyanaCommandHistoryStore.STATUS_BLOCKED
+                                }
+
+                                "ERROR" -> {
+                                    finalSuccess = false
+                                }
+                            }
+
+                            if (!finalSuccess) {
+                                commandHistoryStore.addEvent(
+                                    activeCommandHistoryId,
+                                    state = "agent_machine_terminal",
+                                    message = "Agent Core final получил машинный terminal status",
+                                    details =
+                                        "terminal=${response.optString("terminal_status")}; reply=${finalAnswer?.take(500).orEmpty()}"
+                                )
+                            }
 
                             val semanticFailure =
                                 lastSemanticActionResult
@@ -24490,6 +25491,67 @@ class AyanaVoiceService : Service() {
         return file
     }
 
+    /**
+     * v12.14 bounded Agent Core recovery. A timeout occurs before any returned
+     * device tool call is dispatched, so retrying the same model request is
+     * side-effect safe. One retry only; cancellation always wins.
+     */
+    private fun callAgentCoreWithRecovery(
+        message: String?,
+        previousResponseId: String?,
+        toolResults: JSONArray?,
+        memoryContext: String?,
+        intelligenceContext: String?,
+        source: String,
+        commandToken: Long
+    ): JSONObject {
+        var attempt = 0
+        var backoffMs = AGENT_CORE_RETRY_BACKOFF_MS
+
+        while (true) {
+            try {
+                return callAgentCore(
+                    message = message,
+                    previousResponseId = previousResponseId,
+                    toolResults = toolResults,
+                    memoryContext = memoryContext,
+                    intelligenceContext = intelligenceContext,
+                    source = source
+                )
+            } catch (timeout: SocketTimeoutException) {
+                if (
+                    attempt >= AGENT_CORE_TIMEOUT_RETRY_COUNT ||
+                    isCommandCancelled(commandToken) ||
+                    shuttingDown
+                ) {
+                    throw timeout
+                }
+
+                attempt++
+
+                commandHistoryStore.addEvent(
+                    activeCommandHistoryId,
+                    state = "agent_retry",
+                    message = "Agent Core timeout: выполняю bounded retry",
+                    details =
+                        "attempt=$attempt/$AGENT_CORE_TIMEOUT_RETRY_COUNT; backoff_ms=$backoffMs; " +
+                            "reason=${timeout.message.orEmpty().take(180)}"
+                )
+
+                try {
+                    Thread.sleep(backoffMs)
+                } catch (_: InterruptedException) {
+                    Thread.currentThread().interrupt()
+                    throw timeout
+                }
+
+                backoffMs =
+                    (backoffMs * 2L)
+                        .coerceAtMost(AGENT_CORE_RETRY_BACKOFF_MAX_MS)
+            }
+        }
+    }
+
     private fun callAgentCore(
         message: String?,
         previousResponseId: String?,
@@ -24573,10 +25635,10 @@ class AyanaVoiceService : Service() {
             )
 
             connection.connectTimeout =
-                15000
+                AGENT_CORE_CONNECT_TIMEOUT_MS
 
             connection.readTimeout =
-                45000
+                AGENT_CORE_READ_TIMEOUT_MS
 
             connection.doOutput =
                 true
@@ -28589,6 +29651,80 @@ class AyanaVoiceService : Service() {
                     "unknown"
             }
 
+        val connectivityManager =
+            getSystemService(
+                Context.CONNECTIVITY_SERVICE
+            ) as? ConnectivityManager
+
+        val activeNetwork =
+            try {
+                connectivityManager?.activeNetwork
+            } catch (_: Exception) {
+                null
+            }
+
+        val networkCapabilities =
+            try {
+                if (activeNetwork != null) {
+                    connectivityManager?.getNetworkCapabilities(activeNetwork)
+                } else {
+                    null
+                }
+            } catch (_: Exception) {
+                null
+            }
+
+        val networkConnected =
+            networkCapabilities
+                ?.hasCapability(
+                    NetworkCapabilities.NET_CAPABILITY_INTERNET
+                ) == true
+
+        val networkValidated =
+            networkCapabilities
+                ?.hasCapability(
+                    NetworkCapabilities.NET_CAPABILITY_VALIDATED
+                ) == true
+
+        val networkTransport =
+            when {
+                networkCapabilities?.hasTransport(NetworkCapabilities.TRANSPORT_WIFI) == true -> "Wi-Fi"
+                networkCapabilities?.hasTransport(NetworkCapabilities.TRANSPORT_CELLULAR) == true -> "мобильную сеть"
+                networkCapabilities?.hasTransport(NetworkCapabilities.TRANSPORT_ETHERNET) == true -> "Ethernet"
+                networkCapabilities?.hasTransport(NetworkCapabilities.TRANSPORT_VPN) == true -> "VPN"
+                networkConnected -> "другой транспорт"
+                else -> "none"
+            }
+
+        val storageStat =
+            try {
+                StatFs(
+                    Environment
+                        .getDataDirectory()
+                        .absolutePath
+                )
+            } catch (_: Exception) {
+                null
+            }
+
+        val brightnessRaw =
+            try {
+                Settings.System.getInt(
+                    contentResolver,
+                    Settings.System.SCREEN_BRIGHTNESS
+                )
+            } catch (_: Exception) {
+                -1
+            }
+
+        val brightnessPercent =
+            if (brightnessRaw >= 0) {
+                ((brightnessRaw.coerceIn(0, 255) * 100.0) / 255.0)
+                    .toInt()
+            } else {
+                -1
+            }
+
         val screen =
             try {
                 screenIntelligence
@@ -28625,6 +29761,30 @@ class AyanaVoiceService : Service() {
             .put(
                 "orientation",
                 orientation
+            )
+            .put(
+                "network_connected",
+                networkConnected
+            )
+            .put(
+                "network_validated",
+                networkValidated
+            )
+            .put(
+                "network_transport",
+                networkTransport
+            )
+            .put(
+                "storage_free_bytes",
+                storageStat?.availableBytes ?: -1L
+            )
+            .put(
+                "storage_total_bytes",
+                storageStat?.totalBytes ?: -1L
+            )
+            .put(
+                "brightness_percent",
+                brightnessPercent
             )
             .put(
                 "screen",
@@ -31341,6 +32501,14 @@ class AyanaVoiceService : Service() {
         private const val MAX_DOCX_TRANSLATION_CHARS_PER_BATCH = 5500
         private const val DOCX_TRANSLATION_CONNECT_TIMEOUT_MS = 15000
         private const val DOCX_TRANSLATION_READ_TIMEOUT_MS = 90000
+
+        // v12.14: fail earlier than the old 45 s single wait, then allow exactly
+        // one side-effect-safe model retry before surfacing a recoverable ERROR.
+        private const val AGENT_CORE_CONNECT_TIMEOUT_MS = 15000
+        private const val AGENT_CORE_READ_TIMEOUT_MS = 18000
+        private const val AGENT_CORE_TIMEOUT_RETRY_COUNT = 1
+        private const val AGENT_CORE_RETRY_BACKOFF_MS = 350L
+        private const val AGENT_CORE_RETRY_BACKOFF_MAX_MS = 1200L
 
         // Agent turns include both real actions and screen inspections.
         // Complex Android Settings flows can legitimately need more than 12.

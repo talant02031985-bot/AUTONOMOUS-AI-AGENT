@@ -20,6 +20,12 @@ import kotlin.math.max
 class AgentAccessibilityService :
     AccessibilityService() {
 
+    // AYANA Accessibility v7.2 — FOREGROUND FUSION + EXTENDED SEMANTIC TEXT RECOVERY.
+    // v7.2 preserves v7.1 owner truth and expands read-only node text extraction with
+    // Android hint/state/pane/tooltip semantics. Modern Compose/WebView surfaces may expose
+    // useful accessibility meaning outside node.text/contentDescription; these fields are
+    // now merged only inside the same factual window/package and remain password-hidden.
+    // No OCR/screenshot inference is fabricated when Accessibility still exposes no text.
     // AYANA Accessibility v7.1 — VERIFIED FOREGROUND FUSION + OWNER HANDOFF CONTINUITY.
     // v7.0 preserves v6.9 generic ownership/evidence guards and adds one explicit truth handoff:
     // when an upper execution layer has already VERIFIED a package-owned external surface from
@@ -7967,7 +7973,11 @@ class AgentAccessibilityService :
 
         listOf(
             node.optString("text"),
-            node.optString("description")
+            node.optString("description"),
+            node.optString("hint_text"),
+            node.optString("state_description"),
+            node.optString("pane_title"),
+            node.optString("tooltip_text")
         )
             .map { safeText(it) }
             .filter { it.isNotBlank() && it != "[PASSWORD_HIDDEN]" }
@@ -8104,6 +8114,66 @@ class AgentAccessibilityService :
                     .orEmpty()
             }
 
+        val hintText =
+            if (password) {
+                "[PASSWORD_HIDDEN]"
+            } else if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                try {
+                    node.hintText
+                        ?.toString()
+                        .orEmpty()
+                } catch (_: Exception) {
+                    ""
+                }
+            } else {
+                ""
+            }
+
+        val paneTitle =
+            if (password) {
+                "[PASSWORD_HIDDEN]"
+            } else if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+                try {
+                    node.paneTitle
+                        ?.toString()
+                        .orEmpty()
+                } catch (_: Exception) {
+                    ""
+                }
+            } else {
+                ""
+            }
+
+        val tooltipText =
+            if (password) {
+                "[PASSWORD_HIDDEN]"
+            } else if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+                try {
+                    node.tooltipText
+                        ?.toString()
+                        .orEmpty()
+                } catch (_: Exception) {
+                    ""
+                }
+            } else {
+                ""
+            }
+
+        val stateDescription =
+            if (password) {
+                "[PASSWORD_HIDDEN]"
+            } else if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                try {
+                    node.stateDescription
+                        ?.toString()
+                        .orEmpty()
+                } catch (_: Exception) {
+                    ""
+                }
+            } else {
+                ""
+            }
+
         return JSONObject()
             .put(
                 "index",
@@ -8123,6 +8193,30 @@ class AgentAccessibilityService :
                 "description",
                 safeText(
                     description
+                )
+            )
+            .put(
+                "hint_text",
+                safeText(
+                    hintText
+                )
+            )
+            .put(
+                "state_description",
+                safeText(
+                    stateDescription
+                )
+            )
+            .put(
+                "pane_title",
+                safeText(
+                    paneTitle
+                )
+            )
+            .put(
+                "tooltip_text",
+                safeText(
+                    tooltipText
                 )
             )
             .put(
@@ -8224,24 +8318,17 @@ class AgentAccessibilityService :
                     )
                     ?: continue
 
-            val text =
-                item
-                    .optString(
-                        "text"
-                    )
-                    .trim()
+            val textValues =
+                listOf(
+                    item.optString("text"),
+                    item.optString("description"),
+                    item.optString("hint_text"),
+                    item.optString("state_description"),
+                    item.optString("pane_title"),
+                    item.optString("tooltip_text")
+                )
 
-            val description =
-                item
-                    .optString(
-                        "description"
-                    )
-                    .trim()
-
-            listOf(
-                text,
-                description
-            )
+            textValues
                 .filter {
                     it.isNotBlank() &&
                         it !=
@@ -8842,6 +8929,44 @@ class AgentAccessibilityService :
                             description
                         )
                     }
+
+                    val extraSemantics =
+                        mutableListOf<String>()
+
+                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                        try {
+                            safeText(node.hintText?.toString().orEmpty())
+                                .takeIf { it.isNotBlank() }
+                                ?.let(extraSemantics::add)
+                        } catch (_: Exception) {
+                        }
+                    }
+
+                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+                        try {
+                            safeText(node.paneTitle?.toString().orEmpty())
+                                .takeIf { it.isNotBlank() }
+                                ?.let(extraSemantics::add)
+                        } catch (_: Exception) {
+                        }
+                        try {
+                            safeText(node.tooltipText?.toString().orEmpty())
+                                .takeIf { it.isNotBlank() }
+                                ?.let(extraSemantics::add)
+                        } catch (_: Exception) {
+                        }
+                    }
+
+                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                        try {
+                            safeText(node.stateDescription?.toString().orEmpty())
+                                .takeIf { it.isNotBlank() }
+                                ?.let(extraSemantics::add)
+                        } catch (_: Exception) {
+                        }
+                    }
+
+                    extraSemantics.forEach(seenTexts::add)
                 }
 
                 if (

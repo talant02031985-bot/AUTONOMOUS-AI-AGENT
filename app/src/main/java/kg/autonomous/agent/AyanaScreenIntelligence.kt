@@ -6,6 +6,11 @@ import org.json.JSONObject
 import java.util.Locale
 
 /**
+ * AYANA Screen Intelligence v4.6 — VERIFIED FOREGROUND FUSION + EXTENDED SEMANTIC CONTENT.
+ * v4.6 consumes Accessibility v7.2 extended same-window semantics (hint/state/pane/tooltip)
+ * while preserving the fail-closed content contract: if no readable Accessibility content
+ * exists, AYANA still reports structure_only/unavailable instead of inventing screen text.
+ *
  * AYANA Screen Intelligence v4.5 — VERIFIED FOREGROUND FUSION + Settings sparse-content recovery.
  *
  * v4.4 preserves v4.3/v4.2 truth and extends the same fail-closed recovery
@@ -1162,7 +1167,7 @@ class AyanaScreenIntelligence(
 
         return snapshot
             .put("source", "android_accessibility")
-            .put("perception_fusion_version", 1)
+            .put("perception_fusion_version", 2)
             .put("raw_interaction_package", rawInteractionPackage)
             .put("effective_foreground_package", effectiveForegroundPackage)
             .put("interaction_package", effectiveForegroundPackage)
