@@ -1,4 +1,4 @@
-// AYANA Worker v10.8 — v12.12 Autonomy/Capability Truth + Agent Core Performance; File & Document Engine retained
+// AYANA Worker v10.9 — v12.13 Local Acceptance Truth + Autonomy/Capability Grounding; File & Document Engine retained
 const ANDROID_GOAL_TOOL = {
   type: "function",
   name: "execute_android_goal",
@@ -797,14 +797,16 @@ Screen Intelligence / Perception Contract v2:
 `.trim();
 
 const AYANA_CURRENT_CAPABILITIES = `
-КАРТА ФАКТИЧЕСКОГО СОСТОЯНИЯ AYANA — v12.12 AUTONOMY + CAPABILITY TRUTH + PERCEPTION FUSION поверх v12.11.6.
+КАРТА ФАКТИЧЕСКОГО СОСТОЯНИЯ AYANA — v12.13 AUTONOMOUS ACCEPTANCE ENGINE поверх v12.12 AUTONOMY + CAPABILITY TRUTH + PERCEPTION FUSION.
 Свежий Android AGENT INTELLIGENCE CONTEXT всегда имеет приоритет над этой статической картой.
 
-КРИТИЧЕСКАЯ v12.12 TRUTH:
+КРИТИЧЕСКАЯ v12.13 TRUTH:
 - локальный self-review/autonomy review строится из Android Capability Registry/runtime и не должен заново предлагать уже существующие Planner, Durable Goals, Memory, Tasks, App Resolver, STOP, Safety или strict verification;
+- Android v12.13 имеет local_acceptance_test_engine с тремя режимами: QUICK_HEALTH, CAPABILITY_AUDIT, FULL_ACCEPTANCE. Они выполняются локально без Agent Core network turns; FULL_ACCEPTANCE отличает test-run success от readiness grade и выполняет только read-only/pure/reversible проверки с восстановлением временно изменённого состояния;
+- run_self_diagnostics и get_device_capabilities сами по себе НЕ являются полномасштабным acceptance-test. Никогда не называй их «полномасштабной проверкой всех функций»;
 - perception_owner_fusion различает raw AYANA overlay/main-window package и effective external foreground owner; это защита от false-negative foreground verification, а не live screenshot Vision;
 - Agent Core latency классифицируется по prepare/upload/headers_wait/body/json_parse. Если headers_wait доминирует, это model/server wait, а не Android executor latency;
-- существующие Planner + Durable Goals + checkpoints + bounded replan + terminal verification считаются foundation автономного execution loop, но full multi-step acceptance остаётся обязательным;
+- существующие Planner + Durable Goals + checkpoints + bounded replan + terminal verification считаются foundation автономного execution loop; v12.13 добавляет единый локальный acceptance runner, но его device-результат должен оцениваться по last_acceptance_grade, а не по факту запуска теста;
 - Development Agent transaction НЕ считается реализованным, пока нет авторизованного project workspace + build/test/rollback + подтверждённых commit/push executors.
 
 КРИТИЧЕСКАЯ DEVELOPMENT / DELIVERY TRUTH:
@@ -846,7 +848,7 @@ DEVICE-CONFIRMED БАЗА:
 - новый AYANA Core Orb — лёгкая векторная графика без bitmap/logo clip на каждом кадре и с ограниченной частотой кадров;
 - UI-анимация ограничена по частоте и прекращается во время текстового ввода, чтобы вернуть плавность v11.1.x;
 - App Resolver v2.3: постраничный полный список приложений без молчаливого обрезания;
-- Capability Registry v3.0: build/runtime/window/history facts, capability truth, Agent Core phase-latency classification и local self-review snapshot;
+- Capability Registry v3.1: build/runtime/window/history facts, capability truth, Agent Core phase-latency classification, local self-review и сохранённый last acceptance grade/counters;
 - Self-Diagnostics v3: PASS/WARNING/UNKNOWN/FAIL, реальные memory/tasks/screen/recent-error checks и latency warnings;
 - Command History v2.4: удаление отдельной записи, контекст последней ошибки/результата, устранение дублирования terminal-result в UI/export;
 - локальные fast-path ответы для простых подтверждений; русский display-name для внутренних Android section keys;
@@ -887,6 +889,8 @@ const AYANA_CAPABILITY_AWARENESS_INSTRUCTIONS = `
 3. Не называй отсутствующими STOP, Marin, Safety, Durable Goals, strict verification, App Resolver, Memory v2 и Tasks v2.
 4. Новый Window Content Core и Self-Diagnostics v3 после установки называй реализованными, но до device-теста не утверждай, что все screen scenarios исправлены.
 5. Для конкретного сбоя используй run_self_diagnostics/resolve_app/свежий last-error context вместо догадки.
+5a. Если пользователь спрашивает о результате собственного тестирования AYANA, используй last_acceptance_* из свежего Android context, если они есть. Не пересчитывай readiness по одному run_self_diagnostics.
+5b. SUCCESS команды «проведи тест» означает только, что test runner завершился; готовность агента определяется отдельным acceptance grade.
 6. Если diagnostics содержит WARNING или UNKNOWN, не говори «все проверки пройдены». Назови соответствующие счётчики и важнейшие проблемные компоненты.
 7. Если пользователь просит полный список приложений, продолжай list_installed_apps по next_offset до has_more=false.
 8. Safety всегда fail-closed. Не предлагай обход Android-защиты, protected screens или подтверждений.
@@ -895,7 +899,7 @@ const AYANA_CAPABILITY_AWARENESS_INSTRUCTIONS = `
 
 const AYANA_SELF_REVIEW_INSTRUCTIONS = `
 Если пользователь спрашивает, что улучшить, исправить или развивать в самой AYANA:
-1. Сначала проверь runtime-факты, последние ошибки и текущую карту v12.12; не отвечай как системе «с нуля».
+1. Сначала проверь runtime-факты, последние ошибки и текущую карту v12.13; не отвечай как системе «с нуля».
 2. Учитывай уже существующие App Resolver, Capability Registry, Self-Diagnostics, Planner, Multi-Goal, Memory и Tasks — улучшай/стабилизируй их, а не предлагай добавить заново.
 3. Ставь подтверждённые device-регрессии выше абстрактных будущих идей. Не называй «понимание экрана» сильной стороной, если свежая external_screen evidence = partial/structure_only/unavailable.
 4. После v11.6 ручной multimodal intake уже реализован; следующие крупные уровни: live screen/camera Vision fallback, специализированные executors, безопасные mail/calendar/files integrations + Keystore/permissions, offline fallback и controlled proactivity.
@@ -907,7 +911,7 @@ const AYANA_SELF_REVIEW_INSTRUCTIONS = `
 
 const AYANA_SELF_AUTONOMY_COMPACT_INSTRUCTIONS = `
 Если вопрос именно о большей автономности AYANA:
-1. Точный статус: AYANA уже контролируемый персональный Android ИИ-агент; v12.12 объединяет capability truth, local self-review, perception-owner fusion и phase-latency truth поверх durable/safety/planner базы.
+1. Точный статус: AYANA уже контролируемый персональный Android ИИ-агент; v12.13 добавляет local acceptance engine поверх v12.12 capability truth, self-review, perception-owner fusion и phase-latency truth.
 2. Не пересказывай всю историю версий. Дай 4–6 самых значимых текущих разрывов.
 3. После v11.6 ручные фото/документы и sampled-frame video уже не называй будущей функцией; дальше нужны live Vision fallback, безопасные внешние integrations/credentials, offline fallback и controlled proactivity.
 4. Отделяй «реализовано, но ещё нужно device-тестирование» от «ещё не реализовано».
