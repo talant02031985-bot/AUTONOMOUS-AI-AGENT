@@ -10,7 +10,7 @@ import org.json.JSONArray
 import org.json.JSONObject
 
 /**
- * AYANA Device Capability Registry v3.0 — AUTONOMY / PERCEPTION / LATENCY TRUTH.
+ * AYANA Device Capability Registry v3.1 — ACCEPTANCE / AUTONOMY / PERCEPTION / LATENCY TRUTH.
  *
  * Single machine-readable source of truth for:
  * 1) what this build implements;
@@ -112,6 +112,33 @@ class AyanaCapabilityRegistry(
                 KEY_AGENT_CORE_PERF_HTTP_CODE,
                 httpCode
             )
+            .apply()
+    }
+
+    fun recordAcceptanceResult(
+        mode: String,
+        grade: String,
+        passed: Int,
+        warnings: Int,
+        failed: Int,
+        blocked: Int,
+        unsupported: Int,
+        noData: Int,
+        durationMs: Long,
+        executionSuccess: Boolean
+    ) {
+        prefs.edit()
+            .putLong(KEY_ACCEPTANCE_AT, System.currentTimeMillis())
+            .putString(KEY_ACCEPTANCE_MODE, mode.take(80))
+            .putString(KEY_ACCEPTANCE_GRADE, grade.take(80))
+            .putInt(KEY_ACCEPTANCE_PASSED, passed.coerceAtLeast(0))
+            .putInt(KEY_ACCEPTANCE_WARNINGS, warnings.coerceAtLeast(0))
+            .putInt(KEY_ACCEPTANCE_FAILED, failed.coerceAtLeast(0))
+            .putInt(KEY_ACCEPTANCE_BLOCKED, blocked.coerceAtLeast(0))
+            .putInt(KEY_ACCEPTANCE_UNSUPPORTED, unsupported.coerceAtLeast(0))
+            .putInt(KEY_ACCEPTANCE_NO_DATA, noData.coerceAtLeast(0))
+            .putLong(KEY_ACCEPTANCE_DURATION_MS, durationMs.coerceAtLeast(0L))
+            .putBoolean(KEY_ACCEPTANCE_EXECUTION_SUCCESS, executionSuccess)
             .apply()
     }
 
@@ -473,6 +500,21 @@ class AyanaCapabilityRegistry(
                         .put(
                             "next",
                             "fuse Accessibility window ownership with screen evidence; live visual fallback remains separate"
+                        )
+                )
+                .put(
+                    JSONObject()
+                        .put("id", "acceptance_engine")
+                        .put(
+                            "status",
+                            prefs.getString(
+                                KEY_ACCEPTANCE_GRADE,
+                                "NOT_RUN"
+                            ).orEmpty()
+                        )
+                        .put(
+                            "next",
+                            "use local QUICK_HEALTH / CAPABILITY_AUDIT / FULL_ACCEPTANCE; never call Agent Core merely to test AYANA herself"
                         )
                 )
                 .put(
@@ -992,6 +1034,59 @@ class AyanaCapabilityRegistry(
                     )
                 )
                 .put(
+                    "acceptance_last_at",
+                    prefs.getLong(
+                        KEY_ACCEPTANCE_AT,
+                        0L
+                    )
+                )
+                .put(
+                    "acceptance_last_mode",
+                    prefs.getString(
+                        KEY_ACCEPTANCE_MODE,
+                        ""
+                    ).orEmpty()
+                )
+                .put(
+                    "acceptance_last_grade",
+                    prefs.getString(
+                        KEY_ACCEPTANCE_GRADE,
+                        "NOT_RUN"
+                    ).orEmpty()
+                )
+                .put(
+                    "acceptance_last_passed",
+                    prefs.getInt(KEY_ACCEPTANCE_PASSED, 0)
+                )
+                .put(
+                    "acceptance_last_warnings",
+                    prefs.getInt(KEY_ACCEPTANCE_WARNINGS, 0)
+                )
+                .put(
+                    "acceptance_last_failed",
+                    prefs.getInt(KEY_ACCEPTANCE_FAILED, 0)
+                )
+                .put(
+                    "acceptance_last_blocked",
+                    prefs.getInt(KEY_ACCEPTANCE_BLOCKED, 0)
+                )
+                .put(
+                    "acceptance_last_unsupported",
+                    prefs.getInt(KEY_ACCEPTANCE_UNSUPPORTED, 0)
+                )
+                .put(
+                    "acceptance_last_no_data",
+                    prefs.getInt(KEY_ACCEPTANCE_NO_DATA, 0)
+                )
+                .put(
+                    "acceptance_last_duration_ms",
+                    prefs.getLong(KEY_ACCEPTANCE_DURATION_MS, 0L)
+                )
+                .put(
+                    "acceptance_last_execution_success",
+                    prefs.getBoolean(KEY_ACCEPTANCE_EXECUTION_SUCCESS, false)
+                )
+                .put(
                     "launchable_app_count",
                     appCount
                 )
@@ -1483,6 +1578,15 @@ class AyanaCapabilityRegistry(
 
         capability(
             capabilities,
+            "local_acceptance_test_engine",
+            implemented = true,
+            available = true,
+            deviceConfirmed = false,
+            note = "v12.13 local QUICK_HEALTH / CAPABILITY_AUDIT / FULL_ACCEPTANCE engine; zero Agent Core turns; full mode includes reversible memory/reminder/volume/brightness and verified Settings restore; pending device acceptance"
+        )
+
+        capability(
+            capabilities,
             "capability_truth_grounding",
             implemented = true,
             available = true,
@@ -1653,7 +1757,7 @@ class AyanaCapabilityRegistry(
             )
 
             append(
-                "local_self_review=true; capability_truth_grounding=true; perception_owner_fusion=true; autonomous_execution_loop=true; "
+                "local_self_review=true; local_acceptance_test_engine=true; capability_truth_grounding=true; perception_owner_fusion=true; autonomous_execution_loop=true; "
             )
 
             append(
@@ -1700,6 +1804,35 @@ class AyanaCapabilityRegistry(
 
             append(
                 "Multimodal intake is device-confirmed on the target tablet for image, PDF/DOCX and sampled-frame visual video analysis; video audio remains unavailable. Never inherit other generic ChatGPT abilities. "
+            )
+
+            append(
+                "Acceptance: last_mode="
+            )
+            append(
+                runtime.optString(
+                    "acceptance_last_mode"
+                )
+            )
+            append(
+                "; last_grade="
+            )
+            append(
+                runtime.optString(
+                    "acceptance_last_grade",
+                    "NOT_RUN"
+                )
+            )
+            append(
+                "; pass="
+            )
+            append(runtime.optInt("acceptance_last_passed", 0))
+            append(
+                "; fail="
+            )
+            append(runtime.optInt("acceptance_last_failed", 0))
+            append(
+                "; local_acceptance_network_turns=0. "
             )
 
             append(
@@ -2055,7 +2188,7 @@ class AyanaCapabilityRegistry(
     companion object {
 
         const val BUILD_LABEL =
-            "v12.12.0_autonomy_perception_truth_build_candidate"
+            "v12.13.0_autonomous_acceptance_engine_build_candidate"
 
         private const val PREFS_NAME =
             "ayana_capability_runtime_v11"
@@ -2128,6 +2261,39 @@ class AyanaCapabilityRegistry(
 
         private const val KEY_LAST_COMMAND_AT =
             "last_command_at"
+
+        private const val KEY_ACCEPTANCE_AT =
+            "acceptance_at"
+
+        private const val KEY_ACCEPTANCE_MODE =
+            "acceptance_mode"
+
+        private const val KEY_ACCEPTANCE_GRADE =
+            "acceptance_grade"
+
+        private const val KEY_ACCEPTANCE_PASSED =
+            "acceptance_passed"
+
+        private const val KEY_ACCEPTANCE_WARNINGS =
+            "acceptance_warnings"
+
+        private const val KEY_ACCEPTANCE_FAILED =
+            "acceptance_failed"
+
+        private const val KEY_ACCEPTANCE_BLOCKED =
+            "acceptance_blocked"
+
+        private const val KEY_ACCEPTANCE_UNSUPPORTED =
+            "acceptance_unsupported"
+
+        private const val KEY_ACCEPTANCE_NO_DATA =
+            "acceptance_no_data"
+
+        private const val KEY_ACCEPTANCE_DURATION_MS =
+            "acceptance_duration_ms"
+
+        private const val KEY_ACCEPTANCE_EXECUTION_SUCCESS =
+            "acceptance_execution_success"
 
         private const val KEY_SCREEN_LAST_PACKAGE =
             "screen_last_package"
