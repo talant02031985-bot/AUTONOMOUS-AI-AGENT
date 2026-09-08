@@ -60,6 +60,12 @@ import kotlin.math.abs
 
 class AyanaVoiceService : Service() {
 
+    // AYANA v12.12.0 AUTONOMY + CAPABILITY TRUTH + PERCEPTION FUSION.
+    // Self-review/autonomy-gap requests are answered from local runtime truth without
+    // an Agent Core round-trip; Agent Core latency is phase-classified; screen reads
+    // consume v4.5 effective-foreground fusion so AYANA's own overlay cannot mask a
+    // separately verified external foreground package. Existing v12.11.x routing,
+    // Completion Contract, Durable Goals, Safety, STOP and Settings truth remain intact.
     // AYANA v12.11.6 MULTI-STEP ROUTING INTEGRITY.
     // A conjunction inside a single Android Settings destination (for example
     // «дата и время») no longer forces an Agent Core/Planner round-trip.
@@ -3498,6 +3504,21 @@ class AyanaVoiceService : Service() {
             )
         ) {
             runLocalSelfDiagnosticsCommand(
+                silent = silent
+            )
+            return
+        }
+
+        // v12.12 LOCAL SELF-REVIEW / AUTONOMY TRUTH.
+        // Questions about what AYANA herself still needs must not spend 15–20 s
+        // waiting for a generic model answer that can forget already implemented
+        // capabilities. Build the review from the live Capability Registry instead.
+        if (
+            isLocalSelfReviewOrAutonomyRequest(
+                routingNormalized
+            )
+        ) {
+            runLocalSelfReviewCommand(
                 silent = silent
             )
             return
@@ -15046,7 +15067,9 @@ class AyanaVoiceService : Service() {
                 },
             details =
                 (
-                    "package=${screen.optString("interaction_package", screen.optString("package"))}; " +
+                    "package=${screen.optString("effective_foreground_package", screen.optString("interaction_package", screen.optString("package")))}; " +
+                        "raw_package=${screen.optString("raw_interaction_package", screen.optString("package"))}; " +
+                        "owner_fusion=${screen.optString("foreground_owner_confidence")}; " +
                         "content=${screen.optString("primary_content_state", screen.optString("content_status"))}; " +
                         "nodes=${screen.optInt("primary_node_count", screen.optInt("node_count", 0))}"
                     )
@@ -15151,6 +15174,272 @@ class AyanaVoiceService : Service() {
                         )
             )
         }
+    }
+
+    private fun isLocalSelfReviewOrAutonomyRequest(
+        command: String
+    ): Boolean {
+
+        val normalized =
+            command
+                .lowercase(
+                    Locale.ROOT
+                )
+                .replace(
+                    'ё',
+                    'е'
+                )
+                .replace(
+                    Regex("\\s+"),
+                    " "
+                )
+                .trim()
+
+        if (normalized.isBlank()) {
+            return false
+        }
+
+        // Do not hijack a neutral educational definition.
+        if (
+            normalized.contains("что такое") &&
+            (
+                normalized.contains("ии агент") ||
+                    normalized.contains("ai агент")
+                ) &&
+            !normalized.contains("аяна")
+        ) {
+            return false
+        }
+
+        val reviewVerb =
+            listOf(
+                "улучш",
+                "исправ",
+                "доработ",
+                "развив",
+                "не хватает",
+                "нужно",
+                "необходимо",
+                "что добавить",
+                "что изменить",
+                "список необходимых",
+                "полноценн"
+            )
+                .any {
+                    normalized.contains(
+                        it
+                    )
+                }
+
+        val autonomyTopic =
+            normalized.contains("автоном") ||
+                normalized.contains("ии агент") ||
+                normalized.contains("ai агент") ||
+                normalized.contains("агент core") ||
+                normalized.contains("agent core")
+
+        val explicitSelf =
+            normalized.contains("аяна") ||
+                normalized.contains("ayana") ||
+                normalized.contains("тебе") ||
+                normalized.contains("тебя") ||
+                normalized.contains("твои") ||
+                normalized.contains("твоя") ||
+                normalized.startsWith("что тебе")
+
+        return reviewVerb &&
+            autonomyTopic &&
+            (
+                explicitSelf ||
+                    normalized.contains(
+                        "полноценного автономного ии агента"
+                    ) ||
+                    normalized.contains(
+                        "полноценный автономный ии агент"
+                    )
+                )
+    }
+
+    private fun runLocalSelfReviewCommand(
+        silent: Boolean
+    ) {
+
+        executionPhase(
+            phase = "local_self_review",
+            executor = "capability_truth_executor"
+        )
+
+        broadcastStatus(
+            "Проверяю текущие возможности…",
+            STATE_EXECUTING
+        )
+
+        val review =
+            try {
+                capabilityRegistry
+                    .selfReviewSnapshot()
+            } catch (error: Exception) {
+                commandHistoryStore.addEvent(
+                    activeCommandHistoryId,
+                    state = "local_self_review_error",
+                    message = "Локальная capability self-review завершилась исключением",
+                    details =
+                        error.message
+                            .orEmpty()
+                            .take(
+                                500
+                            )
+                )
+
+                respondAndResume(
+                    text = "Не удалось сформировать локальный обзор возможностей AYANA.",
+                    silent = silent,
+                    success = false,
+                    technical =
+                        "local_self_review_exception:" +
+                            error.javaClass.simpleName
+                )
+                return
+            }
+
+        val runtime =
+            review.optJSONObject(
+                "runtime"
+            )
+                ?: JSONObject()
+
+        val latency =
+            review.optJSONObject(
+                "latency"
+            )
+                ?: JSONObject()
+
+        val screenState =
+            runtime.optString(
+                "screen_primary_content_state",
+                "unknown"
+            )
+
+        val accessibility =
+            runtime.optBoolean(
+                "accessibility_connected",
+                false
+            )
+
+        val latencyClass =
+            latency.optString(
+                "classification",
+                "NO_DATA"
+            )
+
+        val latencyText =
+            when (latencyClass) {
+                "MODEL_OR_SERVER_WAIT" -> {
+                    val total =
+                        latency.optLong(
+                            "total_ms",
+                            -1L
+                        )
+
+                    val headers =
+                        latency.optLong(
+                            "headers_wait_ms",
+                            -1L
+                        )
+
+                    "Последняя задержка Agent Core: ${total} мс; ${headers} мс ушло на ожидание ответа модели/сервера, а не на Android-исполнение."
+                }
+
+                "FAST" ->
+                    "Последний Agent Core запрос по транспортной телеметрии был быстрым."
+
+                "NO_DATA" ->
+                    "Свежей фазовой телеметрии Agent Core пока нет."
+
+                else -> {
+                    val total =
+                        latency.optLong(
+                            "total_ms",
+                            -1L
+                        )
+
+                    "Последняя задержка Agent Core: ${total} мс; класс=$latencyClass."
+                }
+            }
+
+        val perceptionText =
+            when {
+                !accessibility ->
+                    "Perception сейчас ограничен: Accessibility не подключена."
+
+                screenState == "readable" ->
+                    "Accessibility/foreground perception доступен; v12.12 добавляет owner-fusion для защиты от маскировки внешнего приложения собственным overlay AYANA."
+
+                screenState == "partial" ->
+                    "Экран читается только частично; owner-fusion есть, но live visual fallback всё ещё нужен как отдельный следующий уровень."
+
+                else ->
+                    "Foreground/window ownership определяется, но содержимое текущего экрана не подтверждено полностью; live visual fallback остаётся важным пробелом."
+            }
+
+        val answer =
+            buildString {
+                append(
+                    "Для текущей AYANA приоритеты такие.\n\n"
+                )
+                append(
+                    "1. Автономное выполнение: Durable Goals, Planner, checkpoints, bounded replan, Safety и strict terminal verification уже есть. Теперь нужен полный multi-step acceptance: цель → действия → проверка → replan → продолжение без ложного SUCCESS.\n"
+                )
+                append(
+                    "2. Восприятие: "
+                )
+                append(
+                    perceptionText
+                )
+                append(
+                    "\n"
+                )
+                append(
+                    "3. Development Agent: анализ и подготовка исходников возможны, но авторизованная запись в репозиторий, commit/push, запуск Android build/test pipeline и rollback как единая транзакция пока не реализованы.\n"
+                )
+                append(
+                    "4. Внешние интеграции: нужны специализированные mail/calendar/files executors со scoped permissions, подтверждением чувствительных действий и проверяемым результатом.\n"
+                )
+                append(
+                    "5. Capability truth: self-review теперь строится локально из реального Registry/runtime, чтобы не предлагать заново уже существующие App Resolver, Memory, Tasks, Planner, STOP и Durable Goals.\n"
+                )
+                append(
+                    "6. Производительность: "
+                )
+                append(
+                    latencyText
+                )
+                append(
+                    "\n\nПосле этих изменений нужен единый полноценный acceptance-test автономного агента, а не отдельные несвязанные проверки."
+                )
+            }
+
+        commandHistoryStore.addEvent(
+            activeCommandHistoryId,
+            state = "local_self_review",
+            message = "Capability self-review сформирован локально",
+            details =
+                (
+                    "build=${review.optString("build")}; " +
+                        "latency_class=$latencyClass; " +
+                        "screen=$screenState; " +
+                        "accessibility=$accessibility"
+                    )
+                    .take(
+                        900
+                    )
+        )
+
+        respondAndResume(
+            text = answer,
+            silent = silent,
+            success = true
+        )
     }
 
     private fun isHighLevelCapabilityReasoningRequest(
@@ -23019,6 +23308,8 @@ class AyanaVoiceService : Service() {
                         "prepare_ms=$safePrepare; " +
                         "upload_ms=$safeUpload; " +
                         "headers_wait_ms=$safeHeaders; " +
+                        "latency_class=${capabilityRegistry.agentCoreLatencySnapshot().optString("classification", "NO_DATA")}; " +
+                        "bottleneck=${capabilityRegistry.agentCoreLatencySnapshot().optString("bottleneck", "unknown")}; " +
                         "body_read_ms=$safeBody; " +
                         "json_parse_ms=$safeParse; " +
                         "request_bytes=${requestBytes.coerceAtLeast(0)}; " +
