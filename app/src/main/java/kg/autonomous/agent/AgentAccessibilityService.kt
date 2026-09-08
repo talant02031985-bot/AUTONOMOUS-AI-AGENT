@@ -20,7 +20,7 @@ import kotlin.math.max
 class AgentAccessibilityService :
     AccessibilityService() {
 
-    // AYANA Accessibility v7.0 — VERIFIED FOREGROUND OWNER HANDOFF + STICKY OWNER EVIDENCE CONTINUITY.
+    // AYANA Accessibility v7.1 — VERIFIED FOREGROUND FUSION + OWNER HANDOFF CONTINUITY.
     // v7.0 preserves v6.9 generic ownership/evidence guards and adds one explicit truth handoff:
     // when an upper execution layer has already VERIFIED a package-owned external surface from
     // same-window Accessibility/semantic evidence, it can commit that proven package as the
@@ -5334,6 +5334,39 @@ class AgentAccessibilityService :
             primaryContentState == "readable" ||
                 primaryContentState == "partial"
 
+        // v7.1 effective foreground truth:
+        // a real external application window always wins directly. Sticky owner
+        // evidence is allowed to override only AYANA's own package, which prevents
+        // the floating overlay/MainActivity package from masking a verified external
+        // foreground surface without letting stale ownership replace app A with app B.
+        val primaryPackage =
+            primary
+                ?.packageName
+                .orEmpty()
+                .trim()
+
+        val effectiveForegroundPackage =
+            when {
+                primaryPackage.isNotBlank() &&
+                    primaryPackage != packageName ->
+                    primaryPackage
+
+                lastForegroundOwnerPackage.isNotBlank() &&
+                    lastForegroundOwnerPackage != packageName ->
+                    lastForegroundOwnerPackage
+
+                primaryPackage.isNotBlank() ->
+                    primaryPackage
+
+                else ->
+                    lastForegroundOwnerPackage
+            }
+
+        val ayanaOwnWindowSuppressedForForeground =
+            primaryPackage == packageName &&
+                effectiveForegroundPackage.isNotBlank() &&
+                effectiveForegroundPackage != packageName
+
         return JSONObject()
             .put("success", true)
             .put("snapshot_success", true)
@@ -5353,7 +5386,7 @@ class AgentAccessibilityService :
             .put("primary_live_readable_text_count", primaryLiveReadableTextCount)
             .put("primary_evidence_readable_text_count", primaryEvidenceReadableTextCount)
             .put("primary_node_count", primaryNodeCount)
-            .put("window_context_mode", "v7_0_verified_owner_handoff")
+            .put("window_context_mode", "v7_1_verified_foreground_fusion")
             .put("window_count", allContexts.size)
             .put("raw_window_count", safeWindowCount())
             .put("readable_window_count", readableWindowCount)
@@ -5374,6 +5407,15 @@ class AgentAccessibilityService :
             .put("foreground_owner_package", lastForegroundOwnerPackage)
             .put("foreground_owner_window_id", lastForegroundOwnerWindowId)
             .put("foreground_owner_source", lastForegroundOwnerSource)
+            .put("effective_foreground_package", effectiveForegroundPackage)
+            .put(
+                "ayana_own_window_suppressed_for_foreground",
+                ayanaOwnWindowSuppressedForForeground
+            )
+            .put(
+                "foreground_fusion_mode",
+                "external_primary_else_verified_owner_over_own_app"
+            )
             .put(
                 "foreground_owner_age_ms",
                 if (lastForegroundOwnerTime > 0L) {
@@ -5393,6 +5435,41 @@ class AgentAccessibilityService :
                 (SystemClock.elapsedRealtime() - snapshotStartedAt)
                     .coerceAtLeast(0L)
             )
+    }
+
+    /**
+     * Read-only foreground package resolver for upper-layer verifiers.
+     * It follows the same v7.1 fusion rule as buildScreenSnapshot().
+     */
+    fun effectiveForegroundPackage():
+        String {
+
+        val primary =
+            primaryWindowContext(
+                resolveWindowContexts()
+            )
+
+        val primaryPackage =
+            primary
+                ?.packageName
+                .orEmpty()
+                .trim()
+
+        return when {
+            primaryPackage.isNotBlank() &&
+                primaryPackage != packageName ->
+                primaryPackage
+
+            lastForegroundOwnerPackage.isNotBlank() &&
+                lastForegroundOwnerPackage != packageName ->
+                lastForegroundOwnerPackage
+
+            primaryPackage.isNotBlank() ->
+                primaryPackage
+
+            else ->
+                lastForegroundOwnerPackage
+        }
     }
 
     fun screenSignature():
