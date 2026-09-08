@@ -60,6 +60,13 @@ import kotlin.math.abs
 
 class AyanaVoiceService : Service() {
 
+    // AYANA v12.13.0 AUTONOMOUS ACCEPTANCE ENGINE + LOCAL TEST ROUTING.
+    // Self-test requests are split into QUICK_HEALTH / CAPABILITY_AUDIT / FULL_ACCEPTANCE
+    // and execute locally with zero Agent Core turns. Full acceptance combines live
+    // read-only probes, pure contract checks and reversible state round-trips whose
+    // original volume/brightness/reminder/memory state is restored before terminal.
+    // A completed test run is never equated with agent readiness: the acceptance grade
+    // (READY / READY_WITH_LIMITATIONS / NOT_READY) is reported separately.
     // AYANA v12.12.0 AUTONOMY + CAPABILITY TRUTH + PERCEPTION FUSION.
     // Self-review/autonomy-gap requests are answered from local runtime truth without
     // an Agent Core round-trip; Agent Core latency is phase-classified; screen reads
@@ -639,6 +646,22 @@ class AyanaVoiceService : Service() {
     // Agent Core device tools, independently from model instructions.
     private val safetyPolicy by lazy {
         AyanaSafetyPolicy()
+    }
+
+    // v12.13: local acceptance engine. The runner delegates individual probes
+    // back into this service so existing Android executors/stores remain the
+    // single implementation owners; the engine only orchestrates and grades.
+    private val acceptanceTestEngine by lazy {
+        AyanaAcceptanceTestEngine(
+            probeRunner = { probeId ->
+                runAcceptanceProbe(probeId)
+            },
+            shouldCancel = {
+                cancelRequested ||
+                    executionKernel.isCancelled() ||
+                    shuttingDown
+            }
+        )
     }
 
     // =========================================================
@@ -3491,6 +3514,21 @@ class AyanaVoiceService : Service() {
                     reply,
                     silent,
                     success = true
+                )
+                return
+            }
+
+        // v12.13 LOCAL ACCEPTANCE ROUTER.
+        // Requests to test AYANA herself are owned locally before the generic
+        // diagnostics/self-review/Agent Core paths. This prevents the 2-3 cloud
+        // turns observed in v12.12 for what should be deterministic local evidence.
+        localAcceptanceTestMode(
+            originalCommand
+        )
+            ?.let { acceptanceMode ->
+                runLocalAcceptanceTestCommand(
+                    mode = acceptanceMode,
+                    silent = silent
                 )
                 return
             }
@@ -15175,6 +15213,1647 @@ class AyanaVoiceService : Service() {
             )
         }
     }
+
+    private fun localAcceptanceTestMode(
+        command: String
+    ): AyanaAcceptanceTestEngine.Mode? {
+        val normalized =
+            command
+                .lowercase(Locale.ROOT)
+                .replace('ё', 'е')
+                .replace(Regex("\\s+"), " ")
+                .trim()
+
+        if (normalized.isBlank()) {
+            return null
+        }
+
+        // Do not steal explicit source-code/unit-test requests from development Q&A.
+        val clearlyCodeScoped =
+            listOf(
+                "юнит тест",
+                "unit test",
+                "тесты кода",
+                "тест кода",
+                "тесты файла",
+                "протестируй файл",
+                "gradle test",
+                "github actions"
+            ).any(normalized::contains)
+
+        val explicitAyanaScope =
+            listOf(
+                "аяна",
+                "ayana",
+                "себя",
+                "своих возможност",
+                "своих функц",
+                "системн",
+                "что добавлено",
+                "какие функции новые",
+                "новые функции",
+                "внесли много улучш",
+                "проверка сборки",
+                "полномасштаб",
+                "полноценный тест",
+                "полный тест"
+            ).any(normalized::contains)
+
+        if (clearlyCodeScoped && !explicitAyanaScope) {
+            return null
+        }
+
+        val fullAcceptance =
+            listOf(
+                "полномасштаб",
+                "полный тест своих",
+                "полный тест возможност",
+                "полный тест функц",
+                "полноценный тест",
+                "всех своих возможност",
+                "всех своих функц",
+                "acceptance test",
+                "acceptance-тест",
+                "приемочн"
+            ).any(normalized::contains)
+
+        if (fullAcceptance) {
+            return AyanaAcceptanceTestEngine.Mode.FULL_ACCEPTANCE
+        }
+
+        val capabilityAudit =
+            listOf(
+                "что добавлено",
+                "какие функции новые",
+                "новые функции",
+                "что нового в сборке",
+                "внесли много улучш",
+                "аудит возможност",
+                "проверь возможности",
+                "проверь функции",
+                "проверка сборки"
+            ).any(normalized::contains)
+
+        if (capabilityAudit) {
+            return AyanaAcceptanceTestEngine.Mode.CAPABILITY_AUDIT
+        }
+
+        val genericSelfTest =
+            normalized in setOf(
+                "проведи тесты",
+                "проведи тест",
+                "протестируй себя",
+                "проверь себя"
+            ) ||
+                (
+                    normalized.contains("проведи тест") &&
+                        (
+                            normalized.contains("результат") ||
+                                normalized.contains("сво") ||
+                                normalized.contains("аяна")
+                            )
+                    ) ||
+                (
+                    normalized.contains("тест") &&
+                        normalized.contains("дай результат")
+                    )
+
+        return if (genericSelfTest) {
+            AyanaAcceptanceTestEngine.Mode.QUICK_HEALTH
+        } else {
+            null
+        }
+    }
+
+    private fun runLocalAcceptanceTestCommand(
+        mode: AyanaAcceptanceTestEngine.Mode,
+        silent: Boolean
+    ) {
+        executionPhase(
+            phase = "local_acceptance_test",
+            executor = "acceptance_test_executor"
+        )
+
+        broadcastStatus(
+            when (mode) {
+                AyanaAcceptanceTestEngine.Mode.QUICK_HEALTH ->
+                    "Провожу быструю локальную проверку…"
+
+                AyanaAcceptanceTestEngine.Mode.CAPABILITY_AUDIT ->
+                    "Проверяю возможности сборки…"
+
+                AyanaAcceptanceTestEngine.Mode.FULL_ACCEPTANCE ->
+                    "Провожу полномасштабный acceptance-test…"
+            },
+            STATE_EXECUTING
+        )
+
+        val result =
+            try {
+                acceptanceTestEngine.run(mode)
+            } catch (error: Exception) {
+                JSONObject()
+                    .put("success", false)
+                    .put("execution_success", false)
+                    .put("mode", mode.wireName)
+                    .put("grade", AyanaAcceptanceTestEngine.GRADE_NOT_READY)
+                    .put("passed", 0)
+                    .put("warnings", 0)
+                    .put("failed", 1)
+                    .put("blocked", 0)
+                    .put("unsupported", 0)
+                    .put("no_data", 0)
+                    .put("network_turns", 0)
+                    .put(
+                        "summary",
+                        "Локальный acceptance-test не завершён: ${error.message ?: error.javaClass.simpleName}"
+                    )
+            }
+
+        try {
+            capabilityRegistry.recordAcceptanceResult(
+                mode = mode.wireName,
+                grade = result.optString("grade", AyanaAcceptanceTestEngine.GRADE_NOT_READY),
+                passed = result.optInt("passed", 0),
+                warnings = result.optInt("warnings", 0),
+                failed = result.optInt("failed", 0),
+                blocked = result.optInt("blocked", 0),
+                unsupported = result.optInt("unsupported", 0),
+                noData = result.optInt("no_data", 0),
+                durationMs = result.optLong("duration_ms", 0L),
+                executionSuccess = result.optBoolean("execution_success", false)
+            )
+        } catch (_: Exception) {
+        }
+
+        commandHistoryStore.addEvent(
+            activeCommandHistoryId,
+            state = "acceptance_test_result",
+            message =
+                "${mode.wireName}: ${result.optString("grade", "UNKNOWN")}",
+            details =
+                (
+                    "pass=${result.optInt("passed")}; " +
+                        "warning=${result.optInt("warnings")}; " +
+                        "fail=${result.optInt("failed")}; " +
+                        "blocked=${result.optInt("blocked")}; " +
+                        "unsupported=${result.optInt("unsupported")}; " +
+                        "no_data=${result.optInt("no_data")}; " +
+                        "duration_ms=${result.optLong("duration_ms")}; " +
+                        "network_turns=${result.optInt("network_turns", 0)}"
+                    ).take(1000)
+        )
+
+        val summary =
+            result
+                .optString(
+                    if (silent) {
+                        "summary"
+                    } else {
+                        "voice_summary"
+                    }
+                )
+                .ifBlank {
+                    result.optString("summary")
+                }
+                .ifBlank {
+                    "Локальная проверка завершена, но итоговый отчёт не сформирован."
+                }
+
+        if (result.optBoolean("execution_success", false)) {
+            finishLocalCommand(
+                summary,
+                silent
+            )
+        } else {
+            respondAndResume(
+                text = summary,
+                silent = silent,
+                success = false,
+                technical = "acceptance_test_execution_failed:${mode.wireName}"
+            )
+        }
+    }
+
+    private fun runAcceptanceProbe(
+        probeId: String
+    ): JSONObject {
+        return when (probeId) {
+            AyanaAcceptanceTestEngine.PROBE_DIAGNOSTICS_LIVE ->
+                acceptanceDiagnosticsProbe()
+
+            AyanaAcceptanceTestEngine.PROBE_RUNTIME_CAPABILITIES ->
+                acceptanceRuntimeCapabilitiesProbe()
+
+            AyanaAcceptanceTestEngine.PROBE_SCREEN_PERCEPTION ->
+                acceptanceScreenPerceptionProbe()
+
+            AyanaAcceptanceTestEngine.PROBE_AGENT_CORE_LATENCY ->
+                acceptanceAgentCoreLatencyProbe()
+
+            AyanaAcceptanceTestEngine.PROBE_NOTIFICATION_ACCESS ->
+                acceptanceNotificationAccessProbe()
+
+            AyanaAcceptanceTestEngine.PROBE_CAPABILITY_REGISTRY_INTEGRITY ->
+                acceptanceCapabilityRegistryIntegrityProbe()
+
+            AyanaAcceptanceTestEngine.PROBE_AUTONOMY_FOUNDATION ->
+                acceptanceAutonomyFoundationProbe()
+
+            AyanaAcceptanceTestEngine.PROBE_PERCEPTION_TRUTH ->
+                acceptancePerceptionTruthProbe()
+
+            AyanaAcceptanceTestEngine.PROBE_ARTIFACT_DOCUMENT_TRUTH ->
+                acceptanceArtifactDocumentTruthProbe()
+
+            AyanaAcceptanceTestEngine.PROBE_MULTIMODAL_TRUTH ->
+                acceptanceMultimodalTruthProbe()
+
+            AyanaAcceptanceTestEngine.PROBE_DEVELOPMENT_TRUTH ->
+                acceptanceDevelopmentTruthProbe()
+
+            AyanaAcceptanceTestEngine.PROBE_EXTERNAL_INTEGRATION_TRUTH ->
+                acceptanceExternalIntegrationTruthProbe()
+
+            AyanaAcceptanceTestEngine.PROBE_APP_RESOLVER ->
+                acceptanceAppResolverProbe()
+
+            AyanaAcceptanceTestEngine.PROBE_PLANNER ->
+                acceptancePlannerProbe()
+
+            AyanaAcceptanceTestEngine.PROBE_COMPLETION_CONTRACT ->
+                acceptanceCompletionContractProbe()
+
+            AyanaAcceptanceTestEngine.PROBE_SAFETY_ENGINE ->
+                acceptanceSafetyProbe()
+
+            AyanaAcceptanceTestEngine.PROBE_DURABLE_GOALS ->
+                acceptanceDurableGoalsProbe()
+
+            AyanaAcceptanceTestEngine.PROBE_MEMORY_ROUNDTRIP ->
+                acceptanceMemoryRoundTripProbe()
+
+            AyanaAcceptanceTestEngine.PROBE_REMINDER_ROUNDTRIP ->
+                acceptanceReminderRoundTripProbe()
+
+            AyanaAcceptanceTestEngine.PROBE_NOTIFICATION_READ ->
+                acceptanceNotificationReadProbe()
+
+            AyanaAcceptanceTestEngine.PROBE_VOLUME_ROUNDTRIP ->
+                acceptanceVolumeRoundTripProbe()
+
+            AyanaAcceptanceTestEngine.PROBE_BRIGHTNESS_ROUNDTRIP ->
+                acceptanceBrightnessRoundTripProbe()
+
+            AyanaAcceptanceTestEngine.PROBE_SETTINGS_ROUNDTRIP ->
+                acceptanceSettingsRoundTripProbe()
+
+            AyanaAcceptanceTestEngine.PROBE_FOREGROUND_FUSION ->
+                acceptanceForegroundFusionProbe()
+
+            AyanaAcceptanceTestEngine.PROBE_KNOWN_LIMITS ->
+                acceptanceKnownLimitsProbe()
+
+            else ->
+                acceptanceProbeResult(
+                    status = AyanaAcceptanceTestEngine.STATUS_FAIL,
+                    message = "Неизвестная acceptance-проверка: $probeId",
+                    evidenceScope = "none"
+                )
+        }
+    }
+
+    private fun acceptanceDiagnosticsProbe(): JSONObject {
+        val diagnostics =
+            selfDiagnostics.run(
+                focus = "all"
+            )
+
+        val passed = diagnostics.optInt("passed", 0)
+        val warnings = diagnostics.optInt("warnings", 0)
+        val unknown = diagnostics.optInt("unknown", 0)
+        val failed = diagnostics.optInt("failed", 0)
+
+        val status =
+            when {
+                failed > 0 -> AyanaAcceptanceTestEngine.STATUS_FAIL
+                warnings > 0 -> AyanaAcceptanceTestEngine.STATUS_WARNING
+                unknown > 0 -> AyanaAcceptanceTestEngine.STATUS_NO_DATA
+                else -> AyanaAcceptanceTestEngine.STATUS_PASS
+            }
+
+        return acceptanceProbeResult(
+            status = status,
+            message =
+                "Self-Diagnostics: PASS $passed, WARNING $warnings, NO_DATA $unknown, FAIL $failed.",
+            evidenceScope = "live_runtime",
+            verified = failed == 0,
+            evidence =
+                JSONObject()
+                    .put("passed", passed)
+                    .put("warnings", warnings)
+                    .put("unknown", unknown)
+                    .put("failed", failed)
+        )
+    }
+
+    private fun acceptanceRuntimeCapabilitiesProbe(): JSONObject {
+        val snapshot =
+            capabilityRegistry.snapshot()
+
+        val runtime =
+            snapshot.optJSONObject("runtime")
+                ?: JSONObject()
+
+        val ok =
+            snapshot.optBoolean("success", false) &&
+                snapshot.optString("build").isNotBlank() &&
+                runtime.optInt("launchable_app_count", -1) >= 0
+
+        return acceptanceProbeResult(
+            status =
+                if (ok) {
+                    AyanaAcceptanceTestEngine.STATUS_PASS
+                } else {
+                    AyanaAcceptanceTestEngine.STATUS_FAIL
+                },
+            message =
+                if (ok) {
+                    "Capability Registry доступен; build=${snapshot.optString("build")}, приложений=${runtime.optInt("launchable_app_count", -1)}."
+                } else {
+                    "Capability Registry не вернул полный runtime snapshot."
+                },
+            evidenceScope = "live_runtime",
+            verified = ok,
+            evidence =
+                JSONObject()
+                    .put("build", snapshot.optString("build"))
+                    .put("launchable_app_count", runtime.optInt("launchable_app_count", -1))
+                    .put("voice_service_running", runtime.optBoolean("voice_service_running", false))
+                    .put("accessibility_connected", runtime.optBoolean("accessibility_connected", false))
+        )
+    }
+
+    private fun acceptanceScreenPerceptionProbe(): JSONObject {
+        val screen =
+            screenIntelligence.getScreenState()
+
+        if (!screen.optBoolean("success", false)) {
+            return acceptanceProbeResult(
+                status = AyanaAcceptanceTestEngine.STATUS_FAIL,
+                message = screen.optString("message").ifBlank { "Accessibility snapshot не получен." },
+                evidenceScope = "live_accessibility",
+                verified = false,
+                evidence =
+                    JSONObject()
+                        .put("reason", screen.optString("reason"))
+            )
+        }
+
+        val state =
+            screen.optString("primary_content_state", "unknown")
+
+        val status =
+            when (state) {
+                "readable" -> AyanaAcceptanceTestEngine.STATUS_PASS
+                "partial", "structure_only" -> AyanaAcceptanceTestEngine.STATUS_WARNING
+                "unavailable", "unknown" -> AyanaAcceptanceTestEngine.STATUS_NO_DATA
+                else -> AyanaAcceptanceTestEngine.STATUS_WARNING
+            }
+
+        val effectivePackage =
+            screen.optString(
+                "effective_foreground_package",
+                screen.optString("interaction_package", screen.optString("package"))
+            )
+
+        try {
+            capabilityRegistry.recordScreenObservation(screen)
+        } catch (_: Exception) {
+        }
+
+        return acceptanceProbeResult(
+            status = status,
+            message =
+                "Экран: package=${effectivePackage.ifBlank { "не определён" }}, content=$state.",
+            evidenceScope = "live_accessibility",
+            verified = state == "readable" || state == "partial",
+            evidence =
+                JSONObject()
+                    .put("effective_foreground_package", effectivePackage)
+                    .put("raw_interaction_package", screen.optString("raw_interaction_package"))
+                    .put("content_state", state)
+                    .put("perception_fusion_version", screen.optInt("perception_fusion_version", 0))
+                    .put("snapshot_duration_ms", screen.optLong("snapshot_duration_ms", -1L))
+        )
+    }
+
+    private fun acceptanceAgentCoreLatencyProbe(): JSONObject {
+        val latency =
+            capabilityRegistry.agentCoreLatencySnapshot()
+
+        val classification =
+            latency.optString("classification", "NO_DATA")
+
+        val status =
+            when (classification) {
+                "NO_DATA" -> AyanaAcceptanceTestEngine.STATUS_NO_DATA
+                "MODEL_OR_SERVER_WAIT",
+                "ANDROID_PREPARE_SLOW",
+                "UPLOAD_SLOW",
+                "RESPONSE_BODY_SLOW",
+                "ANDROID_PARSE_SLOW",
+                "HIGH_LATENCY_UNCLASSIFIED",
+                "CLIENT_PROCESSING_SLOW" -> AyanaAcceptanceTestEngine.STATUS_WARNING
+                else -> AyanaAcceptanceTestEngine.STATUS_PASS
+            }
+
+        return acceptanceProbeResult(
+            status = status,
+            message =
+                "Agent Core telemetry: class=$classification, total=${latency.optLong("total_ms", -1L)} мс, headers_wait=${latency.optLong("headers_wait_ms", -1L)} мс.",
+            evidenceScope = "stored_measured_telemetry",
+            verified = classification != "NO_DATA",
+            evidence = JSONObject(latency.toString())
+        )
+    }
+
+    private fun acceptanceNotificationAccessProbe(): JSONObject {
+        val runtime =
+            capabilityRegistry.snapshot()
+                .optJSONObject("runtime")
+                ?: JSONObject()
+
+        val access =
+            runtime.optBoolean("notification_listener_access", false)
+
+        val connected =
+            runtime.optBoolean("notification_listener_connected", false)
+
+        val status =
+            when {
+                access && connected -> AyanaAcceptanceTestEngine.STATUS_PASS
+                access -> AyanaAcceptanceTestEngine.STATUS_WARNING
+                else -> AyanaAcceptanceTestEngine.STATUS_BLOCKED
+            }
+
+        return acceptanceProbeResult(
+            status = status,
+            message =
+                when {
+                    access && connected -> "NotificationListener имеет доступ и подключён."
+                    access -> "Доступ к уведомлениям выдан, но listener сейчас не подтверждён как подключённый."
+                    else -> "Доступ NotificationListener не выдан."
+                },
+            evidenceScope = "live_runtime",
+            verified = access && connected,
+            evidence =
+                JSONObject()
+                    .put("access", access)
+                    .put("connected", connected)
+        )
+    }
+
+    private fun acceptanceCapabilityRegistryIntegrityProbe(): JSONObject {
+        val snapshot = capabilityRegistry.snapshot()
+        val capabilities = snapshot.optJSONArray("capabilities") ?: JSONArray()
+        val required =
+            listOf(
+                "strict_terminal_verification",
+                "durable_goals",
+                "memory_v2",
+                "tasks_reminders_v2",
+                "artifact_generation",
+                "docx_translation",
+                "image_vision_analysis",
+                "capability_truth_grounding",
+                "perception_owner_fusion",
+                "autonomous_execution_loop",
+                "local_acceptance_test_engine"
+            )
+
+        val present =
+            linkedSetOf<String>()
+
+        var contradictions = 0
+
+        for (index in 0 until capabilities.length()) {
+            val item = capabilities.optJSONObject(index) ?: continue
+            val id = item.optString("id")
+            if (id.isNotBlank()) {
+                present += id
+            }
+
+            val implemented = item.optBoolean("implemented", false)
+            val available = item.optBoolean("available_now", false)
+            val confirmed = item.optBoolean("device_confirmed", false)
+
+            if ((!implemented && available) || (!implemented && confirmed)) {
+                contradictions++
+            }
+        }
+
+        val missing = required.filterNot(present::contains)
+        val ok = missing.isEmpty() && contradictions == 0
+
+        return acceptanceProbeResult(
+            status = if (ok) AyanaAcceptanceTestEngine.STATUS_PASS else AyanaAcceptanceTestEngine.STATUS_FAIL,
+            message =
+                if (ok) {
+                    "Capability Registry непротиворечив; обязательные capability-id присутствуют."
+                } else {
+                    "Capability Registry: отсутствуют ${missing.joinToString(", ").ifBlank { "нет" }}; противоречий=$contradictions."
+                },
+            evidenceScope = "build_runtime_truth",
+            verified = ok,
+            evidence =
+                JSONObject()
+                    .put("capability_count", capabilities.length())
+                    .put("missing", JSONArray(missing))
+                    .put("contradictions", contradictions)
+        )
+    }
+
+    private fun acceptanceAutonomyFoundationProbe(): JSONObject {
+        val snapshot = capabilityRegistry.snapshot()
+        val ids =
+            listOf(
+                "strict_terminal_verification",
+                "durable_goals",
+                "goal_compiler_execution_contract",
+                "unified_execution_session",
+                "autonomous_execution_loop"
+            )
+
+        val missing = mutableListOf<String>()
+        val unavailable = mutableListOf<String>()
+        val unconfirmed = mutableListOf<String>()
+
+        ids.forEach { id ->
+            val item = acceptanceCapability(snapshot, id)
+            if (item == null || !item.optBoolean("implemented", false)) {
+                missing += id
+            } else {
+                if (!item.optBoolean("available_now", false)) {
+                    unavailable += id
+                }
+                if (!item.optBoolean("device_confirmed", false)) {
+                    unconfirmed += id
+                }
+            }
+        }
+
+        val status =
+            when {
+                missing.isNotEmpty() || unavailable.isNotEmpty() -> AyanaAcceptanceTestEngine.STATUS_FAIL
+                unconfirmed.isNotEmpty() -> AyanaAcceptanceTestEngine.STATUS_WARNING
+                else -> AyanaAcceptanceTestEngine.STATUS_PASS
+            }
+
+        return acceptanceProbeResult(
+            status = status,
+            message =
+                when (status) {
+                    AyanaAcceptanceTestEngine.STATUS_PASS ->
+                        "Planner/Durable Goals/Execution Session/terminal verification подтверждены как доступная автономная база."
+                    AyanaAcceptanceTestEngine.STATUS_WARNING ->
+                        "Автономная база реализована и доступна, но device-confirmed ещё не для всех слоёв: ${unconfirmed.joinToString(", ")}."
+                    else ->
+                        "Автономная база неполна: missing=${missing.joinToString(",")}; unavailable=${unavailable.joinToString(",")}."
+                },
+            evidenceScope = "build_runtime_truth",
+            verified = missing.isEmpty() && unavailable.isEmpty(),
+            evidence =
+                JSONObject()
+                    .put("missing", JSONArray(missing))
+                    .put("unavailable", JSONArray(unavailable))
+                    .put("unconfirmed", JSONArray(unconfirmed))
+        )
+    }
+
+    private fun acceptancePerceptionTruthProbe(): JSONObject {
+        val snapshot = capabilityRegistry.snapshot()
+        val fusion = acceptanceCapability(snapshot, "perception_owner_fusion")
+        val runtime = snapshot.optJSONObject("runtime") ?: JSONObject()
+        val state = runtime.optString("screen_primary_content_state", "unknown")
+
+        val fusionReady =
+            fusion?.optBoolean("implemented", false) == true &&
+                fusion.optBoolean("available_now", false)
+
+        val status =
+            when {
+                !fusionReady -> AyanaAcceptanceTestEngine.STATUS_FAIL
+                state == "readable" -> AyanaAcceptanceTestEngine.STATUS_PASS
+                state == "partial" || state == "structure_only" -> AyanaAcceptanceTestEngine.STATUS_WARNING
+                else -> AyanaAcceptanceTestEngine.STATUS_NO_DATA
+            }
+
+        return acceptanceProbeResult(
+            status = status,
+            message = "Perception owner-fusion=${fusionReady}; current_content=$state.",
+            evidenceScope = "build_plus_live_runtime",
+            verified = fusionReady,
+            evidence =
+                JSONObject()
+                    .put("fusion_ready", fusionReady)
+                    .put("content_state", state)
+                    .put("current_package", runtime.optString("screen_primary_package"))
+        )
+    }
+
+    private fun acceptanceArtifactDocumentTruthProbe(): JSONObject {
+        val snapshot = capabilityRegistry.snapshot()
+        val ids =
+            listOf(
+                "artifact_generation",
+                "docx_style_preserving_transform",
+                "docx_translation"
+            )
+
+        val notConfirmed =
+            ids.filter { id ->
+                val item = acceptanceCapability(snapshot, id)
+                item == null ||
+                    !item.optBoolean("implemented", false) ||
+                    !item.optBoolean("available_now", false) ||
+                    !item.optBoolean("device_confirmed", false)
+            }
+
+        val ok = notConfirmed.isEmpty()
+
+        return acceptanceProbeResult(
+            status = if (ok) AyanaAcceptanceTestEngine.STATUS_PASS else AyanaAcceptanceTestEngine.STATUS_WARNING,
+            message =
+                if (ok) {
+                    "TXT/DOCX/PDF/XLSX/JPEG/graph и DOCX translation имеют device-confirmed evidence."
+                } else {
+                    "Не все File/Document capability подтверждены на устройстве: ${notConfirmed.joinToString(", ")}."
+                },
+            evidenceScope = "device_confirmed_registry",
+            verified = ok,
+            evidence = JSONObject().put("not_confirmed", JSONArray(notConfirmed))
+        )
+    }
+
+    private fun acceptanceMultimodalTruthProbe(): JSONObject {
+        val snapshot = capabilityRegistry.snapshot()
+        val positive =
+            listOf(
+                "image_upload_to_ayana",
+                "video_upload_to_ayana",
+                "image_vision_analysis",
+                "video_analysis",
+                "document_understanding"
+            )
+
+        val badPositive =
+            positive.filter { id ->
+                val item = acceptanceCapability(snapshot, id)
+                item == null ||
+                    !item.optBoolean("implemented", false) ||
+                    !item.optBoolean("available_now", false) ||
+                    !item.optBoolean("device_confirmed", false)
+            }
+
+        val videoAudio = acceptanceCapability(snapshot, "video_audio_analysis")
+        val negativeTruthOk =
+            videoAudio != null &&
+                !videoAudio.optBoolean("implemented", true) &&
+                !videoAudio.optBoolean("available_now", true)
+
+        val ok = badPositive.isEmpty() && negativeTruthOk
+
+        return acceptanceProbeResult(
+            status = if (ok) AyanaAcceptanceTestEngine.STATUS_PASS else AyanaAcceptanceTestEngine.STATUS_FAIL,
+            message =
+                if (ok) {
+                    "Multimodal truth корректна: image/document/sample-frame video подтверждены; video audio честно недоступен."
+                } else {
+                    "Multimodal capability truth противоречива или неполна."
+                },
+            evidenceScope = "device_confirmed_registry",
+            verified = ok,
+            evidence =
+                JSONObject()
+                    .put("positive_not_confirmed", JSONArray(badPositive))
+                    .put("video_audio_negative_truth_ok", negativeTruthOk)
+        )
+    }
+
+    private fun acceptanceDevelopmentTruthProbe(): JSONObject {
+        val snapshot = capabilityRegistry.snapshot()
+        val ids =
+            listOf(
+                "development_agent_transaction",
+                "github_repository_write",
+                "github_commit_push",
+                "android_apk_build",
+                "direct_apk_delivery"
+            )
+
+        val wronglyAdvertised =
+            ids.filter { id ->
+                val item = acceptanceCapability(snapshot, id)
+                item == null ||
+                    item.optBoolean("implemented", true) ||
+                    item.optBoolean("available_now", true)
+            }
+
+        val ok = wronglyAdvertised.isEmpty()
+
+        return acceptanceProbeResult(
+            status = if (ok) AyanaAcceptanceTestEngine.STATUS_PASS else AyanaAcceptanceTestEngine.STATUS_FAIL,
+            message =
+                if (ok) {
+                    "Development/GitHub/APK ограничения представлены честно: неподтверждённые внешние действия не рекламируются как доступные."
+                } else {
+                    "Capability truth ошибочно рекламирует development-возможности: ${wronglyAdvertised.joinToString(", ")}."
+                },
+            evidenceScope = "negative_capability_truth",
+            verified = ok,
+            evidence = JSONObject().put("wrongly_advertised", JSONArray(wronglyAdvertised))
+        )
+    }
+
+    private fun acceptanceExternalIntegrationTruthProbe(): JSONObject {
+        val snapshot = capabilityRegistry.snapshot()
+        val ids =
+            listOf(
+                "external_account_actions",
+                "external_mail_calendar_files",
+                "controlled_proactivity"
+            )
+
+        val wronglyAdvertised =
+            ids.filter { id ->
+                val item = acceptanceCapability(snapshot, id)
+                item == null ||
+                    item.optBoolean("implemented", true) ||
+                    item.optBoolean("available_now", true)
+            }
+
+        val ok = wronglyAdvertised.isEmpty()
+
+        return acceptanceProbeResult(
+            status = if (ok) AyanaAcceptanceTestEngine.STATUS_PASS else AyanaAcceptanceTestEngine.STATUS_FAIL,
+            message =
+                if (ok) {
+                    "Внешние account/mail/calendar/files действия не объявляются доступными без специализированных executors."
+                } else {
+                    "External integration truth содержит ложноположительные capability."
+                },
+            evidenceScope = "negative_capability_truth",
+            verified = ok,
+            evidence = JSONObject().put("wrongly_advertised", JSONArray(wronglyAdvertised))
+        )
+    }
+
+    private fun acceptanceAppResolverProbe(): JSONObject {
+        val apps =
+            appResolver.listLaunchableApps(
+                forceRefresh = true
+            )
+
+        if (apps.isEmpty()) {
+            return acceptanceProbeResult(
+                status = AyanaAcceptanceTestEngine.STATUS_FAIL,
+                message = "App Resolver не получил запускаемые приложения.",
+                evidenceScope = "live_device",
+                verified = false
+            )
+        }
+
+        val candidate =
+            apps.firstOrNull {
+                it.packageName != packageName &&
+                    it.label.isNotBlank()
+            } ?: apps.first()
+
+        val resolved =
+            appResolver.resolve(
+                candidate.label,
+                forceRefresh = false
+            )
+
+        val ok =
+            resolved.success &&
+                resolved.packageName == candidate.packageName
+
+        return acceptanceProbeResult(
+            status = if (ok) AyanaAcceptanceTestEngine.STATUS_PASS else AyanaAcceptanceTestEngine.STATUS_FAIL,
+            message =
+                if (ok) {
+                    "App Resolver: ${apps.size} приложений; round-trip «${candidate.label}» → ${resolved.packageName} подтверждён."
+                } else {
+                    "App Resolver list/resolve round-trip не совпал для «${candidate.label}»."
+                },
+            evidenceScope = "live_device",
+            verified = ok,
+            evidence =
+                JSONObject()
+                    .put("app_count", apps.size)
+                    .put("label", candidate.label)
+                    .put("expected_package", candidate.packageName)
+                    .put("resolved_package", resolved.packageName)
+                    .put("confidence", resolved.confidence)
+        )
+    }
+
+    private fun acceptancePlannerProbe(): JSONObject {
+        val objective =
+            "Открой настройки батареи, затем вернись в AYANA"
+
+        val envelope =
+            agentPlannerV2.buildEnvelope(objective)
+
+        val subgoals =
+            envelope.optJSONArray("subgoals")
+                ?: JSONArray()
+
+        val terminal =
+            envelope.optString("terminal_criterion")
+
+        val ok =
+            envelope.length() > 0 &&
+                subgoals.length() > 0 &&
+                terminal.isNotBlank()
+
+        return acceptanceProbeResult(
+            status = if (ok) AyanaAcceptanceTestEngine.STATUS_PASS else AyanaAcceptanceTestEngine.STATUS_FAIL,
+            message =
+                if (ok) {
+                    "Planner сформировал envelope: domain=${envelope.optString("domain")}, subgoals=${subgoals.length()}, terminal criterion присутствует."
+                } else {
+                    "Planner не сформировал полный envelope с subgoals и terminal criterion."
+                },
+            evidenceScope = "live_pure_contract",
+            verified = ok,
+            evidence =
+                JSONObject()
+                    .put("domain", envelope.optString("domain"))
+                    .put("complexity", envelope.optString("complexity"))
+                    .put("subgoals", subgoals.length())
+                    .put("terminal_criterion", terminal.take(300))
+        )
+    }
+
+    private fun acceptanceCompletionContractProbe(): JSONObject {
+        val validation =
+            completionContract.validateEvidence(
+                request = "создай PDF файл acceptance_contract_test.pdf",
+                reply = "Готово, файл создан.",
+                artifactEvidence = emptyList<AyanaCompletionContract.ArtifactEvidence>()
+            )
+
+        val ok =
+            !validation.satisfied &&
+                validation.missing.isNotEmpty()
+
+        return acceptanceProbeResult(
+            status = if (ok) AyanaAcceptanceTestEngine.STATUS_PASS else AyanaAcceptanceTestEngine.STATUS_FAIL,
+            message =
+                if (ok) {
+                    "Completion Contract отверг ложный текстовый SUCCESS без artifact evidence."
+                } else {
+                    "Completion Contract допустил или неоднозначно обработал неподтверждённый артефакт."
+                },
+            evidenceScope = "live_pure_contract",
+            verified = ok,
+            evidence =
+                JSONObject()
+                    .put("satisfied", validation.satisfied)
+                    .put("reason", validation.reason)
+                    .put("expected", JSONArray(validation.expected))
+                    .put("missing", JSONArray(validation.missing))
+        )
+    }
+
+    private fun acceptanceSafetyProbe(): JSONObject {
+        val secret =
+            safetyPolicy.evaluateUserCommand(
+                "введи пароль 1234 в поле входа"
+            )
+
+        val benign =
+            safetyPolicy.evaluateUserCommand(
+                "открой настройки батареи"
+            )
+
+        val ok =
+            !secret.allowed &&
+                benign.allowed
+
+        return acceptanceProbeResult(
+            status = if (ok) AyanaAcceptanceTestEngine.STATUS_PASS else AyanaAcceptanceTestEngine.STATUS_FAIL,
+            message =
+                if (ok) {
+                    "Safety Engine блокирует credential-like ввод и пропускает низкорисковую навигацию."
+                } else {
+                    "Safety Engine не прошёл положительный/отрицательный control-case."
+                },
+            evidenceScope = "live_pure_policy",
+            verified = ok,
+            evidence =
+                JSONObject()
+                    .put("secret_allowed", secret.allowed)
+                    .put("secret_risk", secret.riskName)
+                    .put("benign_allowed", benign.allowed)
+                    .put("benign_risk", benign.riskName)
+        )
+    }
+
+    private fun acceptanceDurableGoalsProbe(): JSONObject {
+        val goals =
+            durableGoalStore.getRecoverableJson(20)
+
+        val capability =
+            acceptanceCapability(
+                capabilityRegistry.snapshot(),
+                "durable_goals"
+            )
+
+        val confirmed =
+            capability?.optBoolean("device_confirmed", false) == true
+
+        return acceptanceProbeResult(
+            status =
+                if (confirmed) {
+                    AyanaAcceptanceTestEngine.STATUS_PASS
+                } else {
+                    AyanaAcceptanceTestEngine.STATUS_WARNING
+                },
+            message =
+                "Durable Goal Store читается; recoverable=${goals.length()}; device_confirmed=$confirmed.",
+            evidenceScope = "live_store_plus_device_confirmed_registry",
+            verified = true,
+            evidence =
+                JSONObject()
+                    .put("recoverable_count", goals.length())
+                    .put("device_confirmed", confirmed)
+        )
+    }
+
+    private fun acceptanceMemoryRoundTripProbe(): JSONObject {
+        val marker =
+            "AYANA_ACCEPTANCE_MEMORY_${UUID.randomUUID().toString().take(8)}"
+
+        var cleanupRemoved = 0
+
+        return try {
+            val write =
+                agentRememberMemory(
+                    text = marker,
+                    category = "general"
+                )
+
+            val read =
+                agentRecallMemory(marker)
+
+            val observed =
+                read.optJSONArray("memories")
+                    ?.let { array ->
+                        (0 until array.length()).any { index ->
+                            array.optJSONObject(index)
+                                ?.optString("text")
+                                ?.contains(marker) == true
+                        }
+                    } == true
+
+            val remove =
+                agentForgetMemory(marker)
+
+            cleanupRemoved =
+                remove.optInt("removed", 0)
+
+            val post =
+                agentRecallMemory(marker)
+
+            val postCount =
+                post.optInt("count", 0)
+
+            val ok =
+                write.optBoolean("success", false) &&
+                    observed &&
+                    cleanupRemoved > 0 &&
+                    postCount == 0
+
+            acceptanceProbeResult(
+                status = if (ok) AyanaAcceptanceTestEngine.STATUS_PASS else AyanaAcceptanceTestEngine.STATUS_FAIL,
+                message =
+                    if (ok) {
+                        "Memory v2 временная запись создана, прочитана и полностью удалена."
+                    } else {
+                        "Memory v2 round-trip не подтвердил write/read/delete или cleanup."
+                    },
+                evidenceScope = "live_reversible_roundtrip",
+                verified = ok,
+                evidence =
+                    JSONObject()
+                        .put("write_success", write.optBoolean("success", false))
+                        .put("observed", observed)
+                        .put("removed", cleanupRemoved)
+                        .put("post_count", postCount)
+                        .put("state_restored", cleanupRemoved > 0 && postCount == 0)
+            )
+        } finally {
+            if (cleanupRemoved <= 0) {
+                try {
+                    agentForgetMemory(marker)
+                } catch (_: Exception) {
+                }
+            }
+        }
+    }
+
+    private fun acceptanceReminderRoundTripProbe(): JSONObject {
+        val capabilitySnapshot = capabilityRegistry.snapshot()
+        val runtime = capabilitySnapshot.optJSONObject("runtime") ?: JSONObject()
+
+        if (!runtime.optBoolean("exact_alarm_permission", false)) {
+            return acceptanceProbeResult(
+                status = AyanaAcceptanceTestEngine.STATUS_BLOCKED,
+                message = "Exact Alarm permission отсутствует; reminder round-trip не запускается, чтобы не открывать системный permission screen.",
+                evidenceScope = "live_runtime",
+                verified = false
+            )
+        }
+
+        val marker =
+            "AYANA ACCEPTANCE REMINDER ${UUID.randomUUID().toString().take(8)}"
+
+        val trigger =
+            LocalDateTime.now()
+                .plusMinutes(15)
+                .format(
+                    DateTimeFormatter.ofPattern("yyyy-MM-dd'T'HH:mm:ss")
+                )
+
+        var taskId = ""
+        var removed = 0
+
+        return try {
+            val create =
+                agentCreateReminder(
+                    title = marker,
+                    message = "Временная acceptance-проверка AYANA",
+                    triggerAtLocal = trigger,
+                    recurrence = AyanaTaskStore.RECURRENCE_NONE
+                )
+
+            taskId = create.optString("task_id")
+
+            val list = agentListReminders()
+            val observed =
+                list.optJSONArray("tasks")
+                    ?.let { array ->
+                        (0 until array.length()).any { index ->
+                            array.optJSONObject(index)
+                                ?.optString("title") == marker
+                        }
+                    } == true
+
+            val delete =
+                agentDeleteReminder(marker)
+
+            removed = delete.optInt("removed", 0)
+
+            val post = agentListReminders()
+            val stillPresent =
+                post.optJSONArray("tasks")
+                    ?.let { array ->
+                        (0 until array.length()).any { index ->
+                            array.optJSONObject(index)
+                                ?.optString("title") == marker
+                        }
+                    } == true
+
+            val ok =
+                create.optBoolean("success", false) &&
+                    create.optBoolean("exact", false) &&
+                    observed &&
+                    removed > 0 &&
+                    !stillPresent
+
+            acceptanceProbeResult(
+                status = if (ok) AyanaAcceptanceTestEngine.STATUS_PASS else AyanaAcceptanceTestEngine.STATUS_FAIL,
+                message =
+                    if (ok) {
+                        "Reminder временно создан, exact alarm подтверждён, запись найдена и удалена; состояние восстановлено."
+                    } else {
+                        "Reminder round-trip не подтвердил create/schedule/read/delete/cleanup."
+                    },
+                evidenceScope = "live_reversible_roundtrip",
+                verified = ok,
+                evidence =
+                    JSONObject()
+                        .put("create_success", create.optBoolean("success", false))
+                        .put("exact", create.optBoolean("exact", false))
+                        .put("observed", observed)
+                        .put("removed", removed)
+                        .put("still_present", stillPresent)
+                        .put("state_restored", removed > 0 && !stillPresent)
+            )
+        } finally {
+            if (taskId.isNotBlank()) {
+                try {
+                    taskScheduler.cancelById(taskId)
+                } catch (_: Exception) {
+                }
+
+                try {
+                    taskStore.deleteTask(taskId)
+                } catch (_: Exception) {
+                }
+            }
+
+            if (removed <= 0) {
+                try {
+                    agentDeleteReminder(marker)
+                } catch (_: Exception) {
+                }
+            }
+        }
+    }
+
+    private fun acceptanceNotificationReadProbe(): JSONObject {
+        val result =
+            AyanaNotificationListenerService.readRecent(
+                context = this,
+                limit = 5,
+                appFilter = null,
+                projection = AyanaNotificationListenerService.PROJECTION_APP_NAMES_ONLY
+            )
+
+        if (!result.optBoolean("success", false)) {
+            return acceptanceProbeResult(
+                status =
+                    when (result.optString("terminal_status")) {
+                        "BLOCKED" -> AyanaAcceptanceTestEngine.STATUS_BLOCKED
+                        "UNSUPPORTED" -> AyanaAcceptanceTestEngine.STATUS_UNSUPPORTED
+                        else -> AyanaAcceptanceTestEngine.STATUS_FAIL
+                    },
+                message = result.optString("message").ifBlank { "Notification read probe failed." },
+                evidenceScope = "live_read_only",
+                verified = false
+            )
+        }
+
+        val items = result.optJSONArray("notifications") ?: JSONArray()
+        val apps = linkedSetOf<String>()
+
+        for (index in 0 until items.length()) {
+            val item = items.optJSONObject(index) ?: continue
+            val app = item.optString("app").trim()
+            if (app.isNotBlank()) {
+                apps += app
+            }
+        }
+
+        return acceptanceProbeResult(
+            status = AyanaAcceptanceTestEngine.STATUS_PASS,
+            message = "Notification read-only probe выполнен; доступных записей=${items.length()}, приложений=${apps.size}.",
+            evidenceScope = "live_read_only_privacy_projection",
+            verified = true,
+            evidence =
+                JSONObject()
+                    .put("notification_count", items.length())
+                    .put("app_count", apps.size)
+                    .put("apps", JSONArray(apps.toList().take(8)))
+        )
+    }
+
+    private fun acceptanceVolumeRoundTripProbe(): JSONObject {
+        val audioManager =
+            getSystemService(Context.AUDIO_SERVICE) as AudioManager
+
+        val max =
+            audioManager.getStreamMaxVolume(AudioManager.STREAM_MUSIC)
+
+        val min =
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+                audioManager.getStreamMinVolume(AudioManager.STREAM_MUSIC)
+            } else {
+                0
+            }
+
+        val original =
+            audioManager.getStreamVolume(AudioManager.STREAM_MUSIC)
+
+        if (max <= min) {
+            return acceptanceProbeResult(
+                status = AyanaAcceptanceTestEngine.STATUS_UNSUPPORTED,
+                message = "Диапазон media volume не позволяет выполнить round-trip.",
+                evidenceScope = "live_device",
+                verified = false
+            )
+        }
+
+        val target =
+            if (original < max) {
+                original + 1
+            } else {
+                original - 1
+            }.coerceIn(min, max)
+
+        var observed = original
+        var restored = original
+        var writeAccepted = false
+
+        try {
+            audioManager.setStreamVolume(
+                AudioManager.STREAM_MUSIC,
+                target,
+                0
+            )
+            writeAccepted = true
+            Thread.sleep(90L)
+            observed = audioManager.getStreamVolume(AudioManager.STREAM_MUSIC)
+        } finally {
+            try {
+                audioManager.setStreamVolume(
+                    AudioManager.STREAM_MUSIC,
+                    original,
+                    0
+                )
+                Thread.sleep(90L)
+                restored = audioManager.getStreamVolume(AudioManager.STREAM_MUSIC)
+            } catch (_: Exception) {
+                restored = -1
+            }
+        }
+
+        val targetVerified = writeAccepted && observed == target
+        val restoreVerified = restored == original
+        val ok = targetVerified && restoreVerified
+
+        return acceptanceProbeResult(
+            status = if (ok) AyanaAcceptanceTestEngine.STATUS_PASS else AyanaAcceptanceTestEngine.STATUS_FAIL,
+            message =
+                if (ok) {
+                    "Media volume изменён $original→$target и подтверждённо восстановлен до $original."
+                } else {
+                    "Media volume round-trip: target=$target observed=$observed restored=$restored original=$original."
+                },
+            evidenceScope = "live_reversible_roundtrip",
+            verified = ok,
+            evidence =
+                JSONObject()
+                    .put("original", original)
+                    .put("target", target)
+                    .put("observed", observed)
+                    .put("restored", restored)
+                    .put("device_min", min)
+                    .put("device_max", max)
+                    .put("state_restored", restoreVerified)
+        )
+    }
+
+    private fun acceptanceBrightnessRoundTripProbe(): JSONObject {
+        val canWrite =
+            try {
+                Build.VERSION.SDK_INT < Build.VERSION_CODES.M ||
+                    Settings.System.canWrite(this)
+            } catch (_: Exception) {
+                false
+            }
+
+        if (!canWrite) {
+            return acceptanceProbeResult(
+                status = AyanaAcceptanceTestEngine.STATUS_BLOCKED,
+                message = "WRITE_SETTINGS не разрешён; brightness round-trip не выполнялся.",
+                evidenceScope = "live_runtime",
+                verified = false
+            )
+        }
+
+        val originalMode =
+            Settings.System.getInt(
+                contentResolver,
+                Settings.System.SCREEN_BRIGHTNESS_MODE,
+                Settings.System.SCREEN_BRIGHTNESS_MODE_MANUAL
+            )
+
+        val originalBrightness =
+            Settings.System.getInt(
+                contentResolver,
+                Settings.System.SCREEN_BRIGHTNESS,
+                128
+            ).coerceIn(1, 255)
+
+        val target =
+            if (originalBrightness <= 247) {
+                originalBrightness + 8
+            } else {
+                originalBrightness - 8
+            }.coerceIn(1, 255)
+
+        var observed = originalBrightness
+        var restoredMode = originalMode
+        var restoredBrightness = originalBrightness
+        var writeMode = false
+        var writeValue = false
+
+        try {
+            writeMode =
+                Settings.System.putInt(
+                    contentResolver,
+                    Settings.System.SCREEN_BRIGHTNESS_MODE,
+                    Settings.System.SCREEN_BRIGHTNESS_MODE_MANUAL
+                )
+
+            writeValue =
+                Settings.System.putInt(
+                    contentResolver,
+                    Settings.System.SCREEN_BRIGHTNESS,
+                    target
+                )
+
+            Thread.sleep(120L)
+
+            observed =
+                Settings.System.getInt(
+                    contentResolver,
+                    Settings.System.SCREEN_BRIGHTNESS,
+                    -1
+                )
+        } finally {
+            try {
+                Settings.System.putInt(
+                    contentResolver,
+                    Settings.System.SCREEN_BRIGHTNESS,
+                    originalBrightness
+                )
+            } catch (_: Exception) {
+            }
+
+            try {
+                Settings.System.putInt(
+                    contentResolver,
+                    Settings.System.SCREEN_BRIGHTNESS_MODE,
+                    originalMode
+                )
+            } catch (_: Exception) {
+            }
+
+            try {
+                Thread.sleep(120L)
+                restoredMode =
+                    Settings.System.getInt(
+                        contentResolver,
+                        Settings.System.SCREEN_BRIGHTNESS_MODE,
+                        -1
+                    )
+                restoredBrightness =
+                    Settings.System.getInt(
+                        contentResolver,
+                        Settings.System.SCREEN_BRIGHTNESS,
+                        -1
+                    )
+            } catch (_: Exception) {
+                restoredMode = -1
+                restoredBrightness = -1
+            }
+        }
+
+        val targetVerified = writeMode && writeValue && observed == target
+        val modeRestored = restoredMode == originalMode
+        val brightnessRestored =
+            if (originalMode == Settings.System.SCREEN_BRIGHTNESS_MODE_MANUAL) {
+                restoredBrightness == originalBrightness
+            } else {
+                // In automatic mode Android may immediately recompute the numeric
+                // brightness after mode restoration; mode equality owns restore truth.
+                true
+            }
+
+        val restoreVerified = modeRestored && brightnessRestored
+        val ok = targetVerified && restoreVerified
+
+        return acceptanceProbeResult(
+            status = if (ok) AyanaAcceptanceTestEngine.STATUS_PASS else AyanaAcceptanceTestEngine.STATUS_FAIL,
+            message =
+                if (ok) {
+                    "Brightness $originalBrightness→$target подтверждена и исходный режим/состояние восстановлены."
+                } else {
+                    "Brightness round-trip не подтвердил изменение или восстановление исходного состояния."
+                },
+            evidenceScope = "live_reversible_roundtrip",
+            verified = ok,
+            evidence =
+                JSONObject()
+                    .put("original_mode", originalMode)
+                    .put("original_brightness", originalBrightness)
+                    .put("target", target)
+                    .put("observed", observed)
+                    .put("restored_mode", restoredMode)
+                    .put("restored_brightness", restoredBrightness)
+                    .put("state_restored", restoreVerified)
+        )
+    }
+
+    private fun acceptanceSettingsRoundTripProbe(): JSONObject {
+        var openResult = JSONObject()
+        var settingsScreen = JSONObject()
+        var restoreScreen = JSONObject()
+        var restoreDispatched = false
+
+        try {
+            openResult =
+                systemSettingsNavigator.open("date_time")
+
+            try {
+                settingsScreen = screenIntelligence.getScreenState()
+            } catch (_: Exception) {
+            }
+        } finally {
+            restoreDispatched =
+                try {
+                    startActivity(
+                        Intent(
+                            this,
+                            MainActivity::class.java
+                        ).apply {
+                            addFlags(
+                                Intent.FLAG_ACTIVITY_NEW_TASK or
+                                    Intent.FLAG_ACTIVITY_RESET_TASK_IF_NEEDED
+                            )
+                        }
+                    )
+                    true
+                } catch (_: Exception) {
+                    false
+                }
+
+            try {
+                Thread.sleep(650L)
+                restoreScreen = screenIntelligence.getScreenState()
+            } catch (_: Exception) {
+            }
+        }
+
+        val settingsVerified =
+            openResult.optBoolean("success", false) &&
+                openResult.optBoolean("verified", false)
+
+        val settingsPackage =
+            settingsScreen.optString(
+                "effective_foreground_package",
+                settingsScreen.optString("interaction_package", settingsScreen.optString("package"))
+            )
+
+        val externalOwnerVerified =
+            settingsPackage == "com.android.settings" ||
+                openResult.optBoolean("settings_owner_verified", false)
+
+        val restorePackage =
+            restoreScreen.optString(
+                "effective_foreground_package",
+                restoreScreen.optString("interaction_package", restoreScreen.optString("package"))
+            )
+
+        val restored =
+            restoreDispatched &&
+                restorePackage == packageName
+
+        val ok = settingsVerified && externalOwnerVerified && restored
+
+        return acceptanceProbeResult(
+            status = if (ok) AyanaAcceptanceTestEngine.STATUS_PASS else AyanaAcceptanceTestEngine.STATUS_FAIL,
+            message =
+                if (ok) {
+                    "Date & time открыт и verified; com.android.settings подтверждён; AYANA восстановлена на передний план."
+                } else {
+                    "Settings round-trip: opened=$settingsVerified, external_owner=$externalOwnerVerified, restored=$restored."
+                },
+            evidenceScope = "live_navigation_roundtrip",
+            verified = ok,
+            evidence =
+                JSONObject()
+                    .put("settings_verified", settingsVerified)
+                    .put("settings_package", settingsPackage)
+                    .put("settings_owner_verified", externalOwnerVerified)
+                    .put("verification_mode", openResult.optString("verification_mode"))
+                    .put("matched_marker", openResult.optString("matched_marker"))
+                    .put("restore_dispatched", restoreDispatched)
+                    .put("restore_package", restorePackage)
+                    .put("state_restored", restored)
+        )
+    }
+
+    private fun acceptanceForegroundFusionProbe(): JSONObject {
+        val screen = screenIntelligence.getScreenState()
+        val version = screen.optInt("perception_fusion_version", 0)
+        val effective = screen.optString("effective_foreground_package")
+        val raw = screen.optString("raw_interaction_package")
+        val confidence = screen.optString("foreground_owner_confidence")
+
+        val ok =
+            screen.optBoolean("success", false) &&
+                version >= 1 &&
+                effective.isNotBlank()
+
+        return acceptanceProbeResult(
+            status = if (ok) AyanaAcceptanceTestEngine.STATUS_PASS else AyanaAcceptanceTestEngine.STATUS_FAIL,
+            message =
+                if (ok) {
+                    "Foreground fusion active: raw=${raw.ifBlank { "n/a" }}, effective=$effective, confidence=$confidence."
+                } else {
+                    "Foreground fusion fields не подтверждены текущим Accessibility snapshot."
+                },
+            evidenceScope = "live_accessibility_fusion",
+            verified = ok,
+            evidence =
+                JSONObject()
+                    .put("perception_fusion_version", version)
+                    .put("raw_interaction_package", raw)
+                    .put("effective_foreground_package", effective)
+                    .put("owner_confidence", confidence)
+                    .put("overlay_suppressed", screen.optBoolean("ayana_overlay_ownership_suppressed", false))
+        )
+    }
+
+    private fun acceptanceKnownLimitsProbe(): JSONObject {
+        val snapshot = capabilityRegistry.snapshot()
+        val limits = JSONArray()
+
+        val labels =
+            linkedMapOf(
+                "development_agent_transaction" to "Development Agent build/test/rollback transaction пока не реализован на Android",
+                "github_repository_write" to "нет авторизованной записи в GitHub repository",
+                "github_commit_push" to "нет commit/push executor",
+                "android_apk_build" to "AYANA Android не запускает APK build pipeline",
+                "external_mail_calendar_files" to "нет встроенных mail/calendar/files executors",
+                "video_audio_analysis" to "аудиодорожка видео не анализируется",
+                "offline_llm" to "полноценный offline LLM отсутствует",
+                "controlled_proactivity" to "широкая автономная proactivity вне явных задач не реализована"
+            )
+
+        labels.forEach { (id, label) ->
+            val item = acceptanceCapability(snapshot, id)
+            if (
+                item == null ||
+                !item.optBoolean("implemented", false) ||
+                !item.optBoolean("available_now", false)
+            ) {
+                limits.put(
+                    JSONObject()
+                        .put("id", id)
+                        .put("label", label)
+                )
+            }
+        }
+
+        val runtime = snapshot.optJSONObject("runtime") ?: JSONObject()
+        val screenState = runtime.optString("screen_primary_content_state", "unknown")
+        if (screenState != "readable") {
+            limits.put(
+                JSONObject()
+                    .put("id", "live_visual_screen_fallback")
+                    .put(
+                        "label",
+                        "live visual screen fallback ещё не закрывает Accessibility partial/unavailable; current=$screenState"
+                    )
+            )
+        }
+
+        return JSONObject()
+            .put("success", true)
+            .put("status", AyanaAcceptanceTestEngine.STATUS_PASS)
+            .put("limits", limits)
+    }
+
+    private fun acceptanceCapability(
+        snapshot: JSONObject,
+        id: String
+    ): JSONObject? {
+        val array = snapshot.optJSONArray("capabilities") ?: return null
+
+        for (index in 0 until array.length()) {
+            val item = array.optJSONObject(index) ?: continue
+            if (item.optString("id") == id) {
+                return item
+            }
+        }
+
+        return null
+    }
+
+    private fun acceptanceProbeResult(
+        status: String,
+        message: String,
+        evidenceScope: String,
+        verified: Boolean = status == AyanaAcceptanceTestEngine.STATUS_PASS,
+        evidence: JSONObject = JSONObject()
+    ): JSONObject =
+        JSONObject()
+            .put("success", status != AyanaAcceptanceTestEngine.STATUS_FAIL)
+            .put("verified", verified)
+            .put("status", status)
+            .put("message", message)
+            .put("evidence_scope", evidenceScope)
+            .put("evidence", evidence)
+
 
     private fun isLocalSelfReviewOrAutonomyRequest(
         command: String
