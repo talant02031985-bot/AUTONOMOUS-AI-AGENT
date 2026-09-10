@@ -799,9 +799,25 @@ Screen Intelligence / Perception Contract v2:
 В пользовательском русском ответе статус UNKNOWN называй «Нет данных» или «не удалось подтвердить», а не английским UNKNOWN. Отсутствие свежей TTS-телеметрии после текстовой команды само по себе не является новым сбоем голоса: текстовый режим не обязан запускать Marin.
 `.trim();
 
+const AYANA_VERIFIED_DEVICE_FACTS_INSTRUCTIONS = `
+VERIFIED-FACTS COMPLETION CONTRACT:
+Android runtime уже выполнил read-only часть текущей составной цели и передал VERIFIED DEVICE FACTS из одного подтверждённого snapshot.
+Эти значения являются фактической истиной для текущего шага. Не запрашивай те же метрики повторно и не подменяй их предположениями.
+Не используй web_search только ради интерпретации этих локальных фактов; внешний поиск допустим лишь если исходный запрос пользователя прямо требует внешних/актуальных сведений.
+Твоя задача — завершить ВСЕ оставшиеся смысловые требования исходного запроса: условия, оценку, вывод, решение, объяснение или рекомендацию.
+Простое повторение переданных цифр/состояний не является выполнением, если пользователь запросил вывод или условное ветвление.
+Не объявляй действий на устройстве, которые не были выполнены.
+`.trim();
+
 const AYANA_CURRENT_CAPABILITIES = `
-КАРТА ФАКТИЧЕСКОГО СОСТОЯНИЯ AYANA — v12.14 WHOLE-GOAL INTEGRITY + ARTIFACT ORCHESTRATION поверх v12.13 ACCEPTANCE ENGINE.
+КАРТА ФАКТИЧЕСКОГО СОСТОЯНИЯ AYANA — v12.15 COMPLETION INTEGRITY + VERIFIED-FACTS REASONING поверх v12.14 WHOLE-GOAL INTEGRITY.
 Свежий Android AGENT INTELLIGENCE CONTEXT всегда имеет приоритет над этой статической картой.
+
+КРИТИЧЕСКАЯ v12.15 TRUTH:
+- verified_device_facts передаёт Agent Core уже подтверждённый Android snapshot для смыслового завершения составной read-only цели; повторный get_device_state для этих фактов исключается;
+- локальный multi-device executor завершает SUCCESS только presentation-only запрос; при остающейся оценке/условии/решении Execution Session остаётся RUNNING и передаётся Agent Core;
+- Worker проверяет Responses API status/incomplete_details: max_output_tokens получает один bounded continuation, а незавершённый ответ после лимита никогда не возвращается как SUCCESS;
+- terminal reason отделён от пользовательского result и использует короткие machine reason codes.
 
 КРИТИЧЕСКАЯ v12.14 TRUTH:
 - whole_goal_routing_guard не позволяет одному локальному executor объявить SUCCESS, если исходная команда содержит ещё обязательные deliverables;
@@ -1303,6 +1319,89 @@ function extractOutputText(data) {
     .trim();
 }
 
+function incompleteResponseReason(data) {
+  return String(data?.incomplete_details?.reason || "").trim().toLowerCase();
+}
+
+function isIncompleteResponse(data) {
+  return String(data?.status || "").trim().toLowerCase() === "incomplete";
+}
+
+function isMaxOutputTokenIncomplete(data) {
+  const reason = incompleteResponseReason(data);
+  return isIncompleteResponse(data)
+    && (reason.includes("max_output_tokens") || reason.includes("max_tokens"));
+}
+
+function appendContinuationWithoutOverlap(baseText, continuationText) {
+  const base = String(baseText || "").trimEnd();
+  const next = String(continuationText || "").trimStart();
+  if (!base) return next;
+  if (!next) return base;
+
+  const maxOverlap = Math.min(600, base.length, next.length);
+  for (let size = maxOverlap; size >= 24; size -= 1) {
+    if (base.slice(-size) === next.slice(0, size)) {
+      return `${base}${next.slice(size)}`.trim();
+    }
+  }
+  return `${base}\n${next}`.trim();
+}
+
+async function continueIncompleteTextResponse(env, payload, data, initialReply) {
+  if (!isMaxOutputTokenIncomplete(data) || !data?.id || payload.store === false) {
+    return {
+      ok: !isIncompleteResponse(data) && Boolean(String(initialReply || "").trim()),
+      data,
+      reply: initialReply,
+      continuationCount: 0,
+      incompleteReason: incompleteResponseReason(data)
+    };
+  }
+
+  const continuationPayload = {
+    model: payload.model,
+    reasoning: payload.reasoning || { effort: "low" },
+    instructions: `${payload.instructions}\n\nCONTINUATION INTEGRITY:\nПродолжи ровно незавершённый ответ. Не повторяй уже выданный текст. Заверши текущую мысль, список и структуру полностью. Не вызывай инструменты и не начинай новую задачу.`,
+    input: "Продолжи ответ с места обрыва и полностью заверши его без повторения уже написанного.",
+    previous_response_id: String(data.id),
+    max_output_tokens: Math.max(Number(payload.max_output_tokens || 0), 3200),
+    store: true
+  };
+
+  const continued = await callOpenAI(env, continuationPayload);
+  if (!continued.ok) {
+    return {
+      ok: false,
+      data: continued.data,
+      reply: initialReply,
+      continuationCount: 1,
+      incompleteReason: `continuation_http_${continued.status}`
+    };
+  }
+
+  const continuationText = extractOutputText(continued.data);
+  const reply = appendContinuationWithoutOverlap(initialReply, continuationText);
+
+  if (isIncompleteResponse(continued.data)) {
+    return {
+      ok: false,
+      data: continued.data,
+      reply,
+      continuationCount: 1,
+      incompleteReason: incompleteResponseReason(continued.data) || "continuation_incomplete"
+    };
+  }
+
+  return {
+    ok: Boolean(reply),
+    data: continued.data,
+    reply,
+    continuationCount: 1,
+    incompleteReason: ""
+  };
+}
+
 function safeParseArguments(raw) {
   try {
     return JSON.parse(raw || "{}");
@@ -1621,6 +1720,7 @@ async function handleAgent(request, env) {
   const previousResponseId = body.previous_response_id?.trim();
   const memoryContext = body.memory_context?.trim();
   const agentIntelligenceContext = body.agent_intelligence_context?.trim();
+  const verifiedDeviceFacts = body.verified_device_facts?.trim();
   const deviceLocalDatetime = body.device_local_datetime?.trim();
   const deviceTimezone = body.device_timezone?.trim();
   const source = body.source === "voice" ? "voice" : "text";
@@ -1683,6 +1783,14 @@ ${agentIntelligenceContext}
       `.trim());
     }
 
+    if (verifiedDeviceFacts) {
+      contextParts.push(`
+VERIFIED DEVICE FACTS AYANA (доверенные факты Android runtime текущей Execution Session):
+${verifiedDeviceFacts}
+КОНЕЦ VERIFIED DEVICE FACTS
+      `.trim());
+    }
+
     contextParts.push(
       `ИСТОЧНИК КОМАНДЫ: ${source === "voice" ? "голос" : "текст"}`
     );
@@ -1707,7 +1815,8 @@ ${agentIntelligenceContext}
     && isArtifactCreationRequest(message || "");
   const genericAgentDefinitionMode = isGenericAgentDefinitionRequest(message || "");
   const explicitExternalImprovementMode = isExplicitExternalImprovementRequest(message || "");
-  const dropPreviousContext = genericAgentDefinitionMode || explicitExternalImprovementMode;
+  const verifiedFactsCompletionMode = Boolean(verifiedDeviceFacts);
+  const dropPreviousContext = genericAgentDefinitionMode || explicitExternalImprovementMode || verifiedFactsCompletionMode;
   const capabilityFollowUpMode = Boolean(previousResponseId)
     && !genericAgentDefinitionMode
     && String(message || "").length <= 160
@@ -1786,7 +1895,9 @@ ${ANDROID_GOAL_V7_INSTRUCTIONS}`
 
 ${styleInstructions}${artifactCreationMode ? `
 
-${AYANA_ARTIFACT_WHOLE_GOAL_INSTRUCTIONS}` : ""}${productInstructions}${scopeInstructions}${recoveryInstructions}`,
+${AYANA_ARTIFACT_WHOLE_GOAL_INSTRUCTIONS}` : ""}${productInstructions}${scopeInstructions}${recoveryInstructions}${verifiedFactsCompletionMode ? `
+
+${AYANA_VERIFIED_DEVICE_FACTS_INSTRUCTIONS}` : ""}`,
     input,
     max_output_tokens: androidNavigationMode
       ? 260
@@ -1801,14 +1912,14 @@ ${AYANA_ARTIFACT_WHOLE_GOAL_INSTRUCTIONS}` : ""}${productInstructions}${scopeIns
         : source === "voice"
           ? 420
           : selfAutonomyMode
-            ? 450
+            ? 1400
             : capabilityMode
-              ? 520
+              ? 2800
               : genericAgentDefinitionMode
-                ? 520
+                ? 3200
                 : fastEverydayMode
-              ? 700
-              : 1000,
+              ? 1000
+              : 1800,
     store: !androidNavigationMode && !durableRecoveryMode
   };
 
@@ -1839,9 +1950,12 @@ ${AYANA_ARTIFACT_WHOLE_GOAL_INSTRUCTIONS}` : ""}${productInstructions}${scopeIns
     && !detailedFastInfoMode
     && !capabilityMode
   ) {
+    const allowedDeviceTools = verifiedFactsCompletionMode
+      ? DEVICE_TOOLS.filter(tool => tool.name !== "get_device_state")
+      : DEVICE_TOOLS;
     payload.tools = [
       { type: "web_search" },
-      ...DEVICE_TOOLS
+      ...allowedDeviceTools
     ];
     payload.tool_choice = "auto";
   }
@@ -1893,10 +2007,23 @@ ${AYANA_ARTIFACT_WHOLE_GOAL_INSTRUCTIONS}` : ""}${productInstructions}${scopeIns
     });
   }
 
-  const reply = extractOutputText(data);
+  const initialReply = extractOutputText(data);
 
   if (durableRecoveryMode) {
-    const durableFinal = parseDurableFinalReply(reply);
+    if (isIncompleteResponse(data)) {
+      return Response.json(
+        {
+          error: "OpenAI Agent Core incomplete durable response",
+          details: {
+            status: String(data?.status || ""),
+            reason: incompleteResponseReason(data)
+          }
+        },
+        { status: 502 }
+      );
+    }
+
+    const durableFinal = parseDurableFinalReply(initialReply);
 
     return Response.json({
       ok: true,
@@ -1907,15 +2034,38 @@ ${AYANA_ARTIFACT_WHOLE_GOAL_INSTRUCTIONS}` : ""}${productInstructions}${scopeIns
     });
   }
 
-  const finalReply = reply || "Готово.";
+  const completion = await continueIncompleteTextResponse(
+    env,
+    payload,
+    data,
+    initialReply
+  );
+
+  if (!completion.ok) {
+    return Response.json(
+      {
+        error: "OpenAI Agent Core incomplete response",
+        details: {
+          status: String(completion.data?.status || data?.status || ""),
+          reason: completion.incompleteReason || "response_not_completed",
+          continuation_count: completion.continuationCount
+        }
+      },
+      { status: 502 }
+    );
+  }
+
+  const finalReply = completion.reply || "Готово.";
   const terminalStatus = inferFinalTerminalStatus(message || "", finalReply);
 
   return Response.json({
     ok: true,
     type: "final",
-    response_id: data.id,
+    response_id: completion.data?.id || data.id,
     terminal_status: terminalStatus,
     execution_success: terminalStatus === "SUCCESS",
+    completion_status: "completed",
+    continuation_count: completion.continuationCount,
     reply: finalReply
   });
 }
@@ -2059,6 +2209,19 @@ async function handleLegacyChat(request, env) {
     );
   }
 
+  if (isIncompleteResponse(result.data)) {
+    return Response.json(
+      {
+        error: "OpenAI legacy response incomplete",
+        details: {
+          status: String(result.data?.status || ""),
+          reason: incompleteResponseReason(result.data)
+        }
+      },
+      { status: 502 }
+    );
+  }
+
   const reply = extractOutputText(result.data);
 
   return Response.json({
@@ -2076,7 +2239,7 @@ export default {
         ok: true,
         service: "AYANA AI",
         ai: "ready",
-        agent_core: "v11.0-v12.14-whole-goal",
+        agent_core: "v11.1-v12.15-completion-integrity",
         voice: "marin"
       });
     }
