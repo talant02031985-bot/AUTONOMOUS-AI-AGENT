@@ -91,6 +91,7 @@ class MainActivity : AppCompatActivity() {
     private lateinit var textInput: EditText
     private lateinit var textAnswer: TextView
     private lateinit var answerCard: LinearLayout
+    private lateinit var answerScroll: ScrollView
     private lateinit var attachmentInfo: TextView
 
     private var pendingAttachment:
@@ -4360,7 +4361,7 @@ class MainActivity : AppCompatActivity() {
                 )
 
             if (result.isNotBlank()) {
-                card.addView(
+                val resultView =
                     TextView(this).apply {
                         text =
                             "Результат: " +
@@ -4371,8 +4372,42 @@ class MainActivity : AppCompatActivity() {
                         textSize = 14.5f
                         setTextColor(Color.parseColor("#C7D2E2"))
                         setPadding(0, dp(7), 0, 0)
+                        maxLines = Int.MAX_VALUE
+                        ellipsize = null
                     }
-                )
+
+                card.addView(resultView)
+
+                if (result.length > HISTORY_RESULT_PREVIEW_CHARS) {
+                    var resultExpanded = false
+                    val resultToggle =
+                        TextView(this).apply {
+                            text = "Показать результат полностью"
+                            textSize = 12.5f
+                            setTextColor(Color.parseColor("#9E90FF"))
+                            setPadding(0, dp(7), 0, 0)
+                            setOnClickListener {
+                                resultExpanded = !resultExpanded
+                                resultView.text =
+                                    if (resultExpanded) {
+                                        "Результат: $result"
+                                    } else {
+                                        "Результат: " +
+                                            historyPreview(
+                                                result,
+                                                HISTORY_RESULT_PREVIEW_CHARS
+                                            )
+                                    }
+                                text =
+                                    if (resultExpanded) {
+                                        "Свернуть результат"
+                                    } else {
+                                        "Показать результат полностью"
+                                    }
+                            }
+                        }
+                    card.addView(resultToggle)
+                }
             }
 
             val events = record.optJSONArray("events")
@@ -6135,11 +6170,30 @@ class MainActivity : AppCompatActivity() {
             textAnswer
         )
 
+        answerScroll =
+            ScrollView(this).apply {
+                visibility = View.GONE
+                isFillViewport = false
+                isVerticalScrollBarEnabled = true
+                overScrollMode = View.OVER_SCROLL_IF_CONTENT_SCROLLS
+                clipToPadding = false
+                contentDescription = "Полный текст ответа AYANA"
+                importantForAccessibility =
+                    View.IMPORTANT_FOR_ACCESSIBILITY_YES
+                addView(
+                    answerCard,
+                    FrameLayout.LayoutParams(
+                        ViewGroup.LayoutParams.MATCH_PARENT,
+                        ViewGroup.LayoutParams.WRAP_CONTENT
+                    )
+                )
+            }
+
         textPanel.addView(
-            answerCard,
+            answerScroll,
             LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT,
-                ViewGroup.LayoutParams.WRAP_CONTENT
+                dp(190)
             ).apply {
                 topMargin =
                     dp(8)
@@ -6289,6 +6343,8 @@ class MainActivity : AppCompatActivity() {
 
             answerCard.visibility =
                 View.VISIBLE
+            answerScroll.visibility =
+                View.VISIBLE
 
             textAnswer.text =
                 if (useAttachment) {
@@ -6296,6 +6352,10 @@ class MainActivity : AppCompatActivity() {
                 } else {
                     "AYANA думает…"
                 }
+
+            answerScroll.post {
+                answerScroll.scrollTo(0, 0)
+            }
 
             hideKeyboard()
 
@@ -6439,9 +6499,15 @@ class MainActivity : AppCompatActivity() {
 
         answerCard.visibility =
             View.VISIBLE
+        answerScroll.visibility =
+            View.VISIBLE
 
         textAnswer.text =
             text
+
+        answerScroll.post {
+            answerScroll.scrollTo(0, 0)
+        }
     }
 
     private fun hideKeyboard() {
