@@ -1,4 +1,7 @@
-// AYANA Worker v10.9 — v12.13 Local Acceptance Truth + Autonomy/Capability Grounding; File & Document Engine retained
+// AYANA Worker v11.0 — v12.14 Whole-Goal Integrity + Artifact Orchestration + Machine Terminal Truth
+// Preserves v10.9 acceptance/capability grounding and strengthens compound deliverables:
+// device-state exposes network/storage/brightness, artifact goals must end in verified create_artifact,
+// and explicit inability to execute an action is returned as machine UNSUPPORTED instead of generic SUCCESS.
 const ANDROID_GOAL_TOOL = {
   type: "function",
   name: "execute_android_goal",
@@ -145,7 +148,7 @@ const DEVICE_TOOLS = [
   {
     type: "function",
     name: "get_device_state",
-    description: "Read lightweight current Android device context: battery percentage/charging, media volume, orientation, and the current accessibility screen snapshot. Use when device state materially affects the next action or when the user asks about the device state.",
+    description: "Read current Android device context in one call: battery percentage/charging, media volume, orientation, network connectivity/validation/transport, free+total storage, screen brightness percentage, and the current accessibility screen snapshot. Use when one or several device-state facts materially affect the next action or when the user asks for multiple device metrics. Never invent a missing field.",
     strict: true,
     parameters: {
       type: "object",
@@ -797,8 +800,17 @@ Screen Intelligence / Perception Contract v2:
 `.trim();
 
 const AYANA_CURRENT_CAPABILITIES = `
-КАРТА ФАКТИЧЕСКОГО СОСТОЯНИЯ AYANA — v12.13 AUTONOMOUS ACCEPTANCE ENGINE поверх v12.12 AUTONOMY + CAPABILITY TRUTH + PERCEPTION FUSION.
+КАРТА ФАКТИЧЕСКОГО СОСТОЯНИЯ AYANA — v12.14 WHOLE-GOAL INTEGRITY + ARTIFACT ORCHESTRATION поверх v12.13 ACCEPTANCE ENGINE.
 Свежий Android AGENT INTELLIGENCE CONTEXT всегда имеет приоритет над этой статической картой.
+
+КРИТИЧЕСКАЯ v12.14 TRUTH:
+- whole_goal_routing_guard не позволяет одному локальному executor объявить SUCCESS, если исходная команда содержит ещё обязательные deliverables;
+- read-only multi-metric запросы агрегируются локально как одна цель; get_device_state теперь также возвращает network/storage/brightness для Agent Core orchestration;
+- явный запрос на TXT/DOCX/PDF/XLSX/JPEG/graph сохраняет artifact ownership: если нужны фактические данные, сначала получи их, затем обязательно вызови create_artifact;
+- app-open + «проверь foreground» считается одной проверяемой lifecycle-целью; безопасный Settings>Apps путь может сворачиваться прямо к конечному app-detail экрану;
+- обычный Agent Core final теперь несёт machine terminal_status; явный ответ «не могу выполнить / нет capability» для action request должен завершаться UNSUPPORTED, а не SUCCESS;
+- Agent Core read timeout ограничен 18 секундами с одним bounded retry; после повторного timeout Android сохраняет recovery truth и возвращает ERROR;
+- Accessibility v7.2 читает дополнительные same-window semantic поля hint/state/pane/tooltip, но это НЕ OCR/Vision и не гарантирует чтение приложений, которые не публикуют accessibility text.
 
 КРИТИЧЕСКАЯ v12.13 TRUTH:
 - локальный self-review/autonomy review строится из Android Capability Registry/runtime и не должен заново предлагать уже существующие Planner, Durable Goals, Memory, Tasks, App Resolver, STOP, Safety или strict verification;
@@ -818,8 +830,8 @@ const AYANA_CURRENT_CAPABILITIES = `
 - подготовить готовый исходник/патч = отдельная возможность; commit/push/build/deploy = отдельные неподтверждённые/нереализованные возможности.
 
 КРИТИЧЕСКАЯ SETTINGS TRUTH:
-- Samsung App Info -> Permissions реализован как маршрут, но текущий combined terminal verifier имеет известный window-list edge; физически правильный экран не даёт права рекламировать этот путь как универсально device-confirmed;
-- для таких возможностей говори «реализовано, но terminal verification имеет известное ограничение», пока runtime/device evidence не станет подтверждённым.
+- Samsung App Info -> Permissions device-confirmed на целевом планшете через exact-intent attestation + app_info_click terminal verification;
+- составной путь «Настройки приложений → найти приложение → конечный app-detail раздел» в v12.14 сворачивается к той же проверяемой конечной цели вместо частичного выполнения literal route.
 
 КРИТИЧЕСКАЯ CAPABILITY TRUTH:
 - v12.7 File & Document Engine device-confirmed на целевом планшете: TXT, DOCX, PDF, XLSX, JPEG и графики-JPEG создаются локально, проверяются и публикуются в Downloads/AYANA; DOCX translation с сохранением OOXML-оформления также подтверждён;
@@ -836,6 +848,12 @@ DEVICE-CONFIRMED БАЗА:
 - App Resolver v2.x подтверждён реальными запусками Chrome, ChatGPT, Галереи, Play Store, Maps, Notes и других приложений;
 - Durable Goals, checkpoints/recovery, bounded replan, anti-cycle, Safety Engine и strict terminal verification;
 - Window Context Manager подтверждён в части обнаружения нескольких окон/приложений и Recents.
+- v12.13 device acceptance: FULL_ACCEPTANCE и CAPABILITY_AUDIT выполняются локально с network_turns=0 и честным READY_WITH_LIMITATIONS.
+- v12.13 device acceptance: foreground owner fusion через голос поверх YouTube правильно удерживает com.google.android.youtube вместо AYANA overlay.
+- v12.13 device acceptance: YouTube и Chrome закрываются через verified_recents_task_removal с VERIFIED_COMMITTED; это task removal, не force-stop.
+- v12.13 device acceptance: YouTube App Info -> Permissions подтверждён exact-intent attestation + app_info_click.
+- v12.13 device acceptance: notification read/filter, exact/relative media volume и screen brightness read/set/range guard подтверждены.
+- Текущее ограничение perception: foreground app определяется, но YouTube может оставаться structure_only/unavailable; v7.2 лишь расширяет Accessibility semantics и не выдумывает OCR/Vision.
 - Device-test v11.2: прямой переход на App Info Chrome визуально выполняется, primary window правильно определяется как com.android.settings, но внутренний текст остаётся недоступен; strict verification честно возвращает ERROR.
 - Device-test v11.2: полноэкранный Chrome определяется, но внутреннее содержимое страницы не читается; поэтому это системный Screen Acquisition issue, а не только Samsung Settings.
 - Agent Core после deploy v9.1 подтверждён двумя последовательными успешными запросами.
@@ -848,7 +866,7 @@ DEVICE-CONFIRMED БАЗА:
 - новый AYANA Core Orb — лёгкая векторная графика без bitmap/logo clip на каждом кадре и с ограниченной частотой кадров;
 - UI-анимация ограничена по частоте и прекращается во время текстового ввода, чтобы вернуть плавность v11.1.x;
 - App Resolver v2.3: постраничный полный список приложений без молчаливого обрезания;
-- Capability Registry v3.1: build/runtime/window/history facts, capability truth, Agent Core phase-latency classification, local self-review и сохранённый last acceptance grade/counters;
+- Capability Registry v3.2: build/runtime/window/history facts, whole-goal/artifact/recovery capability truth, Agent Core phase-latency classification, local self-review и сохранённый last acceptance grade/counters;
 - Self-Diagnostics v3: PASS/WARNING/UNKNOWN/FAIL, реальные memory/tasks/screen/recent-error checks и latency warnings;
 - Command History v2.4: удаление отдельной записи, контекст последней ошибки/результата, устранение дублирования terminal-result в UI/export;
 - локальные fast-path ответы для простых подтверждений; русский display-name для внутренних Android section keys;
@@ -899,7 +917,7 @@ const AYANA_CAPABILITY_AWARENESS_INSTRUCTIONS = `
 
 const AYANA_SELF_REVIEW_INSTRUCTIONS = `
 Если пользователь спрашивает, что улучшить, исправить или развивать в самой AYANA:
-1. Сначала проверь runtime-факты, последние ошибки и текущую карту v12.13; не отвечай как системе «с нуля».
+1. Сначала проверь runtime-факты, последние ошибки и текущую карту v12.14; не отвечай как системе «с нуля».
 2. Учитывай уже существующие App Resolver, Capability Registry, Self-Diagnostics, Planner, Multi-Goal, Memory и Tasks — улучшай/стабилизируй их, а не предлагай добавить заново.
 3. Ставь подтверждённые device-регрессии выше абстрактных будущих идей. Не называй «понимание экрана» сильной стороной, если свежая external_screen evidence = partial/structure_only/unavailable.
 4. После v11.6 ручной multimodal intake уже реализован; следующие крупные уровни: live screen/camera Vision fallback, специализированные executors, безопасные mail/calendar/files integrations + Keystore/permissions, offline fallback и controlled proactivity.
@@ -911,7 +929,7 @@ const AYANA_SELF_REVIEW_INSTRUCTIONS = `
 
 const AYANA_SELF_AUTONOMY_COMPACT_INSTRUCTIONS = `
 Если вопрос именно о большей автономности AYANA:
-1. Точный статус: AYANA уже контролируемый персональный Android ИИ-агент; v12.13 добавляет local acceptance engine поверх v12.12 capability truth, self-review, perception-owner fusion и phase-latency truth.
+1. Точный статус: AYANA уже контролируемый персональный Android ИИ-агент; v12.14 добавляет whole-goal routing, artifact orchestration, machine terminal truth и bounded Agent Core retry поверх v12.13 acceptance engine.
 2. Не пересказывай всю историю версий. Дай 4–6 самых значимых текущих разрывов.
 3. После v11.6 ручные фото/документы и sampled-frame video уже не называй будущей функцией; дальше нужны live Vision fallback, безопасные внешние integrations/credentials, offline fallback и controlled proactivity.
 4. Отделяй «реализовано, но ещё нужно device-тестирование» от «ещё не реализовано».
@@ -1123,6 +1141,69 @@ function isArtifactCreationRequest(message = "") {
   const creationVerb = /(создай|создать|сделай|сделать|сгенерируй|сгенерировать|сохрани|сохранить|экспортируй|экспортировать|подготовь|подготовить|сформируй|сформировать|выгрузи|выгрузить|дай .*файл|create|generate|export|save)/.test(n);
   const artifactNoun = /(файл|документ|word|ворд|docx|pdf|пдф|excel|эксель|xlsx|txt|текстов.*файл|jpeg|jpg|изображен|картинк|график|диаграмм|chart|graph)/.test(n);
   return creationVerb && artifactNoun;
+}
+
+const AYANA_ARTIFACT_WHOLE_GOAL_INSTRUCTIONS = `
+ARTIFACT WHOLE-GOAL CONTRACT v2:
+- Если запрос содержит несколько обязательных частей и одна из них — создание файла/документа/графика, НЕ завершайся после первой найденной цифры или анализа.
+- Сначала получи все недостающие фактические данные подходящими read-only инструментами (например get_device_state или web_search), затем ОБЯЗАТЕЛЬНО вызови create_artifact.
+- Поля get_device_state могут включать battery_percent, charging, media_volume, media_volume_max, orientation, network_connected, network_validated, network_transport, storage_free_bytes, storage_total_bytes, brightness_percent и screen.
+- Не выдумывай storage/network/brightness, если они не пришли из tool result.
+- Если create_artifact не был успешно вызван, запрос на файл НЕ выполнен. Финальный текст без artifact_reference не является завершением.
+- После create_artifact не вызывай второй инструмент только ради подтверждения: Android ArtifactEngine сам проверяет publish/reopen/hash и возвращает verified evidence.
+`.trim();
+
+function isActionExecutionRequest(message = "") {
+  const n = normalizeIntentText(message)
+    .replace(/^(?:аяна|ayana)[\s,.:;!?—-]+/u, "");
+  if (!n) return false;
+
+  // Narrow imperative/action grammar. Informational questions such as
+  // "почему GitHub не может..." must not be reclassified as execution.
+  if (/^(?:почему|зачем|как|что|кто|какие|расскажи|объясни|можешь\s+ли|умеешь\s+ли)(?=\s|$|[?.!,;:—-])/.test(n)) {
+    return false;
+  }
+
+  return /(?:^|\s)(?:открой|открыть|запусти|запустить|закрой|закрыть|сверни|свернуть|установи|установить|измени|изменить|создай|создать|сделай|сделать|сохрани|сохранить|экспортируй|экспортировать|удали|удалить|отправь|отправить|введи|ввести|нажми|нажать|найди|найти|проверь|проверить|собери|собрать|подпиши|подписать|загрузи|загрузить|дай\s+(?:мне\s+)?готов)(?=\s|$|[?.!,;:—-])/.test(n)
+    || /(?:commit|push|коммит|пуш|apk|сборк)/.test(n) && /(?:сделай|запусти|собери|дай|измени|выполни)/.test(n);
+}
+
+function inferFinalTerminalStatus(message = "", reply = "") {
+  if (!isActionExecutionRequest(message)) return "SUCCESS";
+
+  const r = normalizeIntentText(reply);
+  if (!r) return "ERROR";
+
+  const unsupported = [
+    /(?:^|\s)я\s+не\s+могу\s+(?:выполнить|сделать|изменить|создать|запустить|отправить|записать|собрать|подписать|передать)/,
+    /(?:^|\s)у\s+меня\s+нет\s+(?:доступа|возможности|исполнителя|инструмента|разрешения)/,
+    /(?:^|\s)в\s+текущ(?:ей|ем)\s+(?:версии|сборке).*?(?:нет|не\s+реализован|не\s+доступ)/,
+    /(?:^|\s)(?:эта|данная)\s+возможност.*?(?:не\s+реализован|не\s+доступ)/,
+    /(?:^|\s)не\s+поддерживается\s+(?:текущ|данн)/
+  ].some(re => re.test(r));
+
+  if (unsupported) return "UNSUPPORTED";
+
+  const blocked = /(?:требует|нужно|необходимо)\s+(?:ваше|явное|отдельное)\s+подтверждени/.test(r)
+    || /действие\s+заблокирован/.test(r);
+  if (blocked) return "BLOCKED";
+
+  const explicitFailure = /(?:не\s+удалось|ошибка|выполнить\s+не\s+получилось)/.test(r)
+    && !/(?:не\s+удалось\s+найти\s+причин|объясню)/.test(r);
+  if (explicitFailure) return "ERROR";
+
+  return "SUCCESS";
+}
+
+function isExplicitSupportedArtifactFormatRequest(message = "") {
+  const n = normalizeIntentText(message);
+  if (!n || !isArtifactCreationRequest(message)) return false;
+
+  return [
+    "txt", "текстов", "docx", "word", "ворд", "pdf", "пдф",
+    "xlsx", "excel", "эксель", "jpeg", "jpg", "график", "диаграмм",
+    "chart", "graph"
+  ].some(marker => n.includes(marker));
 }
 
 function isAyanaSelfReviewRequest(message = "") {
@@ -1703,7 +1784,9 @@ ${selfAutonomyMode ? AYANA_SELF_AUTONOMY_COMPACT_INSTRUCTIONS : ""}`
 ${ANDROID_GOAL_V7_INSTRUCTIONS}`
       : `${AGENT_INSTRUCTIONS}
 
-${styleInstructions}${productInstructions}${scopeInstructions}${recoveryInstructions}`,
+${styleInstructions}${artifactCreationMode ? `
+
+${AYANA_ARTIFACT_WHOLE_GOAL_INSTRUCTIONS}` : ""}${productInstructions}${scopeInstructions}${recoveryInstructions}`,
     input,
     max_output_tokens: androidNavigationMode
       ? 260
@@ -1742,7 +1825,12 @@ ${styleInstructions}${productInstructions}${scopeInstructions}${recoveryInstruct
       { type: "web_search" },
       ...DEVICE_TOOLS
     ];
-    payload.tool_choice = "auto";
+    // When the user explicitly named a format supported by Android ArtifactEngine,
+    // a plain text final is not a valid first-turn completion. Require at least one
+    // tool call so compound goals can gather facts first and ultimately create_artifact.
+    payload.tool_choice = isExplicitSupportedArtifactFormatRequest(message || "")
+      ? "required"
+      : "auto";
   } else if (diagnosticMode) {
     payload.tools = diagnosticTools();
     payload.tool_choice = "auto";
@@ -1819,11 +1907,16 @@ ${styleInstructions}${productInstructions}${scopeInstructions}${recoveryInstruct
     });
   }
 
+  const finalReply = reply || "Готово.";
+  const terminalStatus = inferFinalTerminalStatus(message || "", finalReply);
+
   return Response.json({
     ok: true,
     type: "final",
     response_id: data.id,
-    reply: reply || "Готово."
+    terminal_status: terminalStatus,
+    execution_success: terminalStatus === "SUCCESS",
+    reply: finalReply
   });
 }
 
@@ -1983,7 +2076,7 @@ export default {
         ok: true,
         service: "AYANA AI",
         ai: "ready",
-        agent_core: "v10.6.1-typed-xlsx-cells",
+        agent_core: "v11.0-v12.14-whole-goal",
         voice: "marin"
       });
     }
