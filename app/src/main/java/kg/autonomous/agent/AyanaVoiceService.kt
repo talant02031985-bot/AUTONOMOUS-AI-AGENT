@@ -7283,8 +7283,7 @@ class AyanaVoiceService : Service() {
             unavailable += "сборка/подписание/выдача готового APK"
         }
 
-        return
-            "Эта задача сейчас не может быть выполнена напрямую: в AYANA нет ${unavailable.distinct().joinToString(", ")}. " +
+        return "Эта задача сейчас не может быть выполнена напрямую: в AYANA нет ${unavailable.distinct().joinToString(", ")}. " +
                 "Я могу подготовить исходники или патч, но не буду отмечать отсутствующие repository/build действия как выполненные."
     }
 
