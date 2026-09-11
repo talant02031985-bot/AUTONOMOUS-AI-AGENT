@@ -6171,8 +6171,9 @@ class MainActivity : AppCompatActivity() {
         )
 
         answerScroll =
-            ScrollView(this).apply {
+            AyanaAdaptiveAnswerScrollView(this).apply {
                 visibility = View.GONE
+                maxContentHeightPx = dp(190)
                 isFillViewport = false
                 isVerticalScrollBarEnabled = true
                 overScrollMode = View.OVER_SCROLL_IF_CONTENT_SCROLLS
@@ -6193,7 +6194,7 @@ class MainActivity : AppCompatActivity() {
             answerScroll,
             LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT,
-                dp(190)
+                ViewGroup.LayoutParams.WRAP_CONTENT
             ).apply {
                 topMargin =
                     dp(8)
@@ -9334,6 +9335,63 @@ class MainActivity : AppCompatActivity() {
             hasPendingScrollAccessibilityEvent =
                 false
             super.onDetachedFromWindow()
+        }
+    }
+
+    /**
+     * Text-mode answer surface: wraps short replies and grows naturally with
+     * the text until the configured cap is reached. Only overflow beyond the
+     * cap becomes internally scrollable, so a one-line reply never leaves a
+     * permanently tall empty answer panel.
+     */
+    private class AyanaAdaptiveAnswerScrollView(
+        context: Context
+    ) : ScrollView(context) {
+
+        var maxContentHeightPx: Int =
+            Int.MAX_VALUE
+
+        override fun onMeasure(
+            widthMeasureSpec: Int,
+            heightMeasureSpec: Int
+        ) {
+            val parentMode =
+                View.MeasureSpec.getMode(
+                    heightMeasureSpec
+                )
+
+            val parentSize =
+                View.MeasureSpec.getSize(
+                    heightMeasureSpec
+                )
+
+            val effectiveMax =
+                when (parentMode) {
+                    View.MeasureSpec.EXACTLY,
+                    View.MeasureSpec.AT_MOST ->
+                        minOf(
+                            parentSize,
+                            maxContentHeightPx
+                        )
+
+                    else ->
+                        maxContentHeightPx
+                }
+
+            val cappedHeightSpec =
+                if (effectiveMax == Int.MAX_VALUE) {
+                    heightMeasureSpec
+                } else {
+                    View.MeasureSpec.makeMeasureSpec(
+                        effectiveMax.coerceAtLeast(0),
+                        View.MeasureSpec.AT_MOST
+                    )
+                }
+
+            super.onMeasure(
+                widthMeasureSpec,
+                cappedHeightSpec
+            )
         }
     }
 
