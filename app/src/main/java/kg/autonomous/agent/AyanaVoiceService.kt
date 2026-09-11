@@ -25724,8 +25724,7 @@ class AyanaVoiceService : Service() {
                             )
                     )
 
-        return
-            if (deepTextRequest) {
+        return if (deepTextRequest) {
                 AgentCoreTransportPolicy(
                     readTimeoutMs = AGENT_CORE_LONG_READ_TIMEOUT_MS,
                     retryCount = AGENT_CORE_LONG_READ_TIMEOUT_RETRY_COUNT,
