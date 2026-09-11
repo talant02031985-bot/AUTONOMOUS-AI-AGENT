@@ -60,6 +60,11 @@ import kotlin.math.abs
 
 class AyanaVoiceService : Service() {
 
+    // AYANA v12.15.1 LONG RESPONSE RESILIENCE.
+    // Long/deep text-only read-only Agent Core turns use one extended 38 s read window
+    // instead of two restarted 18 s generations. Potential side-effect/device-action
+    // requests keep the existing short bounded policy. Worker completion metadata is
+    // surfaced in History so continuation/integrity can be device-verified.
     // AYANA v12.15.0 COMPLETION INTEGRITY + VERIFIED-FACTS REASONING HANDOFF.
     // Multi-device read-only executors may terminal SUCCESS only for presentation-only
     // metric goals. If the original command still contains an evaluation/condition/decision
@@ -19650,11 +19655,31 @@ class AyanaVoiceService : Service() {
                         )
                     }
 
+                    val responseType =
+                        response.optString("type")
+
+                    val responseCompletionDetails =
+                        buildString {
+                            append(responseType)
+                            if (responseType == "final") {
+                                append("; continuation_count=")
+                                append(response.optInt("continuation_count", 0))
+                                append("; completion_integrity=")
+                                append(
+                                    response
+                                        .optString(
+                                            "completion_integrity",
+                                            "unknown"
+                                        )
+                                )
+                            }
+                        }
+
                     commandHistoryStore.addEvent(
                         activeCommandHistoryId,
                         state = "agent_response",
                         message = "Agent Core: ответ получен",
-                        details = response.optString("type")
+                        details = responseCompletionDetails
                     )
 
                     val type =
@@ -25651,6 +25676,70 @@ class AyanaVoiceService : Service() {
         return file
     }
 
+    private data class AgentCoreTransportPolicy(
+        val readTimeoutMs: Int,
+        val retryCount: Int,
+        val profile: String
+    )
+
+    /**
+     * v12.15.1 transport policy. A deep read-only text request benefits more from one
+     * longer server window than from restarting the same generation after 18 seconds.
+     * Tool-result/verified-device-fact turns remain on the existing short bounded policy
+     * so device/action orchestration keeps its fail-closed latency and semantics.
+     */
+    private fun resolveAgentCoreTransportPolicy(
+        message: String?,
+        toolResults: JSONArray?,
+        verifiedDeviceFacts: String?,
+        source: String
+    ): AgentCoreTransportPolicy {
+        val hasToolResults =
+            toolResults != null &&
+                toolResults.length() > 0
+
+        val normalized =
+            message
+                .orEmpty()
+                .lowercase(Locale.ROOT)
+                .replace('ё', 'е')
+                .trim()
+
+        val hasPotentialSideEffectVerb =
+            Regex("(?:^|\\s)(?:открой|открыть|закрой|закрыть|сверни|свернуть|измени|изменить|установи|установить|создай|создать|сохрани|сохранить|удали|удалить|отправь|отправить|введи|ввести|нажми|нажать|включи|включить|выключи|выключить|запусти|запустить|собери|собрать|подпиши|подписать|загрузи|загрузить|commit|push|коммит|пуш)(?:\\s|$)")
+                .containsMatchIn(normalized)
+
+        val deepTextRequest =
+            source == "text" &&
+                !hasToolResults &&
+                verifiedDeviceFacts.isNullOrBlank() &&
+                normalized.isNotBlank() &&
+                !hasPotentialSideEffectVerb &&
+                (
+                    Regex("(?:подробн|детальн|развернут|тщательн|глубок|полный\\s+(?:обзор|анализ|список|перечень)|проанализируй|сравни|исследуй|пошагов)")
+                        .containsMatchIn(normalized) ||
+                        (
+                            Regex("(?:все|весь|полный)\\s+(?:основн\\w*\\s+)?(?:возможност|пункт|этап|шаг|требован)")
+                                .containsMatchIn(normalized)
+                            )
+                    )
+
+        return
+            if (deepTextRequest) {
+                AgentCoreTransportPolicy(
+                    readTimeoutMs = AGENT_CORE_LONG_READ_TIMEOUT_MS,
+                    retryCount = AGENT_CORE_LONG_READ_TIMEOUT_RETRY_COUNT,
+                    profile = "long_read_only"
+                )
+            } else {
+                AgentCoreTransportPolicy(
+                    readTimeoutMs = AGENT_CORE_READ_TIMEOUT_MS,
+                    retryCount = AGENT_CORE_TIMEOUT_RETRY_COUNT,
+                    profile = "bounded_default"
+                )
+            }
+    }
+
     /**
      * v12.14 bounded Agent Core recovery. A timeout occurs before any returned
      * device tool call is dispatched, so retrying the same model request is
@@ -25666,6 +25755,24 @@ class AyanaVoiceService : Service() {
         commandToken: Long,
         verifiedDeviceFacts: String? = null
     ): JSONObject {
+        val transportPolicy =
+            resolveAgentCoreTransportPolicy(
+                message = message,
+                toolResults = toolResults,
+                verifiedDeviceFacts = verifiedDeviceFacts,
+                source = source
+            )
+
+        if (transportPolicy.profile != "bounded_default") {
+            commandHistoryStore.addEvent(
+                activeCommandHistoryId,
+                state = "agent_transport_policy",
+                message = "Для длинного read-only запроса выбран расширенный Agent Core budget",
+                details =
+                    "profile=${transportPolicy.profile}; read_timeout_ms=${transportPolicy.readTimeoutMs}; retry_count=${transportPolicy.retryCount}"
+            )
+        }
+
         var attempt = 0
         var backoffMs = AGENT_CORE_RETRY_BACKOFF_MS
 
@@ -25678,11 +25785,12 @@ class AyanaVoiceService : Service() {
                     memoryContext = memoryContext,
                     intelligenceContext = intelligenceContext,
                     source = source,
-                    verifiedDeviceFacts = verifiedDeviceFacts
+                    verifiedDeviceFacts = verifiedDeviceFacts,
+                    readTimeoutMs = transportPolicy.readTimeoutMs
                 )
             } catch (timeout: SocketTimeoutException) {
                 if (
-                    attempt >= AGENT_CORE_TIMEOUT_RETRY_COUNT ||
+                    attempt >= transportPolicy.retryCount ||
                     isCommandCancelled(commandToken) ||
                     shuttingDown
                 ) {
@@ -25696,7 +25804,7 @@ class AyanaVoiceService : Service() {
                     state = "agent_retry",
                     message = "Agent Core timeout: выполняю bounded retry",
                     details =
-                        "attempt=$attempt/$AGENT_CORE_TIMEOUT_RETRY_COUNT; backoff_ms=$backoffMs; " +
+                        "attempt=$attempt/${transportPolicy.retryCount}; backoff_ms=$backoffMs; " +
                             "reason=${timeout.message.orEmpty().take(180)}"
                 )
 
@@ -25721,7 +25829,8 @@ class AyanaVoiceService : Service() {
         memoryContext: String?,
         intelligenceContext: String?,
         source: String,
-        verifiedDeviceFacts: String? = null
+        verifiedDeviceFacts: String? = null,
+        readTimeoutMs: Int = AGENT_CORE_READ_TIMEOUT_MS
     ): JSONObject {
 
         var connection:
@@ -25801,7 +25910,7 @@ class AyanaVoiceService : Service() {
                 AGENT_CORE_CONNECT_TIMEOUT_MS
 
             connection.readTimeout =
-                AGENT_CORE_READ_TIMEOUT_MS
+                readTimeoutMs
 
             connection.doOutput =
                 true
@@ -32699,6 +32808,8 @@ class AyanaVoiceService : Service() {
         private const val AGENT_CORE_CONNECT_TIMEOUT_MS = 15000
         private const val AGENT_CORE_READ_TIMEOUT_MS = 18000
         private const val AGENT_CORE_TIMEOUT_RETRY_COUNT = 1
+        private const val AGENT_CORE_LONG_READ_TIMEOUT_MS = 38000
+        private const val AGENT_CORE_LONG_READ_TIMEOUT_RETRY_COUNT = 0
         private const val AGENT_CORE_RETRY_BACKOFF_MS = 350L
         private const val AGENT_CORE_RETRY_BACKOFF_MAX_MS = 1200L
 
