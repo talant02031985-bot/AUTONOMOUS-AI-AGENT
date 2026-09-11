@@ -1,4 +1,4 @@
-// AYANA Worker v11.0 — v12.14 Whole-Goal Integrity + Artifact Orchestration + Machine Terminal Truth
+// AYANA Worker v11.1.1 — D8/D13 Minimal Long-Text Integrity Fix
 // Preserves v10.9 acceptance/capability grounding and strengthens compound deliverables:
 // device-state exposes network/storage/brightness, artifact goals must end in verified create_artifact,
 // and explicit inability to execute an action is returned as machine UNSUPPORTED instead of generic SUCCESS.
@@ -1134,8 +1134,15 @@ function isFastInformationalRequest(message = "") {
     return false;
   }
 
+  // A leading detail modifier changes requested answer length, not task class.
+  // Example: «подробно опиши солнечную систему» is still a plain knowledge query.
+  const routed = n.replace(
+    /^(?:(?:подробно|детально|развернуто|подробнее|тщательно)\s+)+/,
+    ""
+  );
+
   if (
-    /^(?:кто такой|кто такая|кто такие|что такое|что значит|расскажи(?: мне)?(?: о| про)?|объясни(?: мне)?|дай информацию(?: о)?|информация(?: о)?|опиши|как устроен|как устроена|как работает)(?:\s|$)/.test(n)
+    /^(?:кто такой|кто такая|кто такие|что такое|что значит|расскажи(?: мне)?(?: о| про)?|объясни(?: мне)?|дай информацию(?: о)?|информация(?: о)?|опиши|как устроен|как устроена|как работает)(?:\s|$)/.test(routed)
   ) {
     return true;
   }
@@ -1225,7 +1232,7 @@ function isExplicitSupportedArtifactFormatRequest(message = "") {
 function isAyanaSelfReviewRequest(message = "") {
   const n = normalizeIntentText(message);
   const mentionsSelf = /(аяна|ayana)/.test(n)
-    || /(?:^|[^а-яa-z0-9])(ты|тебе|тебя|твой|твои|твоя|твое|твоей|твоего|твою|твоих|себе|себя)(?:$|[^а-яa-z0-9])/.test(n);
+    || /(?:^|[^а-яa-z0-9])(ты|тебе|тебя|твой|твои|твоя|твое|твоей|твоего|твою|твоих|себе|себя|свой|свои|своя|свое|своей|своего|свою|своих)(?:$|[^а-яa-z0-9])/.test(n);
   const asksImprovement = /(улучш|исправ|доработ|развит|что добавить|что изменить|глобальн|что бы .* улучш|что .* улучшила)/.test(n);
   return mentionsSelf && asksImprovement;
 }
@@ -1235,7 +1242,7 @@ function isAyanaCapabilityRequest(message = "") {
   if (!n) return false;
 
   const selfReference = /(аяна|ayana)/.test(n)
-    || /(?:^|[^а-яa-z0-9])(ты|тебе|тебя|твой|твои|твоя|твое|твоей|твоего|твою|твоих|себе|себя)(?:$|[^а-яa-z0-9])/.test(n);
+    || /(?:^|[^а-яa-z0-9])(ты|тебе|тебя|твой|твои|твоя|твое|твоей|твоего|твою|твоих|себе|себя|свой|свои|своя|свое|своей|своего|свою|своих)(?:$|[^а-яa-z0-9])/.test(n);
   const attachmentObject = "(?:фото|фотограф|изображен|видео|файл|документ|pdf|ворд|word|excel|эксель)";
   const attachmentAction = new RegExp(`(?:загруз|отправ|посмотр|анализ|проанализ).*${attachmentObject}|куда .*загруз`);
   const capabilityTopic = /(умеешь|можешь|возможност|функц|автоном|ограничен|не хватает|нужно|необходимо|требует|реализован|готово|готова|демонстрац|состояни|уровень|развити|улучш|исправ|доработ|что добавить|что изменить|что уже|чего нет|что отсутствует|чтобы .* стала|чтобы .* стать)/.test(n)
@@ -1247,7 +1254,7 @@ function isAyanaCapabilityRequest(message = "") {
 function hasAyanaSelfReference(message = "") {
   const n = normalizeIntentText(message);
   return /(аяна|ayana)/.test(n)
-    || /(?:^|[^а-яa-z0-9])(ты|тебе|тебя|твой|твои|твоя|твое|твоей|твоего|твою|твоих|себе|себя)(?:$|[^а-яa-z0-9])/.test(n);
+    || /(?:^|[^а-яa-z0-9])(ты|тебе|тебя|твой|твои|твоя|твое|твоей|твоего|твою|твоих|себе|себя|свой|свои|своя|свое|своей|своего|свою|своих)(?:$|[^а-яa-z0-9])/.test(n);
 }
 
 function isAyanaAutonomyRequest(message = "") {
@@ -1348,22 +1355,78 @@ function appendContinuationWithoutOverlap(baseText, continuationText) {
   return `${base}\n${next}`.trim();
 }
 
-async function continueIncompleteTextResponse(env, payload, data, initialReply) {
-  if (!isMaxOutputTokenIncomplete(data) || !data?.id || payload.store === false) {
+const AYANA_RESPONSE_COMPLETION_SENTINEL = "[[AYANA_RESPONSE_COMPLETE]]";
+
+const AYANA_LONG_TEXT_COMPLETION_INSTRUCTIONS = `
+LONG RESPONSE COMPLETION INTEGRITY:
+- Заверши все начатые предложения, пункты и разделы.
+- Только в самом конце полностью завершённого итогового ответа добавь ${AYANA_RESPONSE_COMPLETION_SENTINEL}.
+- Маркер служебный: Worker удалит его перед отправкой Android.
+- Не ставь маркер, пока ответ реально не завершён.
+`.trim();
+
+function hasCompletionSentinel(text = "") {
+  return String(text || "").trimEnd().endsWith(AYANA_RESPONSE_COMPLETION_SENTINEL);
+}
+
+function stripCompletionSentinel(text = "") {
+  const raw = String(text || "").trim();
+  if (!hasCompletionSentinel(raw)) return raw;
+  return raw
+    .slice(0, raw.lastIndexOf(AYANA_RESPONSE_COMPLETION_SENTINEL))
+    .trimEnd();
+}
+
+async function ensureCompleteTextResponse(env, payload, data, initialReply, requireSentinel = false) {
+  const initialIncomplete = isIncompleteResponse(data);
+  const initialHasSentinel = hasCompletionSentinel(initialReply);
+  const needsTokenContinuation = isMaxOutputTokenIncomplete(data);
+  const needsSentinelContinuation = requireSentinel
+    && !initialIncomplete
+    && !initialHasSentinel;
+
+  if (!needsTokenContinuation && !needsSentinelContinuation) {
+    const complete = !initialIncomplete && (!requireSentinel || initialHasSentinel);
+    const cleaned = stripCompletionSentinel(initialReply);
     return {
-      ok: !isIncompleteResponse(data) && Boolean(String(initialReply || "").trim()),
+      ok: complete && Boolean(cleaned),
       data,
-      reply: initialReply,
+      reply: cleaned,
       continuationCount: 0,
-      incompleteReason: incompleteResponseReason(data)
+      incompleteReason: complete
+        ? ""
+        : (incompleteResponseReason(data) || (requireSentinel ? "completion_sentinel_missing" : "response_not_completed"))
+    };
+  }
+
+  // Non-token API incompletes are not safely resumable here.
+  if (initialIncomplete && !needsTokenContinuation) {
+    return {
+      ok: false,
+      data,
+      reply: stripCompletionSentinel(initialReply),
+      continuationCount: 0,
+      incompleteReason: incompleteResponseReason(data) || "response_incomplete"
+    };
+  }
+
+  if (!data?.id || payload.store === false) {
+    return {
+      ok: false,
+      data,
+      reply: stripCompletionSentinel(initialReply),
+      continuationCount: 0,
+      incompleteReason: incompleteResponseReason(data) || "completion_continuation_unavailable"
     };
   }
 
   const continuationPayload = {
     model: payload.model,
     reasoning: payload.reasoning || { effort: "low" },
-    instructions: `${payload.instructions}\n\nCONTINUATION INTEGRITY:\nПродолжи ровно незавершённый ответ. Не повторяй уже выданный текст. Заверши текущую мысль, список и структуру полностью. Не вызывай инструменты и не начинай новую задачу.`,
-    input: "Продолжи ответ с места обрыва и полностью заверши его без повторения уже написанного.",
+    instructions: `${payload.instructions}\n\nCONTINUATION INTEGRITY:\nПродолжи только незавершённый ответ. Не повторяй уже выданный текст. Заверши текущую мысль, список и структуру полностью.${requireSentinel ? ` В самом конце добавь ${AYANA_RESPONSE_COMPLETION_SENTINEL}.` : ""} Не вызывай инструменты и не начинай новую задачу.`,
+    input: needsSentinelContinuation
+      ? `Проверь предыдущий ответ. Если он оборван — продолжи с места обрыва и полностью заверши. Если он уже завершён — не повторяй его.${requireSentinel ? ` В любом случае закончи служебным маркером ${AYANA_RESPONSE_COMPLETION_SENTINEL}.` : ""}`
+      : `Продолжи ответ с места обрыва и полностью заверши его без повторения уже написанного.${requireSentinel ? ` В самом конце добавь ${AYANA_RESPONSE_COMPLETION_SENTINEL}.` : ""}`,
     previous_response_id: String(data.id),
     max_output_tokens: Math.max(Number(payload.max_output_tokens || 0), 3200),
     store: true
@@ -1374,14 +1437,16 @@ async function continueIncompleteTextResponse(env, payload, data, initialReply) 
     return {
       ok: false,
       data: continued.data,
-      reply: initialReply,
+      reply: stripCompletionSentinel(initialReply),
       continuationCount: 1,
       incompleteReason: `continuation_http_${continued.status}`
     };
   }
 
   const continuationText = extractOutputText(continued.data);
-  const reply = appendContinuationWithoutOverlap(initialReply, continuationText);
+  const combined = appendContinuationWithoutOverlap(initialReply, continuationText);
+  const finalHasSentinel = hasCompletionSentinel(combined);
+  const reply = stripCompletionSentinel(combined);
 
   if (isIncompleteResponse(continued.data)) {
     return {
@@ -1390,6 +1455,16 @@ async function continueIncompleteTextResponse(env, payload, data, initialReply) 
       reply,
       continuationCount: 1,
       incompleteReason: incompleteResponseReason(continued.data) || "continuation_incomplete"
+    };
+  }
+
+  if (requireSentinel && !finalHasSentinel) {
+    return {
+      ok: false,
+      data: continued.data,
+      reply,
+      continuationCount: 1,
+      incompleteReason: "completion_sentinel_missing_after_continuation"
     };
   }
 
@@ -1833,6 +1908,16 @@ ${verifiedDeviceFacts}
   const selfAutonomyMode = capabilityMode
     && isAyanaAutonomyRequest(message || "");
   const deepRequest = isDeepRequest(message || "");
+  const detailedCapabilityFastMode = capabilityMode
+    && deepRequest
+    && !selfReviewMode
+    && !isComplexReasoningRequest(message || "")
+    && !needsFreshWebInformation(message || "");
+  const longTextCompletionMode = deepRequest
+    && !androidNavigationMode
+    && !artifactCreationMode
+    && !durableRecoveryMode
+    && !isActionExecutionRequest(message || "");
   const fastEverydayMode = !durableRecoveryMode
     && !androidNavigationMode
     && !artifactCreationMode
@@ -1852,7 +1937,8 @@ ${verifiedDeviceFacts}
   const fastModelMode =
     androidNavigationMode
     || fastEverydayMode
-    || detailedFastInfoMode;
+    || detailedFastInfoMode
+    || detailedCapabilityFastMode;
 
   const styleInstructions = source === "voice"
     ? AYANA_VOICE_STYLE
@@ -1897,7 +1983,9 @@ ${styleInstructions}${artifactCreationMode ? `
 
 ${AYANA_ARTIFACT_WHOLE_GOAL_INSTRUCTIONS}` : ""}${productInstructions}${scopeInstructions}${recoveryInstructions}${verifiedFactsCompletionMode ? `
 
-${AYANA_VERIFIED_DEVICE_FACTS_INSTRUCTIONS}` : ""}`,
+${AYANA_VERIFIED_DEVICE_FACTS_INSTRUCTIONS}` : ""}${longTextCompletionMode ? `
+
+${AYANA_LONG_TEXT_COMPLETION_INSTRUCTIONS}` : ""}`,
     input,
     max_output_tokens: androidNavigationMode
       ? 260
@@ -1906,7 +1994,9 @@ ${AYANA_VERIFIED_DEVICE_FACTS_INSTRUCTIONS}` : ""}`,
       : durableRecoveryMode
         ? (source === "voice" ? 420 : 520)
       : detailedFastInfoMode
-        ? (source === "voice" ? 650 : 1500)
+        ? (source === "voice" ? 900 : 2400)
+      : detailedCapabilityFastMode
+        ? (source === "voice" ? 1100 : 3000)
       : deepRequest
         ? (source === "voice" ? 650 : 2200)
         : source === "voice"
@@ -2034,11 +2124,12 @@ ${AYANA_VERIFIED_DEVICE_FACTS_INSTRUCTIONS}` : ""}`,
     });
   }
 
-  const completion = await continueIncompleteTextResponse(
+  const completion = await ensureCompleteTextResponse(
     env,
     payload,
     data,
-    initialReply
+    initialReply,
+    longTextCompletionMode
   );
 
   if (!completion.ok) {
@@ -2066,6 +2157,7 @@ ${AYANA_VERIFIED_DEVICE_FACTS_INSTRUCTIONS}` : ""}`,
     execution_success: terminalStatus === "SUCCESS",
     completion_status: "completed",
     continuation_count: completion.continuationCount,
+    completion_integrity: longTextCompletionMode ? "sentinel_verified" : "api_status_verified",
     reply: finalReply
   });
 }
@@ -2239,7 +2331,7 @@ export default {
         ok: true,
         service: "AYANA AI",
         ai: "ready",
-        agent_core: "v11.1-v12.15-completion-integrity",
+        agent_core: "v11.1.1-d8-d13-minimal-fix",
         voice: "marin"
       });
     }
