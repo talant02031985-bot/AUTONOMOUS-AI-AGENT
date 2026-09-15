@@ -7,7 +7,7 @@ import java.util.Date
 import java.util.Locale
 
 /**
- * AYANA Acceptance Test Engine v3.1 — EXHAUSTIVE AUTONOMOUS TESTING.
+ * AYANA Acceptance Test Engine v4.0 — SELF-DIRECTED DIAGNOSTICS.
  *
  * Separates three different truths that were previously conflated:
  * 1) QUICK_HEALTH — current runtime health right now;
@@ -21,7 +21,14 @@ import java.util.Locale
  * A successful test RUN is not the same as an accepted agent. The returned `grade`
  * owns readiness truth, while `execution_success` only says the suite itself completed.
  *
- * v3.1 preserves fail-closed grading/reporting and extends exhaustive mode:
+ * v4.0 preserves every v3.1 baseline probe and adds an optional adaptive runner:
+ * - the 55 baseline tests remain a stable regression floor;
+ * - EXHAUSTIVE_ACCEPTANCE may append a variable number of generated safe tests;
+ * - generated tests are graded by the same fail-closed status/evidence contract;
+ * - test count is no longer a hard-coded proxy for AYANA capability count;
+ * - adaptive coverage, hypotheses and anomaly candidates are exported in the result.
+ *
+ * v3.1 baseline truths remain:
  * - all prior local health/audit/functional probes remain;
  * - network turns are counted from the actual probes rather than hard-coded zero;
  * - extended probes cover device-state evidence, single-network routing, history
@@ -31,6 +38,7 @@ import java.util.Locale
  */
 class AyanaAcceptanceTestEngine(
     private val probeRunner: (String) -> JSONObject,
+    private val adaptiveRunner: ((JSONObject) -> JSONObject)? = null,
     private val shouldCancel: () -> Boolean = { false }
 ) {
 
@@ -204,6 +212,151 @@ class AyanaAcceptanceTestEngine(
             tests.put(testResult)
         }
 
+        var adaptiveEngine = ""
+        var adaptiveEngineVersion = ""
+        var adaptiveGenerated = 0
+        var adaptiveCoverage = JSONObject()
+        var adaptiveHypotheses = JSONArray()
+        var adaptiveAnomalies = JSONArray()
+
+        if (
+            mode == Mode.EXHAUSTIVE_ACCEPTANCE &&
+            cancelled == 0 &&
+            adaptiveRunner != null &&
+            !shouldCancel()
+        ) {
+            val baselineSnapshot =
+                JSONObject()
+                    .put("mode", mode.wireName)
+                    .put("started_at_ms", startedAt)
+                    .put("tests", JSONArray(tests.toString()))
+                    .put("passed", pass)
+                    .put("warnings", warning)
+                    .put("failed", failed)
+                    .put("blocked", blocked)
+                    .put("unsupported", unsupported)
+                    .put("no_data", noData)
+                    .put("cancelled", cancelled)
+                    .put("critical_failures", criticalFailures)
+                    .put("network_turns", networkTurns)
+
+            val adaptiveRaw =
+                try {
+                    adaptiveRunner.invoke(baselineSnapshot)
+                } catch (error: Exception) {
+                    JSONObject()
+                        .put("success", false)
+                        .put("engine", "adaptive_runner")
+                        .put("engine_version", "unknown")
+                        .put("tests",
+                            JSONArray()
+                                .put(
+                                    JSONObject()
+                                        .put("id", "AUTO-ENGINE-ERROR")
+                                        .put("title", "Autonomous Test Intelligence execution")
+                                        .put("status", STATUS_FAIL)
+                                        .put("critical", true)
+                                        .put("duration_ms", 0L)
+                                        .put("message", "Adaptive diagnostics exception: ${error.message ?: error.javaClass.simpleName}")
+                                        .put("evidence_scope", "adaptive_runner_exception")
+                                        .put("verified", false)
+                                        .put("evidence", JSONObject())
+                                )
+                        )
+                }
+
+            adaptiveEngine = adaptiveRaw.optString("engine")
+            adaptiveEngineVersion = adaptiveRaw.optString("engine_version")
+            adaptiveCoverage =
+                adaptiveRaw.optJSONObject("coverage")
+                    ?: JSONObject()
+            adaptiveHypotheses =
+                adaptiveRaw.optJSONArray("hypotheses")
+                    ?: JSONArray()
+            adaptiveAnomalies =
+                adaptiveRaw.optJSONArray("anomalies")
+                    ?: JSONArray()
+
+            networkTurns +=
+                adaptiveRaw.optInt("network_turns", 0)
+                    .coerceAtLeast(0)
+
+            val adaptiveTests =
+                adaptiveRaw.optJSONArray("tests")
+                    ?: JSONArray()
+
+            val usedIds = linkedSetOf<String>()
+            for (index in 0 until tests.length()) {
+                tests.optJSONObject(index)
+                    ?.optString("id")
+                    ?.takeIf { it.isNotBlank() }
+                    ?.let(usedIds::add)
+            }
+
+            for (index in 0 until adaptiveTests.length()) {
+                if (shouldCancel()) {
+                    cancelled++
+                    break
+                }
+
+                val source = adaptiveTests.optJSONObject(index) ?: continue
+                val rawId = source.optString("id").trim()
+                val id =
+                    rawId
+                        .ifBlank { "AUTO-${index + 1}" }
+                        .take(96)
+
+                if (!usedIds.add(id)) {
+                    continue
+                }
+
+                val status =
+                    source.optString("status")
+                        .uppercase(Locale.ROOT)
+                        .takeIf { it in VALID_STATUSES }
+                        ?: STATUS_FAIL
+
+                val critical = source.optBoolean("critical", false)
+
+                when (status) {
+                    STATUS_PASS -> pass++
+                    STATUS_WARNING -> warning++
+                    STATUS_FAIL -> {
+                        failed++
+                        if (critical) criticalFailures++
+                    }
+                    STATUS_BLOCKED -> blocked++
+                    STATUS_UNSUPPORTED -> unsupported++
+                    STATUS_NO_DATA -> noData++
+                    STATUS_CANCELLED -> cancelled++
+                    else -> {
+                        failed++
+                        if (critical) criticalFailures++
+                    }
+                }
+
+                tests.put(
+                    JSONObject()
+                        .put("id", id)
+                        .put("title", source.optString("title").ifBlank { id }.take(220))
+                        .put("status", status)
+                        .put("critical", critical)
+                        .put("duration_ms", source.optLong("duration_ms", 0L).coerceAtLeast(0L))
+                        .put("message", source.optString("message").take(1600))
+                        .put("evidence_scope", source.optString("evidence_scope").ifBlank { "self_directed" }.take(120))
+                        .put("verified", source.optBoolean("verified", status == STATUS_PASS))
+                        .put("evidence", source.optJSONObject("evidence") ?: JSONObject())
+                        .put("generated", true)
+                        .put("generator", source.optString("generator").take(160))
+                )
+                adaptiveGenerated++
+            }
+
+            if (adaptiveRaw.optBoolean("cancelled", false) && cancelled == 0) {
+                cancelled++
+            }
+        }
+
         val finishedAt =
             System.currentTimeMillis()
 
@@ -247,7 +400,9 @@ class AyanaAcceptanceTestEngine(
             .put("started_at_ms", startedAt)
             .put("finished_at_ms", finishedAt)
             .put("network_turns", networkTurns)
-            .put("tests_requested", selected.size)
+            .put("tests_requested", selected.size + adaptiveGenerated)
+            .put("baseline_tests_requested", selected.size)
+            .put("adaptive_tests_generated", adaptiveGenerated)
             .put("tests_completed", tests.length())
             .put("passed", pass)
             .put("warnings", warning)
@@ -261,6 +416,11 @@ class AyanaAcceptanceTestEngine(
             .put("duration_ms", durationMs)
             .put("tests", tests)
             .put("known_limits", limits)
+            .put("adaptive_engine", adaptiveEngine)
+            .put("adaptive_engine_version", adaptiveEngineVersion)
+            .put("adaptive_coverage", adaptiveCoverage)
+            .put("adaptive_hypotheses", adaptiveHypotheses)
+            .put("adaptive_anomalies", adaptiveAnomalies)
             .put(
                 "summary",
                 buildSummary(
@@ -380,6 +540,59 @@ class AyanaAcceptanceTestEngine(
             append("----------------------------------------\n")
             append("execution_success=true means the diagnostic suite itself finished.\n")
             append("It does NOT mean every AYANA function passed. Readiness is owned by grade and per-test statuses.\n")
+
+            val adaptiveGenerated = result.optInt("adaptive_tests_generated", 0)
+            val adaptiveCoverage = result.optJSONObject("adaptive_coverage") ?: JSONObject()
+            val adaptiveHypotheses = result.optJSONArray("adaptive_hypotheses") ?: JSONArray()
+            val adaptiveAnomalies = result.optJSONArray("adaptive_anomalies") ?: JSONArray()
+
+            if (adaptiveGenerated > 0 || adaptiveCoverage.length() > 0) {
+                append("\nSELF-DIRECTED DIAGNOSTICS\n")
+                append("----------------------------------------\n")
+                append("Adaptive engine: ${result.optString("adaptive_engine").ifBlank { "not reported" }}")
+                val adaptiveVersion = result.optString("adaptive_engine_version")
+                if (adaptiveVersion.isNotBlank()) {
+                    append(" v$adaptiveVersion")
+                }
+                append("\n")
+                append("Baseline tests: ${result.optInt("baseline_tests_requested", 0)}\n")
+                append("Generated tests: $adaptiveGenerated\n")
+                if (adaptiveCoverage.length() > 0) {
+                    append("Coverage: ")
+                    append(adaptiveCoverage.toString(2).take(REPORT_ADAPTIVE_SECTION_LIMIT))
+                    append("\n")
+                }
+
+                if (adaptiveHypotheses.length() > 0) {
+                    append("\nGENERATED HYPOTHESES\n")
+                    append("----------------------------------------\n")
+                    val count = minOf(adaptiveHypotheses.length(), REPORT_ADAPTIVE_ITEMS_LIMIT)
+                    for (index in 0 until count) {
+                        val item = adaptiveHypotheses.optJSONObject(index) ?: continue
+                        append("${index + 1}. ${item.optString("id")} [${item.optString("priority")}] ")
+                        append(item.optString("hypothesis").take(REPORT_MESSAGE_LIMIT))
+                        append("\n")
+                    }
+                    if (adaptiveHypotheses.length() > count) {
+                        append("... ${adaptiveHypotheses.length() - count} more hypotheses omitted from this rendered section.\n")
+                    }
+                }
+
+                if (adaptiveAnomalies.length() > 0) {
+                    append("\nMINED ANOMALIES\n")
+                    append("----------------------------------------\n")
+                    val count = minOf(adaptiveAnomalies.length(), REPORT_ADAPTIVE_ITEMS_LIMIT)
+                    for (index in 0 until count) {
+                        val item = adaptiveAnomalies.optJSONObject(index) ?: continue
+                        append("${index + 1}. ${item.optString("kind")} — ")
+                        append(item.optString("message").take(REPORT_MESSAGE_LIMIT))
+                        append("\n")
+                    }
+                    if (adaptiveAnomalies.length() > count) {
+                        append("... ${adaptiveAnomalies.length() - count} more anomalies omitted from this rendered section.\n")
+                    }
+                }
+            }
 
             if (prioritized.isNotEmpty()) {
                 append("\nPRIORITY FINDINGS\n")
@@ -546,6 +759,11 @@ class AyanaAcceptanceTestEngine(
                     "Всесторонняя автономная диагностика AYANA завершена."
             }
 
+        val generatedCount =
+            (0 until tests.length())
+                .mapNotNull { index -> tests.optJSONObject(index) }
+                .count { item -> item.optBoolean("generated", false) }
+
         val notable =
             mutableListOf<String>()
 
@@ -604,6 +822,9 @@ class AyanaAcceptanceTestEngine(
             append(".\n")
             append("Статус готовности: ${russianGrade(grade)}.\n")
             append("Время теста: $durationMs мс. Сетевых обращений Agent Core/Worker: $networkTurns.")
+            if (mode == Mode.EXHAUSTIVE_ACCEPTANCE) {
+                append(" Всего проверок: ${tests.length()}; самонаправленно сгенерировано: $generatedCount.")
+            }
 
             if (notable.isNotEmpty()) {
                 append("\n\nТребуют внимания:\n")
@@ -620,20 +841,24 @@ class AyanaAcceptanceTestEngine(
                 mode == Mode.FULL_ACCEPTANCE ||
                 mode == Mode.EXHAUSTIVE_ACCEPTANCE
             ) {
-                append("\n\nРезультаты проверок:\n")
-                for (index in 0 until tests.length()) {
-                    val item = tests.optJSONObject(index) ?: continue
-                    append(
-                        "${item.optString("status")} — ${item.optString("title")}"
-                    )
-                    val message = item.optString("message").trim()
-                    if (message.isNotBlank()) {
-                        append(": ")
-                        append(message.take(260))
+                if (tests.length() <= SUMMARY_FULL_TEST_LIST_LIMIT) {
+                    append("\n\nРезультаты проверок:\n")
+                    for (index in 0 until tests.length()) {
+                        val item = tests.optJSONObject(index) ?: continue
+                        append(
+                            "${item.optString("status")} — ${item.optString("title")}"
+                        )
+                        val message = item.optString("message").trim()
+                        if (message.isNotBlank()) {
+                            append(": ")
+                            append(message.take(260))
+                        }
+                        if (index < tests.length() - 1) {
+                            append("\n")
+                        }
                     }
-                    if (index < tests.length() - 1) {
-                        append("\n")
-                    }
+                } else {
+                    append("\n\nПолный список ${tests.length()} проверок сохранён в подробном TXT-отчёте; в ответе показаны только приоритетные отклонения.")
                 }
             }
 
@@ -714,8 +939,8 @@ class AyanaAcceptanceTestEngine(
         }
 
     companion object {
-        const val ENGINE_VERSION = "3.1"
-        const val REPORT_SCHEMA_VERSION = "3.1"
+        const val ENGINE_VERSION = "4.0"
+        const val REPORT_SCHEMA_VERSION = "4.0"
 
         const val STATUS_PASS = "PASS"
         const val STATUS_WARNING = "WARNING"
@@ -725,10 +950,25 @@ class AyanaAcceptanceTestEngine(
         const val STATUS_NO_DATA = "NO_DATA"
         const val STATUS_CANCELLED = "CANCELLED"
 
+        private val VALID_STATUSES =
+            setOf(
+                STATUS_PASS,
+                STATUS_WARNING,
+                STATUS_FAIL,
+                STATUS_BLOCKED,
+                STATUS_UNSUPPORTED,
+                STATUS_NO_DATA,
+                STATUS_CANCELLED
+            )
+
         const val GRADE_READY = "READY"
         const val GRADE_READY_WITH_LIMITATIONS = "READY_WITH_LIMITATIONS"
         const val GRADE_NOT_READY = "NOT_READY"
         const val GRADE_CANCELLED = "CANCELLED"
+
+        private const val SUMMARY_FULL_TEST_LIST_LIMIT = 80
+        private const val REPORT_ADAPTIVE_ITEMS_LIMIT = 40
+        private const val REPORT_ADAPTIVE_SECTION_LIMIT = 12_000
 
         const val PROBE_DIAGNOSTICS_LIVE = "diagnostics_live"
         const val PROBE_RUNTIME_CAPABILITIES = "runtime_capabilities"
