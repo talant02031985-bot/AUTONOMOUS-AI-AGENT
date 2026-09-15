@@ -1,4 +1,4 @@
-// AYANA Worker v11.1.5 — Long/Deep Tail Completion + Network Fact Truth + Context Boundary
+// AYANA Worker v11.1.6 — Bounded Deep Single Window + Network Fact Truth + Context Boundary
 // Preserves v10.9 acceptance/capability grounding and strengthens compound deliverables:
 // device-state exposes network/storage/brightness, artifact goals must end in verified create_artifact,
 // and explicit inability to execute an action is returned as machine UNSUPPORTED instead of generic SUCCESS.
@@ -1382,7 +1382,7 @@ const AYANA_LONG_TEXT_COMPLETION_INSTRUCTIONS = `
 LONG RESPONSE COMPLETION INTEGRITY:
 - Заверши все начатые предложения, пункты и разделы.
 - Для подробного информационного ответа приоритет — законченный и содержательный ответ в одном bounded окне, а не максимальная длина.
-- Для обычного подробного справочного ответа ориентируйся примерно на 700–1000 слов: этого достаточно для полноты, но оставляет запас до max_output_tokens.
+- Для обычного подробного справочного ответа ориентируйся примерно на 550–750 слов: ответ должен быть содержательным, но обязан полностью завершиться в одном bounded окне.
 - Не раздувай вступления, повторы и второстепенные примеры; сначала дай все ключевые пункты и доведи структуру до завершения.
 - Если места становится мало, сокращай второстепенные детали, но обязательно заверши последнюю мысль и структуру.
 - Только в самом конце полностью завершённого итогового ответа добавь ${AYANA_RESPONSE_COMPLETION_SENTINEL}.
@@ -2141,7 +2141,7 @@ ${AYANA_LONG_TEXT_COMPLETION_INSTRUCTIONS}` : ""}`,
       : durableRecoveryMode
         ? (source === "voice" ? 420 : 520)
       : detailedFastInfoMode
-        ? (source === "voice" ? 800 : 2000)
+        ? (source === "voice" ? 700 : 1300)
       : detailedCapabilityFastMode
         ? (source === "voice" ? 1100 : 3000)
       : deepRequest
@@ -2217,15 +2217,16 @@ ${AYANA_LONG_TEXT_COMPLETION_INSTRUCTIONS}` : ""}`,
   const workerTransportPolicy =
     !hasModelTools && detailedFastInfoMode
       ? {
-          profile: "fast_detailed_tail_completion",
-          // One primary generation plus one deliberately short tail continuation.
-          // The continuation only finishes an answer that already consumed the
-          // primary token budget; it must never become a second full essay.
-          // 26s + 11s = 37s Worker-side cap, below Android long-read timeout.
-          timeoutMs: 26000,
+          profile: "fast_detailed_bounded_single_window",
+          // Detailed fast informational answers are intentionally bounded so the
+          // model completes the whole response in one request. Earlier 2k-token
+          // generations repeatedly exhausted 26s before the first response arrived;
+          // a 1300-token ceiling plus a 34s window removes the slow continuation
+          // dependency while staying below Android's 38s production read timeout.
+          timeoutMs: 34000,
           retryCount: 0,
-          continuationTimeoutMs: 11000,
-          allowContinuation: true
+          continuationTimeoutMs: 0,
+          allowContinuation: false
         }
       : !hasModelTools && detailedCapabilityFastMode
         ? {
@@ -2545,7 +2546,7 @@ export default {
         ok: true,
         service: "AYANA AI",
         ai: "ready",
-        agent_core: "v11.1.5-long-deep-tail-completion",
+        agent_core: "v11.1.6-bounded-deep-single-window",
         voice: "marin"
       });
     }
