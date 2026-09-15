@@ -60,6 +60,13 @@ import kotlin.math.abs
 
 class AyanaVoiceService : Service() {
 
+    // AYANA v12.18.0 NETWORK TRUTH PACK + EXHAUSTIVE REGRESSION FIX.
+    // Network observation is now backed by ACCESS_NETWORK_STATE and one shared
+    // ConnectivityManager truth snapshot. A single NETWORK read is owned locally,
+    // missing network evidence fails closed, and mobile speed-test requests require
+    // a proven cellular transport. Exhaustive probes exercise the same production
+    // route rather than a separate parser-only approximation. ORB/visualizer untouched.
+    //
     // AYANA v12.17.1 EXHAUSTIVE AUTONOMOUS TESTING.
     // User-facing "полная диагностика AYANA" now runs EXHAUSTIVE_ACCEPTANCE:
     // all prior local health/audit/functional tests plus extended device-state,
@@ -3659,7 +3666,9 @@ class AyanaVoiceService : Service() {
             )
 
         if (
-            requestedAggregateMetrics.size >= 2 &&
+            aggregateMetricLocalRouteEligible(
+                requestedAggregateMetrics
+            ) &&
             preExecutionDecision.type !in
                 setOf(
                     AyanaCompositeIntentGate.DecisionType.DATA_ONLY,
@@ -7559,6 +7568,22 @@ class AyanaVoiceService : Service() {
     }
 
     /**
+     * Production ownership rule for local aggregate metric reads.
+     *
+     * Multi-metric reads stay local as before. NETWORK is additionally allowed as a
+     * single metric because network truth is a deterministic device fact and must not
+     * fall through to Agent Core where missing tool evidence could become false SUCCESS.
+     */
+    private fun aggregateMetricLocalRouteEligible(
+        metrics: Set<AggregateMetric>
+    ): Boolean =
+        metrics.size >= 2 ||
+            (
+                metrics.size == 1 &&
+                    AggregateMetric.NETWORK in metrics
+                )
+
+    /**
      * Completion ownership gate for aggregate device reads.
      *
      * The local executor is intentionally conservative: it terminal-completes only a
@@ -7645,9 +7670,11 @@ class AyanaVoiceService : Service() {
 
         if (AggregateMetric.NETWORK in metrics) {
             listOf(
+                "network_observation_available",
                 "network_connected",
                 "network_validated",
-                "network_transport"
+                "network_transport",
+                "network_observation_error"
             ).forEach(::copyIfPresent)
         }
 
@@ -7717,18 +7744,33 @@ class AyanaVoiceService : Service() {
                 }
 
                 AggregateMetric.NETWORK -> {
-                    if (state.has("network_connected")) {
+                    val observationAvailable =
+                        state.optBoolean(
+                            "network_observation_available",
+                            state.has("network_connected")
+                        )
+
+                    if (observationAvailable && state.has("network_connected")) {
                         val connected = state.optBoolean("network_connected", false)
                         val validated = state.optBoolean("network_validated", false)
                         val transport = state.optString("network_transport", "unknown")
+                        val transportLabel =
+                            when (transport) {
+                                "wifi" -> "Wi-Fi"
+                                "cellular" -> "мобильную сеть"
+                                "ethernet" -> "Ethernet"
+                                "vpn" -> "VPN"
+                                "other" -> "другой транспорт"
+                                else -> transport
+                            }
                         parts +=
                             if (connected) {
-                                "интернет подключён" +
+                                "сеть активна" +
                                     (
                                         if (validated) {
-                                            " и подтверждён Android"
+                                            ", доступ в интернет подтверждён Android"
                                         } else {
-                                            " (доступ в интернет не подтверждён)"
+                                            ", доступ в интернет Android пока не подтвердил"
                                         }
                                     ) +
                                     (
@@ -7737,13 +7779,13 @@ class AyanaVoiceService : Service() {
                                             transport != "unknown" &&
                                             transport != "none"
                                         ) {
-                                            " через $transport"
+                                            " через $transportLabel"
                                         } else {
                                             ""
                                         }
                                     )
                             } else {
-                                "интернет не подключён"
+                                "активное интернет-подключение не обнаружено"
                             }
                     } else {
                         missing += "network"
@@ -18636,7 +18678,7 @@ class AyanaVoiceService : Service() {
 
         val registryMatchesCurrentLineage =
             registryBuild.contains(
-                "12.17",
+                "12.18",
                 ignoreCase = true
             ) ||
                 registryBuild.contains(
@@ -18653,9 +18695,9 @@ class AyanaVoiceService : Service() {
                 },
             message =
                 if (registryMatchesCurrentLineage) {
-                    "Release metadata согласованы с v12.17 exhaustive diagnostics."
+                    "Release metadata согласованы с v12.18 network-truth diagnostics."
                 } else {
-                    "Capability Registry build-label отстаёт от текущего v12.17 diagnostic layer: build=$registryBuild."
+                    "Capability Registry build-label отстаёт от текущего v12.18 diagnostic layer: build=$registryBuild."
                 },
             evidenceScope = "live_release_metadata",
             verified = registryBuild.isNotBlank(),
@@ -18664,7 +18706,7 @@ class AyanaVoiceService : Service() {
                     .put("capability_registry_build", registryBuild)
                     .put("app_version", appVersion)
                     .put("acceptance_engine_version", engineVersion)
-                    .put("expected_lineage", "v12.17")
+                    .put("expected_lineage", "v12.18")
         )
     }
 
@@ -18690,6 +18732,7 @@ class AyanaVoiceService : Service() {
                 "media_volume",
                 "media_volume_max",
                 "orientation",
+                "network_observation_available",
                 "network_connected",
                 "network_validated",
                 "network_transport",
@@ -18909,6 +18952,17 @@ class AyanaVoiceService : Service() {
         val state =
             agentGetDeviceState()
 
+        val observationAvailable =
+            state.optBoolean(
+                "network_observation_available",
+                state.has("network_connected")
+            )
+
+        val observationError =
+            state.optString(
+                "network_observation_error"
+            )
+
         val sensorConnected =
             state.optBoolean(
                 "network_connected",
@@ -18938,13 +18992,16 @@ class AyanaVoiceService : Service() {
 
         val status =
             when {
+                reachable && !observationAvailable ->
+                    AyanaAcceptanceTestEngine.STATUS_FAIL
+
                 reachable && !sensorConnected ->
                     AyanaAcceptanceTestEngine.STATUS_FAIL
 
                 reachable && sensorConnected ->
                     AyanaAcceptanceTestEngine.STATUS_PASS
 
-                !reachable && sensorConnected ->
+                !reachable && observationAvailable && sensorConnected ->
                     AyanaAcceptanceTestEngine.STATUS_WARNING
 
                 else ->
@@ -18954,7 +19011,11 @@ class AyanaVoiceService : Service() {
         val message =
             when (status) {
                 AyanaAcceptanceTestEngine.STATUS_FAIL ->
-                    "Сетевой сенсор дал false-negative: Android сообщает disconnected, но Worker реально достижим."
+                    if (!observationAvailable) {
+                        "Сетевой сенсор недоступен при реально достижимом Worker: ${observationError.ifBlank { "unknown_observation_error" }}."
+                    } else {
+                        "Сетевой сенсор дал false-negative: Android сообщает disconnected, но Worker реально достижим."
+                    }
 
                 AyanaAcceptanceTestEngine.STATUS_PASS ->
                     "Network sensor согласован с прямой достижимостью Worker; transport=$transport, validated=$sensorValidated."
@@ -18975,6 +19036,8 @@ class AyanaVoiceService : Service() {
                     AyanaAcceptanceTestEngine.STATUS_PASS,
             evidence =
                 JSONObject()
+                    .put("network_observation_available", observationAvailable)
+                    .put("network_observation_error", observationError)
                     .put("network_connected", sensorConnected)
                     .put("network_validated", sensorValidated)
                     .put("network_transport", transport)
@@ -18984,27 +19047,29 @@ class AyanaVoiceService : Service() {
     }
 
     private fun acceptanceNetworkSingleRoutingProbe(): JSONObject {
-        val intent =
-            AyanaStructuredLocalCommandRouter
-                .parse(
-                    "проверь подключение к интернету"
-                )
+        val query =
+            "проверь подключение к интернету"
 
-        val metricName =
-            if (
-                intent is
-                AyanaStructuredLocalCommandRouter.Intent.DeviceMetric
-            ) {
-                intent.metric.name
-            } else {
-                ""
-            }
+        val metrics =
+            extractRequestedAggregateMetrics(
+                query
+            )
+
+        val hasRemainingGoal =
+            aggregateMetricHasRemainingSemanticGoal(
+                query
+            )
+
+        val locallyOwned =
+            aggregateMetricLocalRouteEligible(
+                metrics
+            ) &&
+                !hasRemainingGoal
 
         val ok =
-            intent is
-                AyanaStructuredLocalCommandRouter.Intent.DeviceMetric &&
-                metricName ==
-                "NETWORK"
+            metrics.size == 1 &&
+                AggregateMetric.NETWORK in metrics &&
+                locallyOwned
 
         return acceptanceProbeResult(
             status =
@@ -19015,22 +19080,27 @@ class AyanaVoiceService : Service() {
                 },
             message =
                 if (ok) {
-                    "Одиночный NETWORK intent маршрутизируется в local DeviceMetric.NETWORK."
+                    "Одиночный NETWORK запрос принадлежит production local aggregate route и не требует Agent Core."
                 } else {
-                    "Одиночный запрос сети не принадлежит local NETWORK route; actual=${intent?.javaClass?.simpleName ?: "null"}, metric=${metricName.ifBlank { "none" }}."
+                    "Одиночный NETWORK запрос не принадлежит production local route; metrics=${metrics.joinToString(",")}, remaining_goal=$hasRemainingGoal, owned=$locallyOwned."
                 },
-            evidenceScope = "live_pure_routing_contract",
+            evidenceScope = "live_pure_production_routing_contract",
             verified = ok,
             evidence =
                 JSONObject()
                     .put(
-                        "intent_type",
-                        intent?.javaClass?.simpleName
-                            ?: "null"
+                        "requested_metrics",
+                        JSONArray(
+                            metrics.map { it.name }
+                        )
                     )
                     .put(
-                        "metric",
-                        metricName
+                        "remaining_semantic_goal",
+                        hasRemainingGoal
+                    )
+                    .put(
+                        "local_route_eligible",
+                        locallyOwned
                     )
         )
     }
@@ -21769,30 +21839,121 @@ class AyanaVoiceService : Service() {
             intent
     }
 
-    private fun activeNetworkTransport():
-        String {
+    private data class NetworkTruthSnapshot(
+        val observationAvailable: Boolean,
+        val connected: Boolean,
+        val validated: Boolean,
+        val transport: String,
+        val error: String = ""
+    )
 
-        return try {
+    /**
+     * One canonical Android network snapshot used by device-state, local NETWORK
+     * answers, speed-test prechecks and acceptance probes. Permission/runtime errors
+     * are represented as unavailable evidence, never as a fabricated offline state.
+     */
+    private fun readNetworkTruthSnapshot():
+        NetworkTruthSnapshot {
 
-            val connectivity =
+        val permissionGranted =
+            try {
+                checkSelfPermission(
+                    Manifest.permission.ACCESS_NETWORK_STATE
+                ) == PackageManager.PERMISSION_GRANTED
+            } catch (_: Exception) {
+                false
+            }
+
+        if (!permissionGranted) {
+            return NetworkTruthSnapshot(
+                observationAvailable = false,
+                connected = false,
+                validated = false,
+                transport = "unknown",
+                error = "access_network_state_not_granted"
+            )
+        }
+
+        val connectivity =
+            try {
                 getSystemService(
                     Context.CONNECTIVITY_SERVICE
-                ) as?
-                    ConnectivityManager
-                    ?: return "unknown"
+                ) as? ConnectivityManager
+            } catch (error: Exception) {
+                return NetworkTruthSnapshot(
+                    observationAvailable = false,
+                    connected = false,
+                    validated = false,
+                    transport = "unknown",
+                    error =
+                        "connectivity_service_exception:${error.javaClass.simpleName}"
+                )
+            }
+                ?: return NetworkTruthSnapshot(
+                    observationAvailable = false,
+                    connected = false,
+                    validated = false,
+                    transport = "unknown",
+                    error = "connectivity_service_unavailable"
+                )
 
-            val network =
-                connectivity
-                    .activeNetwork
-                    ?: return "none"
+        val activeNetwork =
+            try {
+                connectivity.activeNetwork
+            } catch (error: Exception) {
+                return NetworkTruthSnapshot(
+                    observationAvailable = false,
+                    connected = false,
+                    validated = false,
+                    transport = "unknown",
+                    error =
+                        "active_network_exception:${error.javaClass.simpleName}"
+                )
+            }
 
-            val capabilities =
-                connectivity
-                    .getNetworkCapabilities(
-                        network
-                    )
-                    ?: return "unknown"
+        if (activeNetwork == null) {
+            return NetworkTruthSnapshot(
+                observationAvailable = true,
+                connected = false,
+                validated = false,
+                transport = "none"
+            )
+        }
 
+        val capabilities =
+            try {
+                connectivity.getNetworkCapabilities(
+                    activeNetwork
+                )
+            } catch (error: Exception) {
+                return NetworkTruthSnapshot(
+                    observationAvailable = false,
+                    connected = false,
+                    validated = false,
+                    transport = "unknown",
+                    error =
+                        "network_capabilities_exception:${error.javaClass.simpleName}"
+                )
+            }
+                ?: return NetworkTruthSnapshot(
+                    observationAvailable = false,
+                    connected = false,
+                    validated = false,
+                    transport = "unknown",
+                    error = "network_capabilities_unavailable"
+                )
+
+        val connected =
+            capabilities.hasCapability(
+                NetworkCapabilities.NET_CAPABILITY_INTERNET
+            )
+
+        val validated =
+            capabilities.hasCapability(
+                NetworkCapabilities.NET_CAPABILITY_VALIDATED
+            )
+
+        val transport =
             when {
                 capabilities.hasTransport(
                     NetworkCapabilities.TRANSPORT_WIFI
@@ -21809,11 +21970,35 @@ class AyanaVoiceService : Service() {
                 ) ->
                     "ethernet"
 
-                else ->
+                capabilities.hasTransport(
+                    NetworkCapabilities.TRANSPORT_VPN
+                ) ->
+                    "vpn"
+
+                connected ->
                     "other"
+
+                else ->
+                    "none"
             }
 
-        } catch (_: Exception) {
+        return NetworkTruthSnapshot(
+            observationAvailable = true,
+            connected = connected,
+            validated = validated,
+            transport = transport
+        )
+    }
+
+    private fun activeNetworkTransport():
+        String {
+
+        val snapshot =
+            readNetworkTruthSnapshot()
+
+        return if (snapshot.observationAvailable) {
+            snapshot.transport
+        } else {
             "unknown"
         }
     }
@@ -21826,20 +22011,43 @@ class AyanaVoiceService : Service() {
         val transport =
             activeNetworkTransport()
 
-        if (
-            specificallyMobile &&
-            transport ==
-            "wifi"
-        ) {
-            respondBlockedAndResume(
-                text =
-                    "Сейчас активен Wi‑Fi, поэтому скорость именно мобильного интернета подтвердить нельзя. Отключите Wi‑Fi и повторите проверку.",
-                silent =
-                    silent,
-                technical =
-                    "mobile_speed_test_blocked_by_active_wifi"
-            )
-            return
+        if (specificallyMobile) {
+            when (transport) {
+                "cellular" -> Unit
+
+                "wifi" -> {
+                    respondBlockedAndResume(
+                        text =
+                            "Сейчас активен Wi‑Fi, поэтому скорость именно мобильного интернета подтвердить нельзя. Отключите Wi‑Fi и повторите проверку.",
+                        silent = silent,
+                        technical =
+                            "mobile_speed_test_blocked_by_active_wifi"
+                    )
+                    return
+                }
+
+                "none" -> {
+                    respondBlockedAndResume(
+                        text =
+                            "Активного мобильного интернет-подключения сейчас не обнаружено, поэтому измерить его скорость невозможно.",
+                        silent = silent,
+                        technical =
+                            "mobile_speed_test_blocked_no_active_network"
+                    )
+                    return
+                }
+
+                else -> {
+                    respondBlockedAndResume(
+                        text =
+                            "Не удалось надёжно подтвердить, что активный транспорт — мобильная сеть. Тест именно мобильного интернета не запускаю без этого доказательства.",
+                        silent = silent,
+                        technical =
+                            "mobile_speed_test_blocked_unverified_cellular_transport:$transport"
+                    )
+                    return
+                }
+            }
         }
 
         if (
@@ -33134,50 +33342,8 @@ class AyanaVoiceService : Service() {
                     "unknown"
             }
 
-        val connectivityManager =
-            getSystemService(
-                Context.CONNECTIVITY_SERVICE
-            ) as? ConnectivityManager
-
-        val activeNetwork =
-            try {
-                connectivityManager?.activeNetwork
-            } catch (_: Exception) {
-                null
-            }
-
-        val networkCapabilities =
-            try {
-                if (activeNetwork != null) {
-                    connectivityManager?.getNetworkCapabilities(activeNetwork)
-                } else {
-                    null
-                }
-            } catch (_: Exception) {
-                null
-            }
-
-        val networkConnected =
-            networkCapabilities
-                ?.hasCapability(
-                    NetworkCapabilities.NET_CAPABILITY_INTERNET
-                ) == true
-
-        val networkValidated =
-            networkCapabilities
-                ?.hasCapability(
-                    NetworkCapabilities.NET_CAPABILITY_VALIDATED
-                ) == true
-
-        val networkTransport =
-            when {
-                networkCapabilities?.hasTransport(NetworkCapabilities.TRANSPORT_WIFI) == true -> "Wi-Fi"
-                networkCapabilities?.hasTransport(NetworkCapabilities.TRANSPORT_CELLULAR) == true -> "мобильную сеть"
-                networkCapabilities?.hasTransport(NetworkCapabilities.TRANSPORT_ETHERNET) == true -> "Ethernet"
-                networkCapabilities?.hasTransport(NetworkCapabilities.TRANSPORT_VPN) == true -> "VPN"
-                networkConnected -> "другой транспорт"
-                else -> "none"
-            }
+        val networkSnapshot =
+            readNetworkTruthSnapshot()
 
         val storageStat =
             try {
@@ -33246,16 +33412,24 @@ class AyanaVoiceService : Service() {
                 orientation
             )
             .put(
+                "network_observation_available",
+                networkSnapshot.observationAvailable
+            )
+            .put(
                 "network_connected",
-                networkConnected
+                networkSnapshot.connected
             )
             .put(
                 "network_validated",
-                networkValidated
+                networkSnapshot.validated
             )
             .put(
                 "network_transport",
-                networkTransport
+                networkSnapshot.transport
+            )
+            .put(
+                "network_observation_error",
+                networkSnapshot.error
             )
             .put(
                 "storage_free_bytes",
