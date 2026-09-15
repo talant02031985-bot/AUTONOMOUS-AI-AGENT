@@ -65,7 +65,7 @@ class AyanaVoiceService : Service() {
     // instead of two restarted 18 s generations. Potential side-effect/device-action
     // requests keep the existing short bounded policy. Worker completion metadata is
     // surfaced in History so continuation/integrity can be device-verified.
-    // AYANA v12.15.0 COMPLETION INTEGRITY + VERIFIED-FACTS REASONING HANDOFF.
+    // AYANA v12.15.2 INTEGRITY CONSOLIDATION + VERIFIED-FACT MINIMIZATION.
     // Multi-device read-only executors may terminal SUCCESS only for presentation-only
     // metric goals. If the original command still contains an evaluation/condition/decision
     // clause, one verified local snapshot is preserved as trusted facts and handed to Agent
@@ -7620,19 +7620,46 @@ class AyanaVoiceService : Service() {
             }
         }
 
-        listOf(
-            "battery_percent",
-            "charging",
-            "network_connected",
-            "network_validated",
-            "network_transport",
-            "storage_free_bytes",
-            "storage_total_bytes",
-            "media_volume",
-            "media_volume_max",
-            "brightness_percent",
-            "orientation"
-        ).forEach(::copyIfPresent)
+        if (AggregateMetric.BATTERY in metrics) {
+            listOf(
+                "battery_percent",
+                "charging"
+            ).forEach(::copyIfPresent)
+        }
+
+        if (AggregateMetric.NETWORK in metrics) {
+            listOf(
+                "network_connected",
+                "network_validated",
+                "network_transport"
+            ).forEach(::copyIfPresent)
+        }
+
+        if (AggregateMetric.STORAGE in metrics) {
+            listOf(
+                "storage_free_bytes",
+                "storage_total_bytes"
+            ).forEach(::copyIfPresent)
+        }
+
+        if (AggregateMetric.MEDIA_VOLUME in metrics) {
+            listOf(
+                "media_volume",
+                "media_volume_max"
+            ).forEach(::copyIfPresent)
+        }
+
+        if (AggregateMetric.BRIGHTNESS in metrics) {
+            copyIfPresent(
+                "brightness_percent"
+            )
+        }
+
+        if (AggregateMetric.ORIENTATION in metrics) {
+            copyIfPresent(
+                "orientation"
+            )
+        }
 
         return facts.toString()
     }
@@ -18665,10 +18692,13 @@ class AyanaVoiceService : Service() {
             transport ==
             "wifi"
         ) {
-            respondAndResume(
-                "Сейчас активен Wi‑Fi. Чтобы проверить именно мобильный интернет, отключи Wi‑Fi и повтори команду.",
-                silent,
-                success = true
+            respondBlockedAndResume(
+                text =
+                    "Сейчас активен Wi‑Fi, поэтому скорость именно мобильного интернета подтвердить нельзя. Отключите Wi‑Fi и повторите проверку.",
+                silent =
+                    silent,
+                technical =
+                    "mobile_speed_test_blocked_by_active_wifi"
             )
             return
         }
@@ -18677,10 +18707,13 @@ class AyanaVoiceService : Service() {
             transport ==
             "none"
         ) {
-            respondAndResume(
-                "Активного интернет-подключения сейчас не обнаружено.",
-                silent,
-                success = false
+            respondBlockedAndResume(
+                text =
+                    "Активного интернет-подключения сейчас не обнаружено, поэтому измерить скорость невозможно.",
+                silent =
+                    silent,
+                technical =
+                    "internet_speed_test_blocked_no_active_network"
             )
             return
         }
@@ -18702,9 +18735,13 @@ class AyanaVoiceService : Service() {
                 }
             )
 
-            finishLocalCommand(
-                "Открываю тест скорости. FAST.com начнёт измерение автоматически; результат Mbps я пока не подтверждаю сама.",
-                silent
+            respondUnsupportedAndResume(
+                text =
+                    "FAST.com открыт и начнёт измерение автоматически, но текущая AYANA пока не умеет надёжно прочитать и подтвердить итоговую скорость в Mbps.",
+                silent =
+                    silent,
+                technical =
+                    "speed_test_opened_but_mbps_verification_unavailable"
             )
 
         } catch (
@@ -19672,6 +19709,32 @@ class AyanaVoiceService : Service() {
                                             "unknown"
                                         )
                                 )
+
+                                val workerTransportProfile =
+                                    response
+                                        .optString(
+                                            "worker_transport_profile"
+                                        )
+                                        .trim()
+
+                                if (workerTransportProfile.isNotBlank()) {
+                                    append("; worker_transport_profile=")
+                                    append(workerTransportProfile)
+                                    append("; worker_attempts=")
+                                    append(response.optInt("worker_attempts", 1))
+                                }
+
+                                val contextMode =
+                                    response
+                                        .optString(
+                                            "context_mode"
+                                        )
+                                        .trim()
+
+                                if (contextMode.isNotBlank()) {
+                                    append("; context_mode=")
+                                    append(contextMode)
+                                }
                             }
                         }
 
