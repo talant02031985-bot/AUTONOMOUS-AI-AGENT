@@ -1,4 +1,4 @@
-// AYANA Worker v11.1.4 — Long/Deep Completion Window + Network Fact Truth + Context Boundary
+// AYANA Worker v11.1.5 — Long/Deep Tail Completion + Network Fact Truth + Context Boundary
 // Preserves v10.9 acceptance/capability grounding and strengthens compound deliverables:
 // device-state exposes network/storage/brightness, artifact goals must end in verified create_artifact,
 // and explicit inability to execute an action is returned as machine UNSUPPORTED instead of generic SUCCESS.
@@ -1382,7 +1382,9 @@ const AYANA_LONG_TEXT_COMPLETION_INSTRUCTIONS = `
 LONG RESPONSE COMPLETION INTEGRITY:
 - Заверши все начатые предложения, пункты и разделы.
 - Для подробного информационного ответа приоритет — законченный и содержательный ответ в одном bounded окне, а не максимальная длина.
+- Для обычного подробного справочного ответа ориентируйся примерно на 700–1000 слов: этого достаточно для полноты, но оставляет запас до max_output_tokens.
 - Не раздувай вступления, повторы и второстепенные примеры; сначала дай все ключевые пункты и доведи структуру до завершения.
+- Если места становится мало, сокращай второстепенные детали, но обязательно заверши последнюю мысль и структуру.
 - Только в самом конце полностью завершённого итогового ответа добавь ${AYANA_RESPONSE_COMPLETION_SENTINEL}.
 - Маркер служебный: Worker удалит его перед отправкой Android.
 - Не ставь маркер, пока ответ реально не завершён.
@@ -1461,11 +1463,13 @@ async function ensureCompleteTextResponse(env, payload, data, initialReply, requ
       ? `Проверь предыдущий ответ. Если он оборван — продолжи с места обрыва и полностью заверши. Если он уже завершён — не повторяй его.${requireSentinel ? ` В любом случае закончи служебным маркером ${AYANA_RESPONSE_COMPLETION_SENTINEL}.` : ""}`
       : `Продолжи ответ с места обрыва и полностью заверши его без повторения уже написанного.${requireSentinel ? ` В самом конце добавь ${AYANA_RESPONSE_COMPLETION_SENTINEL}.` : ""}`,
     previous_response_id: String(data.id),
-    // Continuation is recovery, not a second full essay. Keep it bounded so the
-    // whole Android request still fits inside the long read-only client window.
+    // Continuation is only a short tail-completion, never a second full essay.
+    // The primary detailed turn already carried the body of the answer. A 900-token
+    // ceiling is enough to finish the last section + sentinel while avoiding another
+    // long server generation that can hit the continuation HTTP timeout.
     max_output_tokens: Math.max(
-      1200,
-      Math.min(Number(payload.max_output_tokens || 0), 2200)
+      500,
+      Math.min(Number(payload.max_output_tokens || 0), 900)
     ),
     store: true
   };
@@ -2213,12 +2217,14 @@ ${AYANA_LONG_TEXT_COMPLETION_INSTRUCTIONS}` : ""}`,
   const workerTransportPolicy =
     !hasModelTools && detailedFastInfoMode
       ? {
-          profile: "fast_detailed_completion_window",
-          // Keep one primary generation plus one short continuation inside the
-          // Android long-read budget. 27s + 9.5s = 36.5s hard Worker-side cap.
-          timeoutMs: 27000,
+          profile: "fast_detailed_tail_completion",
+          // One primary generation plus one deliberately short tail continuation.
+          // The continuation only finishes an answer that already consumed the
+          // primary token budget; it must never become a second full essay.
+          // 26s + 11s = 37s Worker-side cap, below Android long-read timeout.
+          timeoutMs: 26000,
           retryCount: 0,
-          continuationTimeoutMs: 9500,
+          continuationTimeoutMs: 11000,
           allowContinuation: true
         }
       : !hasModelTools && detailedCapabilityFastMode
@@ -2539,7 +2545,7 @@ export default {
         ok: true,
         service: "AYANA AI",
         ai: "ready",
-        agent_core: "v11.1.4-long-deep-completion-window",
+        agent_core: "v11.1.5-long-deep-tail-completion",
         voice: "marin"
       });
     }
