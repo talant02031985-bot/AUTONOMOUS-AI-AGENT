@@ -1,4 +1,4 @@
-// AYANA Worker v11.1.2 — Completion, Context Boundary & Transport Integrity
+// AYANA Worker v11.1.3 — Network Fact Truth + Context Boundary + Single-Window Transport
 // Preserves v10.9 acceptance/capability grounding and strengthens compound deliverables:
 // device-state exposes network/storage/brightness, artifact goals must end in verified create_artifact,
 // and explicit inability to execute an action is returned as machine UNSUPPORTED instead of generic SUCCESS.
@@ -825,7 +825,7 @@ const AYANA_CURRENT_CAPABILITIES = `
 - явный запрос на TXT/DOCX/PDF/XLSX/JPEG/graph сохраняет artifact ownership: если нужны фактические данные, сначала получи их, затем обязательно вызови create_artifact;
 - app-open + «проверь foreground» считается одной проверяемой lifecycle-целью; безопасный Settings>Apps путь может сворачиваться прямо к конечному app-detail экрану;
 - обычный Agent Core final теперь несёт machine terminal_status; явный ответ «не могу выполнить / нет capability» для action request должен завершаться UNSUPPORTED, а не SUCCESS;
-- Worker управляет модельным timeout для read-only текста: подробные быстрые запросы имеют bounded retry внутри серверного бюджета, сложный анализ — одну более длинную попытку; Android long-read timeout остаётся внешним аварийным пределом и terminal truth при исчерпании бюджета остаётся ERROR;
+- Worker управляет модельным timeout для read-only текста: подробные быстрые запросы используют одну расширенную server window без повторного перезапуска генерации; сложный анализ также использует одну ограниченную попытку; Android long-read timeout остаётся внешним аварийным пределом и terminal truth при исчерпании бюджета остаётся ERROR;
 - Accessibility v7.2 читает дополнительные same-window semantic поля hint/state/pane/tooltip, но это НЕ OCR/Vision и не гарантирует чтение приложений, которые не публикуют accessibility text.
 
 КРИТИЧЕСКАЯ v12.13 TRUTH:
@@ -1113,7 +1113,9 @@ function isLikelyContextFollowUp(message = "") {
     return true;
   }
 
-  return /(?:^|\s)(?:это|этого|этой|этом|эту|тот|того|той|там|здесь|выше|ранее|предыдущ|последн(?:ий|яя|ее)|из\s+этого|из\s+списка|эти\s+результат|другие\s+результат|исправь\s+это|сделай\s+его|сделай\s+ее|сделай\s+её)(?:\s|$|[?.!,;:—-])/.test(n);
+  // Anaphoric follow-ups must begin as references to prior context. A noun phrase
+  // such as «галактика это что подробно» contains «это» internally but is a new topic.
+  return /^(?:(?:а|и|ну)\s+)?(?:это|этого|этой|этом|эту|тот|того|той|там|здесь|выше|ранее|предыдущ(?:ий|ая|ее|ие)?|последн(?:ий|яя|ее)|из\s+этого|из\s+списка|эти\s+результат\w*|другие\s+результат\w*|исправь\s+это|сделай\s+его|сделай\s+ее|сделай\s+её)(?:\s|$|[?.!,;:—-])/.test(n);
 }
 
 function isDeepRequest(message = "") {
@@ -1205,10 +1207,20 @@ function isActionExecutionRequest(message = "") {
 }
 
 function inferFinalTerminalStatus(message = "", reply = "") {
-  if (!isActionExecutionRequest(message)) return "SUCCESS";
-
   const r = normalizeIntentText(reply);
-  if (!r) return "ERROR";
+  const actionRequest = isActionExecutionRequest(message);
+
+  if (!r) return actionRequest ? "ERROR" : "SUCCESS";
+
+  // Completion Truth applies to factual/read-only answers too. If the model
+  // explicitly says the requested fact could not be obtained, terminal SUCCESS
+  // is forbidden even when this is a function_call_output continuation with no
+  // repeated user message in the second HTTP turn.
+  const explicitFailure = /(?:не\s+удалось|ошибка|выполнить\s+не\s+получилось|не\s+получилось\s+(?:получить|определить|подтвердить)|не\s+могу\s+(?:получить|определить|подтвердить)|недостаточно\s+данных)/.test(r)
+    && !/(?:не\s+удалось\s+найти\s+причин|объясню)/.test(r);
+  if (explicitFailure) return "ERROR";
+
+  if (!actionRequest) return "SUCCESS";
 
   const unsupported = [
     /(?:^|\s)я\s+не\s+могу\s+(?:выполнить|сделать|изменить|создать|запустить|отправить|записать|собрать|подписать|передать)/,
@@ -1223,10 +1235,6 @@ function inferFinalTerminalStatus(message = "", reply = "") {
   const blocked = /(?:требует|нужно|необходимо)\s+(?:ваше|явное|отдельное)\s+подтверждени/.test(r)
     || /действие\s+заблокирован/.test(r);
   if (blocked) return "BLOCKED";
-
-  const explicitFailure = /(?:не\s+удалось|ошибка|выполнить\s+не\s+получилось)/.test(r)
-    && !/(?:не\s+удалось\s+найти\s+причин|объясню)/.test(r);
-  if (explicitFailure) return "ERROR";
 
   return "SUCCESS";
 }
@@ -2198,18 +2206,18 @@ ${AYANA_LONG_TEXT_COMPLETION_INSTRUCTIONS}` : ""}`,
   const workerTransportPolicy =
     !hasModelTools && detailedFastInfoMode
       ? {
-          profile: "fast_detailed_retry",
-          timeoutMs: 17000,
-          retryCount: 1,
-          continuationTimeoutMs: 15000,
+          profile: "fast_detailed_single_window",
+          timeoutMs: 30000,
+          retryCount: 0,
+          continuationTimeoutMs: 6500,
           allowContinuation: true
         }
       : !hasModelTools && detailedCapabilityFastMode
         ? {
-            profile: "fast_capability_retry",
-            timeoutMs: 17000,
-            retryCount: 1,
-            continuationTimeoutMs: 15000,
+            profile: "fast_capability_single_window",
+            timeoutMs: 30000,
+            retryCount: 0,
+            continuationTimeoutMs: 6500,
             allowContinuation: true
           }
         : !hasModelTools && deepRequest
@@ -2522,7 +2530,7 @@ export default {
         ok: true,
         service: "AYANA AI",
         ai: "ready",
-        agent_core: "v11.1.2-completion-context-transport-integrity",
+        agent_core: "v11.1.3-network-fact-context-single-window",
         voice: "marin"
       });
     }
