@@ -5,13 +5,17 @@ import org.json.JSONObject
 import java.util.Locale
 
 /**
- * AYANA Planner v2.2 — execution contract + bounded recovery.
+ * AYANA Planner v2.3 — own-app open target integrity.
  *
  * A deterministic planning envelope above Agent Core. It does not click the UI
  * and does not replace the verified Android Goal Compiler. Its job is to keep
  * the user's whole objective, explicit subgoals and terminal evidence visible
  * to the orchestrator so a model/tool classification cannot silently discard
  * part of the request.
+ *
+ * v2.3 keeps AYANA shutdown/close semantics special, but allows explicit
+ * open/launch requests for the installed AYANA AI app to resolve like any
+ * other launcher target. This closes a self-directed planner matrix drift.
  */
 class AyanaAgentPlanner(
     private val appResolver: AyanaAppResolver,
@@ -58,7 +62,7 @@ class AyanaAgentPlanner(
             ?: JSONObject()
 
         return JSONObject()
-            .put("planner_version", "2.2")
+            .put("planner_version", "2.3")
             .put("objective", clean.take(MAX_OBJECTIVE_CHARS))
             .put("domain", domain)
             .put("complexity", complexity)
@@ -115,7 +119,7 @@ class AyanaAgentPlanner(
             }
 
         return buildString {
-            append("LOCAL PLANNER v2.2: domain=")
+            append("LOCAL PLANNER v2.3: domain=")
             append(envelope.optString("domain"))
             append("; complexity=")
             append(envelope.optString("complexity"))
@@ -280,21 +284,41 @@ class AyanaAgentPlanner(
             val candidate = match.groupValues.getOrNull(1).orEmpty()
                 .replace(Regex("(?i)\\s+(?:и|затем|потом|после)\\b.*$"), "")
                 .trim(' ', ',', '.', ';', ':', '-')
-            if (
-                candidate.isNotBlank() &&
-                !listOf(
+            val normalizedCandidate =
+                normalize(candidate)
+
+            val explicitOpenRequest =
+                normalized.startsWith("открой ") ||
+                    normalized.startsWith("запусти ") ||
+                    normalized.startsWith("включи ")
+
+            val ownAyanaTarget =
+                listOf(
+                    "аяна",
+                    "айана",
+                    "аяну",
+                    "айану",
+                    "ayana"
+                ).any { prefix ->
+                    normalizedCandidate.startsWith(prefix)
+                }
+
+            val excludedGenericTarget =
+                listOf(
                     "все",
                     "окно",
                     "вкладк",
                     "диалог",
                     "меню",
-                    "клавиатур",
-                    "аяну",
-                    "айану",
-                    "ayana"
+                    "клавиатур"
                 ).any { prefix ->
-                    normalize(candidate).startsWith(prefix)
-                } &&
+                    normalizedCandidate.startsWith(prefix)
+                }
+
+            if (
+                candidate.isNotBlank() &&
+                !excludedGenericTarget &&
+                (!ownAyanaTarget || explicitOpenRequest) &&
                 !candidate.equals("настройки", ignoreCase = true) &&
                 !candidate.equals("специальные возможности", ignoreCase = true)
             ) {
