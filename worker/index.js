@@ -1,4 +1,4 @@
-// AYANA Worker v11.1.3 — Network Fact Truth + Context Boundary + Single-Window Transport
+// AYANA Worker v11.1.4 — Long/Deep Completion Window + Network Fact Truth + Context Boundary
 // Preserves v10.9 acceptance/capability grounding and strengthens compound deliverables:
 // device-state exposes network/storage/brightness, artifact goals must end in verified create_artifact,
 // and explicit inability to execute an action is returned as machine UNSUPPORTED instead of generic SUCCESS.
@@ -1381,6 +1381,8 @@ const AYANA_RESPONSE_COMPLETION_SENTINEL = "[[AYANA_RESPONSE_COMPLETE]]";
 const AYANA_LONG_TEXT_COMPLETION_INSTRUCTIONS = `
 LONG RESPONSE COMPLETION INTEGRITY:
 - Заверши все начатые предложения, пункты и разделы.
+- Для подробного информационного ответа приоритет — законченный и содержательный ответ в одном bounded окне, а не максимальная длина.
+- Не раздувай вступления, повторы и второстепенные примеры; сначала дай все ключевые пункты и доведи структуру до завершения.
 - Только в самом конце полностью завершённого итогового ответа добавь ${AYANA_RESPONSE_COMPLETION_SENTINEL}.
 - Маркер служебный: Worker удалит его перед отправкой Android.
 - Не ставь маркер, пока ответ реально не завершён.
@@ -1459,7 +1461,12 @@ async function ensureCompleteTextResponse(env, payload, data, initialReply, requ
       ? `Проверь предыдущий ответ. Если он оборван — продолжи с места обрыва и полностью заверши. Если он уже завершён — не повторяй его.${requireSentinel ? ` В любом случае закончи служебным маркером ${AYANA_RESPONSE_COMPLETION_SENTINEL}.` : ""}`
       : `Продолжи ответ с места обрыва и полностью заверши его без повторения уже написанного.${requireSentinel ? ` В самом конце добавь ${AYANA_RESPONSE_COMPLETION_SENTINEL}.` : ""}`,
     previous_response_id: String(data.id),
-    max_output_tokens: Math.max(Number(payload.max_output_tokens || 0), 3200),
+    // Continuation is recovery, not a second full essay. Keep it bounded so the
+    // whole Android request still fits inside the long read-only client window.
+    max_output_tokens: Math.max(
+      1200,
+      Math.min(Number(payload.max_output_tokens || 0), 2200)
+    ),
     store: true
   };
 
@@ -2130,7 +2137,7 @@ ${AYANA_LONG_TEXT_COMPLETION_INSTRUCTIONS}` : ""}`,
       : durableRecoveryMode
         ? (source === "voice" ? 420 : 520)
       : detailedFastInfoMode
-        ? (source === "voice" ? 900 : 2400)
+        ? (source === "voice" ? 800 : 2000)
       : detailedCapabilityFastMode
         ? (source === "voice" ? 1100 : 3000)
       : deepRequest
@@ -2206,10 +2213,12 @@ ${AYANA_LONG_TEXT_COMPLETION_INSTRUCTIONS}` : ""}`,
   const workerTransportPolicy =
     !hasModelTools && detailedFastInfoMode
       ? {
-          profile: "fast_detailed_single_window",
-          timeoutMs: 30000,
+          profile: "fast_detailed_completion_window",
+          // Keep one primary generation plus one short continuation inside the
+          // Android long-read budget. 27s + 9.5s = 36.5s hard Worker-side cap.
+          timeoutMs: 27000,
           retryCount: 0,
-          continuationTimeoutMs: 6500,
+          continuationTimeoutMs: 9500,
           allowContinuation: true
         }
       : !hasModelTools && detailedCapabilityFastMode
@@ -2530,7 +2539,7 @@ export default {
         ok: true,
         service: "AYANA AI",
         ai: "ready",
-        agent_core: "v11.1.3-network-fact-context-single-window",
+        agent_core: "v11.1.4-long-deep-completion-window",
         voice: "marin"
       });
     }
