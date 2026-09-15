@@ -4379,16 +4379,12 @@ class MainActivity : AppCompatActivity() {
                 card.addView(resultView)
 
                 val fullResultLength =
-                    record
-                        .optInt(
-                            "result_length",
-                            result.length
-                        )
+                    record.optInt(
+                        "result_length",
+                        result.length
+                    )
 
-                if (
-                    fullResultLength >
-                        HISTORY_RESULT_PREVIEW_CHARS
-                ) {
+                if (fullResultLength > HISTORY_RESULT_PREVIEW_CHARS) {
                     var resultExpanded = false
                     val resultToggle =
                         TextView(this).apply {
@@ -4401,10 +4397,7 @@ class MainActivity : AppCompatActivity() {
                                 resultView.text =
                                     if (resultExpanded) {
                                         "Результат: " +
-                                            commandHistoryStore
-                                                .fullResult(
-                                                    record
-                                                )
+                                            commandHistoryStore.fullResult(record)
                                     } else {
                                         "Результат: " +
                                             historyPreview(
@@ -4985,10 +4978,7 @@ class MainActivity : AppCompatActivity() {
             append(record.optString("command"))
             append("\nresult=")
             append(
-                commandHistoryStore
-                    .fullResult(
-                        record
-                    )
+                commandHistoryStore.fullResult(record)
             )
 
             val technical = record.optString("technical")
@@ -6192,7 +6182,7 @@ class MainActivity : AppCompatActivity() {
         answerScroll =
             AyanaAdaptiveAnswerScrollView(this).apply {
                 visibility = View.GONE
-                maxContentHeightPx = adaptiveAnswerMaxHeightPx()
+                maxContentHeightPx = dp(190)
                 isFillViewport = false
                 isVerticalScrollBarEnabled = true
                 overScrollMode = View.OVER_SCROLL_IF_CONTENT_SCROLLS
@@ -6365,7 +6355,6 @@ class MainActivity : AppCompatActivity() {
                 View.VISIBLE
             answerScroll.visibility =
                 View.VISIBLE
-            updateAdaptiveAnswerHeight()
 
             textAnswer.text =
                 if (useAttachment) {
@@ -6522,75 +6511,12 @@ class MainActivity : AppCompatActivity() {
             View.VISIBLE
         answerScroll.visibility =
             View.VISIBLE
-        updateAdaptiveAnswerHeight()
 
         textAnswer.text =
             text
 
         answerScroll.post {
             answerScroll.scrollTo(0, 0)
-        }
-    }
-
-    /**
-     * Let the response area grow with its content instead of reserving a fixed
-     * tall box. On tablets the cap follows the usable screen height, leaving
-     * room for the command controls and the current page beneath it.
-     */
-    private fun adaptiveAnswerMaxHeightPx(): Int {
-
-        val screenHeightDp =
-            resources
-                .configuration
-                .screenHeightDp
-                .coerceAtLeast(
-                    1
-                )
-
-        val fraction =
-            if (
-                resources.configuration.orientation ==
-                android.content.res.Configuration.ORIENTATION_LANDSCAPE
-            ) {
-                0.52f
-            } else {
-                0.42f
-            }
-
-        val desiredDp =
-            (
-                screenHeightDp *
-                    fraction
-                )
-                .toInt()
-                .coerceIn(
-                    190,
-                    420
-                )
-
-        return dp(
-            desiredDp
-        )
-    }
-
-    private fun updateAdaptiveAnswerHeight() {
-
-        if (
-            !::answerScroll.isInitialized
-        ) {
-            return
-        }
-
-        val desired =
-            adaptiveAnswerMaxHeightPx()
-
-        if (
-            answerScroll.maxContentHeightPx !=
-            desired
-        ) {
-            answerScroll.maxContentHeightPx =
-                desired
-            answerScroll.requestLayout()
         }
     }
 
@@ -9460,19 +9386,13 @@ class MainActivity : AppCompatActivity() {
                     else ->
                         maxContentHeightPx
                 }
-                    .coerceAtLeast(
-                        0
-                    )
 
             val cappedHeightSpec =
-                if (
-                    effectiveMax ==
-                    Int.MAX_VALUE
-                ) {
+                if (effectiveMax == Int.MAX_VALUE) {
                     heightMeasureSpec
                 } else {
                     View.MeasureSpec.makeMeasureSpec(
-                        effectiveMax,
+                        effectiveMax.coerceAtLeast(0),
                         View.MeasureSpec.AT_MOST
                     )
                 }
@@ -9481,39 +9401,6 @@ class MainActivity : AppCompatActivity() {
                 widthMeasureSpec,
                 cappedHeightSpec
             )
-
-            // ScrollView implementations may otherwise keep the whole AT_MOST
-            // allowance even for a one-line child. Explicitly collapse to the
-            // measured child height while retaining the configured maximum.
-            if (
-                parentMode !=
-                View.MeasureSpec.EXACTLY &&
-                childCount >
-                0
-            ) {
-                val child =
-                    getChildAt(
-                        0
-                    )
-
-                val desiredHeight =
-                    (
-                        paddingTop +
-                            paddingBottom +
-                            child.measuredHeight
-                        )
-                        .coerceAtMost(
-                            effectiveMax
-                        )
-
-                setMeasuredDimension(
-                    measuredWidth,
-                    desiredHeight
-                        .coerceAtLeast(
-                            suggestedMinimumHeight
-                        )
-                )
-            }
         }
     }
 
