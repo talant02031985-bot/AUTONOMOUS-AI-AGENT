@@ -2,24 +2,32 @@ package kg.autonomous.agent
 
 import org.json.JSONArray
 import org.json.JSONObject
+import java.text.SimpleDateFormat
+import java.util.Date
 import java.util.Locale
 
 /**
- * AYANA Acceptance Test Engine v1.1.
- * v1.1 adds a pure whole-goal routing regression probe for the device-proven v12.13
- * failures: verified app-open suffixes, Settings>Apps final-target collapse, multi-metric
- * aggregation, and explicit artifact deliverable ownership.
- *
- * AYANA Acceptance Test Engine v1.0.
+ * AYANA Acceptance Test Engine v3.1 — EXHAUSTIVE AUTONOMOUS TESTING.
  *
  * Separates three different truths that were previously conflated:
  * 1) QUICK_HEALTH — current runtime health right now;
  * 2) CAPABILITY_AUDIT — what this build implements / exposes / has device evidence for;
  * 3) FULL_ACCEPTANCE — a bounded local acceptance suite that executes live safe probes,
- *    reversible round-trips and pure contract checks without Agent Core round-trips.
+ *    reversible round-trips and pure contract checks without Agent Core round-trips;
+ * 4) EXHAUSTIVE_ACCEPTANCE — the widest safe autonomous suite. It includes all
+ *    FULL_ACCEPTANCE checks plus extended device, persistence, artifact, routing and
+ *    bounded online Agent Core transport/context probes.
  *
  * A successful test RUN is not the same as an accepted agent. The returned `grade`
  * owns readiness truth, while `execution_success` only says the suite itself completed.
+ *
+ * v3.1 preserves fail-closed grading/reporting and extends exhaustive mode:
+ * - all prior local health/audit/functional probes remain;
+ * - network turns are counted from the actual probes rather than hard-coded zero;
+ * - extended probes cover device-state evidence, single-network routing, history
+ *   persistence, artifact round-trips, routing contracts and online Agent Core;
+ * - tests that cannot be safely automated must return NO_DATA/BLOCKED instead of PASS;
+ * - every reversible probe owns cleanup/restore before it may return PASS.
  */
 class AyanaAcceptanceTestEngine(
     private val probeRunner: (String) -> JSONObject,
@@ -31,7 +39,8 @@ class AyanaAcceptanceTestEngine(
     ) {
         QUICK_HEALTH("quick_health"),
         CAPABILITY_AUDIT("capability_audit"),
-        FULL_ACCEPTANCE("full_acceptance");
+        FULL_ACCEPTANCE("full_acceptance"),
+        EXHAUSTIVE_ACCEPTANCE("exhaustive_acceptance");
 
         companion object {
             fun fromWireName(value: String): Mode =
@@ -67,10 +76,15 @@ class AyanaAcceptanceTestEngine(
         var noData = 0
         var cancelled = 0
         var criticalFailures = 0
+        var networkTurns = 0
 
         val selected =
             TESTS.filter {
-                mode in it.modes
+                mode in it.modes ||
+                    (
+                        mode == Mode.EXHAUSTIVE_ACCEPTANCE &&
+                            Mode.FULL_ACCEPTANCE in it.modes
+                        )
             }
 
         for (spec in selected) {
@@ -117,6 +131,10 @@ class AyanaAcceptanceTestEngine(
                         .put("reason", "probe_exception")
                         .put("evidence_scope", "none")
                 }
+
+            networkTurns +=
+                raw.optInt("network_turns", 0)
+                    .coerceAtLeast(0)
 
             val status =
                 normalizeStatus(raw)
@@ -186,9 +204,12 @@ class AyanaAcceptanceTestEngine(
             tests.put(testResult)
         }
 
+        val finishedAt =
+            System.currentTimeMillis()
+
         val durationMs =
             (
-                System.currentTimeMillis() -
+                finishedAt -
                     startedAt
                 ).coerceAtLeast(0L)
 
@@ -221,8 +242,11 @@ class AyanaAcceptanceTestEngine(
             .put("execution_success", executionSuccess)
             .put("engine", "AyanaAcceptanceTestEngine")
             .put("engine_version", ENGINE_VERSION)
+            .put("report_schema_version", REPORT_SCHEMA_VERSION)
             .put("mode", mode.wireName)
-            .put("network_turns", 0)
+            .put("started_at_ms", startedAt)
+            .put("finished_at_ms", finishedAt)
+            .put("network_turns", networkTurns)
             .put("tests_requested", selected.size)
             .put("tests_completed", tests.length())
             .put("passed", pass)
@@ -250,6 +274,7 @@ class AyanaAcceptanceTestEngine(
                     cancelled = cancelled,
                     grade = grade,
                     durationMs = durationMs,
+                    networkTurns = networkTurns,
                     tests = tests,
                     limits = limits
                 )
@@ -268,6 +293,177 @@ class AyanaAcceptanceTestEngine(
                     tests = tests
                 )
             )
+    }
+
+    /**
+     * Builds the user-facing diagnostic artifact from the exact machine result.
+     * No PASS/FAIL status is re-inferred here: the report only renders the statuses
+     * already produced by run(), preserving one source of truth.
+     */
+    fun buildDetailedReport(
+        result: JSONObject
+    ): String {
+        val tests =
+            result.optJSONArray("tests")
+                ?: JSONArray()
+
+        val limits =
+            result.optJSONArray("known_limits")
+                ?: JSONArray()
+
+        val startedAt =
+            result.optLong("started_at_ms", 0L)
+
+        val finishedAt =
+            result.optLong("finished_at_ms", 0L)
+
+        val nonPass =
+            mutableListOf<JSONObject>()
+
+        for (index in 0 until tests.length()) {
+            val item = tests.optJSONObject(index) ?: continue
+            if (item.optString("status") != STATUS_PASS) {
+                nonPass += item
+            }
+        }
+
+        val priorityOrder =
+            mapOf(
+                STATUS_FAIL to 0,
+                STATUS_BLOCKED to 1,
+                STATUS_WARNING to 2,
+                STATUS_UNSUPPORTED to 3,
+                STATUS_NO_DATA to 4,
+                STATUS_CANCELLED to 5
+            )
+
+        val prioritized =
+            nonPass.sortedWith(
+                compareBy<JSONObject> {
+                    priorityOrder[it.optString("status")] ?: 99
+                }.thenByDescending {
+                    it.optBoolean("critical", false)
+                }
+            )
+
+        return buildString {
+            append(
+                if (result.optString("mode") == Mode.EXHAUSTIVE_ACCEPTANCE.wireName) {
+                    "AYANA EXHAUSTIVE AUTONOMOUS DIAGNOSTIC REPORT\n"
+                } else {
+                    "AYANA FULL DIAGNOSTIC REPORT\n"
+                }
+            )
+            append("========================================\n")
+            append("Engine: ${result.optString("engine", "AyanaAcceptanceTestEngine")} v${result.optString("engine_version", ENGINE_VERSION)}\n")
+            append("Report schema: ${result.optString("report_schema_version", REPORT_SCHEMA_VERSION)}\n")
+            append("Mode: ${result.optString("mode", "unknown")}\n")
+            append("Started: ${formatReportTime(startedAt)}\n")
+            append("Finished: ${formatReportTime(finishedAt)}\n")
+            append("Duration: ${result.optLong("duration_ms", 0L)} ms\n")
+            append("Agent Core network turns: ${result.optInt("network_turns", 0)}\n")
+            append("Test execution completed: ${result.optBoolean("execution_success", false)}\n")
+            append("Readiness grade: ${result.optString("grade", GRADE_NOT_READY)}\n")
+            append("\n")
+            append("COUNTS\n")
+            append("----------------------------------------\n")
+            append("PASS: ${result.optInt("passed", 0)}\n")
+            append("WARNING: ${result.optInt("warnings", 0)}\n")
+            append("FAIL: ${result.optInt("failed", 0)}\n")
+            append("BLOCKED: ${result.optInt("blocked", 0)}\n")
+            append("UNSUPPORTED: ${result.optInt("unsupported", 0)}\n")
+            append("NO_DATA: ${result.optInt("no_data", 0)}\n")
+            append("CANCELLED: ${result.optInt("cancelled", 0)}\n")
+            append("Critical failures: ${result.optInt("critical_failures", 0)}\n")
+            append("\n")
+            append("IMPORTANT TRUTH CONTRACT\n")
+            append("----------------------------------------\n")
+            append("execution_success=true means the diagnostic suite itself finished.\n")
+            append("It does NOT mean every AYANA function passed. Readiness is owned by grade and per-test statuses.\n")
+
+            if (prioritized.isNotEmpty()) {
+                append("\nPRIORITY FINDINGS\n")
+                append("----------------------------------------\n")
+                prioritized.forEachIndexed { index, item ->
+                    append("${index + 1}. ${item.optString("status")} — ${item.optString("id")} — ${item.optString("title")}\n")
+                    append("   Critical: ${item.optBoolean("critical", false)}\n")
+                    append("   Message: ${item.optString("message").take(REPORT_MESSAGE_LIMIT)}\n")
+                    append("   Evidence scope: ${item.optString("evidence_scope")}\n")
+                }
+            }
+
+            append("\nALL TESTS\n")
+            append("========================================\n")
+            for (index in 0 until tests.length()) {
+                val item = tests.optJSONObject(index) ?: continue
+                append("[${index + 1}/${tests.length()}] ${item.optString("status")} — ${item.optString("id")} — ${item.optString("title")}\n")
+                append("Critical: ${item.optBoolean("critical", false)}\n")
+                append("Verified: ${item.optBoolean("verified", false)}\n")
+                append("Duration: ${item.optLong("duration_ms", 0L)} ms\n")
+                append("Evidence scope: ${item.optString("evidence_scope")}\n")
+                append("Message: ${item.optString("message").take(REPORT_MESSAGE_LIMIT)}\n")
+
+                val evidence = item.optJSONObject("evidence") ?: JSONObject()
+                if (evidence.length() > 0) {
+                    append("Evidence: ")
+                    append(evidence.toString(2).take(REPORT_EVIDENCE_LIMIT))
+                    append("\n")
+                }
+                append("----------------------------------------\n")
+            }
+
+            if (limits.length() > 0) {
+                append("\nKNOWN LIMITS\n")
+                append("========================================\n")
+                for (index in 0 until limits.length()) {
+                    val raw = limits.opt(index)
+                    when (raw) {
+                        is JSONObject -> {
+                            append("${index + 1}. ")
+                            append(
+                                raw.optString("label")
+                                    .ifBlank { raw.optString("id") }
+                                    .ifBlank { raw.toString() }
+                                    .take(REPORT_MESSAGE_LIMIT)
+                            )
+                            val note =
+                                raw.optString("note")
+                                    .ifBlank { raw.optString("next") }
+                                    .ifBlank { raw.optString("message") }
+                            if (note.isNotBlank()) {
+                                append(" — ${note.take(REPORT_MESSAGE_LIMIT)}")
+                            }
+                            append("\n")
+                        }
+
+                        else ->
+                            append("${index + 1}. ${raw?.toString().orEmpty().take(REPORT_MESSAGE_LIMIT)}\n")
+                    }
+                }
+            }
+
+            append("\nSUMMARY\n")
+            append("========================================\n")
+            append(result.optString("summary").take(REPORT_SUMMARY_LIMIT))
+            append("\n")
+        }
+    }
+
+    private fun formatReportTime(
+        timestampMs: Long
+    ): String {
+        if (timestampMs <= 0L) {
+            return "unknown"
+        }
+
+        return try {
+            SimpleDateFormat(
+                "yyyy-MM-dd HH:mm:ss Z",
+                Locale.getDefault()
+            ).format(Date(timestampMs))
+        } catch (_: Exception) {
+            timestampMs.toString()
+        }
     }
 
     private fun normalizeStatus(
@@ -331,6 +527,7 @@ class AyanaAcceptanceTestEngine(
         cancelled: Int,
         grade: String,
         durationMs: Long,
+        networkTurns: Int,
         tests: JSONArray,
         limits: JSONArray
     ): String {
@@ -344,6 +541,9 @@ class AyanaAcceptanceTestEngine(
 
                 Mode.FULL_ACCEPTANCE ->
                     "Полномасштабный локальный acceptance-test AYANA завершён."
+
+                Mode.EXHAUSTIVE_ACCEPTANCE ->
+                    "Всесторонняя автономная диагностика AYANA завершена."
             }
 
         val notable =
@@ -403,7 +603,7 @@ class AyanaAcceptanceTestEngine(
 
             append(".\n")
             append("Статус готовности: ${russianGrade(grade)}.\n")
-            append("Время локального теста: $durationMs мс. Сетевых обращений Agent Core: 0.")
+            append("Время теста: $durationMs мс. Сетевых обращений Agent Core/Worker: $networkTurns.")
 
             if (notable.isNotEmpty()) {
                 append("\n\nТребуют внимания:\n")
@@ -417,7 +617,8 @@ class AyanaAcceptanceTestEngine(
 
             if (
                 mode == Mode.CAPABILITY_AUDIT ||
-                mode == Mode.FULL_ACCEPTANCE
+                mode == Mode.FULL_ACCEPTANCE ||
+                mode == Mode.EXHAUSTIVE_ACCEPTANCE
             ) {
                 append("\n\nРезультаты проверок:\n")
                 for (index in 0 until tests.length()) {
@@ -469,6 +670,7 @@ class AyanaAcceptanceTestEngine(
                     Mode.QUICK_HEALTH -> "Быстрая проверка завершена."
                     Mode.CAPABILITY_AUDIT -> "Аудит возможностей завершён."
                     Mode.FULL_ACCEPTANCE -> "Полномасштабный локальный тест завершён."
+                    Mode.EXHAUSTIVE_ACCEPTANCE -> "Всесторонняя автономная диагностика завершена."
                 }
             )
             append(
@@ -482,7 +684,11 @@ class AyanaAcceptanceTestEngine(
                         firstProblem.optString("message").take(180)
                 )
             }
-            append(" Agent Core для этой проверки не вызывался.")
+            if (mode == Mode.EXHAUSTIVE_ACCEPTANCE) {
+                append(" Расширенный режим включает ограниченные сетевые проверки Agent Core.")
+            } else {
+                append(" Agent Core для этой проверки не вызывался.")
+            }
         }
     }
 
@@ -508,7 +714,8 @@ class AyanaAcceptanceTestEngine(
         }
 
     companion object {
-        const val ENGINE_VERSION = "1.1"
+        const val ENGINE_VERSION = "3.1"
+        const val REPORT_SCHEMA_VERSION = "3.1"
 
         const val STATUS_PASS = "PASS"
         const val STATUS_WARNING = "WARNING"
@@ -548,7 +755,41 @@ class AyanaAcceptanceTestEngine(
         const val PROBE_SETTINGS_ROUNDTRIP = "settings_roundtrip"
         const val PROBE_FOREGROUND_FUSION = "foreground_fusion"
         const val PROBE_WHOLE_GOAL_ROUTING = "whole_goal_routing"
+        const val PROBE_DIAGNOSTICS_DETAIL = "diagnostics_detail"
+        const val PROBE_RELEASE_METADATA = "release_metadata"
+        const val PROBE_DEVICE_STATE_SCHEMA = "device_state_schema"
+        const val PROBE_BATTERY_SANITY = "battery_sanity"
+        const val PROBE_STORAGE_SANITY = "storage_sanity"
+        const val PROBE_ORIENTATION_SANITY = "orientation_sanity"
+        const val PROBE_NETWORK_LIVE = "network_live"
+        const val PROBE_NETWORK_SINGLE_ROUTING = "network_single_routing"
+        const val PROBE_REQUIRED_FACT_GATE = "required_fact_gate"
+        const val PROBE_CALCULATOR = "calculator_contract"
+        const val PROBE_NOTIFICATION_ROUTING = "notification_routing"
+        const val PROBE_EXACT_VOLUME_ROUTING = "exact_volume_routing"
+        const val PROBE_HISTORY_SHORT = "history_short_roundtrip"
+        const val PROBE_HISTORY_LONG = "history_long_roundtrip"
+        const val PROBE_ARTIFACT_TXT = "artifact_txt_roundtrip"
+        const val PROBE_ARTIFACT_DOCX = "artifact_docx_roundtrip"
+        const val PROBE_ARTIFACT_PDF = "artifact_pdf_roundtrip"
+        const val PROBE_ARTIFACT_XLSX = "artifact_xlsx_roundtrip"
+        const val PROBE_ARTIFACT_JPEG = "artifact_jpeg_roundtrip"
+        const val PROBE_ARTIFACT_GRAPH = "artifact_graph_roundtrip"
+        const val PROBE_UNKNOWN_APP = "unknown_app_negative"
+        const val PROBE_SPEED_MOBILE_PRECHECK = "speed_mobile_precheck"
+        const val PROBE_HISTORY_LIVE_REFRESH = "history_live_refresh_coverage"
+        const val PROBE_DIAGNOSTIC_ROUTING = "diagnostic_command_routing"
+        const val PROBE_WAKE_GRAMMAR = "wake_word_grammar"
+        const val PROBE_STOP_GRAMMAR = "stop_grammar"
+        const val PROBE_SHUTDOWN_GRAMMAR = "shutdown_grammar"
+        const val PROBE_AGENT_CORE_ORDINARY = "agent_core_online_ordinary"
+        const val PROBE_AGENT_CORE_DEEP = "agent_core_online_deep"
+        const val PROBE_AGENT_CORE_CONTEXT = "agent_core_online_context"
         const val PROBE_KNOWN_LIMITS = "known_limits"
+
+        private const val REPORT_MESSAGE_LIMIT = 1200
+        private const val REPORT_EVIDENCE_LIMIT = 5000
+        private const val REPORT_SUMMARY_LIMIT = 12000
 
         private val TESTS =
             listOf(
@@ -724,10 +965,223 @@ class AyanaAcceptanceTestEngine(
                 ),
                 TestSpec(
                     id = "FUNC-013",
-                    title = "Whole-goal routing / artifact ownership",
+                    title = "Whole-goal routing / completion integrity",
                     probeId = PROBE_WHOLE_GOAL_ROUTING,
                     critical = true,
                     modes = setOf(Mode.FULL_ACCEPTANCE)
+                ),
+
+                // v3 exhaustive-only coverage. These probes are deliberately excluded
+                // from ordinary FULL_ACCEPTANCE so the fast deterministic suite remains stable.
+                TestSpec(
+                    id = "EXT-001",
+                    title = "Self-Diagnostics full issue disclosure",
+                    probeId = PROBE_DIAGNOSTICS_DETAIL,
+                    critical = false,
+                    modes = setOf(Mode.EXHAUSTIVE_ACCEPTANCE)
+                ),
+                TestSpec(
+                    id = "EXT-002",
+                    title = "Release / runtime metadata consistency",
+                    probeId = PROBE_RELEASE_METADATA,
+                    critical = false,
+                    modes = setOf(Mode.EXHAUSTIVE_ACCEPTANCE)
+                ),
+                TestSpec(
+                    id = "EXT-003",
+                    title = "Device-state schema completeness",
+                    probeId = PROBE_DEVICE_STATE_SCHEMA,
+                    critical = true,
+                    modes = setOf(Mode.EXHAUSTIVE_ACCEPTANCE)
+                ),
+                TestSpec(
+                    id = "EXT-004",
+                    title = "Battery live sanity",
+                    probeId = PROBE_BATTERY_SANITY,
+                    critical = false,
+                    modes = setOf(Mode.EXHAUSTIVE_ACCEPTANCE)
+                ),
+                TestSpec(
+                    id = "EXT-005",
+                    title = "Storage live sanity",
+                    probeId = PROBE_STORAGE_SANITY,
+                    critical = false,
+                    modes = setOf(Mode.EXHAUSTIVE_ACCEPTANCE)
+                ),
+                TestSpec(
+                    id = "EXT-006",
+                    title = "Orientation live sanity",
+                    probeId = PROBE_ORIENTATION_SANITY,
+                    critical = false,
+                    modes = setOf(Mode.EXHAUSTIVE_ACCEPTANCE)
+                ),
+                TestSpec(
+                    id = "EXT-007",
+                    title = "Network sensor vs direct reachability",
+                    probeId = PROBE_NETWORK_LIVE,
+                    critical = true,
+                    modes = setOf(Mode.EXHAUSTIVE_ACCEPTANCE)
+                ),
+                TestSpec(
+                    id = "EXT-008",
+                    title = "Single NETWORK local routing contract",
+                    probeId = PROBE_NETWORK_SINGLE_ROUTING,
+                    critical = true,
+                    modes = setOf(Mode.EXHAUSTIVE_ACCEPTANCE)
+                ),
+                TestSpec(
+                    id = "EXT-009",
+                    title = "Required device fact / false-SUCCESS gate",
+                    probeId = PROBE_REQUIRED_FACT_GATE,
+                    critical = true,
+                    modes = setOf(Mode.EXHAUSTIVE_ACCEPTANCE)
+                ),
+                TestSpec(
+                    id = "EXT-010",
+                    title = "Local calculator contract",
+                    probeId = PROBE_CALCULATOR,
+                    critical = true,
+                    modes = setOf(Mode.EXHAUSTIVE_ACCEPTANCE)
+                ),
+                TestSpec(
+                    id = "EXT-011",
+                    title = "Notification local routing contract",
+                    probeId = PROBE_NOTIFICATION_ROUTING,
+                    critical = true,
+                    modes = setOf(Mode.EXHAUSTIVE_ACCEPTANCE)
+                ),
+                TestSpec(
+                    id = "EXT-012",
+                    title = "Exact media-volume routing contract",
+                    probeId = PROBE_EXACT_VOLUME_ROUTING,
+                    critical = true,
+                    modes = setOf(Mode.EXHAUSTIVE_ACCEPTANCE)
+                ),
+                TestSpec(
+                    id = "EXT-013",
+                    title = "Command History short persistence round-trip",
+                    probeId = PROBE_HISTORY_SHORT,
+                    critical = true,
+                    modes = setOf(Mode.EXHAUSTIVE_ACCEPTANCE)
+                ),
+                TestSpec(
+                    id = "EXT-014",
+                    title = "Command History long result persistence >2500",
+                    probeId = PROBE_HISTORY_LONG,
+                    critical = true,
+                    modes = setOf(Mode.EXHAUSTIVE_ACCEPTANCE)
+                ),
+                TestSpec(
+                    id = "EXT-015",
+                    title = "TXT artifact real create/verify/cleanup",
+                    probeId = PROBE_ARTIFACT_TXT,
+                    critical = true,
+                    modes = setOf(Mode.EXHAUSTIVE_ACCEPTANCE)
+                ),
+                TestSpec(
+                    id = "EXT-016",
+                    title = "DOCX artifact real create/verify/cleanup",
+                    probeId = PROBE_ARTIFACT_DOCX,
+                    critical = true,
+                    modes = setOf(Mode.EXHAUSTIVE_ACCEPTANCE)
+                ),
+                TestSpec(
+                    id = "EXT-017",
+                    title = "PDF artifact real create/verify/cleanup",
+                    probeId = PROBE_ARTIFACT_PDF,
+                    critical = true,
+                    modes = setOf(Mode.EXHAUSTIVE_ACCEPTANCE)
+                ),
+                TestSpec(
+                    id = "EXT-018",
+                    title = "XLSX artifact real create/verify/cleanup",
+                    probeId = PROBE_ARTIFACT_XLSX,
+                    critical = true,
+                    modes = setOf(Mode.EXHAUSTIVE_ACCEPTANCE)
+                ),
+                TestSpec(
+                    id = "EXT-019",
+                    title = "JPEG artifact real create/verify/cleanup",
+                    probeId = PROBE_ARTIFACT_JPEG,
+                    critical = true,
+                    modes = setOf(Mode.EXHAUSTIVE_ACCEPTANCE)
+                ),
+                TestSpec(
+                    id = "EXT-020",
+                    title = "Graph artifact real create/verify/cleanup",
+                    probeId = PROBE_ARTIFACT_GRAPH,
+                    critical = true,
+                    modes = setOf(Mode.EXHAUSTIVE_ACCEPTANCE)
+                ),
+                TestSpec(
+                    id = "EXT-021",
+                    title = "Unknown app negative resolver",
+                    probeId = PROBE_UNKNOWN_APP,
+                    critical = true,
+                    modes = setOf(Mode.EXHAUSTIVE_ACCEPTANCE)
+                ),
+                TestSpec(
+                    id = "EXT-022",
+                    title = "Mobile speed-test transport precheck contract",
+                    probeId = PROBE_SPEED_MOBILE_PRECHECK,
+                    critical = true,
+                    modes = setOf(Mode.EXHAUSTIVE_ACCEPTANCE)
+                ),
+                TestSpec(
+                    id = "EXT-023",
+                    title = "History live-refresh autonomous coverage",
+                    probeId = PROBE_HISTORY_LIVE_REFRESH,
+                    critical = false,
+                    modes = setOf(Mode.EXHAUSTIVE_ACCEPTANCE)
+                ),
+                TestSpec(
+                    id = "EXT-024",
+                    title = "Full-diagnostics command routing",
+                    probeId = PROBE_DIAGNOSTIC_ROUTING,
+                    critical = true,
+                    modes = setOf(Mode.EXHAUSTIVE_ACCEPTANCE)
+                ),
+                TestSpec(
+                    id = "EXT-025",
+                    title = "Wake-word grammar contract",
+                    probeId = PROBE_WAKE_GRAMMAR,
+                    critical = true,
+                    modes = setOf(Mode.EXHAUSTIVE_ACCEPTANCE)
+                ),
+                TestSpec(
+                    id = "EXT-026",
+                    title = "STOP grammar contract",
+                    probeId = PROBE_STOP_GRAMMAR,
+                    critical = true,
+                    modes = setOf(Mode.EXHAUSTIVE_ACCEPTANCE)
+                ),
+                TestSpec(
+                    id = "EXT-027",
+                    title = "AYANA shutdown grammar contract",
+                    probeId = PROBE_SHUTDOWN_GRAMMAR,
+                    critical = false,
+                    modes = setOf(Mode.EXHAUSTIVE_ACCEPTANCE)
+                ),
+                TestSpec(
+                    id = "ONLINE-001",
+                    title = "Agent Core ordinary online response",
+                    probeId = PROBE_AGENT_CORE_ORDINARY,
+                    critical = false,
+                    modes = setOf(Mode.EXHAUSTIVE_ACCEPTANCE)
+                ),
+                TestSpec(
+                    id = "ONLINE-002",
+                    title = "Agent Core long/deep transport",
+                    probeId = PROBE_AGENT_CORE_DEEP,
+                    critical = true,
+                    modes = setOf(Mode.EXHAUSTIVE_ACCEPTANCE)
+                ),
+                TestSpec(
+                    id = "ONLINE-003",
+                    title = "Agent Core follow-up + topic-boundary context",
+                    probeId = PROBE_AGENT_CORE_CONTEXT,
+                    critical = false,
+                    modes = setOf(Mode.EXHAUSTIVE_ACCEPTANCE)
                 )
             )
     }
