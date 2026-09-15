@@ -1,4 +1,4 @@
-// AYANA Worker v11.1.1 — D8/D13 Minimal Long-Text Integrity Fix
+// AYANA Worker v11.1.2 — Completion, Context Boundary & Transport Integrity
 // Preserves v10.9 acceptance/capability grounding and strengthens compound deliverables:
 // device-state exposes network/storage/brightness, artifact goals must end in verified create_artifact,
 // and explicit inability to execute an action is returned as machine UNSUPPORTED instead of generic SUCCESS.
@@ -825,7 +825,7 @@ const AYANA_CURRENT_CAPABILITIES = `
 - явный запрос на TXT/DOCX/PDF/XLSX/JPEG/graph сохраняет artifact ownership: если нужны фактические данные, сначала получи их, затем обязательно вызови create_artifact;
 - app-open + «проверь foreground» считается одной проверяемой lifecycle-целью; безопасный Settings>Apps путь может сворачиваться прямо к конечному app-detail экрану;
 - обычный Agent Core final теперь несёт machine terminal_status; явный ответ «не могу выполнить / нет capability» для action request должен завершаться UNSUPPORTED, а не SUCCESS;
-- Agent Core read timeout ограничен 18 секундами с одним bounded retry; после повторного timeout Android сохраняет recovery truth и возвращает ERROR;
+- Worker управляет модельным timeout для read-only текста: подробные быстрые запросы имеют bounded retry внутри серверного бюджета, сложный анализ — одну более длинную попытку; Android long-read timeout остаётся внешним аварийным пределом и terminal truth при исчерпании бюджета остаётся ERROR;
 - Accessibility v7.2 читает дополнительные same-window semantic поля hint/state/pane/tooltip, но это НЕ OCR/Vision и не гарантирует чтение приложений, которые не публикуют accessibility text.
 
 КРИТИЧЕСКАЯ v12.13 TRUTH:
@@ -1103,6 +1103,19 @@ function normalizeIntentText(message = "") {
     .trim();
 }
 
+function isLikelyContextFollowUp(message = "") {
+  const n = normalizeIntentText(message);
+  if (!n || n.length > 240) return false;
+
+  if (
+    /^(?:продолжи|продолжай|дальше|подробнее|еще|ещё|а\s+подробнее|а\s+дальше|и\s+дальше)(?:\s|$|[?.!,;:—-])/.test(n)
+  ) {
+    return true;
+  }
+
+  return /(?:^|\s)(?:это|этого|этой|этом|эту|тот|того|той|там|здесь|выше|ранее|предыдущ|последн(?:ий|яя|ее)|из\s+этого|из\s+списка|эти\s+результат|другие\s+результат|исправь\s+это|сделай\s+его|сделай\s+ее|сделай\s+её)(?:\s|$|[?.!,;:—-])/.test(n);
+}
+
 function isDeepRequest(message = "") {
   const n = normalizeIntentText(message);
   const explicitDepth = /(подробн|глубок|тщательн|детальн|развернут|полный анализ|проанализируй|сравни|исследуй|пошагов)/.test(n);
@@ -1377,7 +1390,7 @@ function stripCompletionSentinel(text = "") {
     .trimEnd();
 }
 
-async function ensureCompleteTextResponse(env, payload, data, initialReply, requireSentinel = false) {
+async function ensureCompleteTextResponse(env, payload, data, initialReply, requireSentinel = false, continuationTimeoutMs = 0, allowContinuation = true) {
   const initialIncomplete = isIncompleteResponse(data);
   const initialHasSentinel = hasCompletionSentinel(initialReply);
   const needsTokenContinuation = isMaxOutputTokenIncomplete(data);
@@ -1410,6 +1423,16 @@ async function ensureCompleteTextResponse(env, payload, data, initialReply, requ
     };
   }
 
+  if (!allowContinuation) {
+    return {
+      ok: false,
+      data,
+      reply: stripCompletionSentinel(initialReply),
+      continuationCount: 0,
+      incompleteReason: incompleteResponseReason(data) || "completion_continuation_budget_exhausted"
+    };
+  }
+
   if (!data?.id || payload.store === false) {
     return {
       ok: false,
@@ -1432,7 +1455,11 @@ async function ensureCompleteTextResponse(env, payload, data, initialReply, requ
     store: true
   };
 
-  const continued = await callOpenAI(env, continuationPayload);
+  const continued = await callOpenAI(
+    env,
+    continuationPayload,
+    { timeoutMs: continuationTimeoutMs }
+  );
   if (!continued.ok) {
     return {
       ok: false,
@@ -1485,30 +1512,105 @@ function safeParseArguments(raw) {
   }
 }
 
-async function callOpenAI(env, payload) {
-  const response = await fetch("https://api.openai.com/v1/responses", {
-    method: "POST",
-    headers: {
-      "Authorization": `Bearer ${env.OPENAI_API_KEY}`,
-      "Content-Type": "application/json"
-    },
-    body: JSON.stringify(payload)
-  });
+async function callOpenAI(env, payload, options = {}) {
+  const timeoutMs = Math.max(0, Number(options.timeoutMs || 0));
+  const controller = timeoutMs > 0 ? new AbortController() : null;
+  let timeoutHandle = null;
 
-  const data = await response.json();
+  if (controller) {
+    timeoutHandle = setTimeout(() => controller.abort(), timeoutMs);
+  }
 
-  if (!response.ok) {
+  try {
+    const response = await fetch("https://api.openai.com/v1/responses", {
+      method: "POST",
+      headers: {
+        "Authorization": `Bearer ${env.OPENAI_API_KEY}`,
+        "Content-Type": "application/json"
+      },
+      body: JSON.stringify(payload),
+      ...(controller ? { signal: controller.signal } : {})
+    });
+
+    let data;
+    try {
+      data = await response.json();
+    } catch {
+      data = {
+        error: "invalid_openai_json_response"
+      };
+    }
+
+    if (!response.ok) {
+      return {
+        ok: false,
+        status: response.status,
+        data,
+        timedOut: false
+      };
+    }
+
+    return {
+      ok: true,
+      status: response.status,
+      data,
+      timedOut: false
+    };
+  } catch (error) {
+    const timedOut = controller?.signal?.aborted === true
+      || String(error?.name || "") === "AbortError";
+
     return {
       ok: false,
-      status: response.status,
-      data
+      status: timedOut ? 504 : 502,
+      timedOut,
+      data: {
+        error: timedOut ? "openai_timeout" : "openai_fetch_error",
+        timeout_ms: timeoutMs,
+        message: String(error?.message || error || "")
+      }
     };
+  } finally {
+    if (timeoutHandle !== null) {
+      clearTimeout(timeoutHandle);
+    }
+  }
+}
+
+async function callOpenAIWithAgentTransport(env, payload, policy) {
+  const timeoutMs = Math.max(0, Number(policy?.timeoutMs || 0));
+  const retryCount = Math.max(0, Number(policy?.retryCount || 0));
+  let attempts = 0;
+  let last = null;
+
+  for (let attempt = 0; attempt <= retryCount; attempt += 1) {
+    attempts += 1;
+    last = await callOpenAI(
+      env,
+      payload,
+      { timeoutMs }
+    );
+
+    if (last.ok || !last.timedOut) {
+      return {
+        ...last,
+        attempts
+      };
+    }
+
+    if (attempt < retryCount) {
+      await new Promise(resolve => setTimeout(resolve, 180));
+    }
   }
 
   return {
-    ok: true,
-    status: response.status,
-    data
+    ...(last || {
+      ok: false,
+      status: 504,
+      data: { error: "openai_timeout" },
+      timedOut: true
+    }),
+    attempts
   };
 }
 
@@ -1879,7 +1981,8 @@ ${verifiedDeviceFacts}
 
   const durableRecoveryMode = isDurableRecoveryRequest(message || "");
   const automaticDurableRecoveryMode = isAutomaticDurableRecoveryRequest(message || "");
-  const androidNavigationMode = !durableRecoveryMode
+  const androidNavigationMode = toolResults.length === 0
+    && !durableRecoveryMode
     && !isArtifactCreationRequest(message || "")
     && isLikelyAndroidNavigation(message || "");
   const diagnosticMode = !durableRecoveryMode
@@ -1891,7 +1994,7 @@ ${verifiedDeviceFacts}
   const genericAgentDefinitionMode = isGenericAgentDefinitionRequest(message || "");
   const explicitExternalImprovementMode = isExplicitExternalImprovementRequest(message || "");
   const verifiedFactsCompletionMode = Boolean(verifiedDeviceFacts);
-  const dropPreviousContext = genericAgentDefinitionMode || explicitExternalImprovementMode || verifiedFactsCompletionMode;
+  const forceFreshContext = genericAgentDefinitionMode || explicitExternalImprovementMode || verifiedFactsCompletionMode;
   const capabilityFollowUpMode = Boolean(previousResponseId)
     && !genericAgentDefinitionMode
     && String(message || "").length <= 160
@@ -1913,11 +2016,6 @@ ${verifiedDeviceFacts}
     && !selfReviewMode
     && !isComplexReasoningRequest(message || "")
     && !needsFreshWebInformation(message || "");
-  const longTextCompletionMode = deepRequest
-    && !androidNavigationMode
-    && !artifactCreationMode
-    && !durableRecoveryMode
-    && !isActionExecutionRequest(message || "");
   const fastEverydayMode = !durableRecoveryMode
     && !androidNavigationMode
     && !artifactCreationMode
@@ -1933,6 +2031,36 @@ ${verifiedDeviceFacts}
     && !capabilityMode
     && deepRequest
     && isFastInformationalRequest(message || "");
+
+  const contextualFollowUpMode = Boolean(previousResponseId)
+    && isLikelyContextFollowUp(message || "");
+
+  const preservePreviousContext = Boolean(previousResponseId)
+    && !forceFreshContext
+    && (
+      toolResults.length > 0
+      || capabilityFollowUpMode
+      || contextualFollowUpMode
+    );
+
+  const contextMode = !previousResponseId
+    ? "fresh_no_previous"
+    : preservePreviousContext
+      ? "continued_follow_up"
+      : "fresh_topic_boundary";
+
+  // Predicted long pure-text answers get the completion sentinel up front.
+  // Unexpectedly long answers are also verified post-hoc below.
+  const completionIntegrityMode = !durableRecoveryMode
+    && !androidNavigationMode
+    && !artifactCreationMode
+    && !isActionExecutionRequest(message || "")
+    && (
+      deepRequest
+      || genericAgentDefinitionMode
+      || selfAutonomyMode
+      || (capabilityMode && !fastEverydayMode)
+    );
 
   const fastModelMode =
     androidNavigationMode
@@ -1983,7 +2111,7 @@ ${styleInstructions}${artifactCreationMode ? `
 
 ${AYANA_ARTIFACT_WHOLE_GOAL_INSTRUCTIONS}` : ""}${productInstructions}${scopeInstructions}${recoveryInstructions}${verifiedFactsCompletionMode ? `
 
-${AYANA_VERIFIED_DEVICE_FACTS_INSTRUCTIONS}` : ""}${longTextCompletionMode ? `
+${AYANA_VERIFIED_DEVICE_FACTS_INSTRUCTIONS}` : ""}${completionIntegrityMode ? `
 
 ${AYANA_LONG_TEXT_COMPLETION_INSTRUCTIONS}` : ""}`,
     input,
@@ -2058,21 +2186,71 @@ ${AYANA_LONG_TEXT_COMPLETION_INSTRUCTIONS}` : ""}`,
   }
 
   if (
-    previousResponseId
+    preservePreviousContext
     && !androidNavigationMode
     && !durableRecoveryMode
-    && !dropPreviousContext
   ) {
     payload.previous_response_id = previousResponseId;
   }
 
-  const result = await callOpenAI(env, payload);
+  const hasModelTools = Array.isArray(payload.tools) && payload.tools.length > 0;
+
+  const workerTransportPolicy =
+    !hasModelTools && detailedFastInfoMode
+      ? {
+          profile: "fast_detailed_retry",
+          timeoutMs: 17000,
+          retryCount: 1,
+          continuationTimeoutMs: 15000,
+          allowContinuation: true
+        }
+      : !hasModelTools && detailedCapabilityFastMode
+        ? {
+            profile: "fast_capability_retry",
+            timeoutMs: 17000,
+            retryCount: 1,
+            continuationTimeoutMs: 15000,
+            allowContinuation: true
+          }
+        : !hasModelTools && deepRequest
+          ? {
+              profile: "deep_single_window",
+              timeoutMs: 32000,
+              retryCount: 0,
+              continuationTimeoutMs: 5000,
+              allowContinuation: true
+            }
+          : !hasModelTools
+            ? {
+                profile: "plain_text_bounded",
+                timeoutMs: 16000,
+                retryCount: 0,
+                continuationTimeoutMs: 0,
+                allowContinuation: false
+              }
+            : {
+                profile: "tool_managed_by_android",
+                timeoutMs: 0,
+                retryCount: 0,
+                continuationTimeoutMs: deepRequest ? 8000 : 0,
+                allowContinuation: deepRequest
+              };
+
+  const result = await callOpenAIWithAgentTransport(
+    env,
+    payload,
+    workerTransportPolicy
+  );
 
   if (!result.ok) {
     return Response.json(
       {
         error: "OpenAI Agent Core error",
-        details: result.data
+        details: {
+          ...(result.data || {}),
+          worker_transport_profile: workerTransportPolicy.profile,
+          worker_attempts: Number(result.attempts || 1)
+        }
       },
       { status: result.status }
     );
@@ -2124,12 +2302,19 @@ ${AYANA_LONG_TEXT_COMPLETION_INSTRUCTIONS}` : ""}`,
     });
   }
 
+  const requireCompletionSentinel =
+    completionIntegrityMode
+    || initialReply.length >= 2200;
+
   const completion = await ensureCompleteTextResponse(
     env,
     payload,
     data,
     initialReply,
-    longTextCompletionMode
+    requireCompletionSentinel,
+    workerTransportPolicy.continuationTimeoutMs,
+    workerTransportPolicy.allowContinuation
+      && Number(result.attempts || 1) === 1
   );
 
   if (!completion.ok) {
@@ -2139,7 +2324,10 @@ ${AYANA_LONG_TEXT_COMPLETION_INSTRUCTIONS}` : ""}`,
         details: {
           status: String(completion.data?.status || data?.status || ""),
           reason: completion.incompleteReason || "response_not_completed",
-          continuation_count: completion.continuationCount
+          continuation_count: completion.continuationCount,
+          worker_transport_profile: workerTransportPolicy.profile,
+          worker_attempts: Number(result.attempts || 1),
+          context_mode: contextMode
         }
       },
       { status: 502 }
@@ -2157,7 +2345,10 @@ ${AYANA_LONG_TEXT_COMPLETION_INSTRUCTIONS}` : ""}`,
     execution_success: terminalStatus === "SUCCESS",
     completion_status: "completed",
     continuation_count: completion.continuationCount,
-    completion_integrity: longTextCompletionMode ? "sentinel_verified" : "api_status_verified",
+    completion_integrity: requireCompletionSentinel ? "sentinel_verified" : "api_status_verified",
+    worker_transport_profile: workerTransportPolicy.profile,
+    worker_attempts: Number(result.attempts || 1),
+    context_mode: contextMode,
     reply: finalReply
   });
 }
@@ -2331,7 +2522,7 @@ export default {
         ok: true,
         service: "AYANA AI",
         ai: "ready",
-        agent_core: "v11.1.1-d8-d13-minimal-fix",
+        agent_core: "v11.1.2-completion-context-transport-integrity",
         voice: "marin"
       });
     }
