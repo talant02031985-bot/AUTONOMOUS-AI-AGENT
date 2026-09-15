@@ -5,7 +5,7 @@ import org.json.JSONObject
 import java.util.Locale
 
 /**
- * AYANA Planner v2.3 — own-app open target integrity.
+ * AYANA Planner v2.3.1 — own-app open target integrity / resolver API compatibility verified.
  *
  * A deterministic planning envelope above Agent Core. It does not click the UI
  * and does not replace the verified Android Goal Compiler. Its job is to keep
@@ -62,7 +62,7 @@ class AyanaAgentPlanner(
             ?: JSONObject()
 
         return JSONObject()
-            .put("planner_version", "2.3")
+            .put("planner_version", "2.3.1")
             .put("objective", clean.take(MAX_OBJECTIVE_CHARS))
             .put("domain", domain)
             .put("complexity", complexity)
@@ -119,7 +119,7 @@ class AyanaAgentPlanner(
             }
 
         return buildString {
-            append("LOCAL PLANNER v2.3: domain=")
+            append("LOCAL PLANNER v2.3.1: domain=")
             append(envelope.optString("domain"))
             append("; complexity=")
             append(envelope.optString("complexity"))
