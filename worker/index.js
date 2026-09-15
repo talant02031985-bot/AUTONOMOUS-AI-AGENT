@@ -1,4 +1,4 @@
-// AYANA Worker v11.1.6 — Bounded Deep Single Window + Network Fact Truth + Context Boundary
+// AYANA Worker v11.1.7 — Bounded Deep Compact Tail + Network Fact Truth + Context Boundary
 // Preserves v10.9 acceptance/capability grounding and strengthens compound deliverables:
 // device-state exposes network/storage/brightness, artifact goals must end in verified create_artifact,
 // and explicit inability to execute an action is returned as machine UNSUPPORTED instead of generic SUCCESS.
@@ -816,7 +816,7 @@ const AYANA_CURRENT_CAPABILITIES = `
 КРИТИЧЕСКАЯ v12.15 TRUTH:
 - verified_device_facts передаёт Agent Core уже подтверждённый Android snapshot для смыслового завершения составной read-only цели; повторный get_device_state для этих фактов исключается;
 - локальный multi-device executor завершает SUCCESS только presentation-only запрос; при остающейся оценке/условии/решении Execution Session остаётся RUNNING и передаётся Agent Core;
-- Worker проверяет Responses API status/incomplete_details: max_output_tokens получает один bounded continuation, а незавершённый ответ после лимита никогда не возвращается как SUCCESS;
+- Worker проверяет Responses API status/incomplete_details: fast detailed ответ сначала обязан завершиться в компактном основном окне; если API всё же останавливает его по max_output_tokens, разрешён только один короткий emergency-tail для завершения структуры и sentinel; незавершённый ответ никогда не возвращается как SUCCESS;
 - terminal reason отделён от пользовательского result и использует короткие machine reason codes.
 
 КРИТИЧЕСКАЯ v12.14 TRUTH:
@@ -1381,13 +1381,21 @@ const AYANA_RESPONSE_COMPLETION_SENTINEL = "[[AYANA_RESPONSE_COMPLETE]]";
 const AYANA_LONG_TEXT_COMPLETION_INSTRUCTIONS = `
 LONG RESPONSE COMPLETION INTEGRITY:
 - Заверши все начатые предложения, пункты и разделы.
-- Для подробного информационного ответа приоритет — законченный и содержательный ответ в одном bounded окне, а не максимальная длина.
-- Для обычного подробного справочного ответа ориентируйся примерно на 550–750 слов: ответ должен быть содержательным, но обязан полностью завершиться в одном bounded окне.
+- Для подробного информационного ответа приоритет — законченный и содержательный ответ в bounded окне, а не максимальная длина.
+- Если ниже указан профильный бюджет длины, он имеет приоритет: не пытайся использовать весь доступный token budget.
 - Не раздувай вступления, повторы и второстепенные примеры; сначала дай все ключевые пункты и доведи структуру до завершения.
 - Если места становится мало, сокращай второстепенные детали, но обязательно заверши последнюю мысль и структуру.
 - Только в самом конце полностью завершённого итогового ответа добавь ${AYANA_RESPONSE_COMPLETION_SENTINEL}.
 - Маркер служебный: Worker удалит его перед отправкой Android.
 - Не ставь маркер, пока ответ реально не завершён.
+`.trim();
+
+const AYANA_FAST_DETAILED_COMPLETION_INSTRUCTIONS = `
+FAST DETAILED RESPONSE BUDGET:
+- Для обычного справочного запроса со словами «подробно/детально» дай примерно 320–450 слов. Этого достаточно для содержательного ответа и это жёсткий ориентир, а не минимум.
+- Сначала перечисли главные факты и разделы, затем коротко раскрой их; не добавляй длинные вступления, повторные выводы и второстепенные отступления.
+- Обязательно закончи ответ и служебный completion sentinel до исчерпания max_output_tokens.
+- Если для полноты пришлось выбирать, предпочти законченный ответ меньшей длины вместо оборванного более длинного текста.
 `.trim();
 
 function hasCompletionSentinel(text = "") {
@@ -1402,7 +1410,7 @@ function stripCompletionSentinel(text = "") {
     .trimEnd();
 }
 
-async function ensureCompleteTextResponse(env, payload, data, initialReply, requireSentinel = false, continuationTimeoutMs = 0, allowContinuation = true) {
+async function ensureCompleteTextResponse(env, payload, data, initialReply, requireSentinel = false, continuationTimeoutMs = 0, allowContinuation = true, continuationMaxOutputTokens = 900, compactTail = false) {
   const initialIncomplete = isIncompleteResponse(data);
   const initialHasSentinel = hasCompletionSentinel(initialReply);
   const needsTokenContinuation = isMaxOutputTokenIncomplete(data);
@@ -1455,22 +1463,27 @@ async function ensureCompleteTextResponse(env, payload, data, initialReply, requ
     };
   }
 
+  const normalizedContinuationBudget = Math.max(
+    160,
+    Math.min(Number(continuationMaxOutputTokens || 900), 900)
+  );
+
   const continuationPayload = {
     model: payload.model,
     reasoning: payload.reasoning || { effort: "low" },
-    instructions: `${payload.instructions}\n\nCONTINUATION INTEGRITY:\nПродолжи только незавершённый ответ. Не повторяй уже выданный текст. Заверши текущую мысль, список и структуру полностью.${requireSentinel ? ` В самом конце добавь ${AYANA_RESPONSE_COMPLETION_SENTINEL}.` : ""} Не вызывай инструменты и не начинай новую задачу.`,
-    input: needsSentinelContinuation
-      ? `Проверь предыдущий ответ. Если он оборван — продолжи с места обрыва и полностью заверши. Если он уже завершён — не повторяй его.${requireSentinel ? ` В любом случае закончи служебным маркером ${AYANA_RESPONSE_COMPLETION_SENTINEL}.` : ""}`
-      : `Продолжи ответ с места обрыва и полностью заверши его без повторения уже написанного.${requireSentinel ? ` В самом конце добавь ${AYANA_RESPONSE_COMPLETION_SENTINEL}.` : ""}`,
+    instructions: compactTail
+      ? `${payload.instructions}\n\nEMERGENCY COMPACT TAIL:\nПредыдущий ответ уже содержит основную информацию. Не продолжай подробное изложение. В пределах примерно 80–120 слов заверши только оборванную мысль/список, дай короткое заключение и${requireSentinel ? ` обязательно закончи ${AYANA_RESPONSE_COMPLETION_SENTINEL}` : " закончи ответ"}. Не повторяй предыдущий текст, не добавляй новые разделы и не вызывай инструменты.`
+      : `${payload.instructions}\n\nCONTINUATION INTEGRITY:\nПродолжи только незавершённый ответ. Не повторяй уже выданный текст. Заверши текущую мысль, список и структуру полностью.${requireSentinel ? ` В самом конце добавь ${AYANA_RESPONSE_COMPLETION_SENTINEL}.` : ""} Не вызывай инструменты и не начинай новую задачу.`,
+    input: compactTail
+      ? `Немедленно заверши предыдущий ответ компактным хвостом без повторов и без новых разделов.${requireSentinel ? ` Последними символами должны быть ${AYANA_RESPONSE_COMPLETION_SENTINEL}.` : ""}`
+      : needsSentinelContinuation
+        ? `Проверь предыдущий ответ. Если он оборван — продолжи с места обрыва и полностью заверши. Если он уже завершён — не повторяй его.${requireSentinel ? ` В любом случае закончи служебным маркером ${AYANA_RESPONSE_COMPLETION_SENTINEL}.` : ""}`
+        : `Продолжи ответ с места обрыва и полностью заверши его без повторения уже написанного.${requireSentinel ? ` В самом конце добавь ${AYANA_RESPONSE_COMPLETION_SENTINEL}.` : ""}`,
     previous_response_id: String(data.id),
-    // Continuation is only a short tail-completion, never a second full essay.
-    // The primary detailed turn already carried the body of the answer. A 900-token
-    // ceiling is enough to finish the last section + sentinel while avoiding another
-    // long server generation that can hit the continuation HTTP timeout.
-    max_output_tokens: Math.max(
-      500,
-      Math.min(Number(payload.max_output_tokens || 0), 900)
-    ),
+    // Profile-specific continuation budget. Fast detailed informational answers use
+    // a very small emergency tail; other long-response modes retain the larger
+    // bounded continuation used before v11.1.7.
+    max_output_tokens: normalizedContinuationBudget,
     store: true
   };
 
@@ -2132,7 +2145,7 @@ ${AYANA_ARTIFACT_WHOLE_GOAL_INSTRUCTIONS}` : ""}${productInstructions}${scopeIns
 
 ${AYANA_VERIFIED_DEVICE_FACTS_INSTRUCTIONS}` : ""}${completionIntegrityMode ? `
 
-${AYANA_LONG_TEXT_COMPLETION_INSTRUCTIONS}` : ""}`,
+${AYANA_LONG_TEXT_COMPLETION_INSTRUCTIONS}${detailedFastInfoMode ? `\n\n${AYANA_FAST_DETAILED_COMPLETION_INSTRUCTIONS}` : ""}` : ""}`,
     input,
     max_output_tokens: androidNavigationMode
       ? 260
@@ -2141,7 +2154,7 @@ ${AYANA_LONG_TEXT_COMPLETION_INSTRUCTIONS}` : ""}`,
       : durableRecoveryMode
         ? (source === "voice" ? 420 : 520)
       : detailedFastInfoMode
-        ? (source === "voice" ? 700 : 1300)
+        ? (source === "voice" ? 620 : 1150)
       : detailedCapabilityFastMode
         ? (source === "voice" ? 1100 : 3000)
       : deepRequest
@@ -2217,16 +2230,20 @@ ${AYANA_LONG_TEXT_COMPLETION_INSTRUCTIONS}` : ""}`,
   const workerTransportPolicy =
     !hasModelTools && detailedFastInfoMode
       ? {
-          profile: "fast_detailed_bounded_single_window",
-          // Detailed fast informational answers are intentionally bounded so the
-          // model completes the whole response in one request. Earlier 2k-token
-          // generations repeatedly exhausted 26s before the first response arrived;
-          // a 1300-token ceiling plus a 34s window removes the slow continuation
-          // dependency while staying below Android's 38s production read timeout.
-          timeoutMs: 34000,
+          profile: "fast_detailed_compact_tail",
+          // v11.1.6 proved that 1300 output tokens can still end as max_output_tokens
+          // after ~26.5s even with a 34s server window. v11.1.7 therefore asks the
+          // model to finish the informational answer earlier (1150-token ceiling,
+          // 320–450-word target). If it nevertheless reaches max_output_tokens, one
+          // very small emergency tail is allowed to close the current thought +
+          // sentinel while keeping the whole Worker request below Android's 38s
+          // production long-read envelope.
+          timeoutMs: 30000,
           retryCount: 0,
-          continuationTimeoutMs: 0,
-          allowContinuation: false
+          continuationTimeoutMs: 6500,
+          allowContinuation: true,
+          continuationMaxOutputTokens: 260,
+          compactTail: true
         }
       : !hasModelTools && detailedCapabilityFastMode
         ? {
@@ -2338,7 +2355,9 @@ ${AYANA_LONG_TEXT_COMPLETION_INSTRUCTIONS}` : ""}`,
     requireCompletionSentinel,
     workerTransportPolicy.continuationTimeoutMs,
     workerTransportPolicy.allowContinuation
-      && Number(result.attempts || 1) === 1
+      && Number(result.attempts || 1) === 1,
+    workerTransportPolicy.continuationMaxOutputTokens || 900,
+    Boolean(workerTransportPolicy.compactTail)
   );
 
   if (!completion.ok) {
@@ -2546,7 +2565,7 @@ export default {
         ok: true,
         service: "AYANA AI",
         ai: "ready",
-        agent_core: "v11.1.6-bounded-deep-single-window",
+        agent_core: "v11.1.7-bounded-deep-compact-tail",
         voice: "marin"
       });
     }
