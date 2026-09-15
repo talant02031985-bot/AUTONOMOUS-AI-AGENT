@@ -10,10 +10,11 @@ import java.io.File
 import java.util.Locale
 
 /**
- * AYANA App Resolver v2.4 — EXACT LABEL PRECEDENCE.
+ * AYANA App Resolver v2.4.1 — EXACT LABEL + EXACT PACKAGE INTEGRATION.
  *
  * Dynamic source of truth for launchable apps on THIS Android device.
- * v2.4 gives a unique exact launcher label precedence over learned/static aliases.
+ * v2.4.1 gives a unique exact launcher label precedence over learned/static aliases
+ * and preserves the launchExactPackage API required by the current v12.19 VoiceService.
  * This prevents stale aliases such as «Фото» -> Samsung Gallery from overriding
  * the actual installed launcher entry «Фото» -> Google Photos. Learned/static
  * aliases remain fallback hints and are still validated against the current device.
@@ -374,6 +375,59 @@ class AyanaAppResolver(
                 requestedName
             )
         )
+
+    /**
+     * Launch an app by an already verified package identity.
+     *
+     * v12.15+ composite execution uses this path after the package has already
+     * been resolved and persisted in a deterministic execution step.  It must
+     * therefore preserve exact-package semantics and must not re-resolve the
+     * package through a user-visible alias.
+     */
+    fun launchExactPackage(
+        packageName: String
+    ): JSONObject {
+        val cleanPackage = packageName.trim()
+        if (cleanPackage.isBlank()) {
+            return JSONObject()
+                .put("success", false)
+                .put("message", "Не указан package приложения")
+        }
+
+        val apps = listLaunchableApps(forceRefresh = false)
+        val entry =
+            apps.firstOrNull {
+                it.packageName == cleanPackage
+            }
+                ?: listLaunchableApps(forceRefresh = true)
+                    .firstOrNull {
+                        it.packageName == cleanPackage
+                    }
+
+        if (entry == null) {
+            return JSONObject()
+                .put("success", false)
+                .put("package", cleanPackage)
+                .put(
+                    "message",
+                    "Package не подтверждён launcher-картой устройства: $cleanPackage"
+                )
+        }
+
+        return launchResolved(
+            Resolution(
+                success = true,
+                requestedName = entry.label,
+                label = entry.label,
+                packageName = entry.packageName,
+                activityName = entry.activityName,
+                confidence = 100,
+                source = "exact_package",
+                reason = "Exact package подтверждён launcher-картой устройства",
+                alternatives = emptyList()
+            )
+        )
+    }
 
     fun launchWithHints(
         requestedName: String,
