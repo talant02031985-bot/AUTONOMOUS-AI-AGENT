@@ -60,6 +60,13 @@ import kotlin.math.abs
 
 class AyanaVoiceService : Service() {
 
+    // AYANA v12.16.0 AUTONOMOUS ACCEPTANCE REPORTING.
+    // Natural full-diagnostics commands are routed to the existing local acceptance
+    // engine before Agent Core. FULL_ACCEPTANCE now produces a verified TXT report
+    // in Downloads/AYANA from the exact machine test result; the report publish uses
+    // ArtifactEngine verification and ExecutionKernel side-effect reconciliation.
+    // Test-run completion remains separate from readiness grade.
+
     // AYANA v12.15.1 LONG RESPONSE RESILIENCE.
     // Long/deep text-only read-only Agent Core turns use one extended 38 s read window
     // instead of two restarted 18 s generations. Potential side-effect/device-action
@@ -16264,7 +16271,12 @@ class AyanaVoiceService : Service() {
                 "проверка сборки",
                 "полномасштаб",
                 "полноценный тест",
-                "полный тест"
+                "полный тест",
+                "полная диагностика",
+                "подробная диагностика",
+                "подробную диагностику",
+                "все тесты",
+                "всевозможные тесты"
             ).any(normalized::contains)
 
         if (clearlyCodeScoped && !explicitAyanaScope) {
@@ -16282,7 +16294,20 @@ class AyanaVoiceService : Service() {
                 "всех своих функц",
                 "acceptance test",
                 "acceptance-тест",
-                "приемочн"
+                "приемочн",
+                "полная диагностика",
+                "полную диагностику",
+                "подробная диагностика",
+                "подробную диагностику",
+                "все тесты аяна",
+                "все тесты ayana",
+                "всевозможные тесты",
+                "протестируй все функции",
+                "протестируй все возможности",
+                "проверь все функции",
+                "проверь все возможности",
+                "полная проверка аяна",
+                "полную проверку аяна"
             ).any(normalized::contains)
 
         if (fullAcceptance) {
@@ -16351,7 +16376,7 @@ class AyanaVoiceService : Service() {
                     "Проверяю возможности сборки…"
 
                 AyanaAcceptanceTestEngine.Mode.FULL_ACCEPTANCE ->
-                    "Провожу полномасштабный acceptance-test…"
+                    "Провожу полную диагностику AYANA…"
             },
             STATE_EXECUTING
         )
@@ -16363,6 +16388,8 @@ class AyanaVoiceService : Service() {
                 JSONObject()
                     .put("success", false)
                     .put("execution_success", false)
+                    .put("engine", "AyanaAcceptanceTestEngine")
+                    .put("engine_version", AyanaAcceptanceTestEngine.ENGINE_VERSION)
                     .put("mode", mode.wireName)
                     .put("grade", AyanaAcceptanceTestEngine.GRADE_NOT_READY)
                     .put("passed", 0)
@@ -16371,7 +16398,12 @@ class AyanaVoiceService : Service() {
                     .put("blocked", 0)
                     .put("unsupported", 0)
                     .put("no_data", 0)
+                    .put("cancelled", 0)
+                    .put("critical_failures", 1)
                     .put("network_turns", 0)
+                    .put("duration_ms", 0L)
+                    .put("tests", JSONArray())
+                    .put("known_limits", JSONArray())
                     .put(
                         "summary",
                         "Локальный acceptance-test не завершён: ${error.message ?: error.javaClass.simpleName}"
@@ -16401,7 +16433,8 @@ class AyanaVoiceService : Service() {
                 "${mode.wireName}: ${result.optString("grade", "UNKNOWN")}",
             details =
                 (
-                    "pass=${result.optInt("passed")}; " +
+                    "engine=${result.optString("engine_version", AyanaAcceptanceTestEngine.ENGINE_VERSION)}; " +
+                        "pass=${result.optInt("passed")}; " +
                         "warning=${result.optInt("warnings")}; " +
                         "fail=${result.optInt("failed")}; " +
                         "blocked=${result.optInt("blocked")}; " +
@@ -16409,10 +16442,10 @@ class AyanaVoiceService : Service() {
                         "no_data=${result.optInt("no_data")}; " +
                         "duration_ms=${result.optLong("duration_ms")}; " +
                         "network_turns=${result.optInt("network_turns", 0)}"
-                    ).take(1000)
+                    ).take(1200)
         )
 
-        val summary =
+        val baseSummary =
             result
                 .optString(
                     if (silent) {
@@ -16428,18 +16461,401 @@ class AyanaVoiceService : Service() {
                     "Локальная проверка завершена, но итоговый отчёт не сформирован."
                 }
 
-        if (result.optBoolean("execution_success", false)) {
-            finishLocalCommand(
-                summary,
-                silent
-            )
-        } else {
+        if (!result.optBoolean("execution_success", false)) {
             respondAndResume(
-                text = summary,
+                text = baseSummary,
                 silent = silent,
                 success = false,
                 technical = "acceptance_test_execution_failed:${mode.wireName}"
             )
+            return
+        }
+
+        // FULL_ACCEPTANCE owns the user-requested end-to-end diagnostic artifact.
+        // The suite result may legitimately be NOT_READY while this command itself
+        // still succeeds: SUCCESS here means "tests executed and verified report saved".
+        if (mode == AyanaAcceptanceTestEngine.Mode.FULL_ACCEPTANCE) {
+            executionPhase(
+                phase = "acceptance_report_publish",
+                executor = "artifact_engine"
+            )
+
+            val reportText =
+                try {
+                    buildAcceptanceDetailedReport(result)
+                } catch (error: Exception) {
+                    commandHistoryStore.addEvent(
+                        activeCommandHistoryId,
+                        state = "acceptance_report_failed",
+                        message = "Не удалось сформировать TXT-отчёт диагностики",
+                        details = (error.message ?: error.javaClass.simpleName).take(600)
+                    )
+
+                    respondAndResume(
+                        text =
+                            "$baseSummary\n\nТесты выполнены, но TXT-отчёт сформировать не удалось.",
+                        silent = silent,
+                        success = false,
+                        technical = "acceptance_report_build_failed"
+                    )
+                    return
+                }
+
+            val filename =
+                "AYANA_FULL_DIAGNOSTICS_" +
+                    DateTimeFormatter
+                        .ofPattern("yyyy-MM-dd_HHmmss")
+                        .format(LocalDateTime.now()) +
+                    ".txt"
+
+            val artifactArguments =
+                JSONObject()
+                    .put("kind", "txt")
+                    .put("filename", filename)
+                    .put("title", "AYANA Full Diagnostics")
+                    .put("content", reportText)
+                    .put("columns", JSONArray())
+                    .put("rows", JSONArray())
+                    .put("column_types", JSONArray())
+                    .put("chart_type", "none")
+
+            val published =
+                try {
+                    artifactEngine.create(
+                        arguments = artifactArguments,
+                        tryBeginPublish = { detail ->
+                            executionKernel.tryBeginIrreversibleDispatch(
+                                kind = "acceptance_report_publish",
+                                detail = detail
+                            )
+                        },
+                        onPublishAccepted = { detail ->
+                            executionKernel.markIrreversibleDispatchAccepted(
+                                detail
+                            )
+                        },
+                        onPublishReconciliationStarted = { detail ->
+                            executionKernel.markSideEffectReconciliationStarted(
+                                detail
+                            )
+                        },
+                        onPublishReconciled = { committed, detail ->
+                            executionKernel.markSideEffectReconciled(
+                                committed = committed,
+                                detail = detail
+                            )
+                        }
+                    )
+                } catch (error: Exception) {
+                    JSONObject()
+                        .put("success", false)
+                        .put("verified", false)
+                        .put("message", error.message ?: error.javaClass.simpleName)
+                }
+
+            val reportVerified =
+                published.optBoolean("success", false) &&
+                    published.optString("artifact_reference").isNotBlank()
+
+            if (!reportVerified) {
+                commandHistoryStore.addEvent(
+                    activeCommandHistoryId,
+                    state = "acceptance_report_failed",
+                    message = "Полная диагностика выполнена, но TXT-отчёт не подтверждён",
+                    details = published.toString().take(1800)
+                )
+
+                respondAndResume(
+                    text =
+                        "$baseSummary\n\nТесты выполнены, но сохранение итогового TXT-отчёта не подтверждено.",
+                    silent = silent,
+                    success = false,
+                    technical =
+                        "acceptance_report_publish_unverified:" +
+                            published.toString().take(1200)
+                )
+                return
+            }
+
+            val finalName =
+                published
+                    .optString("name", filename)
+                    .ifBlank { filename }
+
+            commandHistoryStore.addEvent(
+                activeCommandHistoryId,
+                state = "acceptance_report_verified",
+                message = "TXT-отчёт полной диагностики создан и проверен",
+                details =
+                    (
+                        "name=$finalName; " +
+                            "artifact_reference=${published.optString("artifact_reference").take(600)}; " +
+                            "grade=${result.optString("grade")}; " +
+                            "tests=${result.optInt("tests_completed", 0)}"
+                        ).take(1200)
+            )
+
+            finishLocalCommand(
+                "$baseSummary\n\nПодробный TXT-отчёт сохранён в Downloads/AYANA: $finalName",
+                silent
+            )
+            return
+        }
+
+        finishLocalCommand(
+            baseSummary,
+            silent
+        )
+    }
+
+    /**
+     * v12.16 diagnostic artifact renderer.
+     *
+     * It renders only the exact statuses/evidence returned by AyanaAcceptanceTestEngine;
+     * it never re-grades a test. This keeps the acceptance engine as the single source
+     * of PASS/FAIL truth while allowing the service to persist a human-readable TXT
+     * without requiring a parallel Agent Core turn.
+     */
+    private fun buildAcceptanceDetailedReport(
+        result: JSONObject
+    ): String {
+        val tests =
+            result.optJSONArray("tests")
+                ?: JSONArray()
+
+        val limits =
+            result.optJSONArray("known_limits")
+                ?: JSONArray()
+
+        val durationMs =
+            result.optLong("duration_ms", 0L)
+
+        val generatedAt =
+            System.currentTimeMillis()
+
+        val startedAt =
+            if (durationMs > 0L) {
+                (generatedAt - durationMs).coerceAtLeast(0L)
+            } else {
+                0L
+            }
+
+        val nonPass =
+            mutableListOf<JSONObject>()
+
+        for (index in 0 until tests.length()) {
+            val item =
+                tests.optJSONObject(index)
+                    ?: continue
+
+            if (
+                item.optString("status") !=
+                AyanaAcceptanceTestEngine.STATUS_PASS
+            ) {
+                nonPass += item
+            }
+        }
+
+        val priorityOrder =
+            mapOf(
+                AyanaAcceptanceTestEngine.STATUS_FAIL to 0,
+                AyanaAcceptanceTestEngine.STATUS_BLOCKED to 1,
+                AyanaAcceptanceTestEngine.STATUS_WARNING to 2,
+                AyanaAcceptanceTestEngine.STATUS_UNSUPPORTED to 3,
+                AyanaAcceptanceTestEngine.STATUS_NO_DATA to 4,
+                AyanaAcceptanceTestEngine.STATUS_CANCELLED to 5
+            )
+
+        val prioritized =
+            nonPass.sortedWith(
+                compareBy<JSONObject> {
+                    priorityOrder[
+                        it.optString("status")
+                    ] ?: 99
+                }.thenByDescending {
+                    it.optBoolean(
+                        "critical",
+                        false
+                    )
+                }
+            )
+
+        return buildString {
+            append("AYANA — ПОЛНЫЙ ОТЧЁТ ДИАГНОСТИКИ\n")
+            append("========================================\n")
+            append("Engine: ${result.optString("engine", "AyanaAcceptanceTestEngine")} v${result.optString("engine_version", "unknown")}\n")
+            append("Режим: ${result.optString("mode", "full_acceptance")}\n")
+            append("Начало: ${formatAcceptanceReportTime(startedAt)}\n")
+            append("Окончание: ${formatAcceptanceReportTime(generatedAt)}\n")
+            append("Длительность: $durationMs мс\n")
+            append("Agent Core network turns: ${result.optInt("network_turns", 0)}\n")
+            append("Выполнение набора тестов завершено: ${result.optBoolean("execution_success", false)}\n")
+            append("Readiness grade: ${result.optString("grade", AyanaAcceptanceTestEngine.GRADE_NOT_READY)}\n")
+            append("\n")
+            append("ИТОГОВЫЕ СЧЁТЧИКИ\n")
+            append("----------------------------------------\n")
+            append("PASS: ${result.optInt("passed", 0)}\n")
+            append("WARNING: ${result.optInt("warnings", 0)}\n")
+            append("FAIL: ${result.optInt("failed", 0)}\n")
+            append("BLOCKED: ${result.optInt("blocked", 0)}\n")
+            append("UNSUPPORTED: ${result.optInt("unsupported", 0)}\n")
+            append("NO_DATA: ${result.optInt("no_data", 0)}\n")
+            append("CANCELLED: ${result.optInt("cancelled", 0)}\n")
+            append("Critical failures: ${result.optInt("critical_failures", 0)}\n")
+            append("Тестов запрошено: ${result.optInt("tests_requested", tests.length())}\n")
+            append("Тестов завершено: ${result.optInt("tests_completed", tests.length())}\n")
+            append("\n")
+            append("КОНТРАКТ ДОСТОВЕРНОСТИ\n")
+            append("----------------------------------------\n")
+            append("execution_success=true означает только то, что сам набор диагностики завершился.\n")
+            append("Это не означает, что все функции AYANA исправны. Готовность определяется grade и статусами каждого теста.\n")
+
+            if (prioritized.isNotEmpty()) {
+                append("\nПРИОРИТЕТНЫЕ ПРОБЛЕМЫ\n")
+                append("----------------------------------------\n")
+
+                prioritized.forEachIndexed {
+                    index,
+                    item ->
+                    append(
+                        "${index + 1}. ${item.optString("status")} — " +
+                            "${item.optString("id")} — ${item.optString("title")}\n"
+                    )
+                    append("   Critical: ${item.optBoolean("critical", false)}\n")
+                    append(
+                        "   Message: " +
+                            item.optString("message")
+                                .take(ACCEPTANCE_REPORT_MESSAGE_LIMIT) +
+                            "\n"
+                    )
+                    append("   Evidence scope: ${item.optString("evidence_scope")}\n")
+                }
+            }
+
+            append("\nВСЕ ТЕСТЫ\n")
+            append("========================================\n")
+
+            for (index in 0 until tests.length()) {
+                val item =
+                    tests.optJSONObject(index)
+                        ?: continue
+
+                append(
+                    "[${index + 1}/${tests.length()}] ${item.optString("status")} — " +
+                        "${item.optString("id")} — ${item.optString("title")}\n"
+                )
+                append("Critical: ${item.optBoolean("critical", false)}\n")
+                append("Verified: ${item.optBoolean("verified", false)}\n")
+                append("Duration: ${item.optLong("duration_ms", 0L)} мс\n")
+                append("Evidence scope: ${item.optString("evidence_scope")}\n")
+                append(
+                    "Message: " +
+                        item.optString("message")
+                            .take(ACCEPTANCE_REPORT_MESSAGE_LIMIT) +
+                        "\n"
+                )
+
+                val evidence =
+                    item.optJSONObject("evidence")
+                        ?: JSONObject()
+
+                if (evidence.length() > 0) {
+                    append("Evidence: ")
+                    append(
+                        evidence
+                            .toString(2)
+                            .take(ACCEPTANCE_REPORT_EVIDENCE_LIMIT)
+                    )
+                    append("\n")
+                }
+
+                append("----------------------------------------\n")
+            }
+
+            if (limits.length() > 0) {
+                append("\nИЗВЕСТНЫЕ ОГРАНИЧЕНИЯ\n")
+                append("========================================\n")
+
+                for (index in 0 until limits.length()) {
+                    val raw =
+                        limits.opt(index)
+
+                    when (raw) {
+                        is JSONObject -> {
+                            append("${index + 1}. ")
+                            append(
+                                raw.optString("label")
+                                    .ifBlank {
+                                        raw.optString("id")
+                                    }
+                                    .ifBlank {
+                                        raw.toString()
+                                    }
+                                    .take(ACCEPTANCE_REPORT_MESSAGE_LIMIT)
+                            )
+
+                            val note =
+                                raw.optString("note")
+                                    .ifBlank {
+                                        raw.optString("next")
+                                    }
+                                    .ifBlank {
+                                        raw.optString("message")
+                                    }
+
+                            if (note.isNotBlank()) {
+                                append(
+                                    " — " +
+                                        note.take(
+                                            ACCEPTANCE_REPORT_MESSAGE_LIMIT
+                                        )
+                                )
+                            }
+
+                            append("\n")
+                        }
+
+                        else ->
+                            append(
+                                "${index + 1}. " +
+                                    raw
+                                        ?.toString()
+                                        .orEmpty()
+                                        .take(ACCEPTANCE_REPORT_MESSAGE_LIMIT) +
+                                    "\n"
+                            )
+                    }
+                }
+            }
+
+            append("\nСВОДКА\n")
+            append("========================================\n")
+            append(
+                result.optString("summary")
+                    .take(ACCEPTANCE_REPORT_SUMMARY_LIMIT)
+            )
+            append("\n")
+        }
+    }
+
+    private fun formatAcceptanceReportTime(
+        timestampMs: Long
+    ): String {
+        if (timestampMs <= 0L) {
+            return "нет данных"
+        }
+
+        return try {
+            java.text.SimpleDateFormat(
+                "yyyy-MM-dd HH:mm:ss Z",
+                Locale.getDefault()
+            ).format(
+                java.util.Date(
+                    timestampMs
+                )
+            )
+        } catch (_: Exception) {
+            timestampMs.toString()
         }
     }
 
@@ -33148,6 +33564,15 @@ class AyanaVoiceService : Service() {
                 "яндекс браузер",
                 "yandex browser"
             )
+
+        private const val ACCEPTANCE_REPORT_MESSAGE_LIMIT =
+            1200
+
+        private const val ACCEPTANCE_REPORT_EVIDENCE_LIMIT =
+            5000
+
+        private const val ACCEPTANCE_REPORT_SUMMARY_LIMIT =
+            12000
 
         private val WAKE_VARIANTS =
             listOf(
