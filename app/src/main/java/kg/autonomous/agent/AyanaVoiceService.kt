@@ -60,6 +60,12 @@ import kotlin.math.abs
 
 class AyanaVoiceService : Service() {
 
+    // AYANA v12.19.1 SELF-DIRECTED REPORT COMPLETENESS.
+    // v12.19.0 adaptive diagnostics are preserved. Diagnostic TXT rendering now
+    // keeps every generated test visible while compacting PASS-only adaptive rows,
+    // and falls back to an ultra-compact full index before the artifact content cap.
+    // A REPORT_COMPLETE footer makes silent report truncation observable. ORB untouched.
+    //
     // AYANA v12.19.0 SELF-DIRECTED DIAGNOSTICS FOUNDATION.
     // The fixed 55-test acceptance suite remains a regression floor, while
     // AyanaAutonomousTestIntelligence generates additional read-only/pure tests
@@ -16823,7 +16829,7 @@ class AyanaVoiceService : Service() {
                 }
             )
 
-        return buildString {
+        val detailedReport = buildString {
             append(
                 if (
                     result.optString("mode") ==
@@ -16898,10 +16904,28 @@ class AyanaVoiceService : Service() {
                     tests.optJSONObject(index)
                         ?: continue
 
+                val status =
+                    item.optString("status")
+
+                val id =
+                    item.optString("id")
+
+                val compactAdaptivePass =
+                    id.startsWith("AUTO-") &&
+                        status == AyanaAcceptanceTestEngine.STATUS_PASS
+
                 append(
-                    "[${index + 1}/${tests.length()}] ${item.optString("status")} — " +
-                        "${item.optString("id")} — ${item.optString("title")}\n"
+                    "[${index + 1}/${tests.length()}] $status — " +
+                        "$id — ${item.optString("title")}\n"
                 )
+
+                // Generated PASS matrices can be numerous. Preserve every test row
+                // while avoiding repetitive successful evidence in the TXT artifact.
+                // Every baseline test and every non-PASS adaptive test stays detailed.
+                if (compactAdaptivePass) {
+                    continue
+                }
+
                 append("Critical: ${item.optBoolean("critical", false)}\n")
                 append("Verified: ${item.optBoolean("verified", false)}\n")
                 append("Duration: ${item.optLong("duration_ms", 0L)} мс\n")
@@ -17036,7 +17060,141 @@ class AyanaVoiceService : Service() {
                     .take(ACCEPTANCE_REPORT_SUMMARY_LIMIT)
             )
             append("\n")
+            append(
+                "REPORT_COMPLETE tests=${tests.length()}; " +
+                    "adaptive=${result.optInt("adaptive_tests_generated", 0)}; " +
+                    "renderer=v12.19.1\n"
+            )
         }
+
+        if (
+            detailedReport.length <=
+            ACCEPTANCE_REPORT_SAFE_CHAR_BUDGET
+        ) {
+            return detailedReport
+        }
+
+        return buildAcceptanceCompactReport(
+            result
+        )
+    }
+
+    /**
+     * Last-resort persistence renderer.
+     *
+     * If adaptive coverage grows beyond the safe detailed TXT budget, rebuild a
+     * complete one-line index of every test rather than letting Artifact Engine
+     * silently cut the report tail.
+     */
+    private fun buildAcceptanceCompactReport(
+        result: JSONObject
+    ): String {
+        val tests =
+            result.optJSONArray("tests")
+                ?: JSONArray()
+
+        val nonPass =
+            mutableListOf<JSONObject>()
+
+        for (index in 0 until tests.length()) {
+            val item =
+                tests.optJSONObject(index)
+                    ?: continue
+
+            if (
+                item.optString("status") !=
+                AyanaAcceptanceTestEngine.STATUS_PASS
+            ) {
+                nonPass += item
+            }
+        }
+
+        val compact =
+            buildString {
+                append("AYANA — COMPACT COMPLETE DIAGNOSTIC INDEX\n")
+                append("========================================\n")
+                append("Engine: ${result.optString("engine")} v${result.optString("engine_version")}\n")
+                append("Mode: ${result.optString("mode")}\n")
+                append("Grade: ${result.optString("grade")}\n")
+                append(
+                    "PASS=${result.optInt("passed", 0)}; " +
+                        "WARNING=${result.optInt("warnings", 0)}; " +
+                        "FAIL=${result.optInt("failed", 0)}; " +
+                        "BLOCKED=${result.optInt("blocked", 0)}; " +
+                        "UNSUPPORTED=${result.optInt("unsupported", 0)}; " +
+                        "NO_DATA=${result.optInt("no_data", 0)}\n"
+                )
+                append(
+                    "tests=${tests.length()}; " +
+                        "baseline=${result.optInt("baseline_tests", 0)}; " +
+                        "adaptive=${result.optInt("adaptive_tests_generated", 0)}\n"
+                )
+                append(
+                    "NOTE: compact fallback activated before TXT artifact limit; " +
+                        "no test rows were omitted.\n"
+                )
+
+                if (nonPass.isNotEmpty()) {
+                    append("\nNON-PASS DETAILS\n")
+                    append("----------------------------------------\n")
+                    nonPass.forEach { item ->
+                        append(
+                            "${item.optString("status")} — " +
+                                "${item.optString("id")} — " +
+                                "${item.optString("title")}\n"
+                        )
+                        append(
+                            "Message: " +
+                                item.optString("message")
+                                    .take(ACCEPTANCE_REPORT_MESSAGE_LIMIT) +
+                                "\n"
+                        )
+                        append(
+                            "Scope: ${item.optString("evidence_scope")}; " +
+                                "critical=${item.optBoolean("critical", false)}; " +
+                                "verified=${item.optBoolean("verified", false)}\n"
+                        )
+                    }
+                }
+
+                append("\nALL TESTS — COMPLETE INDEX\n")
+                append("========================================\n")
+
+                for (index in 0 until tests.length()) {
+                    val item =
+                        tests.optJSONObject(index)
+                            ?: continue
+
+                    append(
+                        "[${index + 1}/${tests.length()}] " +
+                            "${item.optString("status")} — " +
+                            "${item.optString("id")} — " +
+                            item.optString("title")
+                                .replace("\n", " ")
+                                .take(260) +
+                            "\n"
+                    )
+                }
+
+                append("\n")
+                append(
+                    "REPORT_COMPLETE tests=${tests.length()}; " +
+                        "adaptive=${result.optInt("adaptive_tests_generated", 0)}; " +
+                        "renderer=v12.19.1-compact\n"
+                )
+            }
+
+        if (
+            compact.length >
+            ACCEPTANCE_REPORT_HARD_CHAR_BUDGET
+        ) {
+            throw IllegalStateException(
+                "acceptance_report_too_large_even_compact:" +
+                    compact.length
+            )
+        }
+
+        return compact
     }
 
     private fun formatAcceptanceReportTime(
@@ -36573,6 +36731,14 @@ class AyanaVoiceService : Service() {
 
         private const val ACCEPTANCE_REPORT_SUMMARY_LIMIT =
             12000
+
+        // TXT artifacts currently accept a bounded content payload. The observed
+        // artifact boundary is 80,000 content characters, so leave headroom.
+        private const val ACCEPTANCE_REPORT_SAFE_CHAR_BUDGET =
+            76_000
+
+        private const val ACCEPTANCE_REPORT_HARD_CHAR_BUDGET =
+            79_000
 
         private val WAKE_VARIANTS =
             listOf(
