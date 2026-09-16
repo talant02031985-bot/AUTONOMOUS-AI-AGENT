@@ -60,7 +60,7 @@ import kotlin.math.abs
 
 class AyanaVoiceService : Service() {
 
-    // AYANA v12.19.2 AUTONOMY RUNTIME CONFIRMATION.
+    // AYANA v12.19.3 GOAL COMPILER PROBE COMPATIBILITY.
 
 
     // AYANA v12.19.1 SELF-DIRECTED REPORT COMPLETENESS.
@@ -708,6 +708,7 @@ class AyanaVoiceService : Service() {
         AyanaSafetyPolicy()
     }
 
+    // v12.19.3: Goal Compiler runtime truth is feature/contract-based, not pinned to compiler_version=2.0.
     // v12.19.2: self-directed diagnostic intelligence consumes fresh baseline
     // runtime-confirmation evidence. It never performs generated side effects in v1.1: capability invariants, installed-app resolver matrix,
     // generated planner contracts, metamorphic planner checks and history mining
@@ -17807,56 +17808,117 @@ class AyanaVoiceService : Service() {
                         )
                 )
 
-            val compilerOk =
+            // Do not bind runtime truth to an exact compiler-version string.
+            // The device currently runs Goal Compiler v2.1 while the original
+            // probe was written against v2.0. Capability truth is defined by
+            // the observable execution contract, not by a stale version literal.
+            val compiledSuccess =
                 compiled.optBoolean(
                     "success",
                     false
-                ) &&
-                    compiled.optString(
-                        "compiler_version"
-                    ) == "2.0" &&
-                    compiled.optString(
-                        "goal_type"
-                    ) == "open_app" &&
-                    contract.optString(
-                        "executor_key"
-                    ) == "app_launch_executor" &&
-                    contract.optString(
-                        "terminal_policy"
-                    ) == "verified_terminal_only" &&
-                    contract.optString(
-                        "verification_policy"
-                    ) == "fresh_foreground_package" &&
-                    contract.optBoolean(
-                        "cancellation_required",
-                        false
-                    ) &&
-                    contract.optString(
-                        "replan_policy"
-                    ) == "bounded_safe_replan" &&
-                    !contract.optBoolean(
-                        "false_success_allowed",
-                        true
-                    ) &&
-                    plan.optInt(
-                        "max_actions",
-                        -1
-                    ) in 1..2 &&
-                    steps.length() == 1 &&
+                )
+
+            val goalTypeOk =
+                compiled.optString(
+                    "goal_type"
+                ) == "open_app"
+
+            val executorOk =
+                contract.optString(
+                    "executor_key"
+                ) == "app_launch_executor"
+
+            val terminalPolicyOk =
+                contract.optString(
+                    "terminal_policy"
+                ) == "verified_terminal_only"
+
+            val verificationPolicyOk =
+                contract.optString(
+                    "verification_policy"
+                ) == "fresh_foreground_package"
+
+            val cancellationRequired =
+                contract.optBoolean(
+                    "cancellation_required",
+                    false
+                )
+
+            val replanPolicyOk =
+                contract.optString(
+                    "replan_policy"
+                ) == "bounded_safe_replan"
+
+            val falseSuccessGuardOk =
+                !contract.optBoolean(
+                    "false_success_allowed",
+                    true
+                )
+
+            val actionBudgetOk =
+                plan.optInt(
+                    "max_actions",
+                    -1
+                ) in 1..2
+
+            val terminalStepOk =
+                steps.length() == 1 &&
                     firstStep.optString(
                         "action"
                     ) == "open_app" &&
                     firstStep.optBoolean(
                         "terminal",
                         false
-                    ) &&
-                    !blockedMutation.optBoolean(
-                        "success",
-                        true
-                    ) &&
+                    )
+
+            val mutationGuardOk =
+                !blockedMutation.optBoolean(
+                    "success",
+                    true
+                ) &&
                     blockedMutation.optString(
                         "terminal_status"
                     ) == "BLOCKED"
+
+            val failedChecks =
+                mutableListOf<String>()
+
+            if (!compiledSuccess) {
+                failedChecks += "compiled_success"
+            }
+            if (!goalTypeOk) {
+                failedChecks += "goal_type"
+            }
+            if (!executorOk) {
+                failedChecks += "executor_key"
+            }
+            if (!terminalPolicyOk) {
+                failedChecks += "terminal_policy"
+            }
+            if (!verificationPolicyOk) {
+                failedChecks += "verification_policy"
+            }
+            if (!cancellationRequired) {
+                failedChecks += "cancellation_required"
+            }
+            if (!replanPolicyOk) {
+                failedChecks += "replan_policy"
+            }
+            if (!falseSuccessGuardOk) {
+                failedChecks += "false_success_guard"
+            }
+            if (!actionBudgetOk) {
+                failedChecks += "action_budget"
+            }
+            if (!terminalStepOk) {
+                failedChecks += "terminal_step"
+            }
+            if (!mutationGuardOk) {
+                failedChecks += "mutation_guard"
+            }
+
+            val compilerOk =
+                failedChecks.isEmpty()
 
             runtimeEvidence.put(
                 "goal_compiler_execution_contract",
@@ -17872,10 +17934,22 @@ class AyanaVoiceService : Service() {
                         )
                     )
                     .put(
+                        "compiled_success",
+                        compiledSuccess
+                    )
+                    .put(
+                        "goal_type_ok",
+                        goalTypeOk
+                    )
+                    .put(
                         "executor_key",
                         contract.optString(
                             "executor_key"
                         )
+                    )
+                    .put(
+                        "executor_key_ok",
+                        executorOk
                     )
                     .put(
                         "terminal_policy",
@@ -17884,16 +17958,32 @@ class AyanaVoiceService : Service() {
                         )
                     )
                     .put(
+                        "terminal_policy_ok",
+                        terminalPolicyOk
+                    )
+                    .put(
                         "verification_policy",
                         contract.optString(
                             "verification_policy"
                         )
                     )
                     .put(
+                        "verification_policy_ok",
+                        verificationPolicyOk
+                    )
+                    .put(
+                        "cancellation_required",
+                        cancellationRequired
+                    )
+                    .put(
                         "replan_policy",
                         contract.optString(
                             "replan_policy"
                         )
+                    )
+                    .put(
+                        "replan_policy_ok",
+                        replanPolicyOk
                     )
                     .put(
                         "false_success_allowed",
@@ -17903,9 +17993,42 @@ class AyanaVoiceService : Service() {
                         )
                     )
                     .put(
+                        "false_success_guard_ok",
+                        falseSuccessGuardOk
+                    )
+                    .put(
+                        "max_actions",
+                        plan.optInt(
+                            "max_actions",
+                            -1
+                        )
+                    )
+                    .put(
+                        "action_budget_ok",
+                        actionBudgetOk
+                    )
+                    .put(
+                        "step_count",
+                        steps.length()
+                    )
+                    .put(
+                        "terminal_step_ok",
+                        terminalStepOk
+                    )
+                    .put(
                         "mutation_guard_terminal",
                         blockedMutation.optString(
                             "terminal_status"
+                        )
+                    )
+                    .put(
+                        "mutation_guard_ok",
+                        mutationGuardOk
+                    )
+                    .put(
+                        "failed_checks",
+                        JSONArray(
+                            failedChecks
                         )
                     )
             )
@@ -17917,7 +18040,10 @@ class AyanaVoiceService : Service() {
                 runtimeFailures[
                     "goal_compiler_execution_contract"
                 ] =
-                    "execution_contract_probe_failed"
+                    "execution_contract_probe_failed:" +
+                        failedChecks.joinToString(
+                            ","
+                        )
             }
         } catch (
             error: Exception
