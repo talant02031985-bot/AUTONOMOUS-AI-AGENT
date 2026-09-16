@@ -6,7 +6,7 @@ import java.security.MessageDigest
 import java.util.Locale
 
 /**
- * AYANA Autonomous Test Intelligence v1.1 — SELF-DIRECTED DIAGNOSTICS + RUNTIME CONFIRMATION.
+ * AYANA Autonomous Test Intelligence v1.2 — SELF-DIRECTED DIAGNOSTICS + PLATFORM-DRIFT ORACLE.
  *
  * This layer is intentionally different from a fixed acceptance checklist.
  * It discovers test opportunities from the current build/runtime itself:
@@ -19,7 +19,7 @@ import java.util.Locale
  * - fresh PASS evidence from baseline runtime probes can satisfy device-confirmation
  *   for that diagnostic run without mutating Capability Registry metadata.
  *
- * All generated tests in v1.1 are READ-ONLY or PURE. No generated test opens an app,
+ * All generated tests in v1.2 are READ-ONLY or PURE. No generated test opens an app,
  * writes device state, sends a message, deletes user data, uses the camera, purchases,
  * or performs any other irreversible action. Future active probes must remain behind
  * the same fail-closed safety contract and own restore/cleanup before PASS.
@@ -680,27 +680,63 @@ class AyanaAutonomousTestIntelligence(
                         "kotlin" in normalizedCommand
                     )
 
+        // "Canvas" is not a web-only marker: Android has android.graphics.Canvas.
+        // The previous oracle treated any occurrence of "canvas" in a correct
+        // Android/Kotlin answer as HTML/web drift and produced a false warning.
         val explicitlyAskedForWeb =
             listOf(
                 "html",
                 "веб",
                 "web",
                 "браузер",
-                "canvas"
+                "javascript",
+                "typescript",
+                "css",
+                "react",
+                "vue",
+                "svelte"
             ).any { it in normalizedCommand }
 
-        val resultIsWebOnly =
+        val resultLower =
+            resultText.lowercase(
+                Locale.ROOT
+            )
+
+        val androidKotlinEvidence =
+            listOf(
+                "android/kotlin",
+                "package kg.autonomous.agent",
+                "import android.",
+                "android.graphics.canvas",
+                "android.view.view",
+                ": view(",
+                "class ayanavisual"
+            ).any { marker ->
+                marker in resultLower
+            }
+
+        val strongWebEvidence =
             listOf(
                 "<!doctype html",
                 "<html",
-                "canvas",
-                "сохраните код как",
-                "откройте в браузере",
+                "<script",
+                "<style",
                 "html-файл",
-                "html файл"
+                "html файл",
+                ".html",
+                "откройте в браузере",
+                "сохраните код как `",
+                "javascript",
+                "document.getelementbyid",
+                "getcontext(\\\"2d\\\")",
+                "getcontext('2d')"
             ).any { marker ->
-                marker in resultText.lowercase(Locale.ROOT)
+                marker in resultLower
             }
+
+        val resultIsWebOnly =
+            strongWebEvidence &&
+                !androidKotlinEvidence
 
         if (asksForProjectCode && !explicitlyAskedForWeb && resultIsWebOnly) {
             anomalies +=
@@ -847,7 +883,7 @@ class AyanaAutonomousTestIntelligence(
     }
 
     companion object {
-        const val ENGINE_VERSION = "1.1"
+        const val ENGINE_VERSION = "1.2"
 
         private const val STATUS_PASS = "PASS"
         private const val STATUS_WARNING = "WARNING"
