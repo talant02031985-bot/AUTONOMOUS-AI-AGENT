@@ -60,6 +60,16 @@ import kotlin.math.abs
 
 class AyanaVoiceService : Service() {
 
+    // AYANA v12.20.0 R7.8 BATCH TRUTH HARDENING.
+    // Consolidates clipboard local routing, lifecycle semantic-object protection,
+    // fail-closed Agent Core refusal handling, and pure regression probes.
+    // ORB / Worker / Planner / Resolver remain untouched.
+    // Explicit clipboard-copy commands are claimed locally before the generic
+    // StructuredLocal/Agent Core fallback and always use the existing verified
+    // ClipboardManager write -> read-back -> exact-compare executor. Generic
+    // "включи <non-app object>" phrases are no longer misclassified as app launch.
+    // ORB, Worker, Planner, Resolver and all frozen execution lanes are untouched.
+    //
     // AYANA v12.19.3 GOAL COMPILER PROBE COMPATIBILITY.
 
 
@@ -998,8 +1008,7 @@ class AyanaVoiceService : Service() {
                     true
 
                 ensureOrbForActiveService()
-
-                mainHandler.post {
+mainHandler.post {
                     cancelDurableGoalFromControl(
                         silent = true
                     )
@@ -1998,7 +2007,7 @@ class AyanaVoiceService : Service() {
 
                 while (
                     localRecognizer
-                        .isReady(stream)
+.isReady(stream)
                 ) {
 
                     localRecognizer
@@ -2998,7 +3007,7 @@ class AyanaVoiceService : Service() {
                         '—'
                     )
                     .trim()
-        }
+}
 
         var found =
             false
@@ -3793,6 +3802,22 @@ class AyanaVoiceService : Service() {
                 return
             }
 
+        // v12.19.4 CLIPBOARD ROUTING TRUTH.
+        // Clipboard mutation is a deterministic Android side effect already backed
+        // by write/read-back verification. Claim explicit clipboard-copy grammar
+        // locally before any generic parser/model fallback can turn a refusal into
+        // an unrelated Agent Core final.
+        extractLocalClipboardCopyRequest(
+            originalCommand
+        )
+            ?.let { clipboardText ->
+                runLocalClipboardCopy(
+                    text = clipboardText,
+                    silent = silent
+                )
+                return
+            }
+
         // v12.14 VOLUME TARGET PRECEDENCE.
         // A phrase such as «уменьши громкость до 2» names an absolute target,
         // not a -1 relative delta. Resolve exact target semantics before the
@@ -3998,8 +4023,7 @@ class AyanaVoiceService : Service() {
             evaluateSimpleCalculation(
                 routingNormalized
             )
-
-        if (localCalculation != null) {
+if (localCalculation != null) {
             respondAndResume(
                 localCalculation,
                 silent,
@@ -4998,8 +5022,7 @@ class AyanaVoiceService : Service() {
                     silent,
                     "com.android.chrome"
                 )
-
-            "браузер",
+"браузер",
             "интернет",
             "самсунг интернет" ->
                 openApp(
@@ -5998,8 +6021,7 @@ class AyanaVoiceService : Service() {
                         "screen_changed",
                         false
                     )
-
-                if (
+if (
                     clickAccepted ||
                     screenChanged
                 ) {
@@ -6998,8 +7020,7 @@ class AyanaVoiceService : Service() {
                     .interrupt()
                 break
             }
-
-        } while (
+} while (
             !cancelRequested &&
             !shuttingDown
         )
@@ -7998,7 +8019,7 @@ class AyanaVoiceService : Service() {
             "jpg",
             "изображен",
             "график",
-            "диаграмм"
+"диаграмм"
         ).any { marker ->
             c.contains(marker)
         }
@@ -8998,7 +9019,7 @@ class AyanaVoiceService : Service() {
     ): String {
 
         val deadline =
-            SystemClock.elapsedRealtime() +
+SystemClock.elapsedRealtime() +
                 timeoutMs
 
         var latest =
@@ -9998,7 +10019,7 @@ class AyanaVoiceService : Service() {
     ): ExactMediaVolumeRequest? {
         val c =
             command
-                .lowercase(Locale.ROOT)
+.lowercase(Locale.ROOT)
                 .replace('ё', 'е')
                 .replace(Regex("\\s+"), " ")
                 .trim()
@@ -10998,7 +11019,7 @@ class AyanaVoiceService : Service() {
                                 )
 
                             else ->
-                                respondAndResume(
+respondAndResume(
                                     text = message,
                                     silent = silent,
                                     success = false,
@@ -11998,7 +12019,7 @@ class AyanaVoiceService : Service() {
             is AyanaStructuredLocalCommandRouter.Intent.ReminderList -> {
                 runLocalReminderList(
                     query = intent.query,
-                    silent = silent
+silent = silent
                 )
                 true
             }
@@ -12997,8 +13018,7 @@ class AyanaVoiceService : Service() {
             brightnessPercent = brightnessPercent
         )
     }
-
-    private fun executePreExecutionPlan(
+private fun executePreExecutionPlan(
         plan: PreExecutionPlan,
         silent: Boolean,
         successPrefix: String
@@ -13998,7 +14018,7 @@ class AyanaVoiceService : Service() {
                 },
             message =
                 if (verified) {
-                    "Относительное изменение громкости подтверждено"
+"Относительное изменение громкости подтверждено"
                 } else {
                     "Относительное изменение громкости не подтверждено"
                 },
@@ -14998,7 +15018,7 @@ class AyanaVoiceService : Service() {
                         )
 
                 buildString {
-                    append(index + 1)
+append(index + 1)
                     append("). «")
                     append(task.title)
                     append("» — ")
@@ -15293,6 +15313,100 @@ class AyanaVoiceService : Service() {
                 silent,
                 success = false
             )
+        }
+    }
+
+    /**
+     * v12.19.4: narrow, local-first clipboard grammar.
+     *
+     * Only phrases that explicitly name the Android clipboard are accepted here.
+     * This intentionally does NOT own generic "скопируй ..." requests, so file/UI
+     * copy semantics continue to the existing routers. The captured payload keeps
+     * the user's original case and punctuation; only surrounding whitespace is trimmed.
+     */
+    private fun extractLocalClipboardCopyRequest(
+        command: String
+    ): String? {
+
+        val source =
+            command
+                .trim()
+
+        if (source.isBlank()) {
+            return null
+        }
+
+        val patterns =
+            listOf(
+                Regex(
+                    pattern =
+                        """^(?:скопируй|копируй|запиши|помести|сохрани|положи)\s+в\s+буфер(?:\s+обмена)?\s+(?:текст\s+)?(.+)$""",
+                    option = RegexOption.IGNORE_CASE
+                ),
+                Regex(
+                    pattern =
+                        """^(?:скопируй|копируй|запиши|помести|сохрани|положи)\s+(?:текст\s+)?(.+?)\s+в\s+буфер(?:\s+обмена)?$""",
+                    option = RegexOption.IGNORE_CASE
+                )
+            )
+
+        val payload =
+            patterns
+                .asSequence()
+                .mapNotNull { pattern ->
+                    pattern
+                        .matchEntire(source)
+                        ?.groupValues
+                        ?.getOrNull(1)
+                        ?.trim()
+                }
+                .firstOrNull { it.isNotBlank() }
+                ?: return null
+
+        return payload
+    }
+
+    /**
+     * v12.20.0 terminal truth guard.
+     *
+     * A final model/Worker reply is never promoted to SUCCESS when the original
+     * request is an explicit action and the reply itself unambiguously says that
+     * the action failed, is unavailable or was not performed. This guard only
+     * downgrades success; it never fabricates successful evidence or a side effect.
+     */
+    private fun shouldFailClosedAgentFinalWithoutMachineTerminal(
+        originalCommand: String,
+        reply: String
+    ): Boolean {
+
+        val command =
+            normalizeRecognitionText(
+                originalCommand
+            )
+
+        val answer =
+            normalizeRecognitionText(
+                reply
+            )
+
+        if (
+            command.isBlank() ||
+            answer.isBlank()
+        ) {
+            return false
+        }
+
+        val explicitAction =
+            AGENT_FAIL_CLOSED_ACTION_PREFIXES.any { prefix ->
+                command.startsWith(prefix)
+            }
+
+        if (!explicitAction) {
+            return false
+        }
+
+        return AGENT_FAIL_CLOSED_FAILURE_MARKERS.any { marker ->
+            answer.contains(marker)
         }
     }
 
@@ -15998,7 +16112,7 @@ class AyanaVoiceService : Service() {
 
             append(
                 "."
-            )
+)
 
             if (
                 contentState in
@@ -16998,7 +17112,7 @@ class AyanaVoiceService : Service() {
                     append("${index + 1}. ${item.optString("kind")} — ${item.optString("message").take(ACCEPTANCE_REPORT_MESSAGE_LIMIT)}\n")
                     append("   history_id=${item.optString("history_id")}\n")
                     append("   command=${item.optString("command").take(500)}\n")
-                }
+}
             }
 
             if (limits.length() > 0) {
@@ -17998,7 +18112,7 @@ class AyanaVoiceService : Service() {
                     )
                     .put(
                         "max_actions",
-                        plan.optInt(
+plan.optInt(
                             "max_actions",
                             -1
                         )
@@ -18998,7 +19112,7 @@ class AyanaVoiceService : Service() {
                 message =
                     if (ok) {
                         "Memory v2 временная запись создана, прочитана и полностью удалена."
-                    } else {
+} else {
                         "Memory v2 round-trip не подтвердил write/read/delete или cleanup."
                     },
                 evidenceScope = "live_reversible_roundtrip",
@@ -19549,6 +19663,29 @@ class AyanaVoiceService : Service() {
                 "уменьшить громкость до 2"
             )
 
+        val clipboardRoutePrefix =
+            extractLocalClipboardCopyRequest(
+                "скопируй в буфер обмена текст AYANA-R78-CLIPBOARD-001"
+            )
+
+        val clipboardRouteSuffix =
+            extractLocalClipboardCopyRequest(
+                "запиши текст AYANA-R78-CLIPBOARD-002 в буфер обмена"
+            )
+
+        val lifecycleSemanticObjectRejected =
+            extractLocalAppLifecycleRequest(
+                "включи несуществующую функцию AYANA TEST-R78-UNAVAILABLE-001"
+            ) == null
+
+        val refusalFailClosed =
+            shouldFailClosedAgentFinalWithoutMachineTerminal(
+                originalCommand =
+                    "скопируй в буфер обмена текст AYANA-R78-CLIPBOARD-001",
+                reply =
+                    "Не могу напрямую скопировать текст в буфер обмена: инструмент работы с буфером сейчас недоступен."
+            )
+
         val unsupportedDevelopmentAction =
             unsupportedExecutionCapabilityReason(
                 "измени код AYANA в GitHub, сделай commit, запусти сборку APK и дай мне готовый APK"
@@ -19617,12 +19754,19 @@ class AyanaVoiceService : Service() {
             !unsupportedDevelopmentAction.isNullOrBlank() &&
                 informationalDevelopmentQuestion == null
 
+        val clipboardRoutingOk =
+            clipboardRoutePrefix == "AYANA-R78-CLIPBOARD-001" &&
+                clipboardRouteSuffix == "AYANA-R78-CLIPBOARD-002"
+
         val ok =
             lifecycleOk &&
                 appDetailOk &&
                 metricsOk &&
                 volumeTargetOk &&
                 unsupportedTerminalOk &&
+                clipboardRoutingOk &&
+                lifecycleSemanticObjectRejected &&
+                refusalFailClosed &&
                 artifact &&
                 artifactMetricsSuppressed &&
                 mixedSideEffectMetricsSuppressed &&
@@ -19639,9 +19783,9 @@ class AyanaVoiceService : Service() {
                 },
             message =
                 if (ok) {
-                    "Whole-goal routing guard распознал lifecycle verification, App Detail final target, pure multi-metric fast path, verified-facts reasoning handoff и artifact deliverable без greedy interception."
+                    "Whole-goal routing guard распознал lifecycle verification, App Detail final target, clipboard local route, semantic-object lifecycle guard, fail-closed refusal truth, pure multi-metric fast path, verified-facts reasoning handoff и artifact deliverable без greedy interception."
                 } else {
-                    "Whole-goal routing regression: lifecycle=$lifecycleOk, app_detail=$appDetailOk, metrics=$metricsOk, volume_target=$volumeTargetOk, unsupported_terminal=$unsupportedTerminalOk, artifact=$artifact, artifact_metric_guard=$artifactMetricsSuppressed, mixed_metric_guard=$mixedSideEffectMetricsSuppressed, pure_metric_local=$pureMetricGoalTerminalLocal, analytical_handoff=$analyticalMetricGoalRequiresHandoff, conditional_handoff=$conditionalMetricGoalRequiresHandoff."
+                    "Whole-goal routing regression: lifecycle=$lifecycleOk, app_detail=$appDetailOk, metrics=$metricsOk, volume_target=$volumeTargetOk, unsupported_terminal=$unsupportedTerminalOk, clipboard_route=$clipboardRoutingOk, lifecycle_semantic_guard=$lifecycleSemanticObjectRejected, refusal_fail_closed=$refusalFailClosed, artifact=$artifact, artifact_metric_guard=$artifactMetricsSuppressed, mixed_metric_guard=$mixedSideEffectMetricsSuppressed, pure_metric_local=$pureMetricGoalTerminalLocal, analytical_handoff=$analyticalMetricGoalRequiresHandoff, conditional_handoff=$conditionalMetricGoalRequiresHandoff."
                 },
             evidenceScope = "live_pure_contract",
             verified = ok,
@@ -19652,6 +19796,9 @@ class AyanaVoiceService : Service() {
                     .put("metrics_ok", metricsOk)
                     .put("volume_target_ok", volumeTargetOk)
                     .put("unsupported_terminal_ok", unsupportedTerminalOk)
+                    .put("clipboard_routing_ok", clipboardRoutingOk)
+                    .put("lifecycle_semantic_object_guard_ok", lifecycleSemanticObjectRejected)
+                    .put("agent_refusal_fail_closed_ok", refusalFailClosed)
                     .put("artifact_ok", artifact)
                     .put("artifact_metric_guard", artifactMetricsSuppressed)
                     .put("mixed_metric_guard", mixedSideEffectMetricsSuppressed)
@@ -19998,7 +20145,7 @@ class AyanaVoiceService : Service() {
                         .openConnection() as
                         HttpsURLConnection
                     ).apply {
-                    requestMethod = "GET"
+requestMethod = "GET"
                     connectTimeout = 5000
                     readTimeout = 5000
                     instanceFollowRedirects = false
@@ -20998,7 +21145,7 @@ class AyanaVoiceService : Service() {
                     )
                     .firstOrNull {
                         it.optString(
-                            "id"
+"id"
                         ) ==
                             id
                     }
@@ -21494,7 +21641,7 @@ class AyanaVoiceService : Service() {
         return acceptanceProbeResult(
             status = AyanaAcceptanceTestEngine.STATUS_NO_DATA,
             message =
-                "Service-level self-test может доказать persistence, но не может надёжно наблюдать MainActivity live-refresh без UI instrumentation. Известный refresh defect остаётся отдельным coverage gap.",
+                "MainActivity v7.9 содержит debounced refresh History по terminal status, но Service-level self-test не может device-confirm фактическое обновление UI без instrumentation. Поэтому результат остаётся NO_DATA coverage gap, а не утверждением о текущем дефекте.",
             evidenceScope = "coverage_gap",
             verified = false,
             evidence =
@@ -21998,7 +22145,7 @@ class AyanaVoiceService : Service() {
                     .put(
                         "completion_integrity",
                         data.optString(
-                            "completion_integrity"
+"completion_integrity"
                         )
                     )
                     .put(
@@ -22997,8 +23144,7 @@ class AyanaVoiceService : Service() {
                     transport = "unknown",
                     error = "connectivity_service_unavailable"
                 )
-
-        val activeNetwork =
+val activeNetwork =
             try {
                 connectivity.activeNetwork
             } catch (error: Exception) {
@@ -23998,7 +24144,7 @@ class AyanaVoiceService : Service() {
 
                 var androidGoalFallbackUsed =
                     resumeGoal
-                        ?.optBoolean(
+?.optBoolean(
                             "android_goal_fallback_used",
                             false
                         )
@@ -24304,12 +24450,15 @@ class AyanaVoiceService : Service() {
                                         "Готово."
                                     }
 
-                            when (
+                            val machineTerminalStatus =
                                 response
                                     .optString(
                                         "terminal_status"
                                     )
                                     .uppercase(Locale.ROOT)
+
+                            when (
+                                machineTerminalStatus
                             ) {
                                 "UNSUPPORTED" -> {
                                     finalSuccess = false
@@ -24328,7 +24477,37 @@ class AyanaVoiceService : Service() {
                                 }
                             }
 
-                            if (!finalSuccess) {
+                            if (
+                                finalSuccess &&
+                                (
+                                    machineTerminalStatus.isBlank() ||
+                                    machineTerminalStatus == "SUCCESS"
+                                ) &&
+                                shouldFailClosedAgentFinalWithoutMachineTerminal(
+                                    originalCommand = originalGoal,
+                                    reply = finalAnswer.orEmpty()
+                                )
+                            ) {
+                                finalSuccess =
+                                    false
+
+                                commandHistoryStore.addEvent(
+                                    activeCommandHistoryId,
+                                    state = "agent_refusal_truth_guard",
+                                    message = "Agent Core refusal не может завершить action-команду как SUCCESS",
+                                    details =
+                                        (
+                                            "machine_terminal=${machineTerminalStatus.ifBlank { "missing" }}; " +
+                                                "reply=${finalAnswer?.take(500).orEmpty()}"
+                                            ).take(900)
+                                )
+                            }
+
+                            if (
+                                !finalSuccess &&
+                                machineTerminalStatus.isNotBlank() &&
+                                machineTerminalStatus != "SUCCESS"
+                            ) {
                                 commandHistoryStore.addEvent(
                                     activeCommandHistoryId,
                                     state = "agent_machine_terminal",
@@ -24998,7 +25177,7 @@ class AyanaVoiceService : Service() {
                                         "success",
                                         false
                                     ) &&
-                                        result.optBoolean(
+result.optBoolean(
                                             "verified",
                                             false
                                         )
@@ -25998,7 +26177,7 @@ class AyanaVoiceService : Service() {
                                     broadcastStatus(
                                         artifactFinalAnswer,
                                         if (artifactFinalSuccess) {
-                                            STATE_SUCCESS
+STATE_SUCCESS
                                         } else {
                                             STATE_ERROR
                                         }
@@ -26998,7 +27177,7 @@ class AyanaVoiceService : Service() {
                         activeCommandHistoryId,
                         state = "goal_checkpoint_error",
                         message = "Не удалось сохранить переход к перестроению плана",
-                        details = error.message.orEmpty().take(220)
+details = error.message.orEmpty().take(220)
                     )
                     null
                 }
@@ -27998,7 +28177,7 @@ class AyanaVoiceService : Service() {
                         "goal_completed"
                     } else {
                         "goal_checkpoint_error"
-                    },
+},
                 message =
                     if (completed != null) {
                         "Долговечная цель завершена"
@@ -28998,7 +29177,7 @@ class AyanaVoiceService : Service() {
                     val reply = result.optString(
                         "reply",
                         if (success) {
-                            "Анализ завершён."
+"Анализ завершён."
                         } else {
                             "Не удалось проанализировать вложение."
                         }
@@ -29998,7 +30177,7 @@ class AyanaVoiceService : Service() {
                 connection
 
             executionKernel.bindConnection(
-                connection
+connection
             )
 
             connection.requestMethod =
@@ -30997,8 +31176,7 @@ class AyanaVoiceService : Service() {
                 "scroll_screen",
                 "tap_screen_coordinates"
             )
-
-    private fun isSemanticActionResultVerified(
+private fun isSemanticActionResultVerified(
         result: JSONObject
     ): Boolean {
 
@@ -31998,7 +32176,7 @@ class AyanaVoiceService : Service() {
                 "local_reply",
                 localAndroidGoalReply(
                     arguments = normalizedArguments,
-                    result = result
+result = result
                 )
             )
     }
@@ -32998,7 +33176,7 @@ class AyanaVoiceService : Service() {
                         "category",
                         item.category
                     )
-            )
+)
         }
 
         return JSONObject()
@@ -33998,7 +34176,7 @@ class AyanaVoiceService : Service() {
             ) {
                 val graceVerification =
                     awaitVerifiedAppDetailScreen(
-                        appTarget = label,
+appTarget = label,
                         section = "info",
                         timeoutMs = APP_DETAIL_TRANSITION_GRACE_MS
                     )
@@ -34998,7 +35176,7 @@ class AyanaVoiceService : Service() {
                         "items",
                         "files",
                         "artifacts"
-                    ).forEach { key ->
+).forEach { key ->
                         if (value.has(key)) {
                             addValue(
                                 value.opt(key),
@@ -35998,8 +36176,7 @@ class AyanaVoiceService : Service() {
 
             connection.readTimeout =
                 45000
-
-            connection.doOutput =
+connection.doOutput =
                 true
 
             val spokenText =
@@ -36998,7 +37175,7 @@ class AyanaVoiceService : Service() {
 
                 putExtra(
                     EXTRA_STATUS_STATE,
-                    state
+state
                 )
             }
         )
@@ -37702,7 +37879,60 @@ class AyanaVoiceService : Service() {
                 "ссылк",
                 "страниц",
                 "картин",
-                "фото "
+                "фото ",
+                // v12.19.4: semantic objects are not app labels. These markers
+                // make generic «включи ...» fall through to the proper capability
+                // or Agent Core route instead of fabricating an app-launch target.
+                "функц",
+                "действ",
+                "возможност",
+                "режим",
+                "опци",
+                "инструмент",
+                "фич",
+                "feature"
+            )
+
+        private val AGENT_FAIL_CLOSED_ACTION_PREFIXES =
+            listOf(
+                "открой ",
+                "закрой ",
+                "сверни ",
+                "запусти ",
+                "включи ",
+                "выключи ",
+                "установи ",
+                "поставь ",
+                "уменьши ",
+                "увеличь ",
+                "создай ",
+                "удали ",
+                "скопируй ",
+                "копируй ",
+                "запиши ",
+                "помести ",
+                "сохрани ",
+                "положи ",
+                "нажми ",
+                "выбери ",
+                "перейди ",
+                "зайди ",
+                "проверь ",
+                "выполни ",
+                "напомни "
+            )
+
+        private val AGENT_FAIL_CLOSED_FAILURE_MARKERS =
+            listOf(
+                "не удалось",
+                "не могу",
+                "недоступ",
+                "не поддерживается",
+                "невозможно",
+                "нет инструмента",
+                "нет возможности",
+                "не выполнено",
+                "не получилось"
             )
 
         private val LIFECYCLE_CLARIFICATION_NOISE_TOKENS =
