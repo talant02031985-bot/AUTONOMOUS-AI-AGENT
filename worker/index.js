@@ -1,4 +1,4 @@
-// AYANA Worker v11.1.7 — Bounded Deep Compact Tail + Network Fact Truth + Context Boundary
+// AYANA Worker v11.1.8 — Multimodal Project Contract + Bounded Deep Compact Tail + Network Fact Truth + Context Boundary
 // Preserves v10.9 acceptance/capability grounding and strengthens compound deliverables:
 // device-state exposes network/storage/brightness, artifact goals must end in verified create_artifact,
 // and explicit inability to execute an action is returned as machine UNSUPPORTED instead of generic SUCCESS.
@@ -1807,6 +1807,68 @@ async function handleDocxTranslationBatch(request, env) {
   });
 }
 
+function normalizeMultimodalProjectPrompt(value) {
+  return String(value || "")
+    .toLowerCase()
+    .replace(/ё/g, "е")
+    .replace(/[^a-zа-я0-9+#._\-\s]/gi, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function hasExplicitWebDeliverableRequest(prompt) {
+  const text = normalizeMultimodalProjectPrompt(prompt);
+  return /(?:\bhtml\b|\bcss\b|\bjavascript\b|\btypescript\b|\breact\b|\bvue\b|\bsvelte\b|\bweb\b|\bwebview\b|\bcanvas\b|веб[- ]?(?:страниц|интерфейс|верси|прилож)|сайт|браузерн(?:ая|ый|ое)\s+верси)/i.test(text);
+}
+
+function classifyMultimodalProjectContract(prompt) {
+  const text = normalizeMultimodalProjectPrompt(prompt);
+  if (!text) {
+    return { applied: false, mode: "none", reason: "empty_prompt" };
+  }
+
+  if (hasExplicitWebDeliverableRequest(text)) {
+    return { applied: false, mode: "explicit_web", reason: "explicit_web_request" };
+  }
+
+  const codeOrDeliverable =
+    /(?:\bкод\b|код[а-я]*|напиш[а-я]*\s+код|сделай\s+код|реализ[а-я]*|файл\s+для\s+замен|готов(?:ый|ые)\s+файл|полный\s+файл|замен[а-я]*\s+файл|kotlin|android|\.kt\b|class\b|view\b|visualizer\b|визуализатор|интерфейс|ui\b|анимац[а-я]*)/i.test(text);
+
+  if (!codeOrDeliverable) {
+    return { applied: false, mode: "none", reason: "not_code_deliverable" };
+  }
+
+  const ayanaOrSelfProject =
+    /(?:\bayana\b|аяна|тво(?:й|я|е|его|ей|ем|ю)|теб[ея]|ваш[а-я]*|эт(?:от|а|о)\s+(?:экран|визуализатор|интерфейс)|экран\s+визуализац|ядр[оа]\s+ayana|agent core)/i.test(text);
+
+  if (!ayanaOrSelfProject) {
+    return { applied: false, mode: "none", reason: "not_ayana_project" };
+  }
+
+  return {
+    applied: true,
+    mode: "ayana_android_kotlin",
+    reason: "ayana_project_code_deliverable"
+  };
+}
+
+function multimodalProjectInstructions(contract) {
+  if (!contract?.applied || contract.mode !== "ayana_android_kotlin") {
+    return "";
+  }
+
+  return `
+КОНТЕКСТ ПРОЕКТА И ДОГОВОР РЕЗУЛЬТАТА:
+- Это задача по текущему проекту AYANA AI — Android-приложение, package kg.autonomous.agent.
+- Если пользователь просит код, реализацию, замену компонента, визуализатор, экран или UI AYANA по вложенному визуальному референсу, целевая платформа — Android/Kotlin.
+- НЕ подменяй Android/Kotlin реализацию автономным HTML/CSS/JavaScript/Canvas/web-вариантом, если пользователь явно не попросил web/HTML.
+- Вложение в такой задаче является визуальным/структурным референсом для Android-компонента, а не сигналом сменить платформу.
+- Сохраняй исходный deliverable intent пользователя: код Android/Kotlin, а при явном запросе replacement-файла — полный исходник целевого Android-файла, насколько это подтверждается доступным контекстом.
+- Если текущего исходника компонента в запросе нет и поэтому нельзя честно гарантировать drop-in replacement, не выдумывай совместимость: дай Android/Kotlin реализацию и явно обозначь границу интеграционной уверенности.
+- Не утверждай, что файл создан, заменён, собран или установлен, если фактического artifact/build executor evidence нет.
+`.trim();
+}
+
 async function handleMultimodal(request, env) {
   const contentLength = Number(request.headers.get("content-length") || 0);
   if (Number.isFinite(contentLength) && contentLength > 13_500_000) {
@@ -1818,6 +1880,8 @@ async function handleMultimodal(request, env) {
   const kind = String(body.kind || "").trim();
   const displayName = cleanMultimodalName(body.display_name);
   const mimeType = String(body.mime_type || "application/octet-stream").trim().slice(0, 120);
+  const projectContract = classifyMultimodalProjectContract(prompt);
+  const projectInstructions = multimodalProjectInstructions(projectContract);
 
   if (!prompt) {
     return Response.json({ error: "prompt is required" }, { status: 400 });
@@ -1894,6 +1958,7 @@ async function handleMultimodal(request, env) {
 Не выдумывай отсутствующие детали. Если качество/полнота материала недостаточны — прямо скажи об ограничении.
 Для видео тебе доступны только выбранные визуальные кадры; аудиодорожки нет.
 Отвечай по существу запроса пользователя; при анализе документа сохраняй факты, числа и оговорки источника.
+${projectInstructions ? `\n\n${projectInstructions}` : ""}
     `.trim(),
     input: [{ role: "user", content }],
     max_output_tokens: 1400,
@@ -1918,7 +1983,10 @@ async function handleMultimodal(request, env) {
     kind,
     display_name: displayName,
     response_id: String(result.data?.id || ""),
-    reply
+    reply,
+    project_contract_applied: Boolean(projectContract.applied),
+    project_contract_mode: String(projectContract.mode || "none"),
+    project_contract_reason: String(projectContract.reason || "")
   });
 }
 
@@ -2565,7 +2633,7 @@ export default {
         ok: true,
         service: "AYANA AI",
         ai: "ready",
-        agent_core: "v11.1.7-bounded-deep-compact-tail",
+        agent_core: "v11.1.8-multimodal-project-contract",
         voice: "marin"
       });
     }
