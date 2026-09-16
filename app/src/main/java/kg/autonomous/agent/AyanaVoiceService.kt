@@ -60,6 +60,9 @@ import kotlin.math.abs
 
 class AyanaVoiceService : Service() {
 
+    // AYANA v12.19.2 AUTONOMY RUNTIME CONFIRMATION.
+
+
     // AYANA v12.19.1 SELF-DIRECTED REPORT COMPLETENESS.
     // v12.19.0 adaptive diagnostics are preserved. Diagnostic TXT rendering now
     // keeps every generated test visible while compacting PASS-only adaptive rows,
@@ -705,8 +708,8 @@ class AyanaVoiceService : Service() {
         AyanaSafetyPolicy()
     }
 
-    // v12.19: self-directed diagnostic intelligence. It never performs generated
-    // side effects in v1.0: capability invariants, installed-app resolver matrix,
+    // v12.19.2: self-directed diagnostic intelligence consumes fresh baseline
+    // runtime-confirmation evidence. It never performs generated side effects in v1.1: capability invariants, installed-app resolver matrix,
     // generated planner contracts, metamorphic planner checks and history mining
     // are all read-only/pure. This is intentionally separate from the stable
     // baseline acceptance list so test count can grow from live runtime evidence.
@@ -17690,7 +17693,9 @@ class AyanaVoiceService : Service() {
     }
 
     private fun acceptanceAutonomyFoundationProbe(): JSONObject {
-        val snapshot = capabilityRegistry.snapshot()
+        val snapshot =
+            capabilityRegistry.snapshot()
+
         val ids =
             listOf(
                 "strict_terminal_verification",
@@ -17700,49 +17705,758 @@ class AyanaVoiceService : Service() {
                 "autonomous_execution_loop"
             )
 
-        val missing = mutableListOf<String>()
-        val unavailable = mutableListOf<String>()
-        val unconfirmed = mutableListOf<String>()
+        val missing =
+            mutableListOf<String>()
+
+        val unavailable =
+            mutableListOf<String>()
 
         ids.forEach { id ->
-            val item = acceptanceCapability(snapshot, id)
-            if (item == null || !item.optBoolean("implemented", false)) {
+            val item =
+                acceptanceCapability(
+                    snapshot,
+                    id
+                )
+
+            if (
+                item == null ||
+                !item.optBoolean(
+                    "implemented",
+                    false
+                )
+            ) {
                 missing += id
-            } else {
-                if (!item.optBoolean("available_now", false)) {
-                    unavailable += id
-                }
-                if (!item.optBoolean("device_confirmed", false)) {
-                    unconfirmed += id
-                }
+            } else if (
+                !item.optBoolean(
+                    "available_now",
+                    false
+                )
+            ) {
+                unavailable += id
             }
         }
 
+        val runtimeConfirmed =
+            linkedSetOf<String>()
+
+        val runtimeFailures =
+            linkedMapOf<String, String>()
+
+        val runtimeEvidence =
+            JSONObject()
+
+        // -----------------------------------------------------
+        // 1) Goal Compiler execution contract — pure/read-only.
+        // -----------------------------------------------------
+        try {
+            val compiled =
+                androidGoalCompiler.compile(
+                    JSONObject()
+                        .put(
+                            "type",
+                            "open_app"
+                        )
+                        .put(
+                            "app",
+                            "AYANA AI"
+                        )
+                        .put(
+                            "max_actions",
+                            2
+                        )
+                )
+
+            val contract =
+                compiled.optJSONObject(
+                    "execution_contract"
+                )
+                    ?: JSONObject()
+
+            val plan =
+                compiled.optJSONObject(
+                    "plan"
+                )
+                    ?: JSONObject()
+
+            val steps =
+                plan.optJSONArray(
+                    "steps"
+                )
+                    ?: JSONArray()
+
+            val firstStep =
+                steps.optJSONObject(
+                    0
+                )
+                    ?: JSONObject()
+
+            val blockedMutation =
+                androidGoalCompiler.compile(
+                    JSONObject()
+                        .put(
+                            "type",
+                            "open_app"
+                        )
+                        .put(
+                            "app",
+                            "AYANA AI"
+                        )
+                        .put(
+                            "change_state",
+                            true
+                        )
+                )
+
+            val compilerOk =
+                compiled.optBoolean(
+                    "success",
+                    false
+                ) &&
+                    compiled.optString(
+                        "compiler_version"
+                    ) == "2.0" &&
+                    compiled.optString(
+                        "goal_type"
+                    ) == "open_app" &&
+                    contract.optString(
+                        "executor_key"
+                    ) == "app_launch_executor" &&
+                    contract.optString(
+                        "terminal_policy"
+                    ) == "verified_terminal_only" &&
+                    contract.optString(
+                        "verification_policy"
+                    ) == "fresh_foreground_package" &&
+                    contract.optBoolean(
+                        "cancellation_required",
+                        false
+                    ) &&
+                    contract.optString(
+                        "replan_policy"
+                    ) == "bounded_safe_replan" &&
+                    !contract.optBoolean(
+                        "false_success_allowed",
+                        true
+                    ) &&
+                    plan.optInt(
+                        "max_actions",
+                        -1
+                    ) in 1..2 &&
+                    steps.length() == 1 &&
+                    firstStep.optString(
+                        "action"
+                    ) == "open_app" &&
+                    firstStep.optBoolean(
+                        "terminal",
+                        false
+                    ) &&
+                    !blockedMutation.optBoolean(
+                        "success",
+                        true
+                    ) &&
+                    blockedMutation.optString(
+                        "terminal_status"
+                    ) == "BLOCKED"
+
+            runtimeEvidence.put(
+                "goal_compiler_execution_contract",
+                JSONObject()
+                    .put(
+                        "ok",
+                        compilerOk
+                    )
+                    .put(
+                        "compiler_version",
+                        compiled.optString(
+                            "compiler_version"
+                        )
+                    )
+                    .put(
+                        "executor_key",
+                        contract.optString(
+                            "executor_key"
+                        )
+                    )
+                    .put(
+                        "terminal_policy",
+                        contract.optString(
+                            "terminal_policy"
+                        )
+                    )
+                    .put(
+                        "verification_policy",
+                        contract.optString(
+                            "verification_policy"
+                        )
+                    )
+                    .put(
+                        "replan_policy",
+                        contract.optString(
+                            "replan_policy"
+                        )
+                    )
+                    .put(
+                        "false_success_allowed",
+                        contract.optBoolean(
+                            "false_success_allowed",
+                            true
+                        )
+                    )
+                    .put(
+                        "mutation_guard_terminal",
+                        blockedMutation.optString(
+                            "terminal_status"
+                        )
+                    )
+            )
+
+            if (compilerOk) {
+                runtimeConfirmed +=
+                    "goal_compiler_execution_contract"
+            } else {
+                runtimeFailures[
+                    "goal_compiler_execution_contract"
+                ] =
+                    "execution_contract_probe_failed"
+            }
+        } catch (
+            error: Exception
+        ) {
+            runtimeFailures[
+                "goal_compiler_execution_contract"
+            ] =
+                "exception:${error.javaClass.simpleName}"
+
+            runtimeEvidence.put(
+                "goal_compiler_execution_contract",
+                JSONObject()
+                    .put(
+                        "ok",
+                        false
+                    )
+                    .put(
+                        "error",
+                        error.javaClass.simpleName
+                    )
+                    .put(
+                        "message",
+                        error.message
+                            .orEmpty()
+                            .take(
+                                300
+                            )
+                    )
+            )
+        }
+
+        // -----------------------------------------------------
+        // 2) Unified Execution Session — live production session
+        //    + isolated kernel lifecycle, no active-session mutation.
+        // -----------------------------------------------------
+        try {
+            val live =
+                executionKernel.current()
+
+            val liveOk =
+                live != null &&
+                    live.terminalStatus ==
+                    AyanaExecutionKernel.TerminalStatus.RUNNING &&
+                    live.id.isNotBlank() &&
+                    live.lane.isNotBlank() &&
+                    live.executor.isNotBlank()
+
+            val isolatedKernel =
+                AyanaExecutionKernel()
+
+            val begin =
+                isolatedKernel.begin(
+                    objective =
+                        "AYANA acceptance execution-session probe",
+                    source =
+                        "acceptance",
+                    lane =
+                        "runtime_probe",
+                    executor =
+                        "probe_executor"
+                )
+
+            isolatedKernel.setPhase(
+                "probe_phase"
+            )
+
+            isolatedKernel.setExecutor(
+                "probe_executor_verified"
+            )
+
+            isolatedKernel.addEvidence(
+                type =
+                    "probe_evidence",
+                source =
+                    "acceptance",
+                detail =
+                    "unified_execution_session",
+                confidence =
+                    100
+            )
+
+            val middle =
+                isolatedKernel.current()
+
+            val completed =
+                isolatedKernel.complete(
+                    status =
+                        AyanaExecutionKernel.TerminalStatus.SUCCESS,
+                    reason =
+                        "probe_complete"
+                )
+
+            isolatedKernel.begin(
+                objective =
+                    "AYANA acceptance cancellation probe",
+                source =
+                    "acceptance",
+                lane =
+                    "runtime_probe_cancel",
+                executor =
+                    "probe_executor"
+            )
+
+            val cancelled =
+                isolatedKernel.cancel(
+                    "probe_cancel"
+                )
+
+            val isolatedOk =
+                begin.terminalStatus ==
+                    AyanaExecutionKernel.TerminalStatus.RUNNING &&
+                    middle != null &&
+                    middle.phase ==
+                    "probe_phase" &&
+                    middle.executor ==
+                    "probe_executor_verified" &&
+                    middle.evidence.any {
+                        it.type ==
+                            "probe_evidence"
+                    } &&
+                    completed != null &&
+                    completed.terminalStatus ==
+                    AyanaExecutionKernel.TerminalStatus.SUCCESS &&
+                    completed.reason ==
+                    "probe_complete" &&
+                    cancelled != null &&
+                    cancelled.terminalStatus ==
+                    AyanaExecutionKernel.TerminalStatus.CANCELLED &&
+                    cancelled.cancelled &&
+                    cancelled.reason ==
+                    "probe_cancel"
+
+            val sessionOk =
+                liveOk &&
+                    isolatedOk
+
+            runtimeEvidence.put(
+                "unified_execution_session",
+                JSONObject()
+                    .put(
+                        "ok",
+                        sessionOk
+                    )
+                    .put(
+                        "live_session_present",
+                        live != null
+                    )
+                    .put(
+                        "live_id",
+                        live?.id.orEmpty()
+                    )
+                    .put(
+                        "live_lane",
+                        live?.lane.orEmpty()
+                    )
+                    .put(
+                        "live_executor",
+                        live?.executor.orEmpty()
+                    )
+                    .put(
+                        "live_phase",
+                        live?.phase.orEmpty()
+                    )
+                    .put(
+                        "live_terminal",
+                        live?.terminalStatus
+                            ?.name
+                            .orEmpty()
+                    )
+                    .put(
+                        "isolated_terminal",
+                        completed?.terminalStatus
+                            ?.name
+                            .orEmpty()
+                    )
+                    .put(
+                        "isolated_cancel_terminal",
+                        cancelled?.terminalStatus
+                            ?.name
+                            .orEmpty()
+                    )
+                    .put(
+                        "isolated_cancelled",
+                        cancelled?.cancelled
+                            ?: false
+                    )
+            )
+
+            if (sessionOk) {
+                runtimeConfirmed +=
+                    "unified_execution_session"
+            } else {
+                runtimeFailures[
+                    "unified_execution_session"
+                ] =
+                    "execution_session_probe_failed"
+            }
+        } catch (
+            error: Exception
+        ) {
+            runtimeFailures[
+                "unified_execution_session"
+            ] =
+                "exception:${error.javaClass.simpleName}"
+
+            runtimeEvidence.put(
+                "unified_execution_session",
+                JSONObject()
+                    .put(
+                        "ok",
+                        false
+                    )
+                    .put(
+                        "error",
+                        error.javaClass.simpleName
+                    )
+                    .put(
+                        "message",
+                        error.message
+                            .orEmpty()
+                            .take(
+                                300
+                            )
+                    )
+            )
+        }
+
+        // -----------------------------------------------------
+        // 3) Autonomous execution loop — safe integrated contract
+        //    probe: Planner -> Resolver -> Compiler -> live Kernel
+        //    -> Durable Goal readability -> Completion Contract.
+        //    No UI action is dispatched.
+        // -----------------------------------------------------
+        try {
+            val planner =
+                agentPlannerV2.buildEnvelope(
+                    "открой приложение AYANA AI"
+                )
+
+            val resolution =
+                planner.optJSONObject(
+                    "app_resolution"
+                )
+                    ?: JSONObject()
+
+            val compiled =
+                androidGoalCompiler.compile(
+                    JSONObject()
+                        .put(
+                            "type",
+                            "open_app"
+                        )
+                        .put(
+                            "app",
+                            "AYANA AI"
+                        )
+                )
+
+            val executionContract =
+                compiled.optJSONObject(
+                    "execution_contract"
+                )
+                    ?: JSONObject()
+
+            val durableReadable =
+                try {
+                    durableGoalStore
+                        .getRecoverableJson(
+                            20
+                        )
+                    true
+                } catch (_: Exception) {
+                    false
+                }
+
+            val completionGuard =
+                completionContract.validateEvidence(
+                    request =
+                        "создай PDF файл acceptance_contract_test.pdf",
+                    reply =
+                        "Готово, файл создан.",
+                    artifactEvidence =
+                        emptyList<AyanaCompletionContract.ArtifactEvidence>()
+                )
+
+            val live =
+                executionKernel.current()
+
+            val loopOk =
+                planner.optString(
+                    "domain"
+                ) == "android_action" &&
+                    planner.optString(
+                        "terminal_criterion"
+                    ).isNotBlank() &&
+                    resolution.optBoolean(
+                        "success",
+                        false
+                    ) &&
+                    resolution.optString(
+                        "package"
+                    ) ==
+                    packageName &&
+                    compiled.optBoolean(
+                        "success",
+                        false
+                    ) &&
+                    executionContract.optString(
+                        "terminal_policy"
+                    ) ==
+                    "verified_terminal_only" &&
+                    executionContract.optString(
+                        "replan_policy"
+                    ) ==
+                    "bounded_safe_replan" &&
+                    !executionContract.optBoolean(
+                        "false_success_allowed",
+                        true
+                    ) &&
+                    durableReadable &&
+                    !completionGuard.satisfied &&
+                    live != null &&
+                    live.terminalStatus ==
+                    AyanaExecutionKernel.TerminalStatus.RUNNING
+
+            runtimeEvidence.put(
+                "autonomous_execution_loop",
+                JSONObject()
+                    .put(
+                        "ok",
+                        loopOk
+                    )
+                    .put(
+                        "planner_domain",
+                        planner.optString(
+                            "domain"
+                        )
+                    )
+                    .put(
+                        "planner_terminal_criterion",
+                        planner.optString(
+                            "terminal_criterion"
+                        ).isNotBlank()
+                    )
+                    .put(
+                        "resolved_package",
+                        resolution.optString(
+                            "package"
+                        )
+                    )
+                    .put(
+                        "compiler_success",
+                        compiled.optBoolean(
+                            "success",
+                            false
+                        )
+                    )
+                    .put(
+                        "terminal_policy",
+                        executionContract.optString(
+                            "terminal_policy"
+                        )
+                    )
+                    .put(
+                        "replan_policy",
+                        executionContract.optString(
+                            "replan_policy"
+                        )
+                    )
+                    .put(
+                        "durable_store_readable",
+                        durableReadable
+                    )
+                    .put(
+                        "false_success_guard_rejected",
+                        !completionGuard.satisfied
+                    )
+                    .put(
+                        "live_execution_session",
+                        live != null
+                    )
+            )
+
+            if (loopOk) {
+                runtimeConfirmed +=
+                    "autonomous_execution_loop"
+            } else {
+                runtimeFailures[
+                    "autonomous_execution_loop"
+                ] =
+                    "integrated_loop_probe_failed"
+            }
+        } catch (
+            error: Exception
+        ) {
+            runtimeFailures[
+                "autonomous_execution_loop"
+            ] =
+                "exception:${error.javaClass.simpleName}"
+
+            runtimeEvidence.put(
+                "autonomous_execution_loop",
+                JSONObject()
+                    .put(
+                        "ok",
+                        false
+                    )
+                    .put(
+                        "error",
+                        error.javaClass.simpleName
+                    )
+                    .put(
+                        "message",
+                        error.message
+                            .orEmpty()
+                            .take(
+                                300
+                            )
+                    )
+            )
+        }
+
+        val runtimeTargetIds =
+            setOf(
+                "goal_compiler_execution_contract",
+                "unified_execution_session",
+                "autonomous_execution_loop"
+            )
+
+        val runtimeUnconfirmed =
+            runtimeTargetIds
+                .filter {
+                    it !in runtimeConfirmed
+                }
+
+        val registryUnconfirmed =
+            ids.filter { id ->
+                val item =
+                    acceptanceCapability(
+                        snapshot,
+                        id
+                    )
+
+                item != null &&
+                    item.optBoolean(
+                        "implemented",
+                        false
+                    ) &&
+                    item.optBoolean(
+                        "available_now",
+                        false
+                    ) &&
+                    !item.optBoolean(
+                        "device_confirmed",
+                        false
+                    )
+            }
+
+        val effectiveUnconfirmed =
+            registryUnconfirmed
+                .filter {
+                    it !in runtimeConfirmed
+                }
+
         val status =
             when {
-                missing.isNotEmpty() || unavailable.isNotEmpty() -> AyanaAcceptanceTestEngine.STATUS_FAIL
-                unconfirmed.isNotEmpty() -> AyanaAcceptanceTestEngine.STATUS_WARNING
-                else -> AyanaAcceptanceTestEngine.STATUS_PASS
+                missing.isNotEmpty() ||
+                    unavailable.isNotEmpty() ||
+                    runtimeFailures.isNotEmpty() ->
+                    AyanaAcceptanceTestEngine.STATUS_FAIL
+
+                effectiveUnconfirmed.isNotEmpty() ->
+                    AyanaAcceptanceTestEngine.STATUS_WARNING
+
+                else ->
+                    AyanaAcceptanceTestEngine.STATUS_PASS
             }
 
         return acceptanceProbeResult(
-            status = status,
+            status =
+                status,
             message =
                 when (status) {
                     AyanaAcceptanceTestEngine.STATUS_PASS ->
-                        "Planner/Durable Goals/Execution Session/terminal verification подтверждены как доступная автономная база."
+                        "Автономная база подтверждена runtime-probe: Goal Compiler execution contract, unified Execution Session и autonomous execution loop прошли безопасную интеграционную проверку."
+
                     AyanaAcceptanceTestEngine.STATUS_WARNING ->
-                        "Автономная база реализована и доступна, но device-confirmed ещё не для всех слоёв: ${unconfirmed.joinToString(", ")}."
+                        "Автономная база доступна; свежие runtime-probe подтверждены частично. Остались неподтверждённые слои: ${effectiveUnconfirmed.joinToString(", ")}."
+
                     else ->
-                        "Автономная база неполна: missing=${missing.joinToString(",")}; unavailable=${unavailable.joinToString(",")}."
+                        "Автономная база не прошла runtime-проверку: missing=${missing.joinToString(",")}; unavailable=${unavailable.joinToString(",")}; runtime_failed=${runtimeFailures.keys.joinToString(",")}."
                 },
-            evidenceScope = "build_runtime_truth",
-            verified = missing.isEmpty() && unavailable.isEmpty(),
+            evidenceScope =
+                "live_runtime_contract",
+            verified =
+                status ==
+                    AyanaAcceptanceTestEngine.STATUS_PASS,
             evidence =
                 JSONObject()
-                    .put("missing", JSONArray(missing))
-                    .put("unavailable", JSONArray(unavailable))
-                    .put("unconfirmed", JSONArray(unconfirmed))
+                    .put(
+                        "missing",
+                        JSONArray(
+                            missing
+                        )
+                    )
+                    .put(
+                        "unavailable",
+                        JSONArray(
+                            unavailable
+                        )
+                    )
+                    .put(
+                        "registry_unconfirmed",
+                        JSONArray(
+                            registryUnconfirmed
+                        )
+                    )
+                    .put(
+                        "runtime_unconfirmed",
+                        JSONArray(
+                            runtimeUnconfirmed
+                        )
+                    )
+                    .put(
+                        "runtime_confirmed_capabilities",
+                        JSONArray(
+                            runtimeConfirmed.toList()
+                        )
+                    )
+                    .put(
+                        "runtime_failures",
+                        JSONObject(
+                            runtimeFailures
+                        )
+                    )
+                    .put(
+                        "runtime_probe_evidence",
+                        runtimeEvidence
+                    )
         )
     }
 
@@ -24171,7 +24885,7 @@ class AyanaVoiceService : Service() {
                                         .optString(
                                             "message",
                                             if (artifactSucceeded) {
-                                                "Файл создан."
+                                                "Готово, файл создан."
                                             } else {
                                                 "Файл не создан."
                                             }
@@ -24179,7 +24893,7 @@ class AyanaVoiceService : Service() {
                                         .trim()
                                         .ifBlank {
                                             if (artifactSucceeded) {
-                                                "Файл создан."
+                                                "Готово, файл создан."
                                             } else {
                                                 "Файл не создан."
                                             }
