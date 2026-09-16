@@ -6,7 +6,7 @@ import java.security.MessageDigest
 import java.util.Locale
 
 /**
- * AYANA Autonomous Test Intelligence v1.0 — SELF-DIRECTED DIAGNOSTICS.
+ * AYANA Autonomous Test Intelligence v1.1 — SELF-DIRECTED DIAGNOSTICS + RUNTIME CONFIRMATION.
  *
  * This layer is intentionally different from a fixed acceptance checklist.
  * It discovers test opportunities from the current build/runtime itself:
@@ -15,9 +15,11 @@ import java.util.Locale
  * - planner tests are generated from the apps that actually exist on the device;
  * - recent real commands are mutated into safe planner-only metamorphic checks;
  * - Command History is mined for terminal/evidence contradictions and platform drift;
- * - unconfirmed capabilities become explicit hypotheses instead of fabricated PASS.
+ * - unconfirmed capabilities become explicit hypotheses instead of fabricated PASS;
+ * - fresh PASS evidence from baseline runtime probes can satisfy device-confirmation
+ *   for that diagnostic run without mutating Capability Registry metadata.
  *
- * All generated tests in v1.0 are READ-ONLY or PURE. No generated test opens an app,
+ * All generated tests in v1.1 are READ-ONLY or PURE. No generated test opens an app,
  * writes device state, sends a message, deletes user data, uses the camera, purchases,
  * or performs any other irreversible action. Future active probes must remain behind
  * the same fail-closed safety contract and own restore/cleanup before PASS.
@@ -39,6 +41,14 @@ class AyanaAutonomousTestIntelligence(
         val tests = JSONArray()
         val hypotheses = JSONArray()
         val anomalies = JSONArray()
+
+        // Baseline probes execute before the adaptive layer. A fresh PASS probe may
+        // provide stronger evidence than stale registry metadata. This is read-only:
+        // ATI consumes the evidence for this run but does not rewrite the Registry.
+        val runtimeConfirmedCapabilities =
+            runtimeConfirmedCapabilitiesFromBaseline(
+                baseline
+            )
 
         var generated = 0
         var capabilityTests = 0
@@ -78,8 +88,15 @@ class AyanaAutonomousTestIntelligence(
 
             val implemented = item.optBoolean("implemented", false)
             val available = item.optBoolean("available_now", false)
-            val confirmed = item.optBoolean("device_confirmed", false)
-            val truthState = item.optString("truth_state")
+            val registryConfirmed = item.optBoolean("device_confirmed", false)
+            val runtimeProbeConfirmed = id in runtimeConfirmedCapabilities
+            val confirmed = registryConfirmed || runtimeProbeConfirmed
+            val truthState =
+                if (runtimeProbeConfirmed && !registryConfirmed) {
+                    "RUNTIME_PROBE_CONFIRMED"
+                } else {
+                    item.optString("truth_state")
+                }
             val note = item.optString("note").take(MAX_NOTE_CHARS)
 
             val contradiction =
@@ -110,6 +127,8 @@ class AyanaAutonomousTestIntelligence(
                             .put("implemented", implemented)
                             .put("available_now", available)
                             .put("device_confirmed", confirmed)
+                            .put("registry_device_confirmed", registryConfirmed)
+                            .put("runtime_probe_confirmed", runtimeProbeConfirmed)
                             .put("truth_state", truthState)
                             .put("note", note)
                 )
@@ -488,6 +507,7 @@ class AyanaAutonomousTestIntelligence(
                 JSONObject()
                     .put("capabilities_discovered", capabilities.length())
                     .put("capability_invariants_tested", capabilityTests)
+                    .put("runtime_confirmed_capabilities", runtimeConfirmedCapabilities.size)
                     .put("installed_apps_discovered", apps.length())
                     .put("app_resolver_tests", resolverTests)
                     .put("generated_planner_tests", plannerTests)
@@ -497,6 +517,52 @@ class AyanaAutonomousTestIntelligence(
                     .put("hypotheses_generated", hypotheses.length())
                     .put("adaptive_tests_generated", generated)
             )
+    }
+
+    private fun runtimeConfirmedCapabilitiesFromBaseline(
+        baseline: JSONObject
+    ): Set<String> {
+        val confirmed =
+            linkedSetOf<String>()
+
+        val tests =
+            baseline.optJSONArray("tests")
+                ?: JSONArray()
+
+        for (index in 0 until tests.length()) {
+            val item =
+                tests.optJSONObject(index)
+                    ?: continue
+
+            if (
+                item.optString("status") != STATUS_PASS ||
+                !item.optBoolean("verified", false)
+            ) {
+                continue
+            }
+
+            val evidence =
+                item.optJSONObject("evidence")
+                    ?: continue
+
+            val ids =
+                evidence.optJSONArray(
+                    "runtime_confirmed_capabilities"
+                )
+                    ?: continue
+
+            for (capIndex in 0 until ids.length()) {
+                val id =
+                    ids.optString(capIndex)
+                        .trim()
+
+                if (id.isNotBlank()) {
+                    confirmed += id
+                }
+            }
+        }
+
+        return confirmed
     }
 
     private fun stopRequested(
@@ -781,7 +847,7 @@ class AyanaAutonomousTestIntelligence(
     }
 
     companion object {
-        const val ENGINE_VERSION = "1.0"
+        const val ENGINE_VERSION = "1.1"
 
         private const val STATUS_PASS = "PASS"
         private const val STATUS_WARNING = "WARNING"
