@@ -19,7 +19,7 @@ import kotlin.math.min
 import kotlin.math.sin
 
 /**
- * AYANA Core Visualizer v4.0 — REFERENCE PLASMA SPHERE.
+ * AYANA Core Visualizer v4.0.1 — REFERENCE PLASMA SPHERE COMPILE FIX.
  *
  * Clean-room rebuild from the six-state user reference.
  * The renderer intentionally avoids the previous primitive/orbit look.
@@ -641,7 +641,6 @@ class AyanaCoreVisualizer(
             )
 
             AyanaVoiceService.STATE_COMMAND,
-            AyanaVoiceService.STATE_RECORDING,
             AyanaVoiceService.STATE_TEXT -> VisualSpec(
                 primary = Color.parseColor("#1581FF"),
                 secondary = Color.parseColor("#315BFF"),
@@ -691,8 +690,7 @@ class AyanaCoreVisualizer(
                 waveAmplitude = 0.27f
             )
 
-            AyanaVoiceService.STATE_SPEAKING,
-            AyanaVoiceService.STATE_PLAYING -> VisualSpec(
+            AyanaVoiceService.STATE_SPEAKING -> VisualSpec(
                 primary = Color.parseColor("#FF27CE"),
                 secondary = Color.parseColor("#E51BAC"),
                 coreHot = Color.parseColor("#FFD1F5"),
