@@ -6,7 +6,7 @@ import java.security.MessageDigest
 import java.util.Locale
 
 /**
- * AYANA Autonomous Test Intelligence v1.2 — SELF-DIRECTED DIAGNOSTICS + PLATFORM-DRIFT ORACLE.
+ * AYANA Autonomous Test Intelligence v1.3 — RUNTIME-EVIDENCE + HISTORICAL-NOISE TRUTH.
  *
  * This layer is intentionally different from a fixed acceptance checklist.
  * It discovers test opportunities from the current build/runtime itself:
@@ -19,7 +19,7 @@ import java.util.Locale
  * - fresh PASS evidence from baseline runtime probes can satisfy device-confirmation
  *   for that diagnostic run without mutating Capability Registry metadata.
  *
- * All generated tests in v1.2 are READ-ONLY or PURE. No generated test opens an app,
+ * All generated tests in v1.3 are READ-ONLY or PURE. No generated test opens an app,
  * writes device state, sends a message, deletes user data, uses the camera, purchases,
  * or performs any other irreversible action. Future active probes must remain behind
  * the same fail-closed safety contract and own restore/cleanup before PASS.
@@ -307,6 +307,68 @@ class AyanaAutonomousTestIntelligence(
         val seenCommands = linkedSetOf<String>()
         val metamorphicCandidates = mutableListOf<String>()
 
+
+        // v1.3: a later successful Android/Kotlin result can close a historical
+        // platform-drift candidate without deleting the old evidence. The old record
+        // remains in the anomaly ledger, but no longer becomes a current WARNING/hypothesis.
+        // recentHistoryProvider returns newest-first. Keep the newest successful
+        // Android/Kotlin proof for each normalized project request. A historical drift
+        // is suppressed only when the matching proof is NEWER than that drift record.
+        val resolvedAndroidProjectCodeCommandIndices =
+            linkedMapOf<String, Int>()
+
+        history.forEachIndexed { historyIndex, record ->
+            val status =
+                record.optString("status")
+                    .uppercase(Locale.ROOT)
+
+            val command =
+                normalize(
+                    record.optString("command")
+                )
+
+            val resultText =
+                try {
+                    fullResultProvider(record)
+                } catch (_: Exception) {
+                    record.optString("result")
+                }
+
+            val projectCodeRequest =
+                looksLikeAyanaProjectCodeRequest(command) ||
+                    (
+                        projectPlatformAndroid &&
+                            (
+                                "код" in command ||
+                                    "файл" in command ||
+                                    "визуализ" in command ||
+                                    "интерфейс" in command
+                                )
+                        )
+
+            if (
+                (status == STATUS_PASS || status == "SUCCESS") &&
+                projectCodeRequest &&
+                containsPositiveAndroidKotlinEvidence(resultText)
+            ) {
+                val key =
+                    projectRequestResolutionKey(command)
+
+                if (key.isNotBlank()) {
+                    val previousIndex =
+                        resolvedAndroidProjectCodeCommandIndices[key]
+
+                    if (
+                        previousIndex == null ||
+                        historyIndex < previousIndex
+                    ) {
+                        resolvedAndroidProjectCodeCommandIndices[key] =
+                            historyIndex
+                    }
+                }
+            }
+        }
+
         history.forEach { record ->
             val command = record.optString("command").trim()
             if (
@@ -410,6 +472,32 @@ class AyanaAutonomousTestIntelligence(
 
             detected.forEach { anomaly ->
                 val kind = anomaly.optString("kind")
+
+                val matchingResolutionIndex =
+                    resolvedAndroidProjectCodeCommandIndices[
+                        projectRequestResolutionKey(
+                            normalize(command)
+                        )
+                    ]
+
+                if (
+                    kind == "project_platform_drift" &&
+                    matchingResolutionIndex != null &&
+                    matchingResolutionIndex < index
+                ) {
+                    anomalies.put(
+                        copyJsonObject(anomaly)
+                            .put("history_id", record.optString("id"))
+                            .put("history_status", status)
+                            .put("command", command.take(500))
+                            .put("result_preview", resultText.take(1200))
+                            .put("technical_preview", technical.take(1200))
+                            .put("resolved_by_later_android_kotlin_evidence", true)
+                            .put("warning_suppressed", true)
+                    )
+                    return@forEach
+                }
+
                 val currentKindCount = anomalyKindCounts[kind] ?: 0
                 if (currentKindCount >= maxAnomaliesForKind(kind)) {
                     return@forEach
@@ -609,6 +697,61 @@ class AyanaAutonomousTestIntelligence(
         ).joinToString("|")
     }
 
+    private fun looksLikeAyanaProjectCodeRequest(
+        normalizedCommand: String
+    ): Boolean =
+        (
+            "код" in normalizedCommand ||
+                "файл" in normalizedCommand ||
+                "визуализ" in normalizedCommand ||
+                "интерфейс" in normalizedCommand
+            ) &&
+            (
+                "аяна" in normalizedCommand ||
+                    "ayana" in normalizedCommand ||
+                    "android" in normalizedCommand ||
+                    "kotlin" in normalizedCommand
+                )
+
+    private fun projectRequestResolutionKey(
+        normalizedCommand: String
+    ): String =
+        normalizedCommand
+            .replace("[мультимодальное вложение]", "")
+            .replace(Regex("\\s+"), " ")
+            .trim()
+
+    private fun containsPositiveAndroidKotlinEvidence(
+        resultText: String
+    ): Boolean {
+        val resultLower =
+            resultText.lowercase(
+                Locale.ROOT
+            )
+
+        return listOf(
+            "android/kotlin",
+            "package kg.autonomous.agent",
+            "import android.",
+            "android.graphics.canvas",
+            "android.view.view",
+            ": view(",
+            "class ayanavisual"
+        ).any { marker ->
+            marker in resultLower
+        }
+    }
+
+    private fun isExpectedLongDiagnosticCommand(
+        normalizedCommand: String
+    ): Boolean =
+        (
+            "полную диагностику ayana" in normalizedCommand ||
+                "полная диагностика ayana" in normalizedCommand ||
+                "всестороннюю диагностику ayana" in normalizedCommand ||
+                "exhaustive diagnostics" in normalizedCommand
+            )
+
     private fun detectHistoryAnomalies(
         status: String,
         command: String,
@@ -666,18 +809,17 @@ class AyanaAutonomousTestIntelligence(
         }
 
         val asksForProjectCode =
-            (
-                "код" in normalizedCommand ||
-                    "файл" in normalizedCommand ||
-                    "визуализ" in normalizedCommand ||
-                    "интерфейс" in normalizedCommand
-                ) &&
+            looksLikeAyanaProjectCodeRequest(
+                normalizedCommand
+            ) ||
                 (
-                    projectPlatformAndroid ||
-                        "аяна" in normalizedCommand ||
-                        "ayana" in normalizedCommand ||
-                        "android" in normalizedCommand ||
-                        "kotlin" in normalizedCommand
+                    projectPlatformAndroid &&
+                        (
+                            "код" in normalizedCommand ||
+                                "файл" in normalizedCommand ||
+                                "визуализ" in normalizedCommand ||
+                                "интерфейс" in normalizedCommand
+                            )
                     )
 
         // "Canvas" is not a web-only marker: Android has android.graphics.Canvas.
@@ -703,17 +845,9 @@ class AyanaAutonomousTestIntelligence(
             )
 
         val androidKotlinEvidence =
-            listOf(
-                "android/kotlin",
-                "package kg.autonomous.agent",
-                "import android.",
-                "android.graphics.canvas",
-                "android.view.view",
-                ": view(",
-                "class ayanavisual"
-            ).any { marker ->
-                marker in resultLower
-            }
+            containsPositiveAndroidKotlinEvidence(
+                resultText
+            )
 
         val strongWebEvidence =
             listOf(
@@ -742,14 +876,23 @@ class AyanaAutonomousTestIntelligence(
             anomalies +=
                 anomaly(
                     kind = "project_platform_drift",
-                    title = "Project platform / deliverable drift candidate",
-                    message = "Android/AYANA project-code request produced a web/HTML-style deliverable without an explicit web request.",
-                    priority = "high",
+                    title = "Historical project platform / deliverable drift candidate",
+                    message = "History contains an Android/AYANA project-code request that produced a web/HTML-style deliverable without an explicit web request.",
+                    priority = "normal",
                     hypothesis = "Проверить сохранение platform context и deliverable contract в multimodal/codegen lane."
                 )
         }
 
-        if (durationMs >= HISTORY_SLOW_WARNING_MS) {
+        val expectedDiagnosticWindow =
+            isExpectedLongDiagnosticCommand(
+                normalizedCommand
+            ) &&
+                durationMs < DIAGNOSTIC_HARD_WARNING_MS
+
+        if (
+            durationMs >= HISTORY_SLOW_WARNING_MS &&
+            !expectedDiagnosticWindow
+        ) {
             anomalies +=
                 anomaly(
                     kind = "latency_outlier",
@@ -783,7 +926,7 @@ class AyanaAutonomousTestIntelligence(
     ): Int =
         when (kind) {
             "latency_outlier" -> 3
-            "project_platform_drift" -> 3
+            "project_platform_drift" -> 1
             "possible_false_success" -> 5
             "success_with_unverified_evidence" -> 5
             else -> 4
@@ -883,7 +1026,7 @@ class AyanaAutonomousTestIntelligence(
     }
 
     companion object {
-        const val ENGINE_VERSION = "1.2"
+        const val ENGINE_VERSION = "1.3"
 
         private const val STATUS_PASS = "PASS"
         private const val STATUS_WARNING = "WARNING"
@@ -898,5 +1041,6 @@ class AyanaAutonomousTestIntelligence(
         private const val MAX_METAMORPHIC_COMMAND_CHARS = 600
         private const val MAX_GENERATED_TESTS = 180
         private const val HISTORY_SLOW_WARNING_MS = 30_000L
+        private const val DIAGNOSTIC_HARD_WARNING_MS = 180_000L
     }
 }
