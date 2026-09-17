@@ -60,6 +60,12 @@ import kotlin.math.abs
 
 class AyanaVoiceService : Service() {
 
+    // AYANA v12.21.0 R7.9 COMPLETION + CAPABILITY TRUTH HARDENING.
+    // Extends the stable v12.20.0 base with semantic artifact-content validation,
+    // previous-response artifact payload retention, persisted runtime capability evidence,
+    // and diagnostic-noise cleanup integration. Wrong/summary-only artifact payloads fail
+    // BEFORE ArtifactEngine publish. ORB / Worker / Planner / Resolver remain untouched.
+    //
     // AYANA v12.20.0 R7.8 BATCH TRUTH HARDENING.
     // Consolidates clipboard local routing, lifecycle semantic-object protection,
     // fail-closed Agent Core refusal handling, and pure regression probes.
@@ -15410,6 +15416,249 @@ append(index + 1)
         }
     }
 
+    /**
+     * R7.9 artifact follow-up contract.
+     * A request such as "создай файл TXT с готовым кодом" immediately after a
+     * multimodal/code answer must carry the actual previous payload into create_artifact,
+     * never a prose summary of that payload. The previous_response_id remains the source
+     * of truth; this adds an execution-only reminder to the Agent Core turn.
+     */
+    private fun strengthenArtifactFollowUpMessage(
+        message: String?,
+        hasPreviousResponseContext: Boolean
+    ): String? {
+        val clean = message?.trim().orEmpty()
+        if (
+            clean.isBlank() ||
+            !hasPreviousResponseContext ||
+            !isArtifactFollowUpPayloadRequest(clean)
+        ) {
+            return message
+        }
+
+        return (
+            clean +
+                "\n\n[AYANA ARTIFACT FOLLOW-UP CONTRACT] " +
+                "This request refers to payload from the immediately previous response context. " +
+                "If you call create_artifact, arguments.content/rows MUST contain the actual requested payload " +
+                "(for example the complete code), not a description, summary, instructions for saving it, or a placeholder. " +
+                "If the exact payload is unavailable in previous_response_id context, do not call create_artifact and do not claim success."
+            ).take(5000)
+    }
+
+    private fun isArtifactFollowUpPayloadRequest(
+        message: String
+    ): Boolean {
+        val normalized =
+            message
+                .lowercase(Locale.ROOT)
+                .replace('ё', 'е')
+                .replace(Regex("\\s+"), " ")
+                .trim()
+
+        val asksArtifact =
+            listOf(
+                "создай файл",
+                "создать файл",
+                "сохрани в файл",
+                "сохранить в файл",
+                "сделай файл",
+                "запиши в файл"
+            ).any { it in normalized }
+
+        if (!asksArtifact) {
+            return false
+        }
+
+        return listOf(
+            "готовым кодом",
+            "готовый код",
+            "этим кодом",
+            "кодом выше",
+            "предыдущим кодом",
+            "из предыдущего ответа",
+            "с этим текстом",
+            "этот текст",
+            "весь код",
+            "полный код"
+        ).any { it in normalized }
+    }
+
+    /**
+     * R7.9 semantic artifact gate. Byte/hash verification proves that a file exists,
+     * not that it contains the deliverable the user asked for. This gate runs before
+     * ArtifactEngine and therefore prevents publishing a verified-but-useless file.
+     */
+    private fun validateCreateArtifactContentContract(
+        request: String,
+        arguments: JSONObject
+    ): JSONObject {
+        val normalized =
+            request
+                .lowercase(Locale.ROOT)
+                .replace('ё', 'е')
+                .replace(Regex("\\s+"), " ")
+                .trim()
+
+        val kind =
+            arguments
+                .optString("kind")
+                .lowercase(Locale.ROOT)
+                .trim()
+
+        val content =
+            arguments
+                .optString("content")
+                .trim()
+
+        val titleAndName =
+            (
+                arguments.optString("title") +
+                    " " +
+                    arguments.optString("filename")
+                )
+                .lowercase(Locale.ROOT)
+                .replace('ё', 'е')
+
+        val asksForCode =
+            listOf(
+                "готовый код",
+                "готовым кодом",
+                "полный код",
+                "исходный код",
+                "исходник",
+                "напиши код",
+                "код для",
+                "kotlin",
+                "java",
+                "python",
+                "javascript",
+                "typescript"
+            ).any { it in normalized } ||
+                listOf("code", "код", "kotlin", "java", "python")
+                    .any { it in titleAndName }
+
+        val asksForSubstantialReport =
+            listOf(
+                "подробный отчет",
+                "подробный отчёт",
+                "полный отчет",
+                "полный отчёт",
+                "подробный анализ",
+                "справка-обоснование",
+                "справку-обоснование"
+            ).any { it in normalized }
+
+        val rows =
+            arguments.optJSONArray("rows")
+
+        val columns =
+            arguments.optJSONArray("columns")
+
+        val codeMarkerCount =
+            listOf(
+                "package ",
+                "import ",
+                "class ",
+                "object ",
+                "interface ",
+                "fun ",
+                "private ",
+                "public ",
+                "override ",
+                "val ",
+                "var ",
+                "def ",
+                "function ",
+                "const ",
+                "#include",
+                "using namespace",
+                "<!doctype",
+                "<html",
+                "<script",
+                "<?xml"
+            ).count { marker ->
+                marker in content.lowercase(Locale.ROOT)
+            }
+
+        val codeLineCount =
+            content
+                .lineSequence()
+                .count { it.trim().isNotBlank() }
+
+        val structuredCodeShape =
+            content.contains("{") &&
+                content.contains("}") &&
+                content.contains("(") &&
+                content.contains(")")
+
+        val obviousCodeDescriptionOnly =
+            listOf(
+                "сохраните содержимое как",
+                "визуализация включает",
+                "код не требует внешних библиотек",
+                "переключение выполняется",
+                "самостоятельный код визуализации"
+            ).count { marker ->
+                marker in content.lowercase(Locale.ROOT)
+            } >= 2
+
+        val codePayloadPresent =
+            content.length >= 80 &&
+                codeLineCount >= 4 &&
+                !obviousCodeDescriptionOnly &&
+                (
+                    codeMarkerCount >= 2 ||
+                        structuredCodeShape
+                    )
+
+        val tablePayloadPresent =
+            kind != "xlsx" ||
+                (
+                    (columns?.length() ?: 0) > 0 &&
+                        (rows?.length() ?: 0) > 0
+                    )
+
+        val reportPayloadPresent =
+            !asksForSubstantialReport ||
+                (
+                    content.length >= 220 &&
+                        content.lineSequence().count { it.trim().isNotBlank() } >= 5
+                    )
+
+        val allowed =
+            (!asksForCode || codePayloadPresent) &&
+                tablePayloadPresent &&
+                reportPayloadPresent
+
+        val reason =
+            when {
+                asksForCode && !codePayloadPresent ->
+                    "requested_code_payload_missing"
+
+                !tablePayloadPresent ->
+                    "requested_table_payload_missing"
+
+                !reportPayloadPresent ->
+                    "requested_report_payload_incomplete"
+
+                else ->
+                    "semantic_payload_verified"
+            }
+
+        return JSONObject()
+            .put("allowed", allowed)
+            .put("reason", reason)
+            .put("kind", kind)
+            .put("content_chars", content.length)
+            .put("content_lines", codeLineCount)
+            .put("asks_for_code", asksForCode)
+            .put("code_marker_count", codeMarkerCount)
+            .put("code_payload_present", codePayloadPresent)
+            .put("table_payload_present", tablePayloadPresent)
+            .put("report_payload_present", reportPayloadPresent)
+    }
+
     private fun runLocalClipboardCopy(
         text: String,
         silent: Boolean
@@ -15491,6 +15740,12 @@ append(index + 1)
             )
 
         if (verified) {
+            capabilityRegistry.recordCapabilityEvidence(
+                capabilityId = "clipboard_write",
+                detail = "ClipboardManager setPrimaryClip + exact read-back verified",
+                verified = true
+            )
+
             finishLocalCommand(
                 "Текст скопирован в буфер обмена.",
                 silent
@@ -17181,7 +17436,7 @@ append(index + 1)
             append(
                 "REPORT_COMPLETE tests=${tests.length()}; " +
                     "adaptive=${result.optInt("adaptive_tests_generated", 0)}; " +
-                    "renderer=v12.19.1\n"
+                    "renderer=v12.21.0-r7.9\n"
             )
         }
 
@@ -17298,7 +17553,7 @@ append(index + 1)
                 append(
                     "REPORT_COMPLETE tests=${tests.length()}; " +
                         "adaptive=${result.optInt("adaptive_tests_generated", 0)}; " +
-                        "renderer=v12.19.1-compact\n"
+                        "renderer=v12.21.0-r7.9-compact\n"
                 )
             }
 
@@ -19704,6 +19959,55 @@ plan.optInt(
                 artifactCommand
             )
 
+        val validCodeArtifactContract =
+            validateCreateArtifactContentContract(
+                request = "создай TXT-файл с готовым Kotlin кодом",
+                arguments =
+                    JSONObject()
+                        .put("kind", "txt")
+                        .put("filename", "sample.kt.txt")
+                        .put(
+                            "content",
+                            """
+                            package kg.autonomous.agent
+
+                            import android.content.Context
+
+                            class Sample(
+                                private val context: Context
+                            ) {
+                                fun value(): Int {
+                                    return 1
+                                }
+                            }
+                            """.trimIndent()
+                        )
+            )
+
+        val invalidCodeArtifactContract =
+            validateCreateArtifactContentContract(
+                request = "создай TXT-файл с готовым кодом",
+                arguments =
+                    JSONObject()
+                        .put("kind", "txt")
+                        .put("filename", "fake_code.txt")
+                        .put(
+                            "content",
+                            "Готовый автономный код визуализации AYANA. Сохраните содержимое как HTML-файл. Визуализация включает несколько состояний. Переключение выполняется функцией setState(). Код не требует внешних библиотек."
+                        )
+            )
+
+        val artifactSemanticContentOk =
+            validCodeArtifactContract.optBoolean("allowed", false) &&
+                !invalidCodeArtifactContract.optBoolean("allowed", true)
+
+        val artifactFollowUpContractOk =
+            strengthenArtifactFollowUpMessage(
+                message = "создай файл txt с готовым кодом",
+                hasPreviousResponseContext = true
+            )
+                ?.contains("actual requested payload", ignoreCase = true) == true
+
         val artifactMetricsSuppressed =
             extractRequestedAggregateMetrics(
                 artifactCommand
@@ -19768,6 +20072,8 @@ plan.optInt(
                 lifecycleSemanticObjectRejected &&
                 refusalFailClosed &&
                 artifact &&
+                artifactSemanticContentOk &&
+                artifactFollowUpContractOk &&
                 artifactMetricsSuppressed &&
                 mixedSideEffectMetricsSuppressed &&
                 pureMetricGoalTerminalLocal &&
@@ -19783,9 +20089,9 @@ plan.optInt(
                 },
             message =
                 if (ok) {
-                    "Whole-goal routing guard распознал lifecycle verification, App Detail final target, clipboard local route, semantic-object lifecycle guard, fail-closed refusal truth, pure multi-metric fast path, verified-facts reasoning handoff и artifact deliverable без greedy interception."
+                    "Whole-goal routing guard распознал lifecycle verification, App Detail final target, clipboard local route, semantic-object lifecycle guard, fail-closed refusal truth, artifact semantic-content gate + follow-up payload contract, pure multi-metric fast path, verified-facts reasoning handoff и artifact deliverable без greedy interception."
                 } else {
-                    "Whole-goal routing regression: lifecycle=$lifecycleOk, app_detail=$appDetailOk, metrics=$metricsOk, volume_target=$volumeTargetOk, unsupported_terminal=$unsupportedTerminalOk, clipboard_route=$clipboardRoutingOk, lifecycle_semantic_guard=$lifecycleSemanticObjectRejected, refusal_fail_closed=$refusalFailClosed, artifact=$artifact, artifact_metric_guard=$artifactMetricsSuppressed, mixed_metric_guard=$mixedSideEffectMetricsSuppressed, pure_metric_local=$pureMetricGoalTerminalLocal, analytical_handoff=$analyticalMetricGoalRequiresHandoff, conditional_handoff=$conditionalMetricGoalRequiresHandoff."
+                    "Whole-goal routing regression: lifecycle=$lifecycleOk, app_detail=$appDetailOk, metrics=$metricsOk, volume_target=$volumeTargetOk, unsupported_terminal=$unsupportedTerminalOk, clipboard_route=$clipboardRoutingOk, lifecycle_semantic_guard=$lifecycleSemanticObjectRejected, refusal_fail_closed=$refusalFailClosed, artifact=$artifact, artifact_semantic_content=$artifactSemanticContentOk, artifact_follow_up=$artifactFollowUpContractOk, artifact_metric_guard=$artifactMetricsSuppressed, mixed_metric_guard=$mixedSideEffectMetricsSuppressed, pure_metric_local=$pureMetricGoalTerminalLocal, analytical_handoff=$analyticalMetricGoalRequiresHandoff, conditional_handoff=$conditionalMetricGoalRequiresHandoff."
                 },
             evidenceScope = "live_pure_contract",
             verified = ok,
@@ -19800,6 +20106,8 @@ plan.optInt(
                     .put("lifecycle_semantic_object_guard_ok", lifecycleSemanticObjectRejected)
                     .put("agent_refusal_fail_closed_ok", refusalFailClosed)
                     .put("artifact_ok", artifact)
+                    .put("artifact_semantic_content_ok", artifactSemanticContentOk)
+                    .put("artifact_follow_up_contract_ok", artifactFollowUpContractOk)
                     .put("artifact_metric_guard", artifactMetricsSuppressed)
                     .put("mixed_metric_guard", mixedSideEffectMetricsSuppressed)
                     .put("pure_metric_goal_terminal_local", pureMetricGoalTerminalLocal)
@@ -19926,11 +20234,11 @@ plan.optInt(
 
         val registryMatchesCurrentLineage =
             registryBuild.contains(
-                "12.19",
+                "12.21.0",
                 ignoreCase = true
             ) &&
                 registryBuild.contains(
-                    "self_directed",
+                    "r7_9",
                     ignoreCase = true
                 )
 
@@ -19943,9 +20251,9 @@ plan.optInt(
                 },
             message =
                 if (registryMatchesCurrentLineage) {
-                    "Release metadata согласованы с v12.19 self-directed diagnostics."
+                    "Release metadata согласованы с v12.21.0 / R7.9 truth-hardening lineage."
                 } else {
-                    "Capability Registry build-label отстаёт от текущего v12.19 diagnostic layer: build=$registryBuild."
+                    "Capability Registry build-label не соответствует текущей v12.21.0 / R7.9 lineage: build=$registryBuild."
                 },
             evidenceScope = "live_release_metadata",
             verified = registryBuild.isNotBlank(),
@@ -19954,7 +20262,7 @@ plan.optInt(
                     .put("capability_registry_build", registryBuild)
                     .put("app_version", appVersion)
                     .put("acceptance_engine_version", engineVersion)
-                    .put("expected_lineage", "v12.19")
+                    .put("expected_lineage", "v12.21.0_r7_9")
         )
     }
 
@@ -24016,6 +24324,17 @@ val activeNetwork =
                         null
                     }
 
+                if (
+                    resumeGoal == null &&
+                    !previousResponseId.isNullOrBlank()
+                ) {
+                    nextMessage =
+                        strengthenArtifactFollowUpMessage(
+                            message = nextMessage,
+                            hasPreviousResponseContext = true
+                        )
+                }
+
                 var toolResults:
                     JSONArray? = null
 
@@ -24927,10 +25246,41 @@ val activeNetwork =
                             )
 
                             val result =
-                                executeAgentTool(
-                                    toolName,
-                                    arguments
-                                )
+                                if (toolName == "create_artifact") {
+                                    val contentContract =
+                                        validateCreateArtifactContentContract(
+                                            request = originalGoal,
+                                            arguments = arguments
+                                        )
+
+                                    if (!contentContract.optBoolean("allowed", false)) {
+                                        commandHistoryStore.addEvent(
+                                            activeCommandHistoryId,
+                                            state = "artifact_content_contract_failed",
+                                            message = "Артефакт остановлен до публикации: содержимое не соответствует запросу",
+                                            details = contentContract.toString().take(1600)
+                                        )
+
+                                        JSONObject()
+                                            .put("success", false)
+                                            .put("verified", false)
+                                            .put(
+                                                "message",
+                                                "Файл не создан: подготовленное содержимое не подтверждает запрошенный результат (${contentContract.optString("reason")})."
+                                            )
+                                            .put("artifact_content_contract", contentContract)
+                                    } else {
+                                        executeAgentTool(
+                                            toolName,
+                                            arguments
+                                        )
+                                    }
+                                } else {
+                                    executeAgentTool(
+                                        toolName,
+                                        arguments
+                                    )
+                                }
 
                             collectCompletionArtifactEvidence(
                                 result
@@ -25166,9 +25516,6 @@ val activeNetwork =
                                 toolName ==
                                 "create_artifact"
                             ) {
-                                agentPreviousResponseId =
-                                    null
-
                                 artifactToolTerminalReached =
                                     true
 
@@ -25184,6 +25531,11 @@ result.optBoolean(
 
                                 finalSuccess =
                                     artifactSucceeded
+
+                                if (artifactSucceeded) {
+                                    agentPreviousResponseId =
+                                        null
+                                }
 
                                 val artifactMessage =
                                     result
