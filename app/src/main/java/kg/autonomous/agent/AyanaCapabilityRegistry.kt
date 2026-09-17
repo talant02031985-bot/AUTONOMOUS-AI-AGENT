@@ -10,12 +10,7 @@ import org.json.JSONArray
 import org.json.JSONObject
 
 /**
- * AYANA Device Capability Registry v3.2 — WHOLE-GOAL / ARTIFACT / RECOVERY TRUTH.
- * v3.2 preserves v3.1 acceptance truth and records v12.14 whole-goal routing,
- * artifact orchestration, bounded Agent Core timeout recovery and extended Accessibility
- * semantic extraction as separate machine-readable capabilities.
- *
- * AYANA Device Capability Registry v3.1 — ACCEPTANCE / AUTONOMY / PERCEPTION / LATENCY TRUTH.
+ * AYANA Device Capability Registry v3.2 — PERSISTED RUNTIME EVIDENCE + DIAGNOSTIC TRUTH.
  *
  * Single machine-readable source of truth for:
  * 1) what this build implements;
@@ -39,6 +34,46 @@ class AyanaCapabilityRegistry(
             PREFS_NAME,
             Context.MODE_PRIVATE
         )
+
+
+    /**
+     * v3.2: persist only machine-verified capability evidence.
+     * Callers must pass verified=true only after a concrete executor has reconciled
+     * the result on this device. Source-code presence alone is never enough.
+     */
+    fun recordCapabilityEvidence(
+        capabilityId: String,
+        detail: String,
+        verified: Boolean
+    ) {
+        val id =
+            capabilityId
+                .trim()
+                .lowercase()
+
+        if (
+            !verified ||
+            id.isBlank() ||
+            !CAPABILITY_ID_REGEX.matches(id)
+        ) {
+            return
+        }
+
+        prefs.edit()
+            .putBoolean(
+                KEY_CAPABILITY_CONFIRMED_PREFIX + id,
+                true
+            )
+            .putLong(
+                KEY_CAPABILITY_CONFIRMED_AT_PREFIX + id,
+                System.currentTimeMillis()
+            )
+            .putString(
+                KEY_CAPABILITY_CONFIRMED_DETAIL_PREFIX + id,
+                detail.take(500)
+            )
+            .apply()
+    }
 
     fun recordAgentCoreResult(
         success: Boolean,
@@ -226,11 +261,7 @@ class AyanaCapabilityRegistry(
         val packageName =
             snapshot
                 .optString(
-                    "effective_foreground_package",
-                    snapshot.optString(
-                        "interaction_package",
-                        snapshot.optString("package")
-                    )
+                    "package"
                 )
                 .trim()
 
@@ -783,26 +814,48 @@ class AyanaCapabilityRegistry(
                 emptyList()
             }
 
+        // v3.2 migration: retain already proven device truth across the upgrade.
+        // Only raw history events with explicit executor + VERIFIED_COMMITTED evidence
+        // qualify; user-visible SUCCESS text alone is never enough.
+        recoverVerifiedCapabilityEvidenceFromHistory(
+            recentHistory
+        )
+
         val lastRecord =
             recentHistory
                 .firstOrNull()
 
-        val lastErrorRecord =
+        val recentErrorRecords =
             recentHistory
-                .firstOrNull {
+                .filter {
                     it.optString(
                         "status"
                     ) ==
                         "error"
                 }
 
+        val intentionalProbeErrors =
+            recentErrorRecords
+                .filter { record ->
+                    isIntentionalDiagnosticProbe(
+                        record
+                    )
+                }
+
+        val operationalErrorRecords =
+            recentErrorRecords
+                .filterNot { record ->
+                    isIntentionalDiagnosticProbe(
+                        record
+                    )
+                }
+
+        val lastErrorRecord =
+            operationalErrorRecords
+                .firstOrNull()
+
         val recentErrorCount =
-            recentHistory.count {
-                it.optString(
-                    "status"
-                ) ==
-                    "error"
-            }
+            operationalErrorRecords.size
 
         val now =
             System.currentTimeMillis()
@@ -1168,11 +1221,7 @@ class AyanaCapabilityRegistry(
                     "screen_primary_package",
                     screenSnapshot
                         ?.optString(
-                            "effective_foreground_package",
-                            screenSnapshot.optString(
-                                "interaction_package",
-                                screenSnapshot.optString("package")
-                            )
+                            "package"
                         )
                         .orEmpty()
                 )
@@ -1219,6 +1268,18 @@ class AyanaCapabilityRegistry(
                 .put(
                     "recent_error_count",
                     recentErrorCount
+                )
+                .put(
+                    "recent_raw_error_count",
+                    recentErrorRecords.size
+                )
+                .put(
+                    "recent_intentional_probe_error_count",
+                    intentionalProbeErrors.size
+                )
+                .put(
+                    "runtime_confirmed_capability_ids",
+                    persistedCapabilityEvidenceIds()
                 )
                 .put(
                     "last_command_status",
@@ -1326,8 +1387,8 @@ class AyanaCapabilityRegistry(
             "relative_media_volume_delta",
             implemented = true,
             available = true,
-            deviceConfirmed = true,
-            note = "device-confirmed on target tablet for -1 and -3 deltas with verified post-write level"
+            deviceConfirmed = false,
+            note = "v12.11 preserves numeric delta (+N/-N) and verifies actual post-write level"
         )
 
         capability(
@@ -1335,8 +1396,8 @@ class AyanaCapabilityRegistry(
             "exact_screen_brightness_set",
             implemented = true,
             available = writeSettingsAllowed,
-            deviceConfirmed = true,
-            note = "device-confirmed on target tablet at 20/80/40 percent with read-back verification and invalid-range rejection"
+            deviceConfirmed = false,
+            note = "v12.11 requires WRITE_SETTINGS and verifies manual-mode + post-write brightness; never substitutes opening Settings"
         )
 
         capability(
@@ -1345,7 +1406,7 @@ class AyanaCapabilityRegistry(
             implemented = true,
             available = true,
             deviceConfirmed = false,
-            note = "v12.11 local ClipboardManager write with read-back verification"
+            note = "local ClipboardManager write with exact read-back verification; v3.2 persists device-confirmed evidence only after a verified runtime round-trip"
         )
 
         capability(
@@ -1380,8 +1441,8 @@ class AyanaCapabilityRegistry(
             "app_task_removal",
             implemented = true,
             available = accessibilityConnected,
-            deviceConfirmed = true,
-            note = "device-confirmed on target tablet for YouTube and Chrome via verified Recents task removal; never claims force-stop/process kill"
+            deviceConfirmed = false,
+            note = "v12.1 verified Recents task-removal executor; pending device confirmation; never claims force-stop/process kill"
         )
 
         capability(
@@ -1576,8 +1637,8 @@ class AyanaCapabilityRegistry(
             "settings_intent_attestation",
             implemented = true,
             available = accessibilityConnected,
-            deviceConfirmed = true,
-            note = "device-confirmed on target tablet for YouTube App Info using exact-intent + same-window semantic surface evidence"
+            deviceConfirmed = false,
+            note = "v12.0 fuses exact Settings intent target with fresh same-window semantic surface evidence; no app-specific aliases"
         )
 
         capability(
@@ -1585,8 +1646,8 @@ class AyanaCapabilityRegistry(
             "app_detail_permissions_navigation",
             implemented = true,
             available = accessibilityConnected,
-            deviceConfirmed = true,
-            note = "device-confirmed on target Galaxy Tab S8 for YouTube App Info -> Permissions with app_info_click terminal verification"
+            deviceConfirmed = false,
+            note = "Samsung App Info -> Permissions can be reached physically, but the combined terminal verifier still has a known window-list edge; do not advertise it as universally device-confirmed"
         )
 
         capability(
@@ -1594,8 +1655,8 @@ class AyanaCapabilityRegistry(
             "local_acceptance_test_engine",
             implemented = true,
             available = true,
-            deviceConfirmed = true,
-            note = "device-confirmed v12.13 FULL_ACCEPTANCE and CAPABILITY_AUDIT with zero Agent Core turns and READY_WITH_LIMITATIONS truth"
+            deviceConfirmed = false,
+            note = "v12.13 local QUICK_HEALTH / CAPABILITY_AUDIT / FULL_ACCEPTANCE engine; zero Agent Core turns; full mode includes reversible memory/reminder/volume/brightness and verified Settings restore; pending device acceptance"
         )
 
         capability(
@@ -1603,8 +1664,8 @@ class AyanaCapabilityRegistry(
             "capability_truth_grounding",
             implemented = true,
             available = true,
-            deviceConfirmed = true,
-            note = "device-confirmed through local capability audit/self-review using Capability Registry/runtime facts instead of generic model assumptions"
+            deviceConfirmed = false,
+            note = "v12.12 local self-review is generated from Capability Registry/runtime facts instead of generic model assumptions; pending full device acceptance"
         )
 
         capability(
@@ -1612,8 +1673,8 @@ class AyanaCapabilityRegistry(
             "agent_core_latency_classification",
             implemented = true,
             available = prefs.getLong(KEY_AGENT_CORE_PERF_TOTAL, -1L) >= 0L,
-            deviceConfirmed = true,
-            note = "device-confirmed telemetry classifies measured prepare/upload/headers/body/parse phases and repeatedly identified MODEL_OR_SERVER_WAIT"
+            deviceConfirmed = false,
+            note = "v12.12 classifies measured prepare/upload/headers/body/parse phases and separates server/model wait from Android-side work"
         )
 
         capability(
@@ -1621,8 +1682,8 @@ class AyanaCapabilityRegistry(
             "perception_owner_fusion",
             implemented = true,
             available = accessibilityConnected,
-            deviceConfirmed = true,
-            note = "device-confirmed by voice over YouTube: effective foreground owner remained com.google.android.youtube despite AYANA overlay"
+            deviceConfirmed = false,
+            note = "v12.12 exposes effective foreground package so AYANA overlay ownership cannot be confused with a verified external foreground app; pending acceptance"
         )
 
         capability(
@@ -1631,43 +1692,7 @@ class AyanaCapabilityRegistry(
             implemented = true,
             available = true,
             deviceConfirmed = false,
-            note = "Planner/Durable Goals/checkpoints/bounded replan/terminal verification remain the controlled execution loop; v12.14 adds whole-goal guards for verified app-open extensions, read-only multi-metric aggregation and artifact deliverables"
-        )
-
-        capability(
-            capabilities,
-            "whole_goal_routing_guard",
-            implemented = true,
-            available = true,
-            deviceConfirmed = false,
-            note = "v12.14 prevents a single local executor from swallowing required sibling deliverables; includes multi-metric aggregation and verified lifecycle-extension collapse"
-        )
-
-        capability(
-            capabilities,
-            "artifact_whole_goal_orchestration",
-            implemented = true,
-            available = true,
-            deviceConfirmed = false,
-            note = "v12.14 explicit file/document/graph requests bypass greedy single-intent local routes, gather required factual inputs first, then require verified create_artifact evidence"
-        )
-
-        capability(
-            capabilities,
-            "agent_core_timeout_recovery",
-            implemented = true,
-            available = true,
-            deviceConfirmed = false,
-            note = "v12.14 uses an 18 s Agent Core read timeout with one bounded side-effect-safe retry before surfacing a recoverable error"
-        )
-
-        capability(
-            capabilities,
-            "extended_accessibility_semantics",
-            implemented = true,
-            available = accessibilityConnected,
-            deviceConfirmed = false,
-            note = "Accessibility v7.2 adds hint/state/pane/tooltip semantics to same-window text recovery; it does not claim OCR/Vision when apps expose no readable accessibility content"
+            note = "existing Planner/Durable Goals/checkpoints/bounded replan/terminal verification are treated as one controlled execution loop; full multi-step acceptance still required"
         )
 
         capability(
@@ -2178,6 +2203,191 @@ class AyanaCapabilityRegistry(
         }
     }
 
+    private fun recoverVerifiedCapabilityEvidenceFromHistory(
+        records: List<JSONObject>
+    ) {
+        if (
+            persistedCapabilityConfirmed(
+                "clipboard_write"
+            )
+        ) {
+            return
+        }
+
+        val verifiedClipboardRecord =
+            records.firstOrNull { record ->
+                val status =
+                    record
+                        .optString("status")
+                        .lowercase()
+
+                if (status != "success") {
+                    return@firstOrNull false
+                }
+
+                val events =
+                    record.optJSONArray("events")
+                        ?: return@firstOrNull false
+
+                var executorObserved =
+                    false
+
+                var committedTerminalObserved =
+                    false
+
+                for (index in 0 until events.length()) {
+                    val event =
+                        events.optJSONObject(index)
+                            ?: continue
+
+                    val state =
+                        event.optString("state")
+                            .lowercase()
+
+                    val details =
+                        event.optString("details")
+                            .lowercase()
+
+                    if (
+                        state == "execution_phase" &&
+                        (
+                            "clipboard_executor" in details ||
+                                "local_clipboard_write" in details
+                            )
+                    ) {
+                        executorObserved =
+                            true
+                    }
+
+                    if (
+                        state == "execution_terminal" &&
+                        "side_effect_state=verified_committed" in details &&
+                        "side_effect_kind=clipboard_write" in details
+                    ) {
+                        committedTerminalObserved =
+                            true
+                    }
+                }
+
+                executorObserved &&
+                    committedTerminalObserved
+            }
+
+        if (verifiedClipboardRecord != null) {
+            recordCapabilityEvidence(
+                capabilityId = "clipboard_write",
+                detail =
+                    "Recovered from raw Command History: clipboard_executor + " +
+                        "side_effect_state=VERIFIED_COMMITTED + side_effect_kind=clipboard_write",
+                verified = true
+            )
+        }
+    }
+
+    private fun isIntentionalDiagnosticProbe(
+        record: JSONObject
+    ): Boolean {
+        val command =
+            record
+                .optString("command")
+                .lowercase()
+                .replace('ё', 'е')
+                .replace(Regex("\\s+"), " ")
+                .trim()
+
+        val result =
+            record
+                .optString("result")
+                .lowercase()
+                .replace('ё', 'е')
+
+        val explicitTestToken =
+            Regex("(?:^|[^a-z0-9])test[-_a-z0-9]*", RegexOption.IGNORE_CASE)
+                .containsMatchIn(command)
+
+        val negativeIntentMarker =
+            listOf(
+                "недоступное действие",
+                "несуществующую функцию",
+                "несуществующая функция",
+                "unavailable",
+                "unsupported",
+                "invalid action"
+            ).any { marker ->
+                marker in command
+            }
+
+        val negativeResultConfirmed =
+            listOf(
+                "недоступ",
+                "не найден",
+                "не выполн",
+                "не поддерж",
+                "unavailable",
+                "unsupported"
+            ).any { marker ->
+                marker in result
+            }
+
+        val explicitNegativeProbe =
+            negativeIntentMarker &&
+                negativeResultConfirmed
+
+        // A TEST-* label alone is not enough: a positive test that genuinely
+        // regresses must remain an operational ERROR. Suppress only explicit
+        // negative-capability probes whose expected negative result is visible.
+        return explicitNegativeProbe &&
+            (explicitTestToken || negativeIntentMarker)
+    }
+
+    private fun persistedCapabilityEvidenceIds(): JSONArray {
+        val result =
+            JSONArray()
+
+        prefs.all
+            .keys
+            .asSequence()
+            .filter { key ->
+                key.startsWith(
+                    KEY_CAPABILITY_CONFIRMED_PREFIX
+                ) &&
+                    prefs.getBoolean(
+                        key,
+                        false
+                    )
+            }
+            .map { key ->
+                key.removePrefix(
+                    KEY_CAPABILITY_CONFIRMED_PREFIX
+                )
+            }
+            .filter { id ->
+                id.isNotBlank()
+            }
+            .sorted()
+            .forEach { id ->
+                result.put(id)
+            }
+
+        return result
+    }
+
+    private fun persistedCapabilityConfirmed(
+        id: String
+    ): Boolean =
+        prefs.getBoolean(
+            KEY_CAPABILITY_CONFIRMED_PREFIX + id,
+            false
+        )
+
+    private fun persistedCapabilityEvidenceDetail(
+        id: String
+    ): String =
+        prefs.getString(
+            KEY_CAPABILITY_CONFIRMED_DETAIL_PREFIX + id,
+            ""
+        ).orEmpty()
+
     private fun capability(
         array: JSONArray,
         id: String,
@@ -2186,19 +2396,28 @@ class AyanaCapabilityRegistry(
         deviceConfirmed: Boolean,
         note: String
     ) {
+        val persistedConfirmed =
+            persistedCapabilityConfirmed(
+                id
+            )
+
+        val effectiveDeviceConfirmed =
+            deviceConfirmed ||
+                persistedConfirmed
+
         val truthState =
             when {
                 !implemented ->
                     "UNIMPLEMENTED"
 
                 !available &&
-                    deviceConfirmed ->
+                    effectiveDeviceConfirmed ->
                     "DEVICE_CONFIRMED_UNAVAILABLE_NOW"
 
                 !available ->
                     "IMPLEMENTED_UNAVAILABLE_NOW"
 
-                deviceConfirmed ->
+                effectiveDeviceConfirmed ->
                     "DEVICE_CONFIRMED_AVAILABLE"
 
                 else ->
@@ -2219,9 +2438,25 @@ class AyanaCapabilityRegistry(
                     "available_now",
                     available
                 )
-                .put(
+                                .put(
                     "device_confirmed",
+                    effectiveDeviceConfirmed
+                )
+                .put(
+                    "static_device_confirmed",
                     deviceConfirmed
+                )
+                .put(
+                    "runtime_evidence_persisted",
+                    persistedConfirmed
+                )
+                .put(
+                    "runtime_evidence_detail",
+                    if (persistedConfirmed) {
+                        persistedCapabilityEvidenceDetail(id)
+                    } else {
+                        ""
+                    }
                 )
                 .put(
                     "truth_state",
@@ -2237,10 +2472,23 @@ class AyanaCapabilityRegistry(
     companion object {
 
         const val BUILD_LABEL =
-            "v12.14.0_whole_goal_integrity_artifact_recovery_build_candidate"
+            "v12.21.0_r7_9_completion_capability_truth_candidate"
 
         private const val PREFS_NAME =
             "ayana_capability_runtime_v11"
+
+
+        private const val KEY_CAPABILITY_CONFIRMED_PREFIX =
+            "capability_confirmed_flag_"
+
+        private const val KEY_CAPABILITY_CONFIRMED_AT_PREFIX =
+            "capability_confirmed_at_"
+
+        private const val KEY_CAPABILITY_CONFIRMED_DETAIL_PREFIX =
+            "capability_confirmed_detail_"
+
+        private val CAPABILITY_ID_REGEX =
+            Regex("[a-z0-9_\\-]{2,96}")
 
         private const val KEY_AGENT_CORE_OK =
             "agent_core_ok"
