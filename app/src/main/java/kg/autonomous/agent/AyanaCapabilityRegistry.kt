@@ -10,7 +10,7 @@ import org.json.JSONArray
 import org.json.JSONObject
 
 /**
- * AYANA Device Capability Registry v3.2 — PERSISTED RUNTIME EVIDENCE + DIAGNOSTIC TRUTH.
+ * AYANA Device Capability Registry v3.2.1 — SCHEMA RESTORE + PERSISTED RUNTIME EVIDENCE TRUTH.
  *
  * Single machine-readable source of truth for:
  * 1) what this build implements;
@@ -1697,6 +1697,42 @@ class AyanaCapabilityRegistry(
 
         capability(
             capabilities,
+            "whole_goal_routing_guard",
+            implemented = true,
+            available = true,
+            deviceConfirmed = false,
+            note = "v12.14+ whole-goal routing preserves lifecycle verification, semantic-object guards and terminal criteria without greedy interception; production contract is covered by FUNC-013"
+        )
+
+        capability(
+            capabilities,
+            "artifact_whole_goal_orchestration",
+            implemented = true,
+            available = true,
+            deviceConfirmed = false,
+            note = "artifact requests retain ownership of the complete user goal through Agent Core handoff, create_artifact execution, semantic-content validation and verified publish; production contract is covered by FUNC-013"
+        )
+
+        capability(
+            capabilities,
+            "agent_core_timeout_recovery",
+            implemented = true,
+            available = true,
+            deviceConfirmed = false,
+            note = "Agent Core transport uses bounded timeout recovery with one controlled retry and fail-closed terminal handling; device-confirmed evidence remains separate from source presence"
+        )
+
+        capability(
+            capabilities,
+            "extended_accessibility_semantics",
+            implemented = true,
+            available = accessibilityConnected,
+            deviceConfirmed = false,
+            note = "extended Accessibility semantics expose richer node/window identity and interaction evidence while preserving owner-fusion and strict verification; requires device-specific confirmation for unsupported surfaces"
+        )
+
+        capability(
+            capabilities,
             "development_agent_transaction",
             implemented = false,
             available = false,
@@ -2472,7 +2508,7 @@ class AyanaCapabilityRegistry(
     companion object {
 
         const val BUILD_LABEL =
-            "v12.21.0_r7_9_completion_capability_truth_candidate"
+            "v12.21.0_r7_9_1_schema_restore_candidate"
 
         private const val PREFS_NAME =
             "ayana_capability_runtime_v11"
