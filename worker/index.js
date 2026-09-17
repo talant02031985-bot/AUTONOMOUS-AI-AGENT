@@ -1,4 +1,4 @@
-// AYANA Worker v11.1.8 — Multimodal Project Contract + Bounded Deep Compact Tail + Network Fact Truth + Context Boundary
+// AYANA Worker v11.1.9 — Long Completion Rescue Tail + Multimodal Project Contract + Bounded Deep Compact Tail + Network Fact Truth + Context Boundary
 // Preserves v10.9 acceptance/capability grounding and strengthens compound deliverables:
 // device-state exposes network/storage/brightness, artifact goals must end in verified create_artifact,
 // and explicit inability to execute an action is returned as machine UNSUPPORTED instead of generic SUCCESS.
@@ -1507,7 +1507,78 @@ async function ensureCompleteTextResponse(env, payload, data, initialReply, requ
   const finalHasSentinel = hasCompletionSentinel(combined);
   const reply = stripCompletionSentinel(combined);
 
-  if (isIncompleteResponse(continued.data)) {
+  const firstTailIncomplete = isIncompleteResponse(continued.data);
+  const firstTailNeedsRescue =
+    compactTail
+    && Boolean(continued.data?.id)
+    && (
+      isMaxOutputTokenIncomplete(continued.data)
+      || (!firstTailIncomplete && requireSentinel && !finalHasSentinel)
+    );
+
+  if (firstTailNeedsRescue) {
+    const rescueBudget = Math.max(180, Math.min(normalizedContinuationBudget, 260));
+    const rescuePayload = {
+      model: payload.model,
+      reasoning: payload.reasoning || { effort: "low" },
+      instructions: `${payload.instructions}\n\nFINAL RESCUE TAIL:\nЭто второй и последний хвост. Предыдущий ответ уже содержит всю основную информацию. Не добавляй новые факты, разделы, примеры или вступления. В пределах примерно 40–80 слов заверши только оборванную мысль/список, дай одно короткое заключение и${requireSentinel ? ` обязательно закончи ${AYANA_RESPONSE_COMPLETION_SENTINEL}` : " закончи ответ"}. Не повторяй предыдущий текст и не вызывай инструменты.`,
+      input: `Это последний разрешённый хвост. Немедленно заверши только незаконченный фрагмент без повторов и новых разделов.${requireSentinel ? ` Последними символами должны быть ${AYANA_RESPONSE_COMPLETION_SENTINEL}.` : ""}`,
+      previous_response_id: String(continued.data.id),
+      max_output_tokens: rescueBudget,
+      store: true
+    };
+
+    const rescued = await callOpenAI(
+      env,
+      rescuePayload,
+      { timeoutMs: continuationTimeoutMs }
+    );
+
+    if (!rescued.ok) {
+      return {
+        ok: false,
+        data: rescued.data,
+        reply,
+        continuationCount: 2,
+        incompleteReason: `rescue_continuation_http_${rescued.status}`
+      };
+    }
+
+    const rescueText = extractOutputText(rescued.data);
+    const rescuedCombined = appendContinuationWithoutOverlap(combined, rescueText);
+    const rescuedHasSentinel = hasCompletionSentinel(rescuedCombined);
+    const rescuedReply = stripCompletionSentinel(rescuedCombined);
+
+    if (isIncompleteResponse(rescued.data)) {
+      return {
+        ok: false,
+        data: rescued.data,
+        reply: rescuedReply,
+        continuationCount: 2,
+        incompleteReason: incompleteResponseReason(rescued.data) || "rescue_continuation_incomplete"
+      };
+    }
+
+    if (requireSentinel && !rescuedHasSentinel) {
+      return {
+        ok: false,
+        data: rescued.data,
+        reply: rescuedReply,
+        continuationCount: 2,
+        incompleteReason: "completion_sentinel_missing_after_rescue"
+      };
+    }
+
+    return {
+      ok: Boolean(rescuedReply),
+      data: rescued.data,
+      reply: rescuedReply,
+      continuationCount: 2,
+      incompleteReason: ""
+    };
+  }
+
+  if (firstTailIncomplete) {
     return {
       ok: false,
       data: continued.data,
@@ -1798,7 +1869,7 @@ async function handleDocxTranslationBatch(request, env) {
   const ordered = segments.map(segment => ({
     id: segment.id,
     text: byId.get(segment.id) ?? ""
-  }));
+}));
 
   return Response.json({
     ok: true,
@@ -2633,7 +2704,7 @@ export default {
         ok: true,
         service: "AYANA AI",
         ai: "ready",
-        agent_core: "v11.1.8-multimodal-project-contract",
+        agent_core: "v11.1.9-long-completion-rescue-tail",
         voice: "marin"
       });
     }
