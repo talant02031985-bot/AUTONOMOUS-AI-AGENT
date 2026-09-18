@@ -56,7 +56,7 @@ import kotlin.concurrent.thread
 
 class MainActivity : AppCompatActivity() {
 
-    // UI generation: v7.8 UI SCROLL PERFORMANCE + v7.5 NOTIFICATION ACCESS TRUTH
+    // UI generation: v7.10 MULTI-ATTACHMENT INTAKE + v7.8 UI SCROLL PERFORMANCE + v7.5 NOTIFICATION ACCESS TRUTH
     // + OWN-APP SEMANTIC ACTION TRUTH.
     // v7.4 keeps v7.2 foreground ownership truth and hardens the in-process
     // semantic bridge so the same factual View tree used for perception also
@@ -99,6 +99,9 @@ class MainActivity : AppCompatActivity() {
 
     @Volatile
     private var attachmentPreparationGeneration = 0L
+
+    @Volatile
+    private var attachmentPreparationInProgress = false
 
     private val navButtons =
         mutableMapOf<Page, TextView>()
@@ -256,10 +259,10 @@ class MainActivity : AppCompatActivity() {
 
     private val attachmentLauncher =
         registerForActivityResult(
-            ActivityResultContracts.OpenDocument()
-        ) { uri ->
-            if (uri != null) {
-                prepareSelectedAttachment(uri)
+            ActivityResultContracts.OpenMultipleDocuments()
+        ) { uris ->
+            if (uris.isNotEmpty()) {
+                prepareSelectedAttachments(uris)
             }
         }
 
@@ -4378,13 +4381,7 @@ class MainActivity : AppCompatActivity() {
 
                 card.addView(resultView)
 
-                val fullResultLength =
-                    record.optInt(
-                        "result_length",
-                        result.length
-                    )
-
-                if (fullResultLength > HISTORY_RESULT_PREVIEW_CHARS) {
+                if (result.length > HISTORY_RESULT_PREVIEW_CHARS) {
                     var resultExpanded = false
                     val resultToggle =
                         TextView(this).apply {
@@ -4396,8 +4393,7 @@ class MainActivity : AppCompatActivity() {
                                 resultExpanded = !resultExpanded
                                 resultView.text =
                                     if (resultExpanded) {
-                                        "Результат: " +
-                                            commandHistoryStore.fullResult(record)
+                                        "Результат: $result"
                                     } else {
                                         "Результат: " +
                                             historyPreview(
@@ -4977,9 +4973,7 @@ class MainActivity : AppCompatActivity() {
             append("\ncommand=")
             append(record.optString("command"))
             append("\nresult=")
-            append(
-                commandHistoryStore.fullResult(record)
-            )
+            append(record.optString("result"))
 
             val technical = record.optString("technical")
             if (technical.isNotBlank()) {
@@ -6180,9 +6174,8 @@ class MainActivity : AppCompatActivity() {
         )
 
         answerScroll =
-            AyanaAdaptiveAnswerScrollView(this).apply {
+            ScrollView(this).apply {
                 visibility = View.GONE
-                maxContentHeightPx = dp(190)
                 isFillViewport = false
                 isVerticalScrollBarEnabled = true
                 overScrollMode = View.OVER_SCROLL_IF_CONTENT_SCROLLS
@@ -6203,7 +6196,7 @@ class MainActivity : AppCompatActivity() {
             answerScroll,
             LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT,
-                ViewGroup.LayoutParams.WRAP_CONTENT
+                dp(190)
             ).apply {
                 topMargin =
                     dp(8)
@@ -6264,6 +6257,13 @@ class MainActivity : AppCompatActivity() {
 
     private fun sendTextCommand() {
 
+        if (attachmentPreparationInProgress) {
+            showTextAnswer(
+                "Вложения ещё подготавливаются. Дождитесь завершения подготовки и отправьте команду ещё раз."
+            )
+            return
+        }
+
         val attachment =
             pendingAttachment
 
@@ -6278,7 +6278,14 @@ class MainActivity : AppCompatActivity() {
                 typedCommand.isBlank() &&
                 attachment != null
             ) {
-                "Проанализируй это вложение и выдели главное."
+                if (
+                    attachment.kind ==
+                    AyanaMultimodalAttachmentManager.KIND_BATCH
+                ) {
+                    "Проанализируй эти вложения вместе и выдели главное."
+                } else {
+                    "Проанализируй это вложение и выдели главное."
+                }
             } else {
                 typedCommand
             }
@@ -6358,7 +6365,14 @@ class MainActivity : AppCompatActivity() {
 
             textAnswer.text =
                 if (useAttachment) {
-                    "AYANA анализирует вложение…"
+                    if (
+                        attachment?.kind ==
+                        AyanaMultimodalAttachmentManager.KIND_BATCH
+                    ) {
+                        "AYANA анализирует вложения…"
+                    } else {
+                        "AYANA анализирует вложение…"
+                    }
                 } else {
                     "AYANA думает…"
                 }
@@ -6407,15 +6421,21 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    private fun prepareSelectedAttachment(
-        uri: Uri
+    private fun prepareSelectedAttachments(
+        uris: List<Uri>
     ) {
         val generation =
             ++attachmentPreparationGeneration
+        attachmentPreparationInProgress = true
 
         if (::attachmentInfo.isInitialized) {
             attachmentInfo.visibility = View.VISIBLE
-            attachmentInfo.text = "Подготавливаю вложение…"
+            attachmentInfo.text =
+                if (uris.size > 1) {
+                    "Подготавливаю вложения: ${uris.size}…"
+                } else {
+                    "Подготавливаю вложение…"
+                }
         }
 
         thread(
@@ -6425,7 +6445,7 @@ class MainActivity : AppCompatActivity() {
             val result =
                 try {
                     Result.success(
-                        multimodalAttachmentManager.prepare(uri)
+                        multimodalAttachmentManager.prepareBatch(uris)
                     )
                 } catch (error: Exception) {
                     Result.failure(error)
@@ -6439,6 +6459,8 @@ class MainActivity : AppCompatActivity() {
                     return@runOnUiThread
                 }
 
+                attachmentPreparationInProgress = false
+
                 result
                     .onSuccess { prepared ->
                         pendingAttachment?.let {
@@ -6448,11 +6470,10 @@ class MainActivity : AppCompatActivity() {
                         updateAttachmentInfo()
                     }
                     .onFailure { error ->
-                        pendingAttachment = null
                         updateAttachmentInfo()
                         showTextAnswer(
                             error.message
-                                ?: "Не удалось подготовить вложение."
+                                ?: "Не удалось подготовить вложения."
                         )
                     }
             }
@@ -6463,6 +6484,7 @@ class MainActivity : AppCompatActivity() {
         deleteFiles: Boolean
     ) {
         attachmentPreparationGeneration++
+        attachmentPreparationInProgress = false
         val old = pendingAttachment
         pendingAttachment = null
         if (deleteFiles && old != null) {
@@ -6485,8 +6507,43 @@ class MainActivity : AppCompatActivity() {
             when (attachment.kind) {
                 AyanaMultimodalAttachmentManager.KIND_IMAGE ->
                     "Фото: ${attachment.displayName}   ×"
+
                 AyanaMultimodalAttachmentManager.KIND_VIDEO_VISUAL ->
                     "Видео: ${attachment.displayName} · визуальный анализ кадров   ×"
+
+                AyanaMultimodalAttachmentManager.KIND_BATCH -> {
+                    val items =
+                        attachment.manifest
+                            .optJSONArray("items")
+                    val names =
+                        if (items == null) {
+                            emptyList()
+                        } else {
+                            (0 until items.length())
+                                .mapNotNull { index ->
+                                    items
+                                        .optJSONObject(index)
+                                        ?.optString("display_name")
+                                        ?.trim()
+                                        ?.takeIf { it.isNotBlank() }
+                                }
+                        }
+                    val preview =
+                        names
+                            .take(4)
+                            .joinToString(", ")
+                    val extra =
+                        (names.size - 4)
+                            .coerceAtLeast(0)
+                    val suffix =
+                        if (extra > 0) {
+                            ", ещё $extra"
+                        } else {
+                            ""
+                        }
+                    "Вложения (${names.size}): $preview$suffix   ×"
+                }
+
                 else ->
                     "Файл: ${attachment.displayName}   ×"
             }
@@ -9344,63 +9401,6 @@ class MainActivity : AppCompatActivity() {
             hasPendingScrollAccessibilityEvent =
                 false
             super.onDetachedFromWindow()
-        }
-    }
-
-    /**
-     * Text-mode answer surface: wraps short replies and grows naturally with
-     * the text until the configured cap is reached. Only overflow beyond the
-     * cap becomes internally scrollable, so a one-line reply never leaves a
-     * permanently tall empty answer panel.
-     */
-    private class AyanaAdaptiveAnswerScrollView(
-        context: Context
-    ) : ScrollView(context) {
-
-        var maxContentHeightPx: Int =
-            Int.MAX_VALUE
-
-        override fun onMeasure(
-            widthMeasureSpec: Int,
-            heightMeasureSpec: Int
-        ) {
-            val parentMode =
-                View.MeasureSpec.getMode(
-                    heightMeasureSpec
-                )
-
-            val parentSize =
-                View.MeasureSpec.getSize(
-                    heightMeasureSpec
-                )
-
-            val effectiveMax =
-                when (parentMode) {
-                    View.MeasureSpec.EXACTLY,
-                    View.MeasureSpec.AT_MOST ->
-                        minOf(
-                            parentSize,
-                            maxContentHeightPx
-                        )
-
-                    else ->
-                        maxContentHeightPx
-                }
-
-            val cappedHeightSpec =
-                if (effectiveMax == Int.MAX_VALUE) {
-                    heightMeasureSpec
-                } else {
-                    View.MeasureSpec.makeMeasureSpec(
-                        effectiveMax.coerceAtLeast(0),
-                        View.MeasureSpec.AT_MOST
-                    )
-                }
-
-            super.onMeasure(
-                widthMeasureSpec,
-                cappedHeightSpec
-            )
         }
     }
 
