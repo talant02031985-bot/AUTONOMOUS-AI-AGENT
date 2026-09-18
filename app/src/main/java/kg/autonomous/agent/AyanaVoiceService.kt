@@ -60,6 +60,8 @@ import kotlin.math.abs
 
 class AyanaVoiceService : Service() {
 
+    // MULTI-ATTACHMENT EXTENSION: bounded batch manifests are accepted through the
+    // existing multimodal lane without changing the v12.21.0 / R7.9 release-metadata lineage.
     // AYANA v12.21.0 R7.9 COMPLETION + CAPABILITY TRUTH HARDENING.
     // Extends the stable v12.20.0 base with semantic artifact-content validation,
     // previous-response artifact payload retention, persisted runtime capability evidence,
@@ -29308,6 +29310,83 @@ details = error.message.orEmpty().take(220)
         )
     }
 
+    private fun multimodalManifestContainsKind(
+        manifest: JSONObject,
+        targetKind: String
+    ): Boolean {
+        val kind = manifest.optString("kind")
+        if (kind == targetKind) {
+            return true
+        }
+        if (kind != AyanaMultimodalAttachmentManager.KIND_BATCH) {
+            return false
+        }
+
+        val items = manifest.optJSONArray("items") ?: return false
+        for (index in 0 until items.length()) {
+            val item = items.optJSONObject(index) ?: continue
+            if (multimodalManifestContainsKind(item, targetKind)) {
+                return true
+            }
+        }
+        return false
+    }
+
+    private fun multimodalManifestItemCount(
+        manifest: JSONObject
+    ): Int {
+        return if (
+            manifest.optString("kind") ==
+            AyanaMultimodalAttachmentManager.KIND_BATCH
+        ) {
+            manifest.optJSONArray("items")?.length() ?: 0
+        } else {
+            1
+        }
+    }
+
+    private fun multimodalAttachmentCountLabel(
+        count: Int
+    ): String {
+        val safe = count.coerceAtLeast(0)
+        val mod100 = safe % 100
+        val mod10 = safe % 10
+        val noun =
+            when {
+                mod100 in 11..14 -> "вложений"
+                mod10 == 1 -> "вложение"
+                mod10 in 2..4 -> "вложения"
+                else -> "вложений"
+            }
+        return "$safe $noun"
+    }
+
+    private fun isMultiAttachmentDocxTranslationRequest(
+        prompt: String,
+        manifest: JSONObject
+    ): Boolean {
+        if (
+            manifest.optString("kind") !=
+            AyanaMultimodalAttachmentManager.KIND_BATCH
+        ) {
+            return false
+        }
+
+        val items = manifest.optJSONArray("items") ?: return false
+        for (index in 0 until items.length()) {
+            val item = items.optJSONObject(index) ?: continue
+            if (
+                isStylePreservingDocxTranslationRequest(
+                    prompt = prompt,
+                    manifest = item
+                )
+            ) {
+                return true
+            }
+        }
+        return false
+    }
+
     private fun executeMultimodalCommand(
         prompt: String,
         manifestText: String
@@ -29407,6 +29486,38 @@ details = error.message.orEmpty().take(220)
             return
         }
 
+        if (
+            isMultiAttachmentDocxTranslationRequest(
+                prompt = prompt,
+                manifest = manifest
+            )
+        ) {
+            activeCommandHistoryId =
+                commandHistoryStore.begin(
+                    command = "$prompt [несколько вложений]",
+                    source = "text"
+                )
+            beginExecutionSession(
+                objective = prompt,
+                source = "text",
+                lane = "multimodal",
+                executor = "multimodal_batch_guard"
+            )
+            try {
+                AyanaMultimodalAttachmentManager(applicationContext)
+                    .cleanupPrepared(manifest)
+            } catch (_: Exception) {
+            }
+            respondUnsupportedAndResume(
+                text =
+                    "Одновременный перевод нескольких вложений с созданием новых DOCX-файлов пока не поддерживается. Выберите один DOCX — тогда AYANA сохранит оформление и создаст проверенный переведённый файл.",
+                silent = true,
+                technical =
+                    "multi_attachment_docx_translation_unsupported; fail_closed=true"
+            )
+            return
+        }
+
         // A newly attached artifact starts a fresh grounded multimodal context.
         // On success the Worker returns a Responses response_id which becomes the
         // next Agent Core previous_response_id. On failure/cancel we intentionally
@@ -29428,8 +29539,11 @@ details = error.message.orEmpty().take(220)
         )
 
         if (
-            manifest.optString("kind") ==
-            AyanaMultimodalAttachmentManager.KIND_VIDEO_VISUAL &&
+            multimodalManifestContainsKind(
+                manifest = manifest,
+                targetKind =
+                    AyanaMultimodalAttachmentManager.KIND_VIDEO_VISUAL
+            ) &&
             isVideoAudioAnalysisRequest(
                 prompt
             )
@@ -29471,15 +29585,31 @@ details = error.message.orEmpty().take(220)
             ttsExpected = false
         )
 
+        val attachmentCount =
+            multimodalManifestItemCount(
+                manifest
+            )
+
         commandHistoryStore.addEvent(
             activeCommandHistoryId,
             state = "multimodal_attachment",
-            message = "Вложение подготовлено для мультимодального анализа",
-            details = "kind=${manifest.optString("kind")}; name=${displayName.take(120)}; mime=${manifest.optString("mime_type").take(80)}"
+            message =
+                if (attachmentCount > 1) {
+                    "Вложения подготовлены для совместного мультимодального анализа"
+                } else {
+                    "Вложение подготовлено для мультимодального анализа"
+                },
+            details =
+                "kind=${manifest.optString("kind")}; items=$attachmentCount; " +
+                    "name=${displayName.take(120)}; mime=${manifest.optString("mime_type").take(80)}"
         )
 
         broadcastStatus(
-            "Анализирую $displayName…",
+            if (attachmentCount > 1) {
+                "Анализирую ${multimodalAttachmentCountLabel(attachmentCount)}…"
+            } else {
+                "Анализирую $displayName…"
+            },
             STATE_THINKING
         )
 
@@ -30500,6 +30630,188 @@ details = error.message.orEmpty().take(220)
                     )
                 }
 
+                AyanaMultimodalAttachmentManager.KIND_BATCH -> {
+                    val sourceItems =
+                        manifest.optJSONArray(
+                            "items"
+                        )
+                            ?: JSONArray()
+
+                    if (
+                        sourceItems.length() < 2 ||
+                        sourceItems.length() >
+                        MAX_MULTIMODAL_BATCH_ITEMS
+                    ) {
+                        throw IllegalArgumentException(
+                            "Недопустимое количество вложений в пакете"
+                        )
+                    }
+
+                    val attachments =
+                        JSONArray()
+                    var batchBytes =
+                        0L
+                    var batchVideoFrames =
+                        0
+
+                    for (index in 0 until sourceItems.length()) {
+                        val sourceItem =
+                            sourceItems.optJSONObject(index)
+                                ?: throw IllegalArgumentException(
+                                    "Повреждён элемент пакета вложений"
+                                )
+                        val itemKind =
+                            sourceItem.optString("kind")
+                        if (
+                            itemKind ==
+                            AyanaMultimodalAttachmentManager.KIND_BATCH
+                        ) {
+                            throw IllegalArgumentException(
+                                "Вложенные пакеты не поддерживаются"
+                            )
+                        }
+
+                        val workerItem =
+                            JSONObject()
+                                .put("kind", itemKind)
+                                .put(
+                                    "display_name",
+                                    sourceItem
+                                        .optString("display_name")
+                                        .take(160)
+                                )
+                                .put(
+                                    "mime_type",
+                                    sourceItem
+                                        .optString("mime_type")
+                                        .take(120)
+                                )
+
+                        when (itemKind) {
+                            AyanaMultimodalAttachmentManager.KIND_IMAGE,
+                            AyanaMultimodalAttachmentManager.KIND_DOCUMENT -> {
+                                val file =
+                                    validatedMultimodalCacheFile(
+                                        sourceItem.optString("path")
+                                    )
+                                val bytes =
+                                    file.length()
+                                if (
+                                    bytes <= 0L ||
+                                    bytes > MAX_MULTIMODAL_DIRECT_BYTES
+                                ) {
+                                    throw IllegalArgumentException(
+                                        "Размер одного вложения в пакете недопустим"
+                                    )
+                                }
+                                batchBytes += bytes
+                                if (
+                                    batchBytes >
+                                    MAX_MULTIMODAL_BATCH_BYTES
+                                ) {
+                                    throw IllegalArgumentException(
+                                        "Общий размер пакета вложений слишком большой"
+                                    )
+                                }
+                                workerItem.put(
+                                    "data_base64",
+                                    Base64.encodeToString(
+                                        file.readBytes(),
+                                        Base64.NO_WRAP
+                                    )
+                                )
+                            }
+
+                            AyanaMultimodalAttachmentManager.KIND_VIDEO_VISUAL -> {
+                                val sourceFrames =
+                                    sourceItem.optJSONArray("frames")
+                                        ?: JSONArray()
+                                val frames =
+                                    JSONArray()
+                                var videoBytes =
+                                    0L
+                                val frameCount =
+                                    minOf(
+                                        sourceFrames.length(),
+                                        MAX_MULTIMODAL_VIDEO_FRAMES
+                                    )
+                                for (frameIndex in 0 until frameCount) {
+                                    val frameItem =
+                                        sourceFrames.optJSONObject(frameIndex)
+                                            ?: continue
+                                    val file =
+                                        validatedMultimodalCacheFile(
+                                            frameItem.optString("path")
+                                        )
+                                    val bytes =
+                                        file.length()
+                                    if (bytes <= 0L) {
+                                        continue
+                                    }
+                                    videoBytes += bytes
+                                    batchBytes += bytes
+                                    batchVideoFrames++
+                                    if (
+                                        videoBytes >
+                                        MAX_MULTIMODAL_VIDEO_FRAME_BYTES ||
+                                        batchBytes >
+                                        MAX_MULTIMODAL_BATCH_BYTES ||
+                                        batchVideoFrames >
+                                        MAX_MULTIMODAL_BATCH_VIDEO_FRAMES
+                                    ) {
+                                        throw IllegalArgumentException(
+                                            "Слишком большой набор вложений или видеокадров"
+                                        )
+                                    }
+                                    frames.put(
+                                        JSONObject()
+                                            .put(
+                                                "timestamp_ms",
+                                                frameItem.optLong(
+                                                    "timestamp_ms",
+                                                    0L
+                                                )
+                                            )
+                                            .put(
+                                                "data_base64",
+                                                Base64.encodeToString(
+                                                    file.readBytes(),
+                                                    Base64.NO_WRAP
+                                                )
+                                            )
+                                    )
+                                }
+                                if (frames.length() < 2) {
+                                    throw IllegalArgumentException(
+                                        "Недостаточно видеокадров в одном из вложений"
+                                    )
+                                }
+                                workerItem
+                                    .put("frames", frames)
+                                    .put(
+                                        "duration_ms",
+                                        sourceItem.optLong(
+                                            "duration_ms",
+                                            0L
+                                        )
+                                    )
+                                    .put("audio_analysis", false)
+                            }
+
+                            else ->
+                                throw IllegalArgumentException(
+                                    "Неподдерживаемый тип вложения в пакете"
+                                )
+                        }
+
+                        attachments.put(workerItem)
+                    }
+
+                    requestJson
+                        .put("attachments", attachments)
+                        .put("item_count", attachments.length())
+                }
+
                 else ->
                     throw IllegalArgumentException(
                         "Неподдерживаемый тип мультимодального вложения"
@@ -30679,7 +30991,9 @@ connection
                 )
                 .put(
                     "technical",
-                    "kind=$kind"
+                    "kind=$kind; " +
+                        "continuation_count=${response.optInt("continuation_count", 0)}; " +
+                        "completion_integrity=${response.optString("completion_integrity").ifBlank { "unknown" }}"
                 )
 
         } finally {
@@ -37893,6 +38207,9 @@ state
 
         private const val MAX_MULTIMODAL_PROMPT_CHARS = 6000
         private const val MAX_MULTIMODAL_DIRECT_BYTES = 8L * 1024L * 1024L
+        private const val MAX_MULTIMODAL_BATCH_ITEMS = 8
+        private const val MAX_MULTIMODAL_BATCH_BYTES = 8L * 1024L * 1024L
+        private const val MAX_MULTIMODAL_BATCH_VIDEO_FRAMES = 24
         private const val MAX_MULTIMODAL_VIDEO_FRAMES = 8
         private const val MAX_MULTIMODAL_VIDEO_FRAME_BYTES = 6L * 1024L * 1024L
         private const val MULTIMODAL_CONNECT_TIMEOUT_MS = 20000
