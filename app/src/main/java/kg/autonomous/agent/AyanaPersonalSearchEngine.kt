@@ -8,25 +8,29 @@ import java.util.Date
 import java.util.Locale
 
 /**
- * AYANA Personal Search Engine v1.0.1 — LOCAL GLOBAL SEARCH + HISTORY SELF-ECHO GUARD.
+ * AYANA Personal Search Engine v1.1 — LOCAL GLOBAL SEARCH + DEVICE CONTENT METADATA.
  *
- * Scope v1:
+ * Scope v1.1:
  * - Memory v2;
  * - Command History;
  * - Tasks / reminders;
- * - currently available notification history from NotificationListener.
+ * - currently available notification history from NotificationListener;
+ * - file metadata visible through Android MediaStore/Downloads;
+ * - photo metadata visible through Android MediaStore.Images.
  *
  * Privacy / truth contract:
  * - search is local; no Agent Core / Worker request is required;
  * - only sources explicitly available on-device are searched;
  * - a source that cannot be read is reported as unavailable, never silently treated as empty;
- * - this v1 does NOT claim to search arbitrary files/photos yet.
+ * - photo/file v1.1 is metadata search only: filename/path/MIME/date/size;
+ * - scoped-storage / selected-photo access is reported honestly and is never described as full-device coverage.
  */
 class AyanaPersonalSearchEngine(
     context: Context,
     private val memoryStore: AyanaMemoryStore,
     private val taskStore: AyanaTaskStore,
-    private val historyStore: AyanaCommandHistoryStore
+    private val historyStore: AyanaCommandHistoryStore,
+    private val deviceContentSearchEngine: AyanaDeviceContentSearchEngine
 ) {
 
     enum class Source(
@@ -36,7 +40,9 @@ class AyanaPersonalSearchEngine(
         MEMORY("memory", "Память"),
         HISTORY("history", "История"),
         TASKS("tasks", "Задачи"),
-        NOTIFICATIONS("notifications", "Уведомления")
+        NOTIFICATIONS("notifications", "Уведомления"),
+        FILES("files", "Файлы"),
+        PHOTOS("photos", "Фото")
     }
 
     data class Request(
@@ -58,8 +64,11 @@ class AyanaPersonalSearchEngine(
         val hits: List<Hit>,
         val sourceMatchCounts: Map<Source, Int>,
         val sourceErrors: Map<Source, String>,
+        val sourceCoverage: Map<Source, String>,
         val scannedHistoryRecords: Int,
-        val scannedNotifications: Int
+        val scannedNotifications: Int,
+        val scannedFiles: Int,
+        val scannedPhotos: Int
     )
 
     private val appContext =
@@ -81,9 +90,13 @@ class AyanaPersonalSearchEngine(
             linkedMapOf<Source, String>()
         val sourceMatchCounts =
             linkedMapOf<Source, Int>()
+        val sourceCoverage =
+            linkedMapOf<Source, String>()
 
         var scannedHistoryRecords = 0
         var scannedNotifications = 0
+        var scannedFiles = 0
+        var scannedPhotos = 0
 
         fun collect(
             source: Source,
@@ -450,6 +463,123 @@ class AyanaPersonalSearchEngine(
             matches
         }
 
+
+        collect(Source.FILES) {
+            val result =
+                deviceContentSearchEngine.searchFiles(
+                    query = request.query,
+                    limit = safePerSourceLimit
+                )
+
+            scannedFiles = result.scanned
+            sourceCoverage[Source.FILES] =
+                "scope=${result.scope.wireName}; ${result.detail.take(360)}"
+
+            if (
+                result.scope ==
+                AyanaDeviceContentSearchEngine.AccessScope.NONE
+            ) {
+                throw IllegalStateException(result.detail)
+            }
+
+            result.hits
+                .mapIndexed { index, item ->
+                    val location =
+                        item.relativePath
+                            .trim()
+                            .ifBlank { "путь не указан" }
+
+                    val snippet =
+                        buildString {
+                            append(location)
+                            if (item.mimeType.isNotBlank()) {
+                                append(" • ")
+                                append(item.mimeType)
+                            }
+                            if (item.sizeBytes > 0L) {
+                                append(" • ")
+                                append(formatBytes(item.sizeBytes))
+                            }
+                            append(" • поиск по метаданным")
+                        }
+
+                    Hit(
+                        source = Source.FILES,
+                        title =
+                            compact(
+                                item.displayName,
+                                MAX_TITLE_CHARS
+                            )
+                                .ifBlank { "Файл" },
+                        snippet = compact(snippet, MAX_SNIPPET_CHARS),
+                        timestampMs = item.timestampMs,
+                        score =
+                            item.score +
+                                recencyBonus(index),
+                        metadata =
+                            "uri=${item.uri.take(180)}; ${item.metadata.take(180)}"
+                    )
+                }
+        }
+
+        collect(Source.PHOTOS) {
+            val result =
+                deviceContentSearchEngine.searchPhotos(
+                    query = request.query,
+                    limit = safePerSourceLimit
+                )
+
+            scannedPhotos = result.scanned
+            sourceCoverage[Source.PHOTOS] =
+                "scope=${result.scope.wireName}; ${result.detail.take(360)}"
+
+            if (
+                result.scope ==
+                AyanaDeviceContentSearchEngine.AccessScope.NONE
+            ) {
+                throw IllegalStateException(result.detail)
+            }
+
+            result.hits
+                .mapIndexed { index, item ->
+                    val location =
+                        item.relativePath
+                            .trim()
+                            .ifBlank { "альбом/путь не указан" }
+
+                    val snippet =
+                        buildString {
+                            append(location)
+                            if (item.mimeType.isNotBlank()) {
+                                append(" • ")
+                                append(item.mimeType)
+                            }
+                            if (item.sizeBytes > 0L) {
+                                append(" • ")
+                                append(formatBytes(item.sizeBytes))
+                            }
+                            append(" • поиск только по метаданным, не по изображению")
+                        }
+
+                    Hit(
+                        source = Source.PHOTOS,
+                        title =
+                            compact(
+                                item.displayName,
+                                MAX_TITLE_CHARS
+                            )
+                                .ifBlank { "Фото" },
+                        snippet = compact(snippet, MAX_SNIPPET_CHARS),
+                        timestampMs = item.timestampMs,
+                        score =
+                            item.score +
+                                recencyBonus(index),
+                        metadata =
+                            "uri=${item.uri.take(180)}; ${item.metadata.take(180)}"
+                    )
+                }
+        }
+
         val ranked =
             allHits
                 .sortedWith(
@@ -468,8 +598,11 @@ class AyanaPersonalSearchEngine(
             hits = ranked,
             sourceMatchCounts = sourceMatchCounts,
             sourceErrors = sourceErrors,
+            sourceCoverage = sourceCoverage,
             scannedHistoryRecords = scannedHistoryRecords,
-            scannedNotifications = scannedNotifications
+            scannedNotifications = scannedNotifications,
+            scannedFiles = scannedFiles,
+            scannedPhotos = scannedPhotos
         )
     }
 
@@ -498,6 +631,10 @@ class AyanaPersonalSearchEngine(
                 appendSourceErrors(
                     this,
                     report.sourceErrors
+                )
+                appendDeviceCoverage(
+                    this,
+                    report.sourceCoverage
                 )
             }
         }
@@ -535,6 +672,10 @@ class AyanaPersonalSearchEngine(
                 this,
                 report.sourceErrors
             )
+            appendDeviceCoverage(
+                this,
+                report.sourceCoverage
+            )
         }
     }
 
@@ -554,6 +695,8 @@ class AyanaPersonalSearchEngine(
                 "matches=${report.hits.size}; counts=$counts; " +
                 "history_scanned=${report.scannedHistoryRecords}; " +
                 "notifications_scanned=${report.scannedNotifications}; " +
+                "files_scanned=${report.scannedFiles}; photos_scanned=${report.scannedPhotos}; " +
+                "coverage=${report.sourceCoverage.entries.joinToString("|") { (source, detail) -> "${source.wireName}:${detail.substringBefore(';').take(80)}" }}; " +
                 "source_errors=${report.sourceErrors.keys.joinToString(",") { it.wireName }}"
             )
             .take(1200)
@@ -579,6 +722,52 @@ class AyanaPersonalSearchEngine(
                 }
         )
         builder.append(".")
+    }
+
+    private fun appendDeviceCoverage(
+        builder: StringBuilder,
+        coverage: Map<Source, String>
+    ) {
+        val deviceEntries =
+            listOf(
+                Source.FILES,
+                Source.PHOTOS
+            )
+                .mapNotNull { source ->
+                    coverage[source]
+                        ?.takeIf { it.isNotBlank() }
+                        ?.let { detail ->
+                            "${source.label}: ${compact(detail, 220)}"
+                        }
+                }
+
+        if (deviceEntries.isEmpty()) {
+            return
+        }
+
+        builder.append("\nПокрытие устройства: ")
+        builder.append(deviceEntries.joinToString("; "))
+        builder.append(".")
+    }
+
+    private fun formatBytes(
+        bytes: Long
+    ): String {
+        if (bytes <= 0L) {
+            return "0 Б"
+        }
+
+        val kb = bytes / 1024.0
+        if (kb < 1024.0) {
+            return String.format(Locale.ROOT, "%.0f КБ", kb)
+        }
+
+        val mb = kb / 1024.0
+        if (mb < 1024.0) {
+            return String.format(Locale.ROOT, "%.1f МБ", mb)
+        }
+
+        return String.format(Locale.ROOT, "%.2f ГБ", mb / 1024.0)
     }
 
     private fun lexicalScore(
@@ -733,7 +922,9 @@ class AyanaPersonalSearchEngine(
                 Source.MEMORY,
                 Source.HISTORY,
                 Source.TASKS,
-                Source.NOTIFICATIONS
+                Source.NOTIFICATIONS,
+                Source.FILES,
+                Source.PHOTOS
             )
 
         /**
@@ -817,11 +1008,50 @@ class AyanaPersonalSearchEngine(
                     "мои уведомления"
                 ).any(routingScopeText::contains)
 
+            val filesScoped =
+                listOf(
+                    "в файлах",
+                    "из файлов",
+                    "по файлам",
+                    "и файлах",
+                    "мои файлы",
+                    "файл на планшете",
+                    "файлы на планшете",
+                    "документ на планшете",
+                    "документы на планшете",
+                    "в документах",
+                    "из документов",
+                    "по документам",
+                    "в загрузках",
+                    "из загрузок",
+                    "в downloads"
+                ).any(routingScopeText::contains)
+
+            val photosScoped =
+                listOf(
+                    "в фото",
+                    "из фото",
+                    "по фото",
+                    "и фото",
+                    "мои фото",
+                    "фото на планшете",
+                    "фотографии на планшете",
+                    "в фотографиях",
+                    "из фотографий",
+                    "по фотографиям",
+                    "среди фотографий",
+                    "среди фото",
+                    "в галерее",
+                    "из галереи"
+                ).any(routingScopeText::contains)
+
             val hasExplicitSource =
                 memoryScoped ||
                     historyScoped ||
                     tasksScoped ||
-                    notificationsScoped
+                    notificationsScoped ||
+                    filesScoped ||
+                    photosScoped
 
             val broadPersonalSearch =
                 listOf(
@@ -868,6 +1098,12 @@ class AyanaPersonalSearchEngine(
             }
             if (notificationsScoped) {
                 sources += Source.NOTIFICATIONS
+            }
+            if (filesScoped) {
+                sources += Source.FILES
+            }
+            if (photosScoped) {
+                sources += Source.PHOTOS
             }
 
             if (sources.isEmpty()) {
@@ -1030,6 +1266,31 @@ class AyanaPersonalSearchEngine(
                     "в уведомлениях",
                     "из уведомлений",
                     "мои уведомления",
+                    "в файлах",
+                    "из файлов",
+                    "по файлам",
+                    "мои файлы",
+                    "файл на планшете",
+                    "файлы на планшете",
+                    "документ на планшете",
+                    "документы на планшете",
+                    "в документах",
+                    "из документов",
+                    "в загрузках",
+                    "в downloads",
+                    "в фотографиях",
+                    "из фотографий",
+                    "по фотографиям",
+                    "среди фотографий",
+                    "в галерее",
+                    "из галереи",
+                    "в фото",
+                    "из фото",
+                    "по фото",
+                    "мои фото",
+                    "фото на планшете",
+                    "фотографии на планшете",
+                    "среди фото",
                     "у меня",
                     "все что есть",
                     "все"
