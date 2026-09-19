@@ -551,6 +551,12 @@ class AyanaVoiceService : Service() {
         )
     }
 
+    private val imageContentIndexEngine by lazy {
+        AyanaImageContentIndexEngine(
+            applicationContext
+        )
+    }
+
     private val searchResultStore by lazy {
         AyanaSearchResultStore(
             applicationContext
@@ -564,7 +570,8 @@ class AyanaVoiceService : Service() {
             taskStore = taskStore,
             historyStore = commandHistoryStore,
             deviceContentSearchEngine = deviceContentSearchEngine,
-            documentContentIndexEngine = documentContentIndexEngine
+            documentContentIndexEngine = documentContentIndexEngine,
+            imageContentIndexEngine = imageContentIndexEngine
         )
     }
 
@@ -12288,9 +12295,9 @@ respondAndResume(
             executor = "personal_search_engine"
         )
 
-        // R8.3A DEVICE CONTENT SEARCH PERFORMANCE/TRUTH.
-        // MediaStore and first-run document extraction may touch hundreds of rows/files.
-        // Never query/index them from the main looper.
+        // R8.3C DEVICE CONTENT SEARCH PERFORMANCE/TRUTH.
+        // MediaStore, first-run document extraction and bounded local image ML indexing
+        // may touch many rows/files. Never execute these operations on the main looper.
         // Keep the local search bounded in its own execution thread and publish the final
         // state on mainHandler only if this command is still current.
         val commandToken =
