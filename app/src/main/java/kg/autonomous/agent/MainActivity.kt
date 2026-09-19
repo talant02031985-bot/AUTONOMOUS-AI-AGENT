@@ -56,7 +56,7 @@ import kotlin.concurrent.thread
 
 class MainActivity : AppCompatActivity() {
 
-    // UI generation: v7.10 MULTI-ATTACHMENT INTAKE + v7.8 UI SCROLL PERFORMANCE + v7.5 NOTIFICATION ACCESS TRUTH
+    // UI generation: v7.10.1 COMPACT TEXT RESPONSE + v7.10 MULTI-ATTACHMENT INTAKE + v7.8 UI SCROLL PERFORMANCE + v7.5 NOTIFICATION ACCESS TRUTH
     // + OWN-APP SEMANTIC ACTION TRUTH.
     // v7.4 keeps v7.2 foreground ownership truth and hardens the in-process
     // semantic bridge so the same factual View tree used for perception also
@@ -6196,7 +6196,7 @@ class MainActivity : AppCompatActivity() {
             answerScroll,
             LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT,
-                dp(190)
+                dp(44)
             ).apply {
                 topMargin =
                     dp(8)
@@ -6377,9 +6377,10 @@ class MainActivity : AppCompatActivity() {
                     "AYANA думает…"
                 }
 
-            answerScroll.post {
-                answerScroll.scrollTo(0, 0)
-            }
+            updateTextAnswerViewport(
+                text = textAnswer.text?.toString().orEmpty(),
+                forceCompact = true
+            )
 
             hideKeyboard()
 
@@ -6572,7 +6573,85 @@ class MainActivity : AppCompatActivity() {
         textAnswer.text =
             text
 
+        updateTextAnswerViewport(
+            text = text,
+            forceCompact = false
+        )
+    }
+
+    /**
+     * v7.10.1 — compact response viewport.
+     * Short states/results stay compact; long answers remain fully available inside
+     * the existing internal ScrollView and are capped at 190dp. This restores the
+     * pre-v7.9 compact behavior without losing long-response scrolling.
+     */
+    private fun updateTextAnswerViewport(
+        text: String,
+        forceCompact: Boolean
+    ) {
+        if (
+            !::answerScroll.isInitialized ||
+            !::textAnswer.isInitialized
+        ) {
+            return
+        }
+
+        val compactHeight =
+            dp(44)
+        val maxHeight =
+            dp(190)
+
+        val normalized =
+            text.trim()
+
+        val provisionalHeight =
+            when {
+                forceCompact -> compactHeight
+
+                normalized.length <= 120 &&
+                    normalized.count { it == '\n' } <= 1 ->
+                    dp(52)
+
+                normalized.length <= 320 &&
+                    normalized.count { it == '\n' } <= 4 ->
+                    dp(92)
+
+                else -> dp(132)
+            }.coerceAtMost(maxHeight)
+
+        val params =
+            answerScroll.layoutParams as? LinearLayout.LayoutParams
+                ?: return
+
+        if (params.height != provisionalHeight) {
+            params.height = provisionalHeight
+            answerScroll.layoutParams = params
+        }
+
         answerScroll.post {
+            val lines =
+                textAnswer.lineCount.coerceAtLeast(1)
+
+            val contentHeight =
+                (lines * textAnswer.lineHeight + dp(20))
+                    .coerceAtLeast(compactHeight)
+
+            val targetHeight =
+                if (forceCompact) {
+                    compactHeight
+                } else {
+                    contentHeight.coerceAtMost(maxHeight)
+                }
+
+            val current =
+                answerScroll.layoutParams as? LinearLayout.LayoutParams
+                    ?: return@post
+
+            if (current.height != targetHeight) {
+                current.height = targetHeight
+                answerScroll.layoutParams = current
+            }
+
             answerScroll.scrollTo(0, 0)
         }
     }
