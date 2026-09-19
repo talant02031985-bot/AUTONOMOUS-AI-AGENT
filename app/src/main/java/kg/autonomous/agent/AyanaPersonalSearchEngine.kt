@@ -8,7 +8,7 @@ import java.util.Date
 import java.util.Locale
 
 /**
- * AYANA Personal Search Engine v1.0 — LOCAL GLOBAL SEARCH.
+ * AYANA Personal Search Engine v1.0.1 — LOCAL GLOBAL SEARCH + HISTORY SELF-ECHO GUARD.
  *
  * Scope v1:
  * - Memory v2;
@@ -189,6 +189,17 @@ class AyanaPersonalSearchEngine(
                     record.optString("command")
                         .replace(Regex("\\s+"), " ")
                         .trim()
+
+                // v1.0.1 history self-echo guard:
+                // Personal Search commands are observations ABOUT the user's data, not
+                // source facts themselves. If we index them, the first search creates a
+                // History row that the next identical search finds, producing recursive
+                // self-pollution such as «найди всё про YouTube» finding only the previous
+                // Personal Search request/result. Exclude those rows from search hits while
+                // leaving ordinary historical commands untouched.
+                if (isPersonalSearchHistoryRecord(record, command)) {
+                    return@forEachIndexed
+                }
 
                 val storedResult =
                     record.optString("result")
@@ -683,6 +694,25 @@ class AyanaPersonalSearchEngine(
             }
         }
         return 0L
+    }
+
+    private fun isPersonalSearchHistoryRecord(
+        record: JSONObject,
+        command: String
+    ): Boolean {
+        val technical =
+            record.optString("technical")
+                .lowercase(Locale.ROOT)
+
+        if (technical.contains("personal_search_local")) {
+            return true
+        }
+
+        if (command.isBlank()) {
+            return false
+        }
+
+        return parseRequest(command) != null
     }
 
     companion object {
