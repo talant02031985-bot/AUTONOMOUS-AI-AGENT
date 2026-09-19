@@ -62,6 +62,11 @@ class AyanaVoiceService : Service() {
 
     // MULTI-ATTACHMENT EXTENSION: bounded batch manifests are accepted through the
     // existing multimodal lane without changing the v12.21.0 / R7.9 release-metadata lineage.
+    // AYANA R8.1 PERSONAL GLOBAL SEARCH v1 on v12.21.0 truth-hardening lineage.
+    // Adds a strictly local Personal Search lane across Memory, Command History,
+    // Tasks/Reminders and NotificationListener data. Explicit personal-search grammar
+    // is claimed before generic Structured Local / Agent Core routing; web/app/map
+    // search phrases remain untouched. Files/photos are intentionally not claimed by v1.
     // AYANA v12.21.0 R7.9 COMPLETION + CAPABILITY TRUTH HARDENING.
     // Extends the stable v12.20.0 base with semantic artifact-content validation,
     // previous-response artifact payload retention, persisted runtime capability evidence,
@@ -519,6 +524,15 @@ class AyanaVoiceService : Service() {
     private val taskStore by lazy {
         AyanaTaskStore(
             applicationContext
+        )
+    }
+
+    private val personalSearchEngine by lazy {
+        AyanaPersonalSearchEngine(
+            context = applicationContext,
+            memoryStore = memoryStore,
+            taskStore = taskStore,
+            historyStore = commandHistoryStore
         )
     }
 
@@ -3836,6 +3850,22 @@ mainHandler.post {
             ?.let { request ->
                 runLocalExactMediaVolumeCommand(
                     request = request,
+                    silent = silent
+                )
+                return
+            }
+
+        // R8.1 PERSONAL GLOBAL SEARCH — LOCAL-FIRST, NO CLOUD TURN.
+        // Claim only explicit personal/local-search grammar. Google/Internet/YouTube/Map/App
+        // search stays outside this engine by parser contract. Search v1 covers Memory,
+        // Command History, Tasks/Reminders and NotificationListener records only.
+        AyanaPersonalSearchEngine
+            .parseRequest(
+                originalCommand
+            )
+            ?.let { personalSearchRequest ->
+                runLocalPersonalGlobalSearch(
+                    request = personalSearchRequest,
                     silent = silent
                 )
                 return
@@ -11937,6 +11967,58 @@ respondAndResume(
     }
 
 
+    private fun runLocalPersonalGlobalSearch(
+        request: AyanaPersonalSearchEngine.Request,
+        silent: Boolean
+    ) {
+        executionPhase(
+            phase = "local_personal_global_search",
+            executor = "personal_search_engine"
+        )
+
+        val report =
+            try {
+                personalSearchEngine.search(
+                    request = request
+                )
+            } catch (error: Exception) {
+                respondAndResume(
+                    "Личный поиск AYANA не удалось выполнить: ${error.message ?: "ошибка локального поиска"}.",
+                    silent,
+                    success = false,
+                    technical =
+                        "personal_search_exception=${error.javaClass.simpleName}"
+                )
+                return
+            }
+
+        val result =
+            personalSearchEngine
+                .renderRussian(
+                    report
+                )
+
+        val technical =
+            personalSearchEngine
+                .technicalSummary(
+                    report
+                )
+
+        commandHistoryStore.addEvent(
+            activeCommandHistoryId,
+            state = "personal_global_search",
+            message = "Личный поиск выполнен локально по доступным источникам AYANA",
+            details = technical
+        )
+
+        finishLocalCommand(
+            result,
+            silent,
+            technical = technical
+        )
+    }
+
+
     private fun runStructuredLocalCommand(
         intent: AyanaStructuredLocalCommandRouter.Intent,
         silent: Boolean
@@ -20035,6 +20117,58 @@ plan.optInt(
                 "проверь заряд батареи и свободное место; если хотя бы один показатель требует внимания, скажи какой именно, иначе скажи что всё нормально"
             )
 
+        val personalSearchBroad =
+            AyanaPersonalSearchEngine
+                .parseRequest(
+                    "найди всё про YouTube"
+                )
+
+        val personalSearchScoped =
+            AyanaPersonalSearchEngine
+                .parseRequest(
+                    "поищи в памяти и истории про кредит"
+                )
+
+        val externalGoogleSearchRejected =
+            AyanaPersonalSearchEngine
+                .parseRequest(
+                    "найди в Google новости AYANA"
+                ) == null
+
+        val existingNotificationReadRejected =
+            AyanaPersonalSearchEngine
+                .parseRequest(
+                    "покажи последние уведомления"
+                ) == null
+
+        val existingReminderListRejected =
+            AyanaPersonalSearchEngine
+                .parseRequest(
+                    "покажи мои задачи"
+                ) == null
+
+        val personalSearchRoutingOk =
+            personalSearchBroad != null &&
+                personalSearchBroad.query.equals(
+                    "YouTube",
+                    ignoreCase = true
+                ) &&
+                personalSearchBroad.sources.size ==
+                    AyanaPersonalSearchEngine.Source.values().size &&
+                personalSearchScoped != null &&
+                personalSearchScoped.query.equals(
+                    "кредит",
+                    ignoreCase = true
+                ) &&
+                personalSearchScoped.sources ==
+                    setOf(
+                        AyanaPersonalSearchEngine.Source.MEMORY,
+                        AyanaPersonalSearchEngine.Source.HISTORY
+                    ) &&
+                externalGoogleSearchRejected &&
+                existingNotificationReadRejected &&
+                existingReminderListRejected
+
         val lifecycleOk =
             lifecycle != null &&
                 lifecycle.first.contains("камера") &&
@@ -20076,6 +20210,7 @@ plan.optInt(
                 artifact &&
                 artifactSemanticContentOk &&
                 artifactFollowUpContractOk &&
+                personalSearchRoutingOk &&
                 artifactMetricsSuppressed &&
                 mixedSideEffectMetricsSuppressed &&
                 pureMetricGoalTerminalLocal &&
@@ -20091,9 +20226,9 @@ plan.optInt(
                 },
             message =
                 if (ok) {
-                    "Whole-goal routing guard распознал lifecycle verification, App Detail final target, clipboard local route, semantic-object lifecycle guard, fail-closed refusal truth, artifact semantic-content gate + follow-up payload contract, pure multi-metric fast path, verified-facts reasoning handoff и artifact deliverable без greedy interception."
+                    "Whole-goal routing guard распознал lifecycle verification, App Detail final target, clipboard local route, Personal Global Search local route, semantic-object lifecycle guard, fail-closed refusal truth, artifact semantic-content gate + follow-up payload contract, pure multi-metric fast path, verified-facts reasoning handoff и artifact deliverable без greedy interception."
                 } else {
-                    "Whole-goal routing regression: lifecycle=$lifecycleOk, app_detail=$appDetailOk, metrics=$metricsOk, volume_target=$volumeTargetOk, unsupported_terminal=$unsupportedTerminalOk, clipboard_route=$clipboardRoutingOk, lifecycle_semantic_guard=$lifecycleSemanticObjectRejected, refusal_fail_closed=$refusalFailClosed, artifact=$artifact, artifact_semantic_content=$artifactSemanticContentOk, artifact_follow_up=$artifactFollowUpContractOk, artifact_metric_guard=$artifactMetricsSuppressed, mixed_metric_guard=$mixedSideEffectMetricsSuppressed, pure_metric_local=$pureMetricGoalTerminalLocal, analytical_handoff=$analyticalMetricGoalRequiresHandoff, conditional_handoff=$conditionalMetricGoalRequiresHandoff."
+                    "Whole-goal routing regression: lifecycle=$lifecycleOk, app_detail=$appDetailOk, metrics=$metricsOk, volume_target=$volumeTargetOk, unsupported_terminal=$unsupportedTerminalOk, clipboard_route=$clipboardRoutingOk, lifecycle_semantic_guard=$lifecycleSemanticObjectRejected, refusal_fail_closed=$refusalFailClosed, artifact=$artifact, artifact_semantic_content=$artifactSemanticContentOk, artifact_follow_up=$artifactFollowUpContractOk, personal_search_route=$personalSearchRoutingOk, artifact_metric_guard=$artifactMetricsSuppressed, mixed_metric_guard=$mixedSideEffectMetricsSuppressed, pure_metric_local=$pureMetricGoalTerminalLocal, analytical_handoff=$analyticalMetricGoalRequiresHandoff, conditional_handoff=$conditionalMetricGoalRequiresHandoff."
                 },
             evidenceScope = "live_pure_contract",
             verified = ok,
@@ -20110,6 +20245,10 @@ plan.optInt(
                     .put("artifact_ok", artifact)
                     .put("artifact_semantic_content_ok", artifactSemanticContentOk)
                     .put("artifact_follow_up_contract_ok", artifactFollowUpContractOk)
+                    .put("personal_search_routing_ok", personalSearchRoutingOk)
+                    .put("personal_search_google_guard_ok", externalGoogleSearchRejected)
+                    .put("personal_search_notification_route_guard_ok", existingNotificationReadRejected)
+                    .put("personal_search_task_route_guard_ok", existingReminderListRejected)
                     .put("artifact_metric_guard", artifactMetricsSuppressed)
                     .put("mixed_metric_guard", mixedSideEffectMetricsSuppressed)
                     .put("pure_metric_goal_terminal_local", pureMetricGoalTerminalLocal)
@@ -24002,12 +24141,14 @@ val activeNetwork =
 
     private fun finishLocalCommand(
         text: String,
-        silent: Boolean
+        silent: Boolean,
+        technical: String = ""
     ) {
 
         finishActiveCommandHistory(
             success = true,
-            result = text
+            result = text,
+            technical = technical
         )
 
         broadcastStatus(
