@@ -52,4 +52,10 @@ dependencies {
     implementation("com.google.android.material:material:1.12.0")
     implementation("androidx.activity:activity-ktx:1.10.0")
     implementation("androidx.lifecycle:lifecycle-runtime-ktx:2.8.7")
+
+    // R8.3C LOCAL IMAGE CONTENT INDEX.
+    // Bundled models keep OCR + generic image labeling on-device and avoid
+    // first-run model downloads / network dependence during personal search.
+    implementation("com.google.mlkit:text-recognition:16.0.1")
+    implementation("com.google.mlkit:image-labeling:17.0.9")
 }
