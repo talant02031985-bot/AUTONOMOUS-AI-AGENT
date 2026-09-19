@@ -56,7 +56,7 @@ import kotlin.concurrent.thread
 
 class MainActivity : AppCompatActivity() {
 
-    // UI generation: v7.10.1 COMPACT TEXT RESPONSE + v7.10 MULTI-ATTACHMENT INTAKE + v7.8 UI SCROLL PERFORMANCE + v7.5 NOTIFICATION ACCESS TRUTH
+    // UI generation: v7.10.2 MEDIA SEARCH PERMISSION TRUTH + v7.10.1 COMPACT TEXT RESPONSE + v7.10 MULTI-ATTACHMENT INTAKE + v7.8 UI SCROLL PERFORMANCE + v7.5 NOTIFICATION ACCESS TRUTH
     // + OWN-APP SEMANTIC ACTION TRUTH.
     // v7.4 keeps v7.2 foreground ownership truth and hardens the in-process
     // semantic bridge so the same factual View tree used for perception also
@@ -6703,6 +6703,51 @@ class MainActivity : AppCompatActivity() {
             permissions.add(
                 Manifest.permission.POST_NOTIFICATIONS
             )
+        }
+
+        // R8.2 Personal Global Search: request photo-library visibility once as part
+        // of AYANA's existing permission bootstrap. Denial never blocks voice startup.
+        // On Android 14+ a user may grant only selected photos; the search engine checks
+        // the live permission state and reports PARTIAL coverage instead of claiming the
+        // whole gallery. File metadata search does not request broad all-files access.
+        if (Build.VERSION.SDK_INT >= 34) {
+            val fullPhotoAccess =
+                checkSelfPermissionCompat(
+                    Manifest.permission.READ_MEDIA_IMAGES
+                )
+            val partialPhotoAccess =
+                checkSelfPermissionCompat(
+                    Manifest.permission.READ_MEDIA_VISUAL_USER_SELECTED
+                )
+
+            if (!fullPhotoAccess && !partialPhotoAccess) {
+                permissions.add(
+                    Manifest.permission.READ_MEDIA_IMAGES
+                )
+                permissions.add(
+                    Manifest.permission.READ_MEDIA_VISUAL_USER_SELECTED
+                )
+            }
+        } else if (Build.VERSION.SDK_INT >= 33) {
+            if (
+                !checkSelfPermissionCompat(
+                    Manifest.permission.READ_MEDIA_IMAGES
+                )
+            ) {
+                permissions.add(
+                    Manifest.permission.READ_MEDIA_IMAGES
+                )
+            }
+        } else if (Build.VERSION.SDK_INT >= 23) {
+            if (
+                !checkSelfPermissionCompat(
+                    Manifest.permission.READ_EXTERNAL_STORAGE
+                )
+            ) {
+                permissions.add(
+                    Manifest.permission.READ_EXTERNAL_STORAGE
+                )
+            }
         }
 
         if (
