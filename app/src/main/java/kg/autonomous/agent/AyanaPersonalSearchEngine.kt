@@ -8,7 +8,7 @@ import java.util.Date
 import java.util.Locale
 
 /**
- * AYANA Personal Search Engine v1.2 — LOCAL GLOBAL SEARCH + DOCUMENT CONTENT INDEX.
+ * AYANA Personal Search Engine v1.3 — LOCAL GLOBAL SEARCH + DOCUMENT CONTENT INDEX + OPENABLE RESULTS.
  *
  * Scope v1.2:
  * - Memory v2;
@@ -24,7 +24,9 @@ import java.util.Locale
  * - a source that cannot be read is reported as unavailable, never silently treated as empty;
  * - photo search remains metadata-only: filename/path/MIME/date/size;
  * - file search combines metadata with the local incremental document-content index;
- * - scoped-storage / selected-photo access is reported honestly and is never described as full-device coverage.
+ * - scoped-storage / selected-photo access is reported honestly and is never described as full-device coverage;
+ * - openable file/photo results persist only as bounded local content:// action records;
+ * - raw content:// URIs are never rendered in the user-facing answer.
  */
 class AyanaPersonalSearchEngine(
     context: Context,
@@ -58,7 +60,10 @@ class AyanaPersonalSearchEngine(
         val snippet: String,
         val timestampMs: Long,
         val score: Int,
-        val metadata: String = ""
+        val metadata: String = "",
+        val actionUri: String = "",
+        val actionMimeType: String = "",
+        val actionKind: String = ""
     )
 
     data class Report(
@@ -83,6 +88,11 @@ class AyanaPersonalSearchEngine(
 
     private val appContext =
         context.applicationContext
+
+    private val searchResultStore =
+        AyanaSearchResultStore(
+            appContext
+        )
 
     fun search(
         request: Request,
@@ -531,10 +541,10 @@ class AyanaPersonalSearchEngine(
             sourceCoverage[Source.FILES] =
                 (
                     "scope=${metadataResult.scope.wireName}; " +
-                        "${metadataCoverageDetail.take(260)} " +
-                        "content_index=${contentResult.detail.take(420)}"
+                        "${metadataCoverageDetail.take(250)} " +
+                        "Индекс содержимого документов: локальный, инкрементальный; PDF — best-effort."
                     )
-                    .take(760)
+                    .take(620)
 
             val combined =
                 linkedMapOf<String, Hit>()
@@ -589,7 +599,10 @@ class AyanaPersonalSearchEngine(
                                     140 +
                                     recencyBonus(index),
                             metadata =
-                                "content_match=true; uri=${item.uri.take(180)}; extractor=${item.extractor.take(80)}"
+                                "content_match=true; uri_present=${item.uri.isNotBlank()}; extractor=${item.extractor.take(80)}",
+                            actionUri = item.uri,
+                            actionMimeType = item.mimeType,
+                            actionKind = "file"
                         )
 
                     combined[
@@ -636,7 +649,10 @@ class AyanaPersonalSearchEngine(
                                 item.score +
                                     recencyBonus(index),
                             metadata =
-                                "content_match=false; uri=${item.uri.take(180)}; ${item.metadata.take(180)}"
+                                "content_match=false; uri_present=${item.uri.isNotBlank()}; ${item.metadata.take(180)}",
+                            actionUri = item.uri,
+                            actionMimeType = item.mimeType,
+                            actionKind = "file"
                         )
 
                     val key =
@@ -706,7 +722,10 @@ class AyanaPersonalSearchEngine(
                             item.score +
                                 recencyBonus(index),
                         metadata =
-                            "uri=${item.uri.take(180)}; ${item.metadata.take(180)}"
+                            "uri_present=${item.uri.isNotBlank()}; ${item.metadata.take(180)}",
+                        actionUri = item.uri,
+                        actionMimeType = item.mimeType,
+                        actionKind = "photo"
                     )
                 }
         }
@@ -723,6 +742,25 @@ class AyanaPersonalSearchEngine(
                     }
                 )
                 .take(safeTotalLimit)
+
+        searchResultStore.replace(
+            ranked.mapIndexedNotNull { index, hit ->
+                val uri = hit.actionUri.trim()
+                if (!uri.startsWith("content://")) {
+                    null
+                } else {
+                    AyanaSearchResultStore.Item(
+                        resultNumber = index + 1,
+                        source = hit.source.wireName,
+                        title = hit.title,
+                        uri = uri,
+                        mimeType = hit.actionMimeType,
+                        kind = hit.actionKind,
+                        savedAtMs = System.currentTimeMillis()
+                    )
+                }
+            }
+        )
 
         return Report(
             request = request,
@@ -805,6 +843,11 @@ class AyanaPersonalSearchEngine(
                     append("\n   ")
                     append(hit.snippet)
                 }
+
+                if (hit.actionUri.startsWith("content://")) {
+                    append("\n   Открыть результат ")
+                    append(index + 1)
+                }
             }
 
             appendSourceErrors(
@@ -832,6 +875,7 @@ class AyanaPersonalSearchEngine(
             "personal_search_local; query=${report.request.query.take(140)}; " +
                 "sources=${report.request.sources.joinToString(",") { it.wireName }}; " +
                 "matches=${report.hits.size}; counts=$counts; " +
+                "openable_results=${report.hits.count { it.actionUri.startsWith("content://") }}; " +
                 "history_scanned=${report.scannedHistoryRecords}; " +
                 "notifications_scanned=${report.scannedNotifications}; " +
                 "files_scanned=${report.scannedFiles}; photos_scanned=${report.scannedPhotos}; " +
