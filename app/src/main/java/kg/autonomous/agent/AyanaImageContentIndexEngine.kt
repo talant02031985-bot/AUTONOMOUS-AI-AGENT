@@ -639,10 +639,6 @@ class AyanaImageContentIndexEngine(
             return 0
         }
 
-        if (haystack.contains(query)) {
-            return 170 + query.length.coerceAtMost(80)
-        }
-
         val tokens =
             query.split(" ")
                 .filter { it.length >= 2 }
@@ -652,9 +648,21 @@ class AyanaImageContentIndexEngine(
             return 0
         }
 
+        if (tokens.size > 1 && haystack.contains(query)) {
+            return 170 + query.length.coerceAtMost(80)
+        }
+
+        val haystackTokens =
+            lexicalTokens(
+                haystack
+            )
+
         val matched =
             tokens.count { token ->
-                haystack.contains(token)
+                tokenMatchesLexically(
+                    queryToken = token,
+                    haystackTokens = haystackTokens
+                )
             }
 
         if (matched == 0) {
@@ -680,11 +688,19 @@ class AyanaImageContentIndexEngine(
             return 0
         }
 
+        val normalizedLabelTokens =
+            lexicalTokens(
+                normalizedLabels
+            )
+
         val matchedTokens =
             expandedQueryTokens
                 .filter { token ->
                     token.length >= 2 &&
-                        normalizedLabels.contains(token)
+                        tokenMatchesLexically(
+                            queryToken = token,
+                            haystackTokens = normalizedLabelTokens
+                        )
                 }
 
         if (matchedTokens.isEmpty()) {
@@ -694,9 +710,15 @@ class AyanaImageContentIndexEngine(
         val maxConfidence =
             labels
                 .filter { (label, _) ->
-                    val normalizedLabel = normalize(label)
+                    val labelTokens =
+                        lexicalTokens(
+                            normalize(label)
+                        )
                     matchedTokens.any { token ->
-                        normalizedLabel.contains(token)
+                        tokenMatchesLexically(
+                            queryToken = token,
+                            haystackTokens = labelTokens
+                        )
                     }
                 }
                 .maxOfOrNull { it.second }
@@ -705,6 +727,52 @@ class AyanaImageContentIndexEngine(
         return 90 +
             (matchedTokens.size.coerceAtMost(4) * 25) +
             (maxConfidence * 60f).toInt()
+    }
+
+    private fun lexicalTokens(
+        value: String
+    ): Set<String> =
+        Regex("[a-zа-я0-9]+")
+            .findAll(
+                normalize(value)
+            )
+            .map { match ->
+                match.value
+            }
+            .filter { token ->
+                token.isNotBlank()
+            }
+            .toSet()
+
+    private fun tokenMatchesLexically(
+        queryToken: String,
+        haystackTokens: Set<String>
+    ): Boolean {
+        if (queryToken.isBlank() || haystackTokens.isEmpty()) {
+            return false
+        }
+
+        if (queryToken.length <= 2) {
+            // Short tokens such as "AI" must be real OCR/label words.
+            // Substring matching here caused false hits such as "MainActivity" -> "ai".
+            return queryToken in haystackTokens
+        }
+
+        if (queryToken in haystackTokens) {
+            return true
+        }
+
+        if (queryToken.length < 4) {
+            return false
+        }
+
+        return haystackTokens.any { candidate ->
+            candidate.length >= 4 &&
+                (
+                    candidate.startsWith(queryToken) ||
+                        queryToken.startsWith(candidate)
+                    )
+        }
     }
 
     private fun expandedQueryTokens(
