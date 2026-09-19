@@ -8,9 +8,9 @@ import java.util.Date
 import java.util.Locale
 
 /**
- * AYANA Personal Search Engine v1.1 — LOCAL GLOBAL SEARCH + DEVICE CONTENT METADATA.
+ * AYANA Personal Search Engine v1.2 — LOCAL GLOBAL SEARCH + DOCUMENT CONTENT INDEX.
  *
- * Scope v1.1:
+ * Scope v1.2:
  * - Memory v2;
  * - Command History;
  * - Tasks / reminders;
@@ -30,7 +30,8 @@ class AyanaPersonalSearchEngine(
     private val memoryStore: AyanaMemoryStore,
     private val taskStore: AyanaTaskStore,
     private val historyStore: AyanaCommandHistoryStore,
-    private val deviceContentSearchEngine: AyanaDeviceContentSearchEngine
+    private val deviceContentSearchEngine: AyanaDeviceContentSearchEngine,
+    private val documentContentIndexEngine: AyanaDocumentContentIndexEngine
 ) {
 
     enum class Source(
@@ -68,7 +69,15 @@ class AyanaPersonalSearchEngine(
         val scannedHistoryRecords: Int,
         val scannedNotifications: Int,
         val scannedFiles: Int,
-        val scannedPhotos: Int
+        val scannedPhotos: Int,
+        val contentProviderRowsScanned: Int,
+        val contentCandidateDocuments: Int,
+        val contentIndexedDocuments: Int,
+        val contentReusedDocuments: Int,
+        val contentUpdatedDocuments: Int,
+        val contentFailedDocuments: Int,
+        val contentUnsupportedDocuments: Int,
+        val contentPdfBestEffortDocuments: Int
     )
 
     private val appContext =
@@ -97,6 +106,14 @@ class AyanaPersonalSearchEngine(
         var scannedNotifications = 0
         var scannedFiles = 0
         var scannedPhotos = 0
+        var contentProviderRowsScanned = 0
+        var contentCandidateDocuments = 0
+        var contentIndexedDocuments = 0
+        var contentReusedDocuments = 0
+        var contentUpdatedDocuments = 0
+        var contentFailedDocuments = 0
+        var contentUnsupportedDocuments = 0
+        var contentPdfBestEffortDocuments = 0
 
         fun collect(
             source: Source,
@@ -465,25 +482,118 @@ class AyanaPersonalSearchEngine(
 
 
         collect(Source.FILES) {
-            val result =
+            val metadataResult =
                 deviceContentSearchEngine.searchFiles(
                     query = request.query,
                     limit = safePerSourceLimit
                 )
 
-            scannedFiles = result.scanned
-            sourceCoverage[Source.FILES] =
-                "scope=${result.scope.wireName}; ${result.detail.take(360)}"
+            scannedFiles = metadataResult.scanned
 
             if (
-                result.scope ==
+                metadataResult.scope ==
                 AyanaDeviceContentSearchEngine.AccessScope.NONE
             ) {
-                throw IllegalStateException(result.detail)
+                throw IllegalStateException(metadataResult.detail)
             }
 
-            result.hits
-                .mapIndexed { index, item ->
+            val contentResult =
+                documentContentIndexEngine.search(
+                    query = request.query,
+                    limit = safePerSourceLimit
+                )
+
+            contentProviderRowsScanned =
+                contentResult.providerRowsScanned
+            contentCandidateDocuments =
+                contentResult.candidateDocuments
+            contentIndexedDocuments =
+                contentResult.indexedDocuments
+            contentReusedDocuments =
+                contentResult.reusedDocuments
+            contentUpdatedDocuments =
+                contentResult.updatedDocuments
+            contentFailedDocuments =
+                contentResult.failedDocuments
+            contentUnsupportedDocuments =
+                contentResult.unsupportedDocuments
+            contentPdfBestEffortDocuments =
+                contentResult.pdfBestEffortDocuments
+
+            sourceCoverage[Source.FILES] =
+                (
+                    "scope=${metadataResult.scope.wireName}; " +
+                        "${metadataResult.detail.take(260)} " +
+                        "content_index=${contentResult.detail.take(420)}"
+                    )
+                    .take(760)
+
+            val combined =
+                linkedMapOf<String, Hit>()
+
+            contentResult.hits
+                .forEachIndexed { index, item ->
+                    val location =
+                        item.relativePath
+                            .trim()
+                            .ifBlank { "путь не указан" }
+
+                    val snippet =
+                        buildString {
+                            append("Совпадение в содержимом")
+                            if (item.snippet.isNotBlank()) {
+                                append(": ")
+                                append(item.snippet)
+                            }
+                            append(" • ")
+                            append(location)
+                            if (item.mimeType.isNotBlank()) {
+                                append(" • ")
+                                append(item.mimeType)
+                            }
+                            if (item.sizeBytes > 0L) {
+                                append(" • ")
+                                append(formatBytes(item.sizeBytes))
+                            }
+                            if (item.extractor.isNotBlank()) {
+                                append(" • extractor=")
+                                append(item.extractor)
+                            }
+                        }
+
+                    val hit =
+                        Hit(
+                            source = Source.FILES,
+                            title =
+                                compact(
+                                    item.displayName,
+                                    MAX_TITLE_CHARS
+                                )
+                                    .ifBlank { "Документ" },
+                            snippet =
+                                compact(
+                                    snippet,
+                                    MAX_SNIPPET_CHARS
+                                ),
+                            timestampMs = item.timestampMs,
+                            score =
+                                item.score +
+                                    140 +
+                                    recencyBonus(index),
+                            metadata =
+                                "content_match=true; uri=${item.uri.take(180)}; extractor=${item.extractor.take(80)}"
+                        )
+
+                    combined[
+                        contentDedupeKey(
+                            title = hit.title,
+                            timestampMs = hit.timestampMs
+                        )
+                    ] = hit
+                }
+
+            metadataResult.hits
+                .forEachIndexed { index, item ->
                     val location =
                         item.relativePath
                             .trim()
@@ -500,26 +610,39 @@ class AyanaPersonalSearchEngine(
                                 append(" • ")
                                 append(formatBytes(item.sizeBytes))
                             }
-                            append(" • поиск по метаданным")
+                            append(" • совпадение в метаданных")
                         }
 
-                    Hit(
-                        source = Source.FILES,
-                        title =
-                            compact(
-                                item.displayName,
-                                MAX_TITLE_CHARS
-                            )
-                                .ifBlank { "Файл" },
-                        snippet = compact(snippet, MAX_SNIPPET_CHARS),
-                        timestampMs = item.timestampMs,
-                        score =
-                            item.score +
-                                recencyBonus(index),
-                        metadata =
-                            "uri=${item.uri.take(180)}; ${item.metadata.take(180)}"
-                    )
+                    val hit =
+                        Hit(
+                            source = Source.FILES,
+                            title =
+                                compact(
+                                    item.displayName,
+                                    MAX_TITLE_CHARS
+                                )
+                                    .ifBlank { "Файл" },
+                            snippet = compact(snippet, MAX_SNIPPET_CHARS),
+                            timestampMs = item.timestampMs,
+                            score =
+                                item.score +
+                                    recencyBonus(index),
+                            metadata =
+                                "content_match=false; uri=${item.uri.take(180)}; ${item.metadata.take(180)}"
+                        )
+
+                    val key =
+                        contentDedupeKey(
+                            title = hit.title,
+                            timestampMs = hit.timestampMs
+                        )
+
+                    if (key !in combined) {
+                        combined[key] = hit
+                    }
                 }
+
+            combined.values.toList()
         }
 
         collect(Source.PHOTOS) {
@@ -602,7 +725,15 @@ class AyanaPersonalSearchEngine(
             scannedHistoryRecords = scannedHistoryRecords,
             scannedNotifications = scannedNotifications,
             scannedFiles = scannedFiles,
-            scannedPhotos = scannedPhotos
+            scannedPhotos = scannedPhotos,
+            contentProviderRowsScanned = contentProviderRowsScanned,
+            contentCandidateDocuments = contentCandidateDocuments,
+            contentIndexedDocuments = contentIndexedDocuments,
+            contentReusedDocuments = contentReusedDocuments,
+            contentUpdatedDocuments = contentUpdatedDocuments,
+            contentFailedDocuments = contentFailedDocuments,
+            contentUnsupportedDocuments = contentUnsupportedDocuments,
+            contentPdfBestEffortDocuments = contentPdfBestEffortDocuments
         )
     }
 
@@ -696,6 +827,14 @@ class AyanaPersonalSearchEngine(
                 "history_scanned=${report.scannedHistoryRecords}; " +
                 "notifications_scanned=${report.scannedNotifications}; " +
                 "files_scanned=${report.scannedFiles}; photos_scanned=${report.scannedPhotos}; " +
+                "content_provider_rows=${report.contentProviderRowsScanned}; " +
+                "content_candidates=${report.contentCandidateDocuments}; " +
+                "content_indexed=${report.contentIndexedDocuments}; " +
+                "content_reused=${report.contentReusedDocuments}; " +
+                "content_updated=${report.contentUpdatedDocuments}; " +
+                "content_failed=${report.contentFailedDocuments}; " +
+                "content_unsupported=${report.contentUnsupportedDocuments}; " +
+                "content_pdf_best_effort=${report.contentPdfBestEffortDocuments}; " +
                 "coverage=${report.sourceCoverage.entries.joinToString("|") { (source, detail) -> "${source.wireName}:${detail.substringBefore(';').take(80)}" }}; " +
                 "source_errors=${report.sourceErrors.keys.joinToString(",") { it.wireName }}"
             )
@@ -749,6 +888,14 @@ class AyanaPersonalSearchEngine(
         builder.append(deviceEntries.joinToString("; "))
         builder.append(".")
     }
+
+    private fun contentDedupeKey(
+        title: String,
+        timestampMs: Long
+    ): String =
+        normalizeForSearch(title) +
+            "|" +
+            timestampMs.toString()
 
     private fun formatBytes(
         bytes: Long
