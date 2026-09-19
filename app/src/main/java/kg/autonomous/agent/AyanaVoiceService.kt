@@ -557,6 +557,18 @@ class AyanaVoiceService : Service() {
         )
     }
 
+    // R8.3D: progressive local image indexing continues while AYANA is in its
+    // normal wake-idle state. The scheduler never owns Command History and the
+    // image engine remains the single persisted source of index truth.
+    private val backgroundImageIndexer by lazy {
+        AyanaBackgroundImageIndexer(
+            engine = imageContentIndexEngine,
+            canRun = {
+                canRunBackgroundImageIndexing()
+            }
+        )
+    }
+
     private val searchResultStore by lazy {
         AyanaSearchResultStore(
             applicationContext
@@ -573,6 +585,66 @@ class AyanaVoiceService : Service() {
             documentContentIndexEngine = documentContentIndexEngine,
             imageContentIndexEngine = imageContentIndexEngine
         )
+    }
+
+    private fun canRunBackgroundImageIndexing(): Boolean {
+        if (
+            shuttingDown ||
+            !isRunning ||
+            !modelReady ||
+            cancelRequested ||
+            activeCommandHistoryId != null ||
+            currentAgentThread != null ||
+            currentTtsConnection != null ||
+            listenMode != ListenMode.WAKE
+        ) {
+            return false
+        }
+
+        return isBackgroundImageIndexBatteryAllowed()
+    }
+
+    private fun isBackgroundImageIndexBatteryAllowed(): Boolean {
+        return try {
+            val batteryIntent =
+                registerReceiver(
+                    null,
+                    IntentFilter(Intent.ACTION_BATTERY_CHANGED)
+                )
+
+            val status =
+                batteryIntent?.getIntExtra(
+                    BatteryManager.EXTRA_STATUS,
+                    -1
+                ) ?: -1
+
+            val charging =
+                status == BatteryManager.BATTERY_STATUS_CHARGING ||
+                    status == BatteryManager.BATTERY_STATUS_FULL
+
+            val level =
+                batteryIntent?.getIntExtra(
+                    BatteryManager.EXTRA_LEVEL,
+                    -1
+                ) ?: -1
+
+            val scale =
+                batteryIntent?.getIntExtra(
+                    BatteryManager.EXTRA_SCALE,
+                    -1
+                ) ?: -1
+
+            val percent =
+                if (level >= 0 && scale > 0) {
+                    (level * 100 / scale).coerceIn(0, 100)
+                } else {
+                    -1
+                }
+
+            charging || percent < 0 || percent >= BACKGROUND_IMAGE_INDEX_MIN_BATTERY_PERCENT
+        } catch (_: Exception) {
+            true
+        }
     }
 
     private val taskScheduler by lazy {
@@ -1005,6 +1077,10 @@ class AyanaVoiceService : Service() {
                 }
             }
         }
+
+        // The worker waits until AYANA is fully active + wake-idle, so starting
+        // the scheduler here does not compete with model initialization.
+        backgroundImageIndexer.start()
     }
 
     override fun onStartCommand(
@@ -3908,12 +3984,25 @@ mainHandler.post {
                 return
             }
 
-        // R8.3B PERSONAL GLOBAL SEARCH v1.3 — LOCAL-FIRST, DOCUMENT CONTENT INDEX + OPENABLE RESULTS.
+        // R8.3D BACKGROUND IMAGE INDEX STATUS.
+        // A read-only progress request must not be mistaken for a photo search.
+        if (
+            isImageIndexProgressCommand(
+                routingNormalized
+            )
+        ) {
+            runLocalImageIndexProgress(
+                silent = silent
+            )
+            return
+        }
+
+        // R8.3D PERSONAL GLOBAL SEARCH — LOCAL-FIRST, DOCUMENT + IMAGE CONTENT INDEX + OPENABLE RESULTS.
         // Claim only explicit personal/local-search grammar. Google/Internet/YouTube/Map/App
-        // search stays outside this engine by parser contract. Search v1.2 covers Memory,
+        // search stays outside this engine by parser contract. Current search covers Memory,
         // Command History, Tasks/Reminders, NotificationListener records, Android-visible
-        // file/photo metadata, plus a local incremental document-content index. Image pixels
-        // remain metadata-only in R8.3A; no cloud turn is used for document indexing/search.
+        // file/photo metadata, local document content and progressive local OCR/image labels.
+        // Background indexing uses the same local persisted visual index; no cloud turn is used.
         AyanaPersonalSearchEngine
             .parseRequest(
                 originalCommand
@@ -12286,6 +12375,170 @@ respondAndResume(
         worker.start()
     }
 
+    private fun isImageIndexProgressCommand(
+        value: String
+    ): Boolean {
+        val normalized =
+            value
+                .lowercase(Locale.ROOT)
+                .replace('ё', 'е')
+                .replace(Regex("\\s+"), " ")
+                .trim()
+
+        if (
+            !normalized.contains("индекс") ||
+            !(normalized.contains("фото") || normalized.contains("изображен"))
+        ) {
+            return false
+        }
+
+        return listOf(
+            "прогресс",
+            "статус",
+            "сколько",
+            "покажи",
+            "проверь",
+            "состояние"
+        ).any(normalized::contains)
+    }
+
+    private fun runLocalImageIndexProgress(
+        silent: Boolean
+    ) {
+        executionPhase(
+            phase = "local_image_index_status",
+            executor = "background_image_indexer"
+        )
+
+        val commandToken =
+            activeCommandToken
+
+        val worker =
+            thread(
+                start = false,
+                name = "AyanaImageIndexStatus"
+            ) {
+                try {
+                    val snapshot =
+                    try {
+                        imageContentIndexEngine.statusSnapshot()
+                    } catch (error: Exception) {
+                        mainHandler.post {
+                            if (
+                                !isCommandCancelled(commandToken) &&
+                                commandToken == activeCommandToken
+                            ) {
+                                respondAndResume(
+                                    text = "Не удалось прочитать состояние локального индекса фото.",
+                                    silent = silent,
+                                    success = false,
+                                    technical =
+                                        "image_index_status_exception=${error.javaClass.simpleName}"
+                                )
+                            }
+                        }
+                        return@thread
+                    }
+
+                val runtime =
+                    backgroundImageIndexer.runtimeStatus()
+
+                val scheduleText =
+                    when (runtime.state) {
+                        AyanaBackgroundImageIndexer.STATE_INDEXING -> "индексирует сейчас"
+                        AyanaBackgroundImageIndexer.STATE_WAITING -> "активна, ожидает следующий пакет"
+                        AyanaBackgroundImageIndexer.STATE_PAUSED ->
+                            if (!isBackgroundImageIndexBatteryAllowed()) {
+                                "приостановлена из-за низкого заряда"
+                            } else {
+                                "приостановлена на время активной работы AYANA"
+                            }
+                        AyanaBackgroundImageIndexer.STATE_COMPLETE -> "индекс актуален; отслеживаются новые фото"
+                        AyanaBackgroundImageIndexer.STATE_ERROR -> "временная ошибка; будет повтор"
+                        AyanaBackgroundImageIndexer.STATE_STOPPING -> "останавливается"
+                        else -> "остановлена"
+                    }
+
+                val resultText =
+                    buildString {
+                        append("Индекс содержимого фото: ")
+                        append(snapshot.indexedImages)
+                        append("/")
+                        append(snapshot.candidateImages)
+                        append(". Осталось: ")
+                        append(snapshot.pendingImages)
+                        append("; ошибок: ")
+                        append(snapshot.failedImages)
+                        append(". OCR: ")
+                        append(snapshot.ocrIndexedImages)
+                        append("; visual labels: ")
+                        append(snapshot.labeledImages)
+                        append(". Фоновая индексация: ")
+                        append(scheduleText)
+                        append(".")
+                    }
+
+                val technical =
+                    buildString {
+                        append("image_background_index_status")
+                        append("; indexed=")
+                        append(snapshot.indexedImages)
+                        append("; candidates=")
+                        append(snapshot.candidateImages)
+                        append("; pending=")
+                        append(snapshot.pendingImages)
+                        append("; failed=")
+                        append(snapshot.failedImages)
+                        append("; ocr=")
+                        append(snapshot.ocrIndexedImages)
+                        append("; labeled=")
+                        append(snapshot.labeledImages)
+                        append("; scheduler_state=")
+                        append(runtime.state)
+                        append("; last_batch_updated=")
+                        append(runtime.lastBatchUpdatedImages)
+                        append("; last_batch_at_ms=")
+                        append(runtime.lastBatchAtMs)
+                        if (runtime.lastError.isNotBlank()) {
+                            append("; last_error=")
+                            append(runtime.lastError.take(160))
+                        }
+                    }
+
+                    mainHandler.post {
+                        if (
+                            isCommandCancelled(commandToken) ||
+                            commandToken != activeCommandToken
+                        ) {
+                            return@post
+                        }
+
+                        commandHistoryStore.addEvent(
+                            activeCommandHistoryId,
+                            state = "image_background_index_status",
+                            message = "Состояние фонового визуального индекса прочитано локально",
+                            details = technical
+                        )
+
+                        respondAndResume(
+                            text = resultText,
+                            silent = silent,
+                            success = true,
+                            technical = technical
+                        )
+                    }
+                } finally {
+                    if (Thread.currentThread() === currentAgentThread) {
+                        currentAgentThread = null
+                    }
+                }
+            }
+
+        currentAgentThread = worker
+        executionKernel.bindThread(worker)
+        worker.start()
+    }
+
     private fun runLocalPersonalGlobalSearch(
         request: AyanaPersonalSearchEngine.Request,
         silent: Boolean
@@ -12295,7 +12548,7 @@ respondAndResume(
             executor = "personal_search_engine"
         )
 
-        // R8.3C DEVICE CONTENT SEARCH PERFORMANCE/TRUTH.
+        // R8.3D DEVICE CONTENT SEARCH + BACKGROUND IMAGE INDEX PERFORMANCE/TRUTH.
         // MediaStore, first-run document extraction and bounded local image ML indexing
         // may touch many rows/files. Never execute these operations on the main looper.
         // Keep the local search bounded in its own execution thread and publish the final
@@ -38434,6 +38687,7 @@ state
         }
 
         stopCancelListenerWatchdog()
+        backgroundImageIndexer.stop()
         miniOrbController.hide()
 
         try {
@@ -38558,6 +38812,7 @@ state
             ListenMode.BUSY
 
         stopCancelListenerWatchdog()
+        backgroundImageIndexer.stop()
         stopSherpaListening()
         stopCurrentAudio()
 
@@ -39221,6 +39476,8 @@ state
 
         const val STATE_STOPPED =
             "stopped"
+
+        private const val BACKGROUND_IMAGE_INDEX_MIN_BATTERY_PERCENT = 25
 
         @Volatile
         var isRunning:
