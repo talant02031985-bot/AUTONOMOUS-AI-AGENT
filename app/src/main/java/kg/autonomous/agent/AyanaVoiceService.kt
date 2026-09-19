@@ -60,6 +60,13 @@ import kotlin.math.abs
 
 class AyanaVoiceService : Service() {
 
+    // AYANA R8.3B SEARCH RESULT ACTIONS.
+    // The latest openable Personal Search file/photo results are stored only as local
+    // content:// action records. «Открой результат N» performs a read-access preflight,
+    // dispatches ACTION_VIEW with a temporary URI grant, then requires external foreground
+    // evidence before terminal SUCCESS. If handoff cannot be verified, AYANA reports it
+    // fail-closed instead of claiming the file was opened. ORB / visualizer / Worker untouched.
+
     // MULTI-ATTACHMENT EXTENSION: bounded batch manifests are accepted through the
     // existing multimodal lane without changing the v12.21.0 / R7.9 release-metadata lineage.
     // AYANA R8.2 PERSONAL GLOBAL SEARCH v1.1 on v12.21.0 truth-hardening lineage.
@@ -540,6 +547,12 @@ class AyanaVoiceService : Service() {
 
     private val documentContentIndexEngine by lazy {
         AyanaDocumentContentIndexEngine(
+            applicationContext
+        )
+    }
+
+    private val searchResultStore by lazy {
+        AyanaSearchResultStore(
             applicationContext
         )
     }
@@ -3859,6 +3872,20 @@ mainHandler.post {
                 return
             }
 
+        // R8.3B SEARCH RESULT ACTION PRECEDENCE.
+        // «Открой результат 2» belongs to the latest Personal Search result map, not
+        // to generic app-launch parsing. Claim it before lifecycle/App Resolver routes.
+        extractSearchResultOpenIndex(
+            originalCommand
+        )
+            ?.let { resultNumber ->
+                runOpenSearchResult(
+                    resultNumber = resultNumber,
+                    silent = silent
+                )
+                return
+            }
+
         // v12.14 VOLUME TARGET PRECEDENCE.
         // A phrase such as «уменьши громкость до 2» names an absolute target,
         // not a -1 relative delta. Resolve exact target semantics before the
@@ -3874,7 +3901,7 @@ mainHandler.post {
                 return
             }
 
-        // R8.3A PERSONAL GLOBAL SEARCH v1.2 — LOCAL-FIRST, DOCUMENT CONTENT INDEX.
+        // R8.3B PERSONAL GLOBAL SEARCH v1.3 — LOCAL-FIRST, DOCUMENT CONTENT INDEX + OPENABLE RESULTS.
         // Claim only explicit personal/local-search grammar. Google/Internet/YouTube/Map/App
         // search stays outside this engine by parser contract. Search v1.2 covers Memory,
         // Command History, Tasks/Reminders, NotificationListener records, Android-visible
@@ -11987,6 +12014,270 @@ respondAndResume(
         }
     }
 
+
+    private fun extractSearchResultOpenIndex(
+        command: String
+    ): Int? {
+        val normalized =
+            normalizeRecognitionText(
+                command
+            )
+                .lowercase(Locale.ROOT)
+                .replace('ё', 'е')
+                .replace(Regex("\\s+"), " ")
+                .trim()
+
+        val patterns =
+            listOf(
+                Regex("^(?:открой|открыть|покажи|перейди к|перейди на) (?:результат|результат поиска) ?№? ?(\\d{1,2})$"),
+                Regex("^(?:открой|открыть|покажи) (?:файл|фото|документ) (?:из )?результат(?:а|ов)? ?№? ?(\\d{1,2})$"),
+                Regex("^(?:открой|открыть|покажи) ?№? ?(\\d{1,2}) (?:результат|результат поиска)$")
+            )
+
+        for (pattern in patterns) {
+            val match = pattern.matchEntire(normalized) ?: continue
+            val number =
+                match.groupValues
+                    .getOrNull(1)
+                    ?.toIntOrNull()
+                    ?: continue
+
+            if (number in 1..20) {
+                return number
+            }
+        }
+
+        return null
+    }
+
+    private fun runOpenSearchResult(
+        resultNumber: Int,
+        silent: Boolean
+    ) {
+        executionPhase(
+            phase = "local_search_result_open",
+            executor = "search_result_action_executor"
+        )
+
+        val item =
+            searchResultStore.get(
+                resultNumber
+            )
+
+        if (item == null) {
+            respondAndResume(
+                text =
+                    "Результат $resultNumber уже недоступен. Выполни поиск ещё раз и открой результат из новой выдачи.",
+                silent = silent,
+                success = false,
+                technical =
+                    "search_result_action_missing; result_number=$resultNumber; stale_or_non_openable=true"
+            )
+            return
+        }
+
+        val uri =
+            try {
+                Uri.parse(item.uri)
+            } catch (_: Exception) {
+                null
+            }
+
+        if (
+            uri == null ||
+            uri.scheme != "content"
+        ) {
+            respondAndResume(
+                text = "Не удалось безопасно открыть результат $resultNumber.",
+                silent = silent,
+                success = false,
+                technical =
+                    "search_result_action_invalid_uri; result_number=$resultNumber"
+            )
+            return
+        }
+
+        val commandToken =
+            activeCommandToken
+
+        val worker =
+            thread(
+                start = false,
+                name = "AyanaSearchResultOpen"
+            ) {
+                var readable = false
+                try {
+                    contentResolver
+                        .openAssetFileDescriptor(
+                            uri,
+                            "r"
+                        )
+                        ?.use {
+                            readable = true
+                        }
+                } catch (_: Exception) {
+                    readable = false
+                }
+
+                if (
+                    isCommandCancelled(commandToken) ||
+                    commandToken != activeCommandToken
+                ) {
+                    return@thread
+                }
+
+                if (!readable) {
+                    mainHandler.post {
+                        if (
+                            !isCommandCancelled(commandToken) &&
+                            commandToken == activeCommandToken
+                        ) {
+                            respondAndResume(
+                                text =
+                                    "Файл из результата $resultNumber больше не читается. Выполни поиск заново.",
+                                silent = silent,
+                                success = false,
+                                technical =
+                                    "search_result_action_preflight_failed; result_number=$resultNumber"
+                            )
+                        }
+                    }
+                    return@thread
+                }
+
+                val viewIntent =
+                    Intent(
+                        Intent.ACTION_VIEW
+                    ).apply {
+                        if (item.mimeType.isNotBlank()) {
+                            setDataAndType(
+                                uri,
+                                item.mimeType
+                            )
+                        } else {
+                            data = uri
+                        }
+
+                        clipData =
+                            ClipData.newRawUri(
+                                "AYANA search result",
+                                uri
+                            )
+
+                        addFlags(
+                            Intent.FLAG_ACTIVITY_NEW_TASK or
+                                Intent.FLAG_GRANT_READ_URI_PERMISSION
+                        )
+                    }
+
+                val dispatched =
+                    try {
+                        startActivity(viewIntent)
+                        true
+                    } catch (_: ActivityNotFoundException) {
+                        false
+                    } catch (_: SecurityException) {
+                        false
+                    } catch (_: Exception) {
+                        false
+                    }
+
+                if (!dispatched) {
+                    mainHandler.post {
+                        if (
+                            !isCommandCancelled(commandToken) &&
+                            commandToken == activeCommandToken
+                        ) {
+                            respondAndResume(
+                                text =
+                                    "Для результата $resultNumber не найдено приложение, которое может его открыть.",
+                                silent = silent,
+                                success = false,
+                                technical =
+                                    "search_result_action_dispatch_failed; result_number=$resultNumber; mime=${item.mimeType.take(100)}"
+                            )
+                        }
+                    }
+                    return@thread
+                }
+
+                commandHistoryStore.addEvent(
+                    activeCommandHistoryId,
+                    state = "search_result_open_dispatched",
+                    message = "Результат поиска передан Android для открытия",
+                    details =
+                        "result_number=$resultNumber; source=${item.source}; kind=${item.kind}; mime=${item.mimeType.take(100)}; uri_scheme=content"
+                )
+
+                try {
+                    Thread.sleep(700L)
+                } catch (_: InterruptedException) {
+                    Thread.currentThread().interrupt()
+                }
+
+                val screen =
+                    try {
+                        screenIntelligence.getScreenState()
+                    } catch (_: Exception) {
+                        JSONObject()
+                    }
+
+                val effectivePackage =
+                    screen.optString(
+                        "effective_foreground_package",
+                        screen.optString(
+                            "interaction_package",
+                            screen.optString("package")
+                        )
+                    )
+                        .trim()
+
+                val handoffVerified =
+                    screen.optBoolean("success", false) &&
+                        effectivePackage.isNotBlank() &&
+                        effectivePackage != packageName
+
+                mainHandler.post {
+                    if (
+                        isCommandCancelled(commandToken) ||
+                        commandToken != activeCommandToken
+                    ) {
+                        return@post
+                    }
+
+                    if (handoffVerified) {
+                        commandHistoryStore.addEvent(
+                            activeCommandHistoryId,
+                            state = "search_result_open_verified",
+                            message = "Переход к найденному файлу подтверждён по внешнему foreground owner",
+                            details =
+                                "result_number=$resultNumber; foreground_package=${effectivePackage.take(140)}"
+                        )
+
+                        respondAndResume(
+                            text =
+                                "Открыт результат $resultNumber: ${item.title.ifBlank { "файл" }}.",
+                            silent = silent,
+                            success = true,
+                            technical =
+                                "search_result_open_verified; result_number=$resultNumber; foreground_package=${effectivePackage.take(140)}"
+                        )
+                    } else {
+                        respondAndResume(
+                            text =
+                                "Запрос на открытие результата $resultNumber передан Android, но AYANA не смогла подтвердить переход к файлу.",
+                            silent = silent,
+                            success = false,
+                            technical =
+                                "search_result_open_unverified; result_number=$resultNumber; dispatched=true; foreground_package=${effectivePackage.take(140)}"
+                        )
+                    }
+                }
+            }
+
+        executionKernel.bindThread(worker)
+        worker.start()
+    }
 
     private fun runLocalPersonalGlobalSearch(
         request: AyanaPersonalSearchEngine.Request,
