@@ -8,7 +8,7 @@ import java.util.Date
 import java.util.Locale
 
 /**
- * AYANA Personal Search Engine v1.3 — LOCAL GLOBAL SEARCH + DOCUMENT CONTENT INDEX + OPENABLE RESULTS.
+ * AYANA Personal Search Engine v1.4 — LOCAL GLOBAL SEARCH + DOCUMENT + IMAGE CONTENT INDEX + OPENABLE RESULTS.
  *
  * Scope v1.2:
  * - Memory v2;
@@ -22,7 +22,7 @@ import java.util.Locale
  * - search is local; no Agent Core / Worker request is required;
  * - only sources explicitly available on-device are searched;
  * - a source that cannot be read is reported as unavailable, never silently treated as empty;
- * - photo search remains metadata-only: filename/path/MIME/date/size;
+ * - photo search combines MediaStore metadata with a bounded local ML Kit OCR/label index;
  * - file search combines metadata with the local incremental document-content index;
  * - scoped-storage / selected-photo access is reported honestly and is never described as full-device coverage;
  * - openable file/photo results persist only as bounded local content:// action records;
@@ -34,7 +34,8 @@ class AyanaPersonalSearchEngine(
     private val taskStore: AyanaTaskStore,
     private val historyStore: AyanaCommandHistoryStore,
     private val deviceContentSearchEngine: AyanaDeviceContentSearchEngine,
-    private val documentContentIndexEngine: AyanaDocumentContentIndexEngine
+    private val documentContentIndexEngine: AyanaDocumentContentIndexEngine,
+    private val imageContentIndexEngine: AyanaImageContentIndexEngine
 ) {
 
     enum class Source(
@@ -83,7 +84,17 @@ class AyanaPersonalSearchEngine(
         val contentUpdatedDocuments: Int,
         val contentFailedDocuments: Int,
         val contentUnsupportedDocuments: Int,
-        val contentPdfBestEffortDocuments: Int
+        val contentPdfBestEffortDocuments: Int,
+        val imageProviderRowsScanned: Int,
+        val imageCandidatePhotos: Int,
+        val imageIndexedPhotos: Int,
+        val imageReusedPhotos: Int,
+        val imageUpdatedPhotos: Int,
+        val imageFailedPhotos: Int,
+        val imagePendingPhotos: Int,
+        val imageOcrPhotos: Int,
+        val imageLabeledPhotos: Int,
+        val imageNewIndexBudget: Int
     )
 
     private val appContext =
@@ -125,6 +136,16 @@ class AyanaPersonalSearchEngine(
         var contentFailedDocuments = 0
         var contentUnsupportedDocuments = 0
         var contentPdfBestEffortDocuments = 0
+        var imageProviderRowsScanned = 0
+        var imageCandidatePhotos = 0
+        var imageIndexedPhotos = 0
+        var imageReusedPhotos = 0
+        var imageUpdatedPhotos = 0
+        var imageFailedPhotos = 0
+        var imagePendingPhotos = 0
+        var imageOcrPhotos = 0
+        var imageLabeledPhotos = 0
+        var imageNewIndexBudget = 0
 
         fun collect(
             source: Source,
@@ -537,6 +558,12 @@ class AyanaPersonalSearchEngine(
                         "Поиск v1 выполняется по метаданным, не по содержимому файла. ",
                         "Метаданные файлов также проверены. "
                     )
+                    .replace(
+                        Regex("\\s*collections=[^.;]*"),
+                        ""
+                    )
+                    .replace(Regex("\\s+"), " ")
+                    .trim()
 
             sourceCoverage[Source.FILES] =
                 (
@@ -670,25 +697,159 @@ class AyanaPersonalSearchEngine(
         }
 
         collect(Source.PHOTOS) {
-            val result =
+            val metadataResult =
                 deviceContentSearchEngine.searchPhotos(
                     query = request.query,
                     limit = safePerSourceLimit
                 )
 
-            scannedPhotos = result.scanned
-            sourceCoverage[Source.PHOTOS] =
-                "scope=${result.scope.wireName}; ${result.detail.take(360)}"
+            scannedPhotos = metadataResult.scanned
 
             if (
-                result.scope ==
+                metadataResult.scope ==
                 AyanaDeviceContentSearchEngine.AccessScope.NONE
             ) {
-                throw IllegalStateException(result.detail)
+                throw IllegalStateException(metadataResult.detail)
             }
 
-            result.hits
-                .mapIndexed { index, item ->
+            val explicitPhotoOnly =
+                request.sources.size == 1 &&
+                    Source.PHOTOS in request.sources
+
+            val visualResult =
+                imageContentIndexEngine.search(
+                    query = request.query,
+                    limit = safePerSourceLimit,
+                    maxNewImages =
+                        if (explicitPhotoOnly) {
+                            AyanaImageContentIndexEngine.DEFAULT_NEW_IMAGE_BUDGET
+                        } else {
+                            AyanaImageContentIndexEngine.BROAD_SEARCH_NEW_IMAGE_BUDGET
+                        }
+                )
+
+            imageProviderRowsScanned =
+                visualResult.providerRowsScanned
+            imageCandidatePhotos =
+                visualResult.candidateImages
+            imageIndexedPhotos =
+                visualResult.indexedImages
+            imageReusedPhotos =
+                visualResult.reusedImages
+            imageUpdatedPhotos =
+                visualResult.updatedImages
+            imageFailedPhotos =
+                visualResult.failedImages
+            imagePendingPhotos =
+                visualResult.pendingImages
+            imageOcrPhotos =
+                visualResult.ocrIndexedImages
+            imageLabeledPhotos =
+                visualResult.labeledImages
+            imageNewIndexBudget =
+                visualResult.newIndexBudget
+
+            sourceCoverage[Source.PHOTOS] =
+                (
+                    "scope=${metadataResult.scope.wireName}; " +
+                        metadataResult.detail
+                            .replace(
+                                "поиск только по метаданным имени/пути/MIME.",
+                                "метаданные имени/пути/MIME проверены."
+                            )
+                            .take(280) +
+                        " Визуальный индекс: ${visualResult.indexedImages}/${visualResult.candidateImages}; " +
+                        "pending=${visualResult.pendingImages}; OCR/labels локально. " +
+                        if (visualResult.pendingImages > 0) {
+                            "Поиск по содержимому фото частичный до завершения индекса."
+                        } else {
+                            "Поиск по содержимому охватывает все доступные текущему MediaStore изображения."
+                        }
+                    )
+                    .replace(Regex("\\s+"), " ")
+                    .trim()
+                    .trimEnd('.')
+                    .take(700)
+
+            val combined =
+                linkedMapOf<String, Hit>()
+
+            visualResult.hits
+                .forEachIndexed { index, item ->
+                    val location =
+                        item.relativePath
+                            .trim()
+                            .ifBlank { "альбом/путь не указан" }
+
+                    val evidence =
+                        when (item.matchType) {
+                            AyanaImageContentIndexEngine.MatchType.OCR ->
+                                "Совпадение в тексте изображения"
+
+                            AyanaImageContentIndexEngine.MatchType.LABEL ->
+                                "Совпадение по визуальным признакам"
+
+                            AyanaImageContentIndexEngine.MatchType.OCR_AND_LABEL ->
+                                "Совпадение в тексте и визуальных признаках"
+                        }
+
+                    val snippet =
+                        buildString {
+                            append(evidence)
+                            if (item.snippet.isNotBlank()) {
+                                append(": ")
+                                append(item.snippet)
+                            }
+                            append(" • ")
+                            append(location)
+                            if (item.mimeType.isNotBlank()) {
+                                append(" • ")
+                                append(item.mimeType)
+                            }
+                            if (item.sizeBytes > 0L) {
+                                append(" • ")
+                                append(formatBytes(item.sizeBytes))
+                            }
+                            append(" • локальный ML Kit")
+                        }
+
+                    val hit =
+                        Hit(
+                            source = Source.PHOTOS,
+                            title =
+                                compact(
+                                    item.displayName,
+                                    MAX_TITLE_CHARS
+                                )
+                                    .ifBlank { "Фото" },
+                            snippet =
+                                compact(
+                                    snippet,
+                                    MAX_SNIPPET_CHARS
+                                ),
+                            timestampMs = item.timestampMs,
+                            score =
+                                item.score +
+                                    180 +
+                                    recencyBonus(index),
+                            metadata =
+                                "image_content_match=true; match_type=${item.matchType.wireName}; " +
+                                    "labels=${item.labels.joinToString("|").take(160)}; uri_present=${item.uri.isNotBlank()}",
+                            actionUri = item.uri,
+                            actionMimeType = item.mimeType,
+                            actionKind = "photo"
+                        )
+
+                    combined[
+                        contentDedupeKey(
+                            title = hit.title,
+                            timestampMs = hit.timestampMs
+                        )
+                    ] = hit
+                }
+
+            metadataResult.hits
+                .forEachIndexed { index, item ->
                     val location =
                         item.relativePath
                             .trim()
@@ -705,29 +866,46 @@ class AyanaPersonalSearchEngine(
                                 append(" • ")
                                 append(formatBytes(item.sizeBytes))
                             }
-                            append(" • поиск только по метаданным, не по изображению")
+                            append(" • совпадение в метаданных")
                         }
 
-                    Hit(
-                        source = Source.PHOTOS,
-                        title =
-                            compact(
-                                item.displayName,
-                                MAX_TITLE_CHARS
-                            )
-                                .ifBlank { "Фото" },
-                        snippet = compact(snippet, MAX_SNIPPET_CHARS),
-                        timestampMs = item.timestampMs,
-                        score =
-                            item.score +
-                                recencyBonus(index),
-                        metadata =
-                            "uri_present=${item.uri.isNotBlank()}; ${item.metadata.take(180)}",
-                        actionUri = item.uri,
-                        actionMimeType = item.mimeType,
-                        actionKind = "photo"
-                    )
+                    val hit =
+                        Hit(
+                            source = Source.PHOTOS,
+                            title =
+                                compact(
+                                    item.displayName,
+                                    MAX_TITLE_CHARS
+                                )
+                                    .ifBlank { "Фото" },
+                            snippet =
+                                compact(
+                                    snippet,
+                                    MAX_SNIPPET_CHARS
+                                ),
+                            timestampMs = item.timestampMs,
+                            score =
+                                item.score +
+                                    recencyBonus(index),
+                            metadata =
+                                "image_content_match=false; uri_present=${item.uri.isNotBlank()}; ${item.metadata.take(180)}",
+                            actionUri = item.uri,
+                            actionMimeType = item.mimeType,
+                            actionKind = "photo"
+                        )
+
+                    val key =
+                        contentDedupeKey(
+                            title = hit.title,
+                            timestampMs = hit.timestampMs
+                        )
+
+                    if (key !in combined) {
+                        combined[key] = hit
+                    }
                 }
+
+            combined.values.toList()
         }
 
         val ranked =
@@ -779,7 +957,17 @@ class AyanaPersonalSearchEngine(
             contentUpdatedDocuments = contentUpdatedDocuments,
             contentFailedDocuments = contentFailedDocuments,
             contentUnsupportedDocuments = contentUnsupportedDocuments,
-            contentPdfBestEffortDocuments = contentPdfBestEffortDocuments
+            contentPdfBestEffortDocuments = contentPdfBestEffortDocuments,
+            imageProviderRowsScanned = imageProviderRowsScanned,
+            imageCandidatePhotos = imageCandidatePhotos,
+            imageIndexedPhotos = imageIndexedPhotos,
+            imageReusedPhotos = imageReusedPhotos,
+            imageUpdatedPhotos = imageUpdatedPhotos,
+            imageFailedPhotos = imageFailedPhotos,
+            imagePendingPhotos = imagePendingPhotos,
+            imageOcrPhotos = imageOcrPhotos,
+            imageLabeledPhotos = imageLabeledPhotos,
+            imageNewIndexBudget = imageNewIndexBudget
         )
     }
 
@@ -887,10 +1075,20 @@ class AyanaPersonalSearchEngine(
                 "content_failed=${report.contentFailedDocuments}; " +
                 "content_unsupported=${report.contentUnsupportedDocuments}; " +
                 "content_pdf_best_effort=${report.contentPdfBestEffortDocuments}; " +
+                "image_provider_rows=${report.imageProviderRowsScanned}; " +
+                "image_candidates=${report.imageCandidatePhotos}; " +
+                "image_indexed=${report.imageIndexedPhotos}; " +
+                "image_reused=${report.imageReusedPhotos}; " +
+                "image_updated=${report.imageUpdatedPhotos}; " +
+                "image_failed=${report.imageFailedPhotos}; " +
+                "image_pending=${report.imagePendingPhotos}; " +
+                "image_ocr=${report.imageOcrPhotos}; " +
+                "image_labeled=${report.imageLabeledPhotos}; " +
+                "image_budget=${report.imageNewIndexBudget}; " +
                 "coverage=${report.sourceCoverage.entries.joinToString("|") { (source, detail) -> "${source.wireName}:${detail.substringBefore(';').take(80)}" }}; " +
                 "source_errors=${report.sourceErrors.keys.joinToString(",") { it.wireName }}"
             )
-            .take(1200)
+            .take(1800)
     }
 
     private fun appendSourceErrors(
