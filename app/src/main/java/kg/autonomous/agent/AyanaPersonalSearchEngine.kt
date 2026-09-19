@@ -22,7 +22,8 @@ import java.util.Locale
  * - search is local; no Agent Core / Worker request is required;
  * - only sources explicitly available on-device are searched;
  * - a source that cannot be read is reported as unavailable, never silently treated as empty;
- * - photo/file v1.1 is metadata search only: filename/path/MIME/date/size;
+ * - photo search remains metadata-only: filename/path/MIME/date/size;
+ * - file search combines metadata with the local incremental document-content index;
  * - scoped-storage / selected-photo access is reported honestly and is never described as full-device coverage.
  */
 class AyanaPersonalSearchEngine(
@@ -520,10 +521,17 @@ class AyanaPersonalSearchEngine(
             contentPdfBestEffortDocuments =
                 contentResult.pdfBestEffortDocuments
 
+            val metadataCoverageDetail =
+                metadataResult.detail
+                    .replace(
+                        "Поиск v1 выполняется по метаданным, не по содержимому файла. ",
+                        "Метаданные файлов также проверены. "
+                    )
+
             sourceCoverage[Source.FILES] =
                 (
                     "scope=${metadataResult.scope.wireName}; " +
-                        "${metadataResult.detail.take(260)} " +
+                        "${metadataCoverageDetail.take(260)} " +
                         "content_index=${contentResult.detail.take(420)}"
                     )
                     .take(760)
