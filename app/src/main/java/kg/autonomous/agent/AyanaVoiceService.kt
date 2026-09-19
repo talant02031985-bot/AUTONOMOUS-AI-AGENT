@@ -62,11 +62,12 @@ class AyanaVoiceService : Service() {
 
     // MULTI-ATTACHMENT EXTENSION: bounded batch manifests are accepted through the
     // existing multimodal lane without changing the v12.21.0 / R7.9 release-metadata lineage.
-    // AYANA R8.1 PERSONAL GLOBAL SEARCH v1 on v12.21.0 truth-hardening lineage.
-    // Adds a strictly local Personal Search lane across Memory, Command History,
-    // Tasks/Reminders and NotificationListener data. Explicit personal-search grammar
-    // is claimed before generic Structured Local / Agent Core routing; web/app/map
-    // search phrases remain untouched. Files/photos are intentionally not claimed by v1.
+    // AYANA R8.2 PERSONAL GLOBAL SEARCH v1.1 on v12.21.0 truth-hardening lineage.
+    // Extends the strictly local Personal Search lane across Memory, Command History,
+    // Tasks/Reminders, NotificationListener data, MediaStore-visible file metadata and
+    // MediaStore-visible photo metadata. Android scoped-storage / selected-photo limits
+    // are surfaced as coverage truth; image pixels, document contents and faces are NOT
+    // claimed by this metadata layer. Web/app/map search phrases remain untouched.
     // AYANA R8.1.1 PERSONAL SEARCH UI RESPONSE FIX.
     // Local Personal Global Search now publishes its completed answer through the
     // existing STATE_TEXT path for typed commands; execution/history truth is unchanged.
@@ -531,12 +532,19 @@ class AyanaVoiceService : Service() {
         )
     }
 
+    private val deviceContentSearchEngine by lazy {
+        AyanaDeviceContentSearchEngine(
+            applicationContext
+        )
+    }
+
     private val personalSearchEngine by lazy {
         AyanaPersonalSearchEngine(
             context = applicationContext,
             memoryStore = memoryStore,
             taskStore = taskStore,
-            historyStore = commandHistoryStore
+            historyStore = commandHistoryStore,
+            deviceContentSearchEngine = deviceContentSearchEngine
         )
     }
 
@@ -3859,10 +3867,11 @@ mainHandler.post {
                 return
             }
 
-        // R8.1 PERSONAL GLOBAL SEARCH — LOCAL-FIRST, NO CLOUD TURN.
+        // R8.2 PERSONAL GLOBAL SEARCH v1.1 — LOCAL-FIRST, NO CLOUD TURN.
         // Claim only explicit personal/local-search grammar. Google/Internet/YouTube/Map/App
-        // search stays outside this engine by parser contract. Search v1 covers Memory,
-        // Command History, Tasks/Reminders and NotificationListener records only.
+        // search stays outside this engine by parser contract. Search v1.1 covers Memory,
+        // Command History, Tasks/Reminders, NotificationListener records and Android-
+        // visible file/photo metadata. Scoped-storage/partial-photo coverage is explicit.
         AyanaPersonalSearchEngine
             .parseRequest(
                 originalCommand
@@ -11980,56 +11989,118 @@ respondAndResume(
             executor = "personal_search_engine"
         )
 
-        val report =
-            try {
-                personalSearchEngine.search(
-                    request = request
-                )
-            } catch (error: Exception) {
-                respondAndResume(
-                    "Личный поиск AYANA не удалось выполнить: ${error.message ?: "ошибка локального поиска"}.",
-                    silent,
-                    success = false,
-                    technical =
-                        "personal_search_exception=${error.javaClass.simpleName}"
-                )
-                return
+        // R8.2 DEVICE CONTENT SEARCH PERFORMANCE/TRUTH.
+        // MediaStore may contain thousands of rows. Never query it from the main looper.
+        // Keep the local search bounded in its own execution thread and publish the final
+        // state on mainHandler only if this command is still current.
+        val commandToken =
+            activeCommandToken
+
+        val worker =
+            thread(
+                start = false,
+                name = "AyanaPersonalGlobalSearch"
+            ) {
+                try {
+                    val report =
+                        try {
+                            personalSearchEngine.search(
+                                request = request
+                            )
+                        } catch (error: Exception) {
+                            mainHandler.post {
+                                if (
+                                    !isCommandCancelled(commandToken) &&
+                                    commandToken == activeCommandToken
+                                ) {
+                                    respondAndResume(
+                                        "Личный поиск AYANA не удалось выполнить: ${error.message ?: "ошибка локального поиска"}.",
+                                        silent,
+                                        success = false,
+                                        technical =
+                                            "personal_search_exception=${error.javaClass.simpleName}"
+                                    )
+                                }
+                            }
+                            return@thread
+                        }
+
+                    if (isCommandCancelled(commandToken)) {
+                        return@thread
+                    }
+
+                    val result =
+                        personalSearchEngine
+                            .renderRussian(
+                                report
+                            )
+
+                    val technical =
+                        personalSearchEngine
+                            .technicalSummary(
+                                report
+                            )
+
+                    val everyRequestedSourceUnavailable =
+                        request.sources.isNotEmpty() &&
+                            request.sources.all { source ->
+                                source in report.sourceErrors.keys
+                            }
+
+                    mainHandler.post {
+                        if (
+                            isCommandCancelled(commandToken) ||
+                            commandToken != activeCommandToken
+                        ) {
+                            return@post
+                        }
+
+                        commandHistoryStore.addEvent(
+                            activeCommandHistoryId,
+                            state = "personal_global_search",
+                            message =
+                                if (everyRequestedSourceUnavailable) {
+                                    "Личный поиск не получил доступ ни к одному запрошенному источнику"
+                                } else {
+                                    "Личный поиск выполнен локально по доступным источникам AYANA"
+                                },
+                            details = technical
+                        )
+
+                        if (everyRequestedSourceUnavailable) {
+                            // Requested-only inaccessible scope is not a successful search.
+                            // Example: «найди в фото ...» while Android photo access is denied.
+                            respondAndResume(
+                                text = result,
+                                silent = silent,
+                                success = false,
+                                terminalStatus =
+                                    AyanaCommandHistoryStore.STATUS_BLOCKED,
+                                technical =
+                                    "$technical; requested_sources_unavailable=true"
+                            )
+                        } else {
+                            // Text-mode commands must publish STATE_TEXT so MainActivity replaces
+                            // the temporary “AYANA думает…” placeholder with the actual result.
+                            respondAndResume(
+                                text = result,
+                                silent = silent,
+                                success = true,
+                                technical = technical
+                            )
+                        }
+                    }
+                } finally {
+                    if (Thread.currentThread() === currentAgentThread) {
+                        currentAgentThread = null
+                    }
+                }
             }
 
-        val result =
-            personalSearchEngine
-                .renderRussian(
-                    report
-                )
-
-        val technical =
-            personalSearchEngine
-                .technicalSummary(
-                    report
-                )
-
-        commandHistoryStore.addEvent(
-            activeCommandHistoryId,
-            state = "personal_global_search",
-            message = "Личный поиск выполнен локально по доступным источникам AYANA",
-            details = technical
-        )
-
-        // R8.1.1 UI RESPONSE TRUTH FIX.
-        // Text-mode commands must publish STATE_TEXT so MainActivity replaces the
-        // temporary “AYANA думает…” placeholder with the actual local-search result.
-        // finishLocalCommand() intentionally publishes STATE_SUCCESS only and is used by
-        // other compact local controls; using it here left the text answer panel stale.
-        // respondAndResume() preserves the same verified terminal/history semantics while
-        // routing silent text requests through showTextAndResume().
-        respondAndResume(
-            text = result,
-            silent = silent,
-            success = true,
-            technical = technical
-        )
+        currentAgentThread = worker
+        executionKernel.bindThread(worker)
+        worker.start()
     }
-
 
     private fun runStructuredLocalCommand(
         intent: AyanaStructuredLocalCommandRouter.Intent,
