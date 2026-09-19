@@ -25,7 +25,12 @@ import android.os.SystemClock
 import android.os.Looper
 import android.net.Uri
 import android.provider.Settings
+import android.text.SpannableString
+import android.text.Spanned
+import android.text.TextPaint
+import android.text.method.LinkMovementMethod
 import android.text.method.PasswordTransformationMethod
+import android.text.style.ClickableSpan
 import android.view.Gravity
 import android.view.View
 import android.view.ViewGroup
@@ -56,7 +61,7 @@ import kotlin.concurrent.thread
 
 class MainActivity : AppCompatActivity() {
 
-    // UI generation: v7.10.2 MEDIA SEARCH PERMISSION TRUTH + v7.10.1 COMPACT TEXT RESPONSE + v7.10 MULTI-ATTACHMENT INTAKE + v7.8 UI SCROLL PERFORMANCE + v7.5 NOTIFICATION ACCESS TRUTH
+    // UI generation: v7.10.3 SEARCH RESULT LINKS + v7.10.2 MEDIA SEARCH PERMISSION TRUTH + v7.10.1 COMPACT TEXT RESPONSE + v7.10 MULTI-ATTACHMENT INTAKE + v7.8 UI SCROLL PERFORMANCE + v7.5 NOTIFICATION ACCESS TRUTH
     // + OWN-APP SEMANTIC ACTION TRUTH.
     // v7.4 keeps v7.2 foreground ownership truth and hardens the in-process
     // semantic bridge so the same factual View tree used for perception also
@@ -6167,6 +6172,7 @@ class MainActivity : AppCompatActivity() {
                 setTextColor(
                     Color.parseColor("#DCE6F5")
                 )
+                highlightColor = Color.TRANSPARENT
             }
 
         answerCard.addView(
@@ -6570,13 +6576,133 @@ class MainActivity : AppCompatActivity() {
         answerScroll.visibility =
             View.VISIBLE
 
-        textAnswer.text =
+        setTextAnswerContent(
             text
+        )
 
         updateTextAnswerViewport(
             text = text,
             forceCompact = false
         )
+    }
+
+    /**
+     * v7.10.3 — user-facing local links for Personal Search results.
+     * Raw content:// values remain private in AyanaSearchResultStore; the visible
+     * answer contains only «Открыть результат N». Tapping it sends the same factual
+     * command through VoiceService, where URI access and foreground handoff are verified.
+     */
+    private fun setTextAnswerContent(
+        text: String
+    ) {
+        if (!::textAnswer.isInitialized) {
+            return
+        }
+
+        val pattern =
+            Regex("Открыть результат (\\d{1,2})")
+
+        val matches =
+            pattern.findAll(text)
+                .toList()
+
+        if (matches.isEmpty()) {
+            textAnswer.movementMethod = null
+            textAnswer.text = text
+            return
+        }
+
+        val spannable =
+            SpannableString(text)
+
+        matches.forEach { match ->
+            val resultNumber =
+                match.groupValues
+                    .getOrNull(1)
+                    ?.toIntOrNull()
+                    ?: return@forEach
+
+            if (resultNumber !in 1..20) {
+                return@forEach
+            }
+
+            spannable.setSpan(
+                object : ClickableSpan() {
+                    override fun onClick(
+                        widget: View
+                    ) {
+                        openSearchResultFromAnswer(
+                            resultNumber
+                        )
+                    }
+
+                    override fun updateDrawState(
+                        ds: TextPaint
+                    ) {
+                        ds.color =
+                            Color.parseColor(
+                                "#67E8F9"
+                            )
+                        ds.isUnderlineText = true
+                        ds.isFakeBoldText = true
+                    }
+                },
+                match.range.first,
+                match.range.last + 1,
+                Spanned.SPAN_EXCLUSIVE_EXCLUSIVE
+            )
+        }
+
+        textAnswer.text = spannable
+        textAnswer.movementMethod =
+            LinkMovementMethod.getInstance()
+    }
+
+    private fun openSearchResultFromAnswer(
+        resultNumber: Int
+    ) {
+        if (resultNumber !in 1..20) {
+            return
+        }
+
+        val command =
+            "открой результат $resultNumber"
+
+        val intent =
+            Intent(
+                this,
+                AyanaVoiceService::class.java
+            ).apply {
+                action =
+                    AyanaVoiceService.ACTION_TEXT_COMMAND
+                putExtra(
+                    AyanaVoiceService.EXTRA_TEXT_COMMAND,
+                    command
+                )
+            }
+
+        try {
+            if (Build.VERSION.SDK_INT >= 26) {
+                startForegroundService(intent)
+            } else {
+                startService(intent)
+            }
+
+            answerCard.visibility = View.VISIBLE
+            answerScroll.visibility = View.VISIBLE
+            textAnswer.movementMethod = null
+            textAnswer.text =
+                "AYANA открывает результат $resultNumber…"
+
+            updateTextAnswerViewport(
+                text = textAnswer.text?.toString().orEmpty(),
+                forceCompact = true
+            )
+        } catch (_: Exception) {
+            showTextAnswer(
+                "Не удалось отправить команду открытия результата $resultNumber."
+            )
+        }
     }
 
     /**
