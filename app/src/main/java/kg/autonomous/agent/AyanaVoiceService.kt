@@ -67,6 +67,10 @@ class AyanaVoiceService : Service() {
     // Tasks/Reminders and NotificationListener data. Explicit personal-search grammar
     // is claimed before generic Structured Local / Agent Core routing; web/app/map
     // search phrases remain untouched. Files/photos are intentionally not claimed by v1.
+    // AYANA R8.1.1 PERSONAL SEARCH UI RESPONSE FIX.
+    // Local Personal Global Search now publishes its completed answer through the
+    // existing STATE_TEXT path for typed commands; execution/history truth is unchanged.
+    // MainActivity / ORB / visualizer / Worker / Planner / Resolver remain untouched.
     // AYANA v12.21.0 R7.9 COMPLETION + CAPABILITY TRUTH HARDENING.
     // Extends the stable v12.20.0 base with semantic artifact-content validation,
     // previous-response artifact payload retention, persisted runtime capability evidence,
@@ -12011,9 +12015,17 @@ respondAndResume(
             details = technical
         )
 
-        finishLocalCommand(
-            result,
-            silent,
+        // R8.1.1 UI RESPONSE TRUTH FIX.
+        // Text-mode commands must publish STATE_TEXT so MainActivity replaces the
+        // temporary “AYANA думает…” placeholder with the actual local-search result.
+        // finishLocalCommand() intentionally publishes STATE_SUCCESS only and is used by
+        // other compact local controls; using it here left the text answer panel stale.
+        // respondAndResume() preserves the same verified terminal/history semantics while
+        // routing silent text requests through showTextAndResume().
+        respondAndResume(
+            text = result,
+            silent = silent,
+            success = true,
             technical = technical
         )
     }
