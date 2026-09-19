@@ -19,7 +19,7 @@ import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
 
 /**
- * AYANA Image Content Index Engine v1.0 — LOCAL ML KIT progressive index.
+ * AYANA Image Content Index Engine v1.1 — LOCAL ML KIT progressive + background index.
  *
  * Truth / privacy contract:
  * - image bytes stay on the Android device; this engine never calls Worker / Agent Core;
@@ -27,7 +27,8 @@ import java.util.concurrent.TimeUnit
  * - visual categories use bundled ML Kit default Image Labeling (400+ generic labels);
  * - the index lives only in AYANA app-private filesDir;
  * - unchanged images reuse cached OCR/labels;
- * - indexing is deliberately bounded per search so a 700+ photo library cannot freeze AYANA;
+ * - foreground search indexing is deliberately bounded so a 700+ photo library cannot freeze AYANA;
+ * - v1.1 exposes a small cancellable background batch API that reuses the same persisted index;
  * - a partial index is explicitly reported as partial and is never described as full visual coverage;
  * - Android MediaStore visibility remains the outer boundary of what can be indexed;
  * - labels describe generic visual categories only; this is NOT biometric identification.
@@ -123,7 +124,8 @@ class AyanaImageContentIndexEngine(
     fun search(
         query: String,
         limit: Int = DEFAULT_LIMIT,
-        maxNewImages: Int = DEFAULT_NEW_IMAGE_BUDGET
+        maxNewImages: Int = DEFAULT_NEW_IMAGE_BUDGET,
+        shouldContinue: () -> Boolean = { true }
     ): SearchResult {
         val normalizedQuery = normalize(query)
         if (normalizedQuery.isBlank()) {
@@ -184,6 +186,15 @@ class AyanaImageContentIndexEngine(
                 }
 
                 if (remainingBudget <= 0) {
+                    pending++
+                    return@forEach
+                }
+
+                // R8.3D: background indexing may be pre-empted by a user command / STOP.
+                // We finish at most the image already inside ML Kit and check this guard
+                // before starting the next image so the foreground path regains the index
+                // lock quickly without marking untouched images as failures.
+                if (!shouldContinue()) {
                     pending++
                     return@forEach
                 }
@@ -345,6 +356,35 @@ class AyanaImageContentIndexEngine(
             )
         }
     }
+
+
+    /**
+     * R8.3D background index entrypoint. It uses the exact same persisted index as
+     * foreground search but returns no user-facing result dependency. The caller
+     * supplies a live guard so a newly-started user command can pre-empt the batch
+     * before the next image is handed to ML Kit.
+     */
+    fun indexBackgroundBatch(
+        maxNewImages: Int = BACKGROUND_NEW_IMAGE_BUDGET,
+        shouldContinue: () -> Boolean = { true }
+    ): SearchResult =
+        search(
+            query = INTERNAL_INDEX_QUERY,
+            limit = 1,
+            maxNewImages = maxNewImages,
+            shouldContinue = shouldContinue
+        )
+
+    /**
+     * Read-only index snapshot: enumerates current MediaStore visibility and reuses
+     * the persisted index without analyzing a new image.
+     */
+    fun statusSnapshot(): SearchResult =
+        search(
+            query = INTERNAL_INDEX_QUERY,
+            limit = 1,
+            maxNewImages = 0
+        )
 
     private fun analyze(
         descriptor: Descriptor
@@ -1026,7 +1066,9 @@ class AyanaImageContentIndexEngine(
         private const val DEFAULT_LIMIT = 8
         const val DEFAULT_NEW_IMAGE_BUDGET = 32
         const val BROAD_SEARCH_NEW_IMAGE_BUDGET = 8
+        const val BACKGROUND_NEW_IMAGE_BUDGET = 4
         private const val MAX_NEW_IMAGE_BUDGET = 64
+        private const val INTERNAL_INDEX_QUERY = "__ayana_local_image_index_background__"
         private const val MAX_PROVIDER_ROWS_SCAN = 1400
         private const val MAX_INDEX_ITEMS = 1600
         private const val MAX_RETURNED_HITS = 20
