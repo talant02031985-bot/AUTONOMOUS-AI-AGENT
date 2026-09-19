@@ -538,13 +538,20 @@ class AyanaVoiceService : Service() {
         )
     }
 
+    private val documentContentIndexEngine by lazy {
+        AyanaDocumentContentIndexEngine(
+            applicationContext
+        )
+    }
+
     private val personalSearchEngine by lazy {
         AyanaPersonalSearchEngine(
             context = applicationContext,
             memoryStore = memoryStore,
             taskStore = taskStore,
             historyStore = commandHistoryStore,
-            deviceContentSearchEngine = deviceContentSearchEngine
+            deviceContentSearchEngine = deviceContentSearchEngine,
+            documentContentIndexEngine = documentContentIndexEngine
         )
     }
 
@@ -3867,11 +3874,12 @@ mainHandler.post {
                 return
             }
 
-        // R8.2 PERSONAL GLOBAL SEARCH v1.1 — LOCAL-FIRST, NO CLOUD TURN.
+        // R8.3A PERSONAL GLOBAL SEARCH v1.2 — LOCAL-FIRST, DOCUMENT CONTENT INDEX.
         // Claim only explicit personal/local-search grammar. Google/Internet/YouTube/Map/App
-        // search stays outside this engine by parser contract. Search v1.1 covers Memory,
-        // Command History, Tasks/Reminders, NotificationListener records and Android-
-        // visible file/photo metadata. Scoped-storage/partial-photo coverage is explicit.
+        // search stays outside this engine by parser contract. Search v1.2 covers Memory,
+        // Command History, Tasks/Reminders, NotificationListener records, Android-visible
+        // file/photo metadata, plus a local incremental document-content index. Image pixels
+        // remain metadata-only in R8.3A; no cloud turn is used for document indexing/search.
         AyanaPersonalSearchEngine
             .parseRequest(
                 originalCommand
@@ -11989,8 +11997,9 @@ respondAndResume(
             executor = "personal_search_engine"
         )
 
-        // R8.2 DEVICE CONTENT SEARCH PERFORMANCE/TRUTH.
-        // MediaStore may contain thousands of rows. Never query it from the main looper.
+        // R8.3A DEVICE CONTENT SEARCH PERFORMANCE/TRUTH.
+        // MediaStore and first-run document extraction may touch hundreds of rows/files.
+        // Never query/index them from the main looper.
         // Keep the local search bounded in its own execution thread and publish the final
         // state on mainHandler only if this command is still current.
         val commandToken =
@@ -20224,6 +20233,12 @@ plan.optInt(
                     "покажи последние уведомления"
                 ) == null
 
+        val documentContentSearchScoped =
+            AyanaPersonalSearchEngine
+                .parseRequest(
+                    "найди в документах Озгур"
+                )
+
         val existingReminderListRejected =
             AyanaPersonalSearchEngine
                 .parseRequest(
@@ -20250,6 +20265,15 @@ plan.optInt(
                     ) &&
                 externalGoogleSearchRejected &&
                 existingNotificationReadRejected &&
+                documentContentSearchScoped != null &&
+                documentContentSearchScoped.query.equals(
+                    "озгур",
+                    ignoreCase = true
+                ) &&
+                documentContentSearchScoped.sources ==
+                    setOf(
+                        AyanaPersonalSearchEngine.Source.FILES
+                    ) &&
                 existingReminderListRejected
 
         val lifecycleOk =
