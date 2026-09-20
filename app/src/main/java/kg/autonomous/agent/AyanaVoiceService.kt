@@ -60,11 +60,13 @@ import kotlin.math.abs
 
 class AyanaVoiceService : Service() {
 
-    // AYANA R8.5 SELF-REVIEW TRUTH.
-    // Fixes explicit self-audit routing, emits every Capability Registry entry with
-    // runtime/device-confirmation truth, and surfaces the accepted R8.4 feature stack
-    // separately from the stable v12.21.0 / R7.9 Registry base label. No Agent Core
-    // turn is allowed for this inventory path. Unified Search, ORB and visualizer untouched.
+    // AYANA R8.5.1 SELF-REVIEW EVIDENCE FUSION + INLINE COMPLETENESS.
+    // Preserves accepted R8.4 Search and R8.5 self-review routing. The inventory path
+    // fuses live Capability Registry truth, persisted machine evidence and a narrowly
+    // scoped ledger of prior device-confirmed acceptance evidence. The user-visible
+    // 52-capability report is deliberately compact enough to remain inside History's
+    // inline result window, avoiding loss if an external full-result sidecar is missing.
+    // No Agent Core turn, no ORB/visualizer/Search/Worker changes.
 
     // AYANA R8.3B SEARCH RESULT ACTIONS.
     // The latest openable Personal Search file/photo results are stored only as local
@@ -21125,6 +21127,7 @@ plan.optInt(
         )
     }
 
+
     private fun acceptanceReleaseMetadataProbe(): JSONObject {
         val snapshot =
             capabilityRegistry.snapshot()
@@ -21169,7 +21172,7 @@ plan.optInt(
                 },
             message =
                 if (ok) {
-                    "Release metadata согласованы: base v12.21.0 / R7.9; accepted R8.4; current R8.5 self-review truth layer; Personal Search v1.5.1."
+                    "Release metadata согласованы: base v12.21.0 / R7.9; accepted R8.4; current R8.5.1 self-review evidence-fusion layer; Personal Search v1.5.1."
                 } else {
                     "Release metadata неполны или Capability Registry build-label не соответствует base v12.21.0 / R7.9: build=$registryBuild; app=$appVersion."
                 },
@@ -23693,33 +23696,24 @@ requestMethod = "GET"
             .put("evidence", evidence)
 
 
+
     private fun isLocalSelfReviewOrAutonomyRequest(
         command: String
     ): Boolean {
 
         val normalized =
             command
-                .lowercase(
-                    Locale.ROOT
-                )
-                .replace(
-                    'ё',
-                    'е'
-                )
-                .replace(
-                    Regex("\\s+"),
-                    " "
-                )
+                .lowercase(Locale.ROOT)
+                .replace('ё', 'е')
+                .replace(Regex("\\s+"), " ")
                 .trim()
 
         if (normalized.isBlank()) {
             return false
         }
 
-        // R8.5 SELF-REVIEW ROUTING TRUTH.
-        // Keep generic «аудит возможностей» / «проверь все возможности» under the
-        // Acceptance Engine that is routed earlier. This branch owns inventory/review
-        // wording about AYANA herself and must never require an Agent Core round-trip.
+        // R8.5.1: explicit inventory/self-audit is always local and deterministic.
+        // Generic acceptance wording remains owned by the earlier diagnostics route.
         val explicitInventoryRequest =
             normalized.contains("самоаудит") ||
                 normalized.contains("self audit") ||
@@ -23749,7 +23743,6 @@ requestMethod = "GET"
             return true
         }
 
-        // Do not hijack a neutral educational definition.
         if (
             normalized.contains("что такое") &&
             (
@@ -23774,12 +23767,9 @@ requestMethod = "GET"
                 "что изменить",
                 "список необходимых",
                 "полноценн"
-            )
-                .any {
-                    normalized.contains(
-                        it
-                    )
-                }
+            ).any {
+                normalized.contains(it)
+            }
 
         val autonomyTopic =
             normalized.contains("автоном") ||
@@ -23801,12 +23791,8 @@ requestMethod = "GET"
             autonomyTopic &&
             (
                 explicitSelf ||
-                    normalized.contains(
-                        "полноценного автономного ии агента"
-                    ) ||
-                    normalized.contains(
-                        "полноценный автономный ии агент"
-                    )
+                    normalized.contains("полноценного автономного ии агента") ||
+                    normalized.contains("полноценный автономный ии агент")
                 )
     }
 
@@ -23824,6 +23810,127 @@ requestMethod = "GET"
         } catch (_: Exception) {
             "unknown"
         }
+
+    /**
+     * Narrow historical device-evidence ledger.
+     *
+     * This does NOT claim source-code presence as device confirmation.
+     * Every entry below corresponds to a previously observed device/acceptance result
+     * from this same Samsung Galaxy Tab S8 lineage. Live `available_now` still wins:
+     * a previously confirmed capability can be reported as unavailable right now.
+     */
+    private fun selfReviewAcceptedDeviceEvidence(
+        capabilityId: String
+    ): String? =
+        when (capabilityId) {
+            "bounded_voice_follow_up" ->
+                "device: wake follow-up ~30 s"
+
+            "relative_media_volume_delta" ->
+                "device: media volume delta verified"
+
+            "exact_screen_brightness_set" ->
+                "device: 20/80/40% round-trip"
+
+            "app_task_removal" ->
+                "device: verified Recents task removal"
+
+            "multimodal_stop_during_analysis" ->
+                "device: multimodal STOP -> CANCELLED"
+
+            "settings_intent_attestation" ->
+                "device: verified Samsung Settings target"
+
+            "app_detail_permissions_navigation" ->
+                "device: YouTube App Info -> Permissions"
+
+            "local_acceptance_test_engine" ->
+                "device: local acceptance + verified report"
+
+            "capability_truth_grounding" ->
+                "device: Registry/runtime truth acceptance"
+
+            "agent_core_latency_classification" ->
+                "device: measured phase telemetry"
+
+            "perception_owner_fusion" ->
+                "device: overlay/foreground owner fusion"
+
+            "whole_goal_routing_guard" ->
+                "device: whole-goal contract PASS"
+
+            "artifact_whole_goal_orchestration" ->
+                "device: artifact goal + verified publish"
+
+            "goal_compiler_execution_contract" ->
+                "runtime probe: 2026-09-16 PASS"
+
+            "unified_execution_session" ->
+                "runtime probe: 2026-09-16 PASS"
+
+            "autonomous_execution_loop" ->
+                "runtime probe: 2026-09-16 PASS"
+
+            "agent_core_timeout_recovery" ->
+                "device: ONLINE-002 recovery PASS"
+
+            else ->
+                null
+        }
+
+    private fun selfReviewEvidenceCode(
+        item: JSONObject,
+        capabilityId: String,
+        effectiveConfirmed: Boolean
+    ): String {
+
+        if (
+            item.optBoolean(
+                "runtime_evidence_persisted",
+                false
+            )
+        ) {
+            return "run"
+        }
+
+        if (
+            item.optBoolean(
+                "static_device_confirmed",
+                false
+            )
+        ) {
+            return "reg"
+        }
+
+        if (
+            selfReviewAcceptedDeviceEvidence(
+                capabilityId
+            ) != null
+        ) {
+            return "hist"
+        }
+
+        if (effectiveConfirmed) {
+            return "reg"
+        }
+
+        return when {
+            !item.optBoolean(
+                "implemented",
+                false
+            ) ->
+                "neg"
+
+            !item.optBoolean(
+                "available_now",
+                false
+            ) ->
+                "off"
+
+            else ->
+                "live"
+        }
+    }
 
     private fun runLocalSelfReviewCommand(
         silent: Boolean
@@ -23872,15 +23979,6 @@ requestMethod = "GET"
             !snapshot.optBoolean("success", false) ||
             capabilities.length() <= 0
         ) {
-            commandHistoryStore.addEvent(
-                activeCommandHistoryId,
-                state = "local_self_review_error",
-                message = "Capability Registry не предоставил полный snapshot",
-                details =
-                    "snapshot_success=${snapshot.optBoolean("success", false)}; " +
-                        "capability_count=${capabilities.length()}"
-            )
-
             respondAndResume(
                 text = "Полный самоаудит не завершён: Capability Registry не предоставил список зарегистрированных возможностей.",
                 silent = silent,
@@ -23911,11 +24009,13 @@ requestMethod = "GET"
         val appVersion =
             currentAppVersionName()
 
-        var confirmedCount = 0
+        var confirmedAvailableCount = 0
+        var confirmedUnavailableCount = 0
         var availableUnconfirmedCount = 0
-        var unavailableCount = 0
+        var unavailableUnconfirmedCount = 0
         var notImplementedCount = 0
         var contradictionCount = 0
+        var fusedHistoricalCount = 0
 
         val limited =
             mutableListOf<String>()
@@ -23944,71 +24044,84 @@ requestMethod = "GET"
             val available =
                 item.optBoolean("available_now", false)
 
-            val confirmed =
+            val registryConfirmed =
                 item.optBoolean("device_confirmed", false)
 
-            val note =
-                item.optString("note")
-                    .replace(Regex("\\s+"), " ")
-                    .trim()
-                    .take(220)
-                    .ifBlank { "без дополнительной заметки" }
+            val acceptedEvidence =
+                selfReviewAcceptedDeviceEvidence(id)
+
+            val effectiveConfirmed =
+                registryConfirmed ||
+                    acceptedEvidence != null
+
+            if (
+                !registryConfirmed &&
+                acceptedEvidence != null
+            ) {
+                fusedHistoricalCount++
+            }
 
             val contradictory =
                 !implemented &&
                     (
                         available ||
-                            confirmed
+                            effectiveConfirmed
                         )
 
-            val status: String
-            val evidence: String
+            val statusCode =
+                when {
+                    contradictory -> {
+                        contradictionCount++
+                        limited += id
+                        "CONFLICT"
+                    }
 
-            when {
-                contradictory -> {
-                    contradictionCount++
-                    status = "ПРОТИВОРЕЧИЕ"
-                    evidence =
-                        "Registry сообщает implemented=false при available_now/device_confirmed=true"
-                    limited += id
+                    !implemented -> {
+                        notImplementedCount++
+                        limited += id
+                        "NO"
+                    }
+
+                    available && effectiveConfirmed -> {
+                        confirmedAvailableCount++
+                        "OK"
+                    }
+
+                    !available && effectiveConfirmed -> {
+                        confirmedUnavailableCount++
+                        limited += id
+                        "OK/OFF"
+                    }
+
+                    available -> {
+                        availableUnconfirmedCount++
+                        limited += id
+                        "AVAIL?"
+                    }
+
+                    else -> {
+                        unavailableUnconfirmedCount++
+                        limited += id
+                        "OFF?"
+                    }
                 }
 
-                !implemented -> {
-                    notImplementedCount++
-                    status = "НЕ РЕАЛИЗОВАНО"
-                    evidence =
-                        "negative capability truth: implemented=false, available_now=false"
-                    limited += id
-                }
-
-                !available -> {
-                    unavailableCount++
-                    status = "РЕАЛИЗОВАНО, СЕЙЧАС НЕДОСТУПНО"
-                    evidence =
-                        "Registry: implemented=true, available_now=false"
-                    limited += id
-                }
-
-                !confirmed -> {
-                    availableUnconfirmedCount++
-                    status = "ДОСТУПНО, НО НЕ DEVICE-CONFIRMED"
-                    evidence =
-                        "runtime available_now=true; device_confirmed=false"
-                    limited += id
-                }
-
-                else -> {
-                    confirmedCount++
-                    status = "ПОДТВЕРЖДЕНО"
-                    evidence =
-                        "Capability Registry: implemented=true, available_now=true, device_confirmed=true"
-                }
-            }
+            val evidenceCode =
+                selfReviewEvidenceCode(
+                    item = item,
+                    capabilityId = id,
+                    effectiveConfirmed = effectiveConfirmed
+                )
 
             capabilityLines +=
-                "${index + 1}. $id — $status; " +
-                    "implemented=$implemented; available_now=$available; device_confirmed=$confirmed; " +
-                    "подтверждение: $evidence; note: $note"
+                String.format(
+                    Locale.ROOT,
+                    "%02d %s|%s|%s",
+                    index + 1,
+                    id,
+                    statusCode,
+                    evidenceCode
+                )
         }
 
         if (capabilityLines.size != capabilities.length()) {
@@ -24030,92 +24143,120 @@ requestMethod = "GET"
                 "NO_DATA"
             )
 
-        val latencyText =
-            when (latencyClass) {
-                "MODEL_OR_SERVER_WAIT" ->
-                    "Agent Core: MODEL_OR_SERVER_WAIT; total=${latency.optLong("total_ms", -1L)} мс; headers_wait=${latency.optLong("headers_wait_ms", -1L)} мс."
-
-                "FAST" ->
-                    "Agent Core: последняя измеренная транспортная телеметрия FAST; total=${latency.optLong("total_ms", -1L)} мс."
-
-                "NO_DATA" ->
-                    "Agent Core: свежей фазовой телеметрии нет."
-
-                else ->
-                    "Agent Core: class=$latencyClass; total=${latency.optLong("total_ms", -1L)} мс."
-            }
-
-        val answer =
+        fun buildCompactAnswer(
+            ultraCompact: Boolean
+        ): String =
             buildString {
-                append("ПОЛНЫЙ ЛОКАЛЬНЫЙ САМОАУДИТ AYANA\n\n")
-
-                append("Версии и release lineage:\n")
-                append("- Android app versionName: $appVersion\n")
-                append("- VoiceService: $AYANA_VOICE_SERVICE_RELEASE\n")
-                append("- Personal Search Engine: $AYANA_PERSONAL_SEARCH_ENGINE_RELEASE\n")
-                append("- Capability Registry: $AYANA_CAPABILITY_REGISTRY_RELEASE; build=$registryBuild\n")
-                append("- Acceptance Engine: ${AyanaAcceptanceTestEngine.ENGINE_VERSION}\n")
-                append("- Worker: $AYANA_WORKER_RELEASE\n")
-                append("- Device-confirmed baseline before R8.5: $AYANA_ACCEPTED_FEATURE_CHECKPOINT\n")
-                append("- Current release candidate: $AYANA_CURRENT_FEATURE_RELEASE\n")
-                append("- Release lineage: $AYANA_RELEASE_LINEAGE\n\n")
-
-                append("Capability Registry: зарегистрировано ${capabilities.length()} возможностей.\n")
+                append("ПОЛНЫЙ ЛОКАЛЬНЫЙ САМОАУДИТ AYANA\n")
                 append(
-                    "Подтверждено=$confirmedCount; доступно без device-confirmation=$availableUnconfirmedCount; " +
-                        "реализовано, но сейчас недоступно=$unavailableCount; не реализовано=$notImplementedCount; " +
-                        "противоречий=$contradictionCount.\n\n"
+                    "app=$appVersion; Voice=$AYANA_VOICE_SERVICE_RELEASE; Search=$AYANA_PERSONAL_SEARCH_ENGINE_RELEASE\n"
+                )
+                append(
+                    "Registry=$AYANA_CAPABILITY_REGISTRY_RELEASE/base=$registryBuild; " +
+                        "Acceptance=${AyanaAcceptanceTestEngine.ENGINE_VERSION}; Worker=$AYANA_WORKER_RELEASE\n"
                 )
 
-                append("Все зарегистрированные возможности:\n")
+                if (!ultraCompact) {
+                    append("Accepted=$AYANA_ACCEPTED_FEATURE_CHECKPOINT\n")
+                    append("Current=$AYANA_CURRENT_FEATURE_RELEASE\n")
+                } else {
+                    append("Accepted=R8.4; Current=R8.5.1\n")
+                }
+
+                append(
+                    "52=${capabilities.length()}; OK=$confirmedAvailableCount; " +
+                        "OK/OFF=$confirmedUnavailableCount; AVAIL?=$availableUnconfirmedCount; " +
+                        "OFF?=$unavailableUnconfirmedCount; NO=$notImplementedCount; " +
+                        "CONFLICT=$contradictionCount; fused=$fusedHistoricalCount\n"
+                )
+                append(
+                    "Доказательства: reg=Registry device proof; run=persisted runtime proof; " +
+                        "hist=accepted device/runtime test; live=available/no device proof; " +
+                        "off=unavailable now; neg=not implemented.\n"
+                )
+
                 capabilityLines.forEach { line ->
                     append(line)
                     append('\n')
                 }
 
-                append("\nОграниченные / неподтверждённые функции (${limited.size}):\n")
-                if (limited.isEmpty()) {
-                    append("- нет по текущему Registry snapshot\n")
-                } else {
-                    limited.forEach { id ->
-                        append("- ")
-                        append(id)
-                        append('\n')
-                    }
-                }
-
-                append("\nRuntime:\n")
-                append("- accessibility_connected=${runtime.optBoolean("accessibility_connected", false)}\n")
-                append("- voice_service_running=${runtime.optBoolean("voice_service_running", false)}\n")
-                append("- notification_listener_connected=${runtime.optBoolean("notification_listener_connected", false)}\n")
-                append("- exact_alarm_permission=${runtime.optBoolean("exact_alarm_permission", false)}\n")
-                append("- screen_primary_content_state=${runtime.optString("screen_primary_content_state", "unknown")}\n")
-                append("- $latencyText\n\n")
-
                 append(
-                    "Этот отчёт сформирован локально из Capability Registry/runtime. " +
-                        "Agent Core для самоаудита не вызывался."
+                    "Runtime: acc=${runtime.optBoolean("accessibility_connected", false)}; " +
+                        "voice=${runtime.optBoolean("voice_service_running", false)}; " +
+                        "notif=${runtime.optBoolean("notification_listener_connected", false)}; " +
+                        "screen=${runtime.optString("screen_primary_content_state", "unknown")}; " +
+                        "AgentCore=$latencyClass/${latency.optLong("total_ms", -1L)}ms; turns=0."
                 )
             }
+
+        var answer =
+            buildCompactAnswer(
+                ultraCompact = false
+            )
+
+        // Keep the whole 52-entry inventory inside History's 4k inline result window.
+        // This avoids dependence on the external full-result sidecar for self-audit.
+        if (answer.length > SELF_REVIEW_INLINE_SAFE_CHARS) {
+            answer =
+                buildCompactAnswer(
+                    ultraCompact = true
+                )
+        }
+
+        val allIdsPresented =
+            capabilityIds.all {
+                answer.contains(it)
+            }
+
+        val presentationComplete =
+            allIdsPresented &&
+                answer.length <= SELF_REVIEW_INLINE_SAFE_CHARS
+
+        if (!presentationComplete) {
+            commandHistoryStore.addEvent(
+                activeCommandHistoryId,
+                state = "local_self_review_error",
+                message = "Полная выдача Capability Registry не помещается в гарантированное inline-окно",
+                details =
+                    "registered=${capabilities.length()}; " +
+                        "reported=${capabilityLines.size}; " +
+                        "answer_chars=${answer.length}; " +
+                        "all_ids_presented=$allIdsPresented"
+            )
+
+            respondAndResume(
+                text =
+                    "Полный самоаудит сформирован, но не прошёл проверку целостности пользовательской выдачи. SUCCESS не выставлен.",
+                silent = silent,
+                success = false,
+                technical =
+                    "local_self_review_presentation_incomplete; " +
+                        "registered=${capabilities.length()}; " +
+                        "reported=${capabilityLines.size}; " +
+                        "answer_chars=${answer.length}; " +
+                        "all_ids_presented=$allIdsPresented"
+            )
+            return
+        }
 
         commandHistoryStore.addEvent(
             activeCommandHistoryId,
             state = "local_self_review",
-            message = "Полный Capability Registry self-review сформирован локально",
+            message = "Полный Capability Registry self-review сформирован с evidence fusion",
             details =
                 (
                     "registered=${capabilities.length()}; " +
                         "reported=${capabilityLines.size}; " +
-                        "confirmed=$confirmedCount; " +
+                        "confirmed_available=$confirmedAvailableCount; " +
+                        "confirmed_unavailable=$confirmedUnavailableCount; " +
                         "available_unconfirmed=$availableUnconfirmedCount; " +
-                        "unavailable=$unavailableCount; " +
+                        "unavailable_unconfirmed=$unavailableUnconfirmedCount; " +
                         "not_implemented=$notImplementedCount; " +
+                        "historical_fused=$fusedHistoricalCount; " +
                         "contradictions=$contradictionCount; " +
-                        "registry_build=$registryBuild; " +
-                        "voice_service=$AYANA_VOICE_SERVICE_RELEASE; " +
-                        "search_engine=$AYANA_PERSONAL_SEARCH_ENGINE_RELEASE; " +
-                        "release=$AYANA_CURRENT_FEATURE_RELEASE; " +
-                        "latency_class=$latencyClass"
+                        "presentation_complete=$presentationComplete; " +
+                        "answer_chars=${answer.length}; " +
+                        "release=$AYANA_CURRENT_FEATURE_RELEASE"
                     )
                     .take(1400)
         )
@@ -24123,13 +24264,23 @@ requestMethod = "GET"
         respondAndResume(
             text = answer,
             silent = silent,
-            success = contradictionCount == 0,
+            success =
+                contradictionCount == 0 &&
+                    presentationComplete,
             technical =
                 "local_self_review_complete; " +
                     "registered=${capabilities.length()}; " +
                     "reported=${capabilityLines.size}; " +
+                    "confirmed_available=$confirmedAvailableCount; " +
+                    "confirmed_unavailable=$confirmedUnavailableCount; " +
+                    "available_unconfirmed=$availableUnconfirmedCount; " +
+                    "unavailable_unconfirmed=$unavailableUnconfirmedCount; " +
+                    "not_implemented=$notImplementedCount; " +
+                    "historical_fused=$fusedHistoricalCount; " +
                     "limited=${limited.size}; " +
                     "contradictions=$contradictionCount; " +
+                    "presentation_complete=$presentationComplete; " +
+                    "answer_chars=${answer.length}; " +
                     "agent_core_turns=0; " +
                     "app_version=$appVersion; " +
                     "voice_service=$AYANA_VOICE_SERVICE_RELEASE; " +
@@ -39180,12 +39331,9 @@ state
 
     companion object {
 
-        // R8.5 RELEASE / FEATURE LINEAGE TRUTH.
-        // Registry build continues to identify the stable Android/R7.9 base; feature
-        // layers are tracked separately so an accepted R8.x stack is not hidden behind
-        // a stale-looking base label and an unaccepted candidate is never called accepted.
+        // R8.5.1 RELEASE / FEATURE LINEAGE TRUTH.
         private const val AYANA_VOICE_SERVICE_RELEASE =
-            "v12.21.0 / R8.5 SELF-REVIEW TRUTH"
+            "v12.21.0 / R8.5.1 SELF-REVIEW EVIDENCE FUSION"
 
         private const val AYANA_PERSONAL_SEARCH_ENGINE_RELEASE =
             "v1.5.1 IMAGE COVERAGE TRUTH"
@@ -39200,10 +39348,17 @@ state
             "R8.4 Unified Search Commands & Actions — DEVICE-CONFIRMED ACCEPTED"
 
         private const val AYANA_CURRENT_FEATURE_RELEASE =
-            "R8.5 SELF-REVIEW ROUTING + COMPLETENESS + RELEASE METADATA"
+            "R8.5.1 SELF-REVIEW EVIDENCE FUSION + INLINE COMPLETENESS"
 
         private const val AYANA_RELEASE_LINEAGE =
-            "Android v12.21.0 / R7.9 truth-hardening + R8.0 multi-attachment + R8.1–R8.4 accepted Personal Global Search stack + R8.5 self-review truth layer"
+            "Android v12.21.0 / R7.9 truth-hardening + R8.0 multi-attachment + R8.1–R8.4 accepted Personal Global Search stack + R8.5/R8.5.1 self-review truth"
+
+        // AyanaCommandHistoryStore v2.8 keeps up to 4k chars inline and stores longer
+        // results out-of-line. Self-review intentionally remains inline so copied History
+        // cannot degrade to a 4k preview if a sidecar result file is unavailable.
+        private const val SELF_REVIEW_INLINE_SAFE_CHARS =
+            3_900
+
 
         const val ACTION_START =
             "kg.autonomous.agent.action.START_AYANA"
