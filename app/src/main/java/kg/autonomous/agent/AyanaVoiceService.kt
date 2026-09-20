@@ -3997,7 +3997,22 @@ mainHandler.post {
             return
         }
 
-        // R8.3D PERSONAL GLOBAL SEARCH — LOCAL-FIRST, DOCUMENT + IMAGE CONTENT INDEX + OPENABLE RESULTS.
+        // R8.4 UNIFIED PERSONAL SEARCH FOLLOW-UPS.
+        // These commands intentionally omit the original query text, so resolve them
+        // against the bounded local Personal Search session before generic routing.
+        AyanaPersonalSearchEngine
+            .parseFollowUp(
+                originalCommand
+            )
+            ?.let { followUp ->
+                runLocalPersonalSearchFollowUp(
+                    followUp = followUp,
+                    silent = silent
+                )
+                return
+            }
+
+        // R8.4 PERSONAL GLOBAL SEARCH — LOCAL-FIRST, PAGED FOLLOW-UPS + SOURCE FILTERS.
         // Claim only explicit personal/local-search grammar. Google/Internet/YouTube/Map/App
         // search stays outside this engine by parser contract. Current search covers Memory,
         // Command History, Tasks/Reminders, NotificationListener records, Android-visible
@@ -12539,6 +12554,104 @@ respondAndResume(
         worker.start()
     }
 
+    private fun runLocalPersonalSearchFollowUp(
+        followUp: AyanaPersonalSearchEngine.FollowUpRequest,
+        silent: Boolean
+    ) {
+        executionPhase(
+            phase = "local_personal_search_followup",
+            executor = "personal_search_engine"
+        )
+
+        when (followUp.kind) {
+            AyanaPersonalSearchEngine.FollowUpKind.NEXT_PAGE,
+            AyanaPersonalSearchEngine.FollowUpKind.PREVIOUS_PAGE -> {
+                val delta =
+                    if (
+                        followUp.kind ==
+                        AyanaPersonalSearchEngine.FollowUpKind.NEXT_PAGE
+                    ) {
+                        1
+                    } else {
+                        -1
+                    }
+
+                val page =
+                    personalSearchEngine
+                        .renderLatestPage(
+                            delta
+                        )
+
+                if (page == null) {
+                    respondAndResume(
+                        text =
+                            "Нет сохранённой выдачи личного поиска. Сначала выполни поиск, например «найди всё про AYANA».",
+                        silent = silent,
+                        success = false,
+                        technical =
+                            "personal_search_followup_no_session; kind=${followUp.kind.name.lowercase(Locale.ROOT)}"
+                    )
+                    return
+                }
+
+                commandHistoryStore.addEvent(
+                    activeCommandHistoryId,
+                    state = "personal_search_followup",
+                    message =
+                        if (page.boundary) {
+                            "Граница сохранённой выдачи личного поиска достигнута"
+                        } else {
+                            "Показана другая страница сохранённой выдачи личного поиска"
+                        },
+                    details = page.technical
+                )
+
+                respondAndResume(
+                    text = page.text,
+                    silent = silent,
+                    success = true,
+                    technical = page.technical
+                )
+            }
+
+            AyanaPersonalSearchEngine.FollowUpKind.FILTER_SOURCES -> {
+                val request =
+                    personalSearchEngine
+                        .latestRequestForSources(
+                            followUp.sources
+                        )
+
+                if (request == null) {
+                    respondAndResume(
+                        text =
+                            "Нет предыдущего личного поиска, который можно отфильтровать. Сначала выполни новый поиск.",
+                        silent = silent,
+                        success = false,
+                        technical =
+                            "personal_search_followup_no_session; kind=filter_sources"
+                    )
+                    return
+                }
+
+                commandHistoryStore.addEvent(
+                    activeCommandHistoryId,
+                    state = "personal_search_followup",
+                    message =
+                        "Последний личный поиск повторяется только по выбранным источникам",
+                    details =
+                        "kind=filter_sources; query=${request.query.take(140)}; " +
+                            "sources=${request.sources.joinToString(",") { it.wireName }}"
+                )
+
+                runLocalPersonalGlobalSearch(
+                    request = request,
+                    silent = silent
+                )
+            }
+        }
+    }
+
+
     private fun runLocalPersonalGlobalSearch(
         request: AyanaPersonalSearchEngine.Request,
         silent: Boolean
@@ -12548,7 +12661,7 @@ respondAndResume(
             executor = "personal_search_engine"
         )
 
-        // R8.3D DEVICE CONTENT SEARCH + BACKGROUND IMAGE INDEX PERFORMANCE/TRUTH.
+        // R8.4 DEVICE CONTENT SEARCH + UNIFIED SEARCH SESSION PERFORMANCE/TRUTH.
         // MediaStore, first-run document extraction and bounded local image ML indexing
         // may touch many rows/files. Never execute these operations on the main looper.
         // Keep the local search bounded in its own execution thread and publish the final
