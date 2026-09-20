@@ -60,13 +60,11 @@ import kotlin.math.abs
 
 class AyanaVoiceService : Service() {
 
-    // AYANA R8.5.1 SELF-REVIEW EVIDENCE FUSION + INLINE COMPLETENESS.
-    // Preserves accepted R8.4 Search and R8.5 self-review routing. The inventory path
-    // fuses live Capability Registry truth, persisted machine evidence and a narrowly
-    // scoped ledger of prior device-confirmed acceptance evidence. The user-visible
-    // 52-capability report is deliberately compact enough to remain inside History's
-    // inline result window, avoiding loss if an external full-result sidecar is missing.
-    // No Agent Core turn, no ORB/visualizer/Search/Worker changes.
+    // AYANA R8.5.2 SHARED DEVICE EVIDENCE TRUTH.
+    // Self-review and Autonomous Test Intelligence now resolve effective device proof
+    // through one AyanaDeviceEvidenceTruth source. This removes duplicate truth ledgers
+    // and prevents ATI from generating coverage-gap hypotheses for capabilities already
+    // accepted by device/runtime evidence. Search, ORB, visualizer and Worker untouched.
 
     // AYANA R8.3B SEARCH RESULT ACTIONS.
     // The latest openable Personal Search file/photo results are stored only as local
@@ -21172,7 +21170,7 @@ plan.optInt(
                 },
             message =
                 if (ok) {
-                    "Release metadata согласованы: base v12.21.0 / R7.9; accepted R8.4; current R8.5.1 self-review evidence-fusion layer; Personal Search v1.5.1."
+                    "Release metadata согласованы: base v12.21.0 / R7.9; accepted R8.5.1; current R8.5.2 shared device-evidence truth; Personal Search v1.5.1."
                 } else {
                     "Release metadata неполны или Capability Registry build-label не соответствует base v12.21.0 / R7.9: build=$registryBuild; app=$appVersion."
                 },
@@ -23811,126 +23809,37 @@ requestMethod = "GET"
             "unknown"
         }
 
-    /**
-     * Narrow historical device-evidence ledger.
-     *
-     * This does NOT claim source-code presence as device confirmation.
-     * Every entry below corresponds to a previously observed device/acceptance result
-     * from this same Samsung Galaxy Tab S8 lineage. Live `available_now` still wins:
-     * a previously confirmed capability can be reported as unavailable right now.
-     */
-    private fun selfReviewAcceptedDeviceEvidence(
-        capabilityId: String
-    ): String? =
-        when (capabilityId) {
-            "bounded_voice_follow_up" ->
-                "device: wake follow-up ~30 s"
-
-            "relative_media_volume_delta" ->
-                "device: media volume delta verified"
-
-            "exact_screen_brightness_set" ->
-                "device: 20/80/40% round-trip"
-
-            "app_task_removal" ->
-                "device: verified Recents task removal"
-
-            "multimodal_stop_during_analysis" ->
-                "device: multimodal STOP -> CANCELLED"
-
-            "settings_intent_attestation" ->
-                "device: verified Samsung Settings target"
-
-            "app_detail_permissions_navigation" ->
-                "device: YouTube App Info -> Permissions"
-
-            "local_acceptance_test_engine" ->
-                "device: local acceptance + verified report"
-
-            "capability_truth_grounding" ->
-                "device: Registry/runtime truth acceptance"
-
-            "agent_core_latency_classification" ->
-                "device: measured phase telemetry"
-
-            "perception_owner_fusion" ->
-                "device: overlay/foreground owner fusion"
-
-            "whole_goal_routing_guard" ->
-                "device: whole-goal contract PASS"
-
-            "artifact_whole_goal_orchestration" ->
-                "device: artifact goal + verified publish"
-
-            "goal_compiler_execution_contract" ->
-                "runtime probe: 2026-09-16 PASS"
-
-            "unified_execution_session" ->
-                "runtime probe: 2026-09-16 PASS"
-
-            "autonomous_execution_loop" ->
-                "runtime probe: 2026-09-16 PASS"
-
-            "agent_core_timeout_recovery" ->
-                "device: ONLINE-002 recovery PASS"
-
-            else ->
-                null
-        }
-
-    private fun selfReviewEvidenceCode(
+    private fun selfReviewEvidenceResolution(
         item: JSONObject,
         capabilityId: String,
-        effectiveConfirmed: Boolean
-    ): String {
-
-        if (
-            item.optBoolean(
-                "runtime_evidence_persisted",
-                false
-            )
-        ) {
-            return "run"
-        }
-
-        if (
-            item.optBoolean(
-                "static_device_confirmed",
-                false
-            )
-        ) {
-            return "reg"
-        }
-
-        if (
-            selfReviewAcceptedDeviceEvidence(
-                capabilityId
-            ) != null
-        ) {
-            return "hist"
-        }
-
-        if (effectiveConfirmed) {
-            return "reg"
-        }
-
-        return when {
-            !item.optBoolean(
-                "implemented",
-                false
-            ) ->
-                "neg"
-
-            !item.optBoolean(
-                "available_now",
-                false
-            ) ->
-                "off"
-
-            else ->
-                "live"
-        }
-    }
+        implemented: Boolean,
+        available: Boolean
+    ): AyanaDeviceEvidenceTruth.Resolution =
+        AyanaDeviceEvidenceTruth.resolve(
+            capabilityId = capabilityId,
+            implemented = implemented,
+            availableNow = available,
+            registryDeviceConfirmed =
+                item.optBoolean(
+                    "device_confirmed",
+                    false
+                ),
+            staticDeviceConfirmed =
+                item.optBoolean(
+                    "static_device_confirmed",
+                    false
+                ),
+            runtimeEvidencePersisted =
+                item.optBoolean(
+                    "runtime_evidence_persisted",
+                    false
+                ),
+            runtimeEvidenceDetail =
+                item.optString(
+                    "runtime_evidence_detail"
+                ),
+            runtimeProbeConfirmed = false
+        )
 
     private fun runLocalSelfReviewCommand(
         silent: Boolean
@@ -24047,16 +23956,20 @@ requestMethod = "GET"
             val registryConfirmed =
                 item.optBoolean("device_confirmed", false)
 
-            val acceptedEvidence =
-                selfReviewAcceptedDeviceEvidence(id)
+            val evidenceResolution =
+                selfReviewEvidenceResolution(
+                    item = item,
+                    capabilityId = id,
+                    implemented = implemented,
+                    available = available
+                )
 
             val effectiveConfirmed =
-                registryConfirmed ||
-                    acceptedEvidence != null
+                evidenceResolution.effectiveConfirmed
 
             if (
                 !registryConfirmed &&
-                acceptedEvidence != null
+                evidenceResolution.historicalAccepted
             ) {
                 fusedHistoricalCount++
             }
@@ -24107,11 +24020,7 @@ requestMethod = "GET"
                 }
 
             val evidenceCode =
-                selfReviewEvidenceCode(
-                    item = item,
-                    capabilityId = id,
-                    effectiveConfirmed = effectiveConfirmed
-                )
+                evidenceResolution.sourceCode
 
             capabilityLines +=
                 String.format(
@@ -24253,6 +24162,7 @@ requestMethod = "GET"
                         "unavailable_unconfirmed=$unavailableUnconfirmedCount; " +
                         "not_implemented=$notImplementedCount; " +
                         "historical_fused=$fusedHistoricalCount; " +
+                        "shared_truth=${AyanaDeviceEvidenceTruth.VERSION}; " +
                         "contradictions=$contradictionCount; " +
                         "presentation_complete=$presentationComplete; " +
                         "answer_chars=${answer.length}; " +
@@ -24277,6 +24187,7 @@ requestMethod = "GET"
                     "unavailable_unconfirmed=$unavailableUnconfirmedCount; " +
                     "not_implemented=$notImplementedCount; " +
                     "historical_fused=$fusedHistoricalCount; " +
+                    "shared_truth=${AyanaDeviceEvidenceTruth.VERSION}; " +
                     "limited=${limited.size}; " +
                     "contradictions=$contradictionCount; " +
                     "presentation_complete=$presentationComplete; " +
@@ -39331,9 +39242,9 @@ state
 
     companion object {
 
-        // R8.5.1 RELEASE / FEATURE LINEAGE TRUTH.
+        // R8.5.2 RELEASE / FEATURE LINEAGE TRUTH.
         private const val AYANA_VOICE_SERVICE_RELEASE =
-            "v12.21.0 / R8.5.1 SELF-REVIEW EVIDENCE FUSION"
+            "v12.21.0 / R8.5.2 SHARED DEVICE EVIDENCE TRUTH"
 
         private const val AYANA_PERSONAL_SEARCH_ENGINE_RELEASE =
             "v1.5.1 IMAGE COVERAGE TRUTH"
@@ -39345,13 +39256,13 @@ state
             "v11.1.10 Multi-Attachment"
 
         private const val AYANA_ACCEPTED_FEATURE_CHECKPOINT =
-            "R8.4 Unified Search Commands & Actions — DEVICE-CONFIRMED ACCEPTED"
+            "R8.5.1 Self-Review Evidence Fusion + Inline Completeness — DEVICE-CONFIRMED ACCEPTED"
 
         private const val AYANA_CURRENT_FEATURE_RELEASE =
-            "R8.5.1 SELF-REVIEW EVIDENCE FUSION + INLINE COMPLETENESS"
+            "R8.5.2 SHARED DEVICE EVIDENCE TRUTH"
 
         private const val AYANA_RELEASE_LINEAGE =
-            "Android v12.21.0 / R7.9 truth-hardening + R8.0 multi-attachment + R8.1–R8.4 accepted Personal Global Search stack + R8.5/R8.5.1 self-review truth"
+            "Android v12.21.0 / R7.9 truth-hardening + R8.0 multi-attachment + R8.1–R8.4 accepted Personal Global Search stack + R8.5/R8.5.1 self-review truth + R8.5.2 shared evidence truth"
 
         // AyanaCommandHistoryStore v2.8 keeps up to 4k chars inline and stores longer
         // results out-of-line. Self-review intentionally remains inline so copied History
