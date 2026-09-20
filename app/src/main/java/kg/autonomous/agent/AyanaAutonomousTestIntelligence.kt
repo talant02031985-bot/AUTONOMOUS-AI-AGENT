@@ -6,7 +6,7 @@ import java.security.MessageDigest
 import java.util.Locale
 
 /**
- * AYANA Autonomous Test Intelligence v1.3 — RUNTIME-EVIDENCE + HISTORICAL-NOISE TRUTH.
+ * AYANA Autonomous Test Intelligence v1.4 — SHARED DEVICE EVIDENCE TRUTH.
  *
  * This layer is intentionally different from a fixed acceptance checklist.
  * It discovers test opportunities from the current build/runtime itself:
@@ -15,11 +15,12 @@ import java.util.Locale
  * - planner tests are generated from the apps that actually exist on the device;
  * - recent real commands are mutated into safe planner-only metamorphic checks;
  * - Command History is mined for terminal/evidence contradictions and platform drift;
- * - unconfirmed capabilities become explicit hypotheses instead of fabricated PASS;
+ * - effective device-confirmation is resolved through AyanaDeviceEvidenceTruth;
+ * - accepted historical/device evidence suppresses stale coverage-gap hypotheses;
  * - fresh PASS evidence from baseline runtime probes can satisfy device-confirmation
  *   for that diagnostic run without mutating Capability Registry metadata.
  *
- * All generated tests in v1.3 are READ-ONLY or PURE. No generated test opens an app,
+ * All generated tests in v1.4 are READ-ONLY or PURE. No generated test opens an app,
  * writes device state, sends a message, deletes user data, uses the camera, purchases,
  * or performs any other irreversible action. Future active probes must remain behind
  * the same fail-closed safety contract and own restore/cleanup before PASS.
@@ -52,6 +53,8 @@ class AyanaAutonomousTestIntelligence(
 
         var generated = 0
         var capabilityTests = 0
+        var capabilityCoverageGaps = 0
+        val sharedHistoricalCapabilities = linkedSetOf<String>()
         var resolverTests = 0
         var plannerTests = 0
         var metamorphicTests = 0
@@ -90,14 +93,27 @@ class AyanaAutonomousTestIntelligence(
             val available = item.optBoolean("available_now", false)
             val registryConfirmed = item.optBoolean("device_confirmed", false)
             val runtimeProbeConfirmed = id in runtimeConfirmedCapabilities
-            val confirmed = registryConfirmed || runtimeProbeConfirmed
-            val truthState =
-                if (runtimeProbeConfirmed && !registryConfirmed) {
-                    "RUNTIME_PROBE_CONFIRMED"
-                } else {
-                    item.optString("truth_state")
-                }
+            val evidenceResolution =
+                AyanaDeviceEvidenceTruth.resolve(
+                    capabilityId = id,
+                    implemented = implemented,
+                    availableNow = available,
+                    registryDeviceConfirmed = registryConfirmed,
+                    staticDeviceConfirmed =
+                        item.optBoolean("static_device_confirmed", false),
+                    runtimeEvidencePersisted =
+                        item.optBoolean("runtime_evidence_persisted", false),
+                    runtimeEvidenceDetail =
+                        item.optString("runtime_evidence_detail"),
+                    runtimeProbeConfirmed = runtimeProbeConfirmed
+                )
+            val confirmed = evidenceResolution.effectiveConfirmed
+            val truthState = evidenceResolution.truthState
             val note = item.optString("note").take(MAX_NOTE_CHARS)
+
+            if (evidenceResolution.historicalAccepted) {
+                sharedHistoricalCapabilities += id
+            }
 
             val contradiction =
                 (!implemented && available) ||
@@ -129,6 +145,10 @@ class AyanaAutonomousTestIntelligence(
                             .put("device_confirmed", confirmed)
                             .put("registry_device_confirmed", registryConfirmed)
                             .put("runtime_probe_confirmed", runtimeProbeConfirmed)
+                            .put("shared_truth_version", AyanaDeviceEvidenceTruth.VERSION)
+                            .put("evidence_source", evidenceResolution.sourceCode)
+                            .put("historical_accepted_evidence", evidenceResolution.historicalAccepted)
+                            .put("evidence_detail", evidenceResolution.sourceDetail.take(500))
                             .put("truth_state", truthState)
                             .put("note", note)
                 )
@@ -137,6 +157,7 @@ class AyanaAutonomousTestIntelligence(
             capabilityTests++
 
             if (implemented && available && !confirmed) {
+                capabilityCoverageGaps++
                 hypotheses.put(
                     JSONObject()
                         .put("id", "HYP-CAP-${shortId(id)}")
@@ -146,7 +167,7 @@ class AyanaAutonomousTestIntelligence(
                         .put("safe_execution", "requires_capability_specific_probe")
                         .put(
                             "hypothesis",
-                            "Capability реализована и доступна, но ещё не имеет device-confirmed evidence. Сгенерировать безопасный runtime-probe для: $id."
+                            "Capability реализована и доступна, но shared device-evidence truth не содержит подтверждения. Сгенерировать безопасный runtime-probe для: $id."
                         )
                         .put("note", note)
                 )
@@ -596,6 +617,9 @@ class AyanaAutonomousTestIntelligence(
                     .put("capabilities_discovered", capabilities.length())
                     .put("capability_invariants_tested", capabilityTests)
                     .put("runtime_confirmed_capabilities", runtimeConfirmedCapabilities.size)
+                    .put("shared_device_evidence_truth_version", AyanaDeviceEvidenceTruth.VERSION)
+                    .put("shared_historical_evidence_capabilities", sharedHistoricalCapabilities.size)
+                    .put("capability_coverage_gaps_after_fusion", capabilityCoverageGaps)
                     .put("installed_apps_discovered", apps.length())
                     .put("app_resolver_tests", resolverTests)
                     .put("generated_planner_tests", plannerTests)
@@ -1026,7 +1050,7 @@ class AyanaAutonomousTestIntelligence(
     }
 
     companion object {
-        const val ENGINE_VERSION = "1.3"
+        const val ENGINE_VERSION = "1.4"
 
         private const val STATUS_PASS = "PASS"
         private const val STATUS_WARNING = "WARNING"
