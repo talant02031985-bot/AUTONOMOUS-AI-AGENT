@@ -796,6 +796,10 @@ class AyanaPersonalSearchEngine(
                         "pending=${visualResult.pendingImages}; OCR/labels локально. " +
                         if (visualResult.pendingImages > 0) {
                             "Поиск по содержимому фото частичный до завершения индекса."
+                        } else if (visualResult.failedImages > 0) {
+                            "Индекс завершён: успешно проиндексировано ${visualResult.indexedImages} из " +
+                                "${visualResult.candidateImages}; ошибок=${visualResult.failedImages}. " +
+                                "Изображения с ошибкой не покрыты поиском по содержимому."
                         } else {
                             "Поиск по содержимому охватывает все доступные текущему MediaStore изображения."
                         }
