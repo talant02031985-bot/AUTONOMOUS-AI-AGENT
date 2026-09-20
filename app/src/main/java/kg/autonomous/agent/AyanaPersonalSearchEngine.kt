@@ -8,9 +8,9 @@ import java.util.Date
 import java.util.Locale
 
 /**
- * AYANA Personal Search Engine v1.4 — LOCAL GLOBAL SEARCH + DOCUMENT + IMAGE CONTENT INDEX + OPENABLE RESULTS.
+ * AYANA Personal Search Engine v1.5 — UNIFIED LOCAL SEARCH + PAGED FOLLOW-UPS + SOURCE FILTERS.
  *
- * Scope v1.2:
+ * Scope v1.5:
  * - Memory v2;
  * - Command History;
  * - Tasks / reminders;
@@ -26,7 +26,9 @@ import java.util.Locale
  * - file search combines metadata with the local incremental document-content index;
  * - scoped-storage / selected-photo access is reported honestly and is never described as full-device coverage;
  * - openable file/photo results persist only as bounded local content:// action records;
- * - raw content:// URIs are never rendered in the user-facing answer.
+ * - raw content:// URIs are never rendered in the user-facing answer;
+ * - the latest bounded result pool is persisted locally for «следующие результаты»;
+ * - source-filter follow-ups reuse only the latest query text, then run a fresh truthful local search.
  */
 class AyanaPersonalSearchEngine(
     context: Context,
@@ -53,6 +55,32 @@ class AyanaPersonalSearchEngine(
     data class Request(
         val query: String,
         val sources: Set<Source>
+    )
+
+    enum class FollowUpKind {
+        NEXT_PAGE,
+        PREVIOUS_PAGE,
+        FILTER_SOURCES
+    }
+
+    data class FollowUpRequest(
+        val kind: FollowUpKind,
+        val sources: Set<Source> = emptySet()
+    )
+
+    data class PageResult(
+        val text: String,
+        val technical: String,
+        val pageIndex: Int,
+        val totalPages: Int,
+        val totalHits: Int,
+        val boundary: Boolean
+    )
+
+    private data class SearchSession(
+        val report: Report,
+        val pageIndex: Int,
+        val savedAtMs: Long
     )
 
     data class Hit(
@@ -103,6 +131,12 @@ class AyanaPersonalSearchEngine(
     private val searchResultStore =
         AyanaSearchResultStore(
             appContext
+        )
+
+    private val sessionPreferences =
+        appContext.getSharedPreferences(
+            SESSION_PREFS_NAME,
+            Context.MODE_PRIVATE
         )
 
     fun search(
@@ -909,17 +943,11 @@ class AyanaPersonalSearchEngine(
         }
 
         val ranked =
-            allHits
-                .sortedWith(
-                    compareByDescending<Hit> {
-                        it.score
-                    }.thenByDescending {
-                        it.timestampMs
-                    }.thenBy {
-                        it.source.ordinal
-                    }
-                )
-                .take(safeTotalLimit)
+            rankHitsForUnifiedPool(
+                hits = allHits,
+                requestedSources = request.sources,
+                limit = safeTotalLimit
+            )
 
         searchResultStore.replace(
             ranked.mapIndexedNotNull { index, hit ->
@@ -940,7 +968,8 @@ class AyanaPersonalSearchEngine(
             }
         )
 
-        return Report(
+        val report =
+            Report(
             request = request,
             hits = ranked,
             sourceMatchCounts = sourceMatchCounts,
@@ -969,10 +998,17 @@ class AyanaPersonalSearchEngine(
             imageLabeledPhotos = imageLabeledPhotos,
             imageNewIndexBudget = imageNewIndexBudget
         )
-    }
+        saveSession(
+            report = report,
+            pageIndex = 0
+        )
 
+        return report
+    }
     fun renderRussian(
-        report: Report
+        report: Report,
+        pageIndex: Int = 0,
+        pageSize: Int = DEFAULT_PAGE_SIZE
     ): String {
         val request =
             report.request
@@ -1004,19 +1040,86 @@ class AyanaPersonalSearchEngine(
             }
         }
 
+        val safePageSize =
+            pageSize.coerceIn(
+                1,
+                MAX_PAGE_SIZE
+            )
+
+        val totalPages =
+            pageCount(
+                hitCount = report.hits.size,
+                pageSize = safePageSize
+            )
+
+        val safePageIndex =
+            pageIndex.coerceIn(
+                0,
+                totalPages - 1
+            )
+
+        val fromIndex =
+            safePageIndex * safePageSize
+
+        val toExclusive =
+            (fromIndex + safePageSize)
+                .coerceAtMost(
+                    report.hits.size
+                )
+
+        val pageHits =
+            report.hits.subList(
+                fromIndex,
+                toExclusive
+            )
+
+        val sourceSummary =
+            report.hits
+                .groupingBy {
+                    it.source
+                }
+                .eachCount()
+                .entries
+                .sortedBy {
+                    it.key.ordinal
+                }
+                .joinToString("; ") { (source, count) ->
+                    "${source.label} — $count"
+                }
+
         return buildString {
             append("Личный поиск AYANA: «")
             append(request.query)
-            append("». Найдено: ")
+            append("». В текущей выдаче: ")
             append(report.hits.size)
             append(".")
-            append("\nПроверено локально: ")
-            append(sourceLabels)
+
+            if (safePageIndex == 0) {
+                append("\nПроверено локально: ")
+                append(sourceLabels)
+                append(".")
+
+                if (sourceSummary.isNotBlank()) {
+                    append("\nВ выдаче по источникам: ")
+                    append(sourceSummary)
+                    append(".")
+                }
+            }
+
+            append("\nПоказано ")
+            append(fromIndex + 1)
+            append("–")
+            append(toExclusive)
+            append(" из ")
+            append(report.hits.size)
             append(".")
 
-            report.hits.forEachIndexed { index, hit ->
+            pageHits.forEachIndexed { localIndex, hit ->
+                val resultNumber =
+                    fromIndex + localIndex + 1
+
                 append("\n")
-                append(index + 1)
+                append(resultNumber)
                 append("). [")
                 append(hit.source.label)
                 append("] ")
@@ -1034,19 +1137,128 @@ class AyanaPersonalSearchEngine(
 
                 if (hit.actionUri.startsWith("content://")) {
                     append("\n   Открыть результат ")
-                    append(index + 1)
+                    append(resultNumber)
                 }
             }
 
-            appendSourceErrors(
-                this,
-                report.sourceErrors
-            )
-            appendDeviceCoverage(
-                this,
-                report.sourceCoverage
+            if (safePageIndex == 0) {
+                appendSourceErrors(
+                    this,
+                    report.sourceErrors
+                )
+                appendDeviceCoverage(
+                    this,
+                    report.sourceCoverage
+                )
+            }
+
+            if (toExclusive < report.hits.size) {
+                append("\nЕсть ещё результаты. Скажи: «покажи следующие результаты».")
+            } else if (safePageIndex > 0) {
+                append("\nЭто последние результаты текущей выдачи.")
+            }
+        }
+    }
+
+    fun latestRequestForSources(
+        sources: Set<Source>
+    ): Request? {
+        if (sources.isEmpty()) {
+            return null
+        }
+
+        val session =
+            loadSession()
+                ?: return null
+
+        return Request(
+            query = session.report.request.query,
+            sources = LinkedHashSet(sources)
+        )
+    }
+
+    fun renderLatestPage(
+        delta: Int
+    ): PageResult? {
+        val session =
+            loadSession()
+                ?: return null
+
+        val report =
+            session.report
+
+        if (report.hits.isEmpty()) {
+            return PageResult(
+                text = renderRussian(report),
+                technical =
+                    "personal_search_local; followup=page; query=${report.request.query.take(140)}; " +
+                        "page=0/0; matches=0; session_reused=true",
+                pageIndex = 0,
+                totalPages = 0,
+                totalHits = 0,
+                boundary = true
             )
         }
+
+        val totalPages =
+            pageCount(
+                hitCount = report.hits.size,
+                pageSize = DEFAULT_PAGE_SIZE
+            )
+
+        val currentPage =
+            session.pageIndex
+                .coerceIn(
+                    0,
+                    totalPages - 1
+                )
+
+        val requestedPage =
+            currentPage + delta
+
+        if (
+            requestedPage < 0 ||
+            requestedPage >= totalPages
+        ) {
+            val boundaryText =
+                if (requestedPage < 0) {
+                    "Это первая страница текущей выдачи. Предыдущих результатов нет."
+                } else {
+                    "Больше результатов в текущей выдаче нет. Всего сохранено: ${report.hits.size}."
+                }
+
+            return PageResult(
+                text = boundaryText,
+                technical =
+                    "personal_search_local; followup=page_boundary; query=${report.request.query.take(140)}; " +
+                        "page=${currentPage + 1}/$totalPages; matches=${report.hits.size}; session_reused=true",
+                pageIndex = currentPage,
+                totalPages = totalPages,
+                totalHits = report.hits.size,
+                boundary = true
+            )
+        }
+
+        saveSession(
+            report = report,
+            pageIndex = requestedPage
+        )
+
+        return PageResult(
+            text =
+                renderRussian(
+                    report = report,
+                    pageIndex = requestedPage
+                ),
+            technical =
+                "personal_search_local; followup=page; query=${report.request.query.take(140)}; " +
+                    "sources=${report.request.sources.joinToString(",") { it.wireName }}; " +
+                    "page=${requestedPage + 1}/$totalPages; matches=${report.hits.size}; session_reused=true",
+            pageIndex = requestedPage,
+            totalPages = totalPages,
+            totalHits = report.hits.size,
+            boundary = false
+        )
     }
 
     fun technicalSummary(
@@ -1090,6 +1302,726 @@ class AyanaPersonalSearchEngine(
             )
             .take(1800)
     }
+
+    private fun rankHitsForUnifiedPool(
+        hits: List<Hit>,
+        requestedSources: Set<Source>,
+        limit: Int
+    ): List<Hit> {
+        val safeLimit =
+            limit.coerceIn(
+                1,
+                MAX_TOTAL_LIMIT
+            )
+
+        val comparator =
+            compareByDescending<Hit> {
+                it.score
+            }.thenByDescending {
+                it.timestampMs
+            }.thenBy {
+                it.source.ordinal
+            }
+
+        val globallySorted =
+            hits.sortedWith(
+                comparator
+            )
+
+        if (
+            requestedSources.size <= 1 ||
+            globallySorted.size <= safeLimit
+        ) {
+            return globallySorted
+                .take(
+                    safeLimit
+                )
+        }
+
+        val selected =
+            mutableListOf<Hit>()
+
+        requestedSources
+            .sortedBy {
+                it.ordinal
+            }
+            .forEach { source ->
+                if (selected.size >= safeLimit) {
+                    return@forEach
+                }
+
+                globallySorted
+                    .asSequence()
+                    .filter {
+                        it.source == source
+                    }
+                    .take(
+                        MIN_PER_SOURCE_IN_GLOBAL_POOL
+                    )
+                    .forEach { hit ->
+                        if (
+                            selected.size < safeLimit &&
+                            hit !in selected
+                        ) {
+                            selected += hit
+                        }
+                    }
+            }
+
+        globallySorted
+            .forEach { hit ->
+                if (
+                    selected.size < safeLimit &&
+                    hit !in selected
+                ) {
+                    selected += hit
+                }
+            }
+
+        return selected
+            .take(
+                safeLimit
+            )
+    }
+
+
+    private fun saveSession(
+        report: Report,
+        pageIndex: Int
+    ) {
+        val now =
+            System.currentTimeMillis()
+
+        val root =
+            JSONObject()
+                .put(
+                    "saved_at_ms",
+                    now
+                )
+                .put(
+                    "page_index",
+                    pageIndex.coerceAtLeast(0)
+                )
+
+        val requestJson =
+            JSONObject()
+                .put(
+                    "query",
+                    report.request.query.take(MAX_SESSION_QUERY_CHARS)
+                )
+
+        val sourceArray =
+            JSONArray()
+
+        report.request.sources
+            .sortedBy {
+                it.ordinal
+            }
+            .forEach { source ->
+                sourceArray.put(
+                    source.wireName
+                )
+            }
+
+        requestJson.put(
+            "sources",
+            sourceArray
+        )
+
+        root.put(
+            "request",
+            requestJson
+        )
+
+        val hitsArray =
+            JSONArray()
+
+        report.hits
+            .take(MAX_TOTAL_LIMIT)
+            .forEach { hit ->
+                hitsArray.put(
+                    JSONObject()
+                        .put(
+                            "source",
+                            hit.source.wireName
+                        )
+                        .put(
+                            "title",
+                            hit.title.take(MAX_TITLE_CHARS)
+                        )
+                        .put(
+                            "snippet",
+                            hit.snippet.take(MAX_SNIPPET_CHARS)
+                        )
+                        .put(
+                            "timestamp_ms",
+                            hit.timestampMs
+                        )
+                        .put(
+                            "score",
+                            hit.score
+                        )
+                        .put(
+                            "metadata",
+                            hit.metadata.take(MAX_SESSION_METADATA_CHARS)
+                        )
+                        .put(
+                            "action_uri",
+                            hit.actionUri.take(MAX_SESSION_URI_CHARS)
+                        )
+                        .put(
+                            "action_mime",
+                            hit.actionMimeType.take(160)
+                        )
+                        .put(
+                            "action_kind",
+                            hit.actionKind.take(40)
+                        )
+                )
+            }
+
+        root.put(
+            "hits",
+            hitsArray
+        )
+
+        root.put(
+            "source_match_counts",
+            sourceIntMapToJson(
+                report.sourceMatchCounts
+            )
+        )
+        root.put(
+            "source_errors",
+            sourceStringMapToJson(
+                report.sourceErrors
+            )
+        )
+        root.put(
+            "source_coverage",
+            sourceStringMapToJson(
+                report.sourceCoverage
+            )
+        )
+
+        root
+            .put(
+                "scanned_history",
+                report.scannedHistoryRecords
+            )
+            .put(
+                "scanned_notifications",
+                report.scannedNotifications
+            )
+            .put(
+                "scanned_files",
+                report.scannedFiles
+            )
+            .put(
+                "scanned_photos",
+                report.scannedPhotos
+            )
+            .put(
+                "content_provider_rows",
+                report.contentProviderRowsScanned
+            )
+            .put(
+                "content_candidates",
+                report.contentCandidateDocuments
+            )
+            .put(
+                "content_indexed",
+                report.contentIndexedDocuments
+            )
+            .put(
+                "content_reused",
+                report.contentReusedDocuments
+            )
+            .put(
+                "content_updated",
+                report.contentUpdatedDocuments
+            )
+            .put(
+                "content_failed",
+                report.contentFailedDocuments
+            )
+            .put(
+                "content_unsupported",
+                report.contentUnsupportedDocuments
+            )
+            .put(
+                "content_pdf_best_effort",
+                report.contentPdfBestEffortDocuments
+            )
+            .put(
+                "image_provider_rows",
+                report.imageProviderRowsScanned
+            )
+            .put(
+                "image_candidates",
+                report.imageCandidatePhotos
+            )
+            .put(
+                "image_indexed",
+                report.imageIndexedPhotos
+            )
+            .put(
+                "image_reused",
+                report.imageReusedPhotos
+            )
+            .put(
+                "image_updated",
+                report.imageUpdatedPhotos
+            )
+            .put(
+                "image_failed",
+                report.imageFailedPhotos
+            )
+            .put(
+                "image_pending",
+                report.imagePendingPhotos
+            )
+            .put(
+                "image_ocr",
+                report.imageOcrPhotos
+            )
+            .put(
+                "image_labeled",
+                report.imageLabeledPhotos
+            )
+            .put(
+                "image_budget",
+                report.imageNewIndexBudget
+            )
+
+        sessionPreferences
+            .edit()
+            .putString(
+                SESSION_KEY_JSON,
+                root.toString()
+            )
+            .apply()
+    }
+
+    private fun loadSession(): SearchSession? {
+        val raw =
+            sessionPreferences.getString(
+                SESSION_KEY_JSON,
+                null
+            )
+                ?: return null
+
+        val root =
+            try {
+                JSONObject(raw)
+            } catch (_: Exception) {
+                clearSession()
+                return null
+            }
+
+        val savedAtMs =
+            root.optLong(
+                "saved_at_ms",
+                0L
+            )
+
+        val now =
+            System.currentTimeMillis()
+
+        if (
+            savedAtMs <= 0L ||
+            now - savedAtMs >
+            SESSION_TTL_MS
+        ) {
+            clearSession()
+            return null
+        }
+
+        val requestJson =
+            root.optJSONObject(
+                "request"
+            )
+                ?: run {
+                    clearSession()
+                    return null
+                }
+
+        val query =
+            requestJson
+                .optString(
+                    "query"
+                )
+                .trim()
+
+        if (query.isBlank()) {
+            clearSession()
+            return null
+        }
+
+        val requestedSources =
+            linkedSetOf<Source>()
+
+        val requestSourcesJson =
+            requestJson.optJSONArray(
+                "sources"
+            )
+
+        if (requestSourcesJson != null) {
+            for (
+                index in
+                0 until requestSourcesJson.length()
+            ) {
+                sourceFromWire(
+                    requestSourcesJson
+                        .optString(index)
+                )
+                    ?.let(
+                        requestedSources::add
+                    )
+            }
+        }
+
+        if (requestedSources.isEmpty()) {
+            clearSession()
+            return null
+        }
+
+        val hits =
+            mutableListOf<Hit>()
+
+        val hitsJson =
+            root.optJSONArray(
+                "hits"
+            )
+
+        if (hitsJson != null) {
+            for (
+                index in
+                0 until hitsJson.length()
+            ) {
+                val row =
+                    hitsJson.optJSONObject(index)
+                        ?: continue
+
+                val source =
+                    sourceFromWire(
+                        row.optString(
+                            "source"
+                        )
+                    )
+                        ?: continue
+
+                hits +=
+                    Hit(
+                        source = source,
+                        title =
+                            row.optString(
+                                "title"
+                            ),
+                        snippet =
+                            row.optString(
+                                "snippet"
+                            ),
+                        timestampMs =
+                            row.optLong(
+                                "timestamp_ms",
+                                0L
+                            ),
+                        score =
+                            row.optInt(
+                                "score",
+                                0
+                            ),
+                        metadata =
+                            row.optString(
+                                "metadata"
+                            ),
+                        actionUri =
+                            row.optString(
+                                "action_uri"
+                            ),
+                        actionMimeType =
+                            row.optString(
+                                "action_mime"
+                            ),
+                        actionKind =
+                            row.optString(
+                                "action_kind"
+                            )
+                    )
+            }
+        }
+
+        val report =
+            Report(
+                request =
+                    Request(
+                        query = query,
+                        sources = requestedSources
+                    ),
+                hits = hits,
+                sourceMatchCounts =
+                    sourceIntMapFromJson(
+                        root.optJSONObject(
+                            "source_match_counts"
+                        )
+                    ),
+                sourceErrors =
+                    sourceStringMapFromJson(
+                        root.optJSONObject(
+                            "source_errors"
+                        )
+                    ),
+                sourceCoverage =
+                    sourceStringMapFromJson(
+                        root.optJSONObject(
+                            "source_coverage"
+                        )
+                    ),
+                scannedHistoryRecords =
+                    root.optInt(
+                        "scanned_history",
+                        0
+                    ),
+                scannedNotifications =
+                    root.optInt(
+                        "scanned_notifications",
+                        0
+                    ),
+                scannedFiles =
+                    root.optInt(
+                        "scanned_files",
+                        0
+                    ),
+                scannedPhotos =
+                    root.optInt(
+                        "scanned_photos",
+                        0
+                    ),
+                contentProviderRowsScanned =
+                    root.optInt(
+                        "content_provider_rows",
+                        0
+                    ),
+                contentCandidateDocuments =
+                    root.optInt(
+                        "content_candidates",
+                        0
+                    ),
+                contentIndexedDocuments =
+                    root.optInt(
+                        "content_indexed",
+                        0
+                    ),
+                contentReusedDocuments =
+                    root.optInt(
+                        "content_reused",
+                        0
+                    ),
+                contentUpdatedDocuments =
+                    root.optInt(
+                        "content_updated",
+                        0
+                    ),
+                contentFailedDocuments =
+                    root.optInt(
+                        "content_failed",
+                        0
+                    ),
+                contentUnsupportedDocuments =
+                    root.optInt(
+                        "content_unsupported",
+                        0
+                    ),
+                contentPdfBestEffortDocuments =
+                    root.optInt(
+                        "content_pdf_best_effort",
+                        0
+                    ),
+                imageProviderRowsScanned =
+                    root.optInt(
+                        "image_provider_rows",
+                        0
+                    ),
+                imageCandidatePhotos =
+                    root.optInt(
+                        "image_candidates",
+                        0
+                    ),
+                imageIndexedPhotos =
+                    root.optInt(
+                        "image_indexed",
+                        0
+                    ),
+                imageReusedPhotos =
+                    root.optInt(
+                        "image_reused",
+                        0
+                    ),
+                imageUpdatedPhotos =
+                    root.optInt(
+                        "image_updated",
+                        0
+                    ),
+                imageFailedPhotos =
+                    root.optInt(
+                        "image_failed",
+                        0
+                    ),
+                imagePendingPhotos =
+                    root.optInt(
+                        "image_pending",
+                        0
+                    ),
+                imageOcrPhotos =
+                    root.optInt(
+                        "image_ocr",
+                        0
+                    ),
+                imageLabeledPhotos =
+                    root.optInt(
+                        "image_labeled",
+                        0
+                    ),
+                imageNewIndexBudget =
+                    root.optInt(
+                        "image_budget",
+                        0
+                    )
+            )
+
+        return SearchSession(
+            report = report,
+            pageIndex =
+                root.optInt(
+                    "page_index",
+                    0
+                ),
+            savedAtMs = savedAtMs
+        )
+    }
+
+    private fun clearSession() {
+        sessionPreferences
+            .edit()
+            .remove(
+                SESSION_KEY_JSON
+            )
+            .apply()
+
+        searchResultStore.clear()
+    }
+
+    private fun sourceIntMapToJson(
+        values: Map<Source, Int>
+    ): JSONObject {
+        val result =
+            JSONObject()
+
+        values.forEach { (source, value) ->
+            result.put(
+                source.wireName,
+                value
+            )
+        }
+
+        return result
+    }
+
+    private fun sourceStringMapToJson(
+        values: Map<Source, String>
+    ): JSONObject {
+        val result =
+            JSONObject()
+
+        values.forEach { (source, value) ->
+            result.put(
+                source.wireName,
+                value.take(MAX_SESSION_DETAIL_CHARS)
+            )
+        }
+
+        return result
+    }
+
+    private fun sourceIntMapFromJson(
+        value: JSONObject?
+    ): Map<Source, Int> {
+        if (value == null) {
+            return emptyMap()
+        }
+
+        val result =
+            linkedMapOf<Source, Int>()
+
+        Source.values()
+            .forEach { source ->
+                if (value.has(source.wireName)) {
+                    result[source] =
+                        value.optInt(
+                            source.wireName,
+                            0
+                        )
+                }
+            }
+
+        return result
+    }
+
+    private fun sourceStringMapFromJson(
+        value: JSONObject?
+    ): Map<Source, String> {
+        if (value == null) {
+            return emptyMap()
+        }
+
+        val result =
+            linkedMapOf<Source, String>()
+
+        Source.values()
+            .forEach { source ->
+                if (value.has(source.wireName)) {
+                    result[source] =
+                        value.optString(
+                            source.wireName
+                        )
+                }
+            }
+
+        return result
+    }
+
+    private fun sourceFromWire(
+        wireName: String
+    ): Source? =
+        Source.values()
+            .firstOrNull {
+                it.wireName ==
+                    wireName.trim()
+            }
+
+    private fun pageCount(
+        hitCount: Int,
+        pageSize: Int
+    ): Int {
+        if (hitCount <= 0) {
+            return 0
+        }
+
+        val safePageSize =
+            pageSize.coerceAtLeast(1)
+
+        return (
+            (
+                hitCount +
+                    safePageSize -
+                    1
+                ) /
+                safePageSize
+            )
+            .coerceAtLeast(1)
+    }
+
 
     private fun appendSourceErrors(
         builder: StringBuilder,
@@ -1290,7 +2222,10 @@ class AyanaPersonalSearchEngine(
             record.optString("technical")
                 .lowercase(Locale.ROOT)
 
-        if (technical.contains("personal_search_local")) {
+        if (
+            technical.contains("personal_search_local") ||
+            technical.contains("personal_search_followup")
+        ) {
             return true
         }
 
@@ -1302,10 +2237,20 @@ class AyanaPersonalSearchEngine(
     }
 
     companion object {
-        private const val DEFAULT_PER_SOURCE_LIMIT = 4
-        private const val DEFAULT_TOTAL_LIMIT = 16
-        private const val MAX_PER_SOURCE_LIMIT = 8
+        private const val DEFAULT_PER_SOURCE_LIMIT = 8
+        private const val DEFAULT_TOTAL_LIMIT = 20
+        private const val MAX_PER_SOURCE_LIMIT = 12
         private const val MAX_TOTAL_LIMIT = 20
+        private const val MIN_PER_SOURCE_IN_GLOBAL_POOL = 2
+        private const val DEFAULT_PAGE_SIZE = 6
+        private const val MAX_PAGE_SIZE = 10
+        private const val SESSION_PREFS_NAME = "ayana_personal_search_session_v1"
+        private const val SESSION_KEY_JSON = "latest_session_json"
+        private const val SESSION_TTL_MS = 24L * 60L * 60L * 1000L
+        private const val MAX_SESSION_QUERY_CHARS = 320
+        private const val MAX_SESSION_METADATA_CHARS = 420
+        private const val MAX_SESSION_DETAIL_CHARS = 900
+        private const val MAX_SESSION_URI_CHARS = 1800
         private const val MAX_MEMORY_SCAN = 200
         private const val MAX_HISTORY_SCAN = 80
         private const val MAX_NOTIFICATION_SCAN = 32
@@ -1323,6 +2268,199 @@ class AyanaPersonalSearchEngine(
                 Source.FILES,
                 Source.PHOTOS
             )
+
+        fun parseFollowUp(
+            command: String
+        ): FollowUpRequest? {
+            val normalized =
+                normalizeForSearch(
+                    command
+                )
+                    .removePrefix(
+                        "аяна "
+                    )
+                    .trim()
+
+            if (normalized.isBlank()) {
+                return null
+            }
+
+            val nextPagePhrases =
+                setOf(
+                    "покажи следующие результаты",
+                    "следующие результаты",
+                    "покажи следующие",
+                    "следующая страница результатов",
+                    "покажи дальше результаты",
+                    "дальше результаты"
+                )
+
+            if (normalized in nextPagePhrases) {
+                return FollowUpRequest(
+                    kind =
+                        FollowUpKind.NEXT_PAGE
+                )
+            }
+
+            val previousPagePhrases =
+                setOf(
+                    "покажи предыдущие результаты",
+                    "предыдущие результаты",
+                    "покажи предыдущие",
+                    "предыдущая страница результатов"
+                )
+
+            if (normalized in previousPagePhrases) {
+                return FollowUpRequest(
+                    kind =
+                        FollowUpKind.PREVIOUS_PAGE
+                )
+            }
+
+            val allSourcePhrases =
+                setOf(
+                    "покажи все источники",
+                    "повтори по всем источникам",
+                    "повтори поиск по всем источникам",
+                    "покажи снова все источники"
+                )
+
+            if (normalized in allSourcePhrases) {
+                return FollowUpRequest(
+                    kind =
+                        FollowUpKind.FILTER_SOURCES,
+                    sources =
+                        LinkedHashSet(
+                            ALL_SOURCES
+                        )
+                )
+            }
+
+            val filterPrefixes =
+                listOf(
+                    "покажи только ",
+                    "повтори только ",
+                    "повтори поиск только ",
+                    "оставь только ",
+                    "покажи результаты только из ",
+                    "покажи результаты только по "
+                )
+
+            val tail =
+                filterPrefixes
+                    .firstOrNull {
+                        normalized.startsWith(it)
+                    }
+                    ?.let { prefix ->
+                        normalized
+                            .removePrefix(prefix)
+                            .removePrefix("по ")
+                            .removePrefix("из ")
+                            .trim()
+                    }
+                    ?: return null
+
+            val sources =
+                parseFollowUpSources(
+                    tail
+                )
+
+            if (sources.isEmpty()) {
+                return null
+            }
+
+            return FollowUpRequest(
+                kind =
+                    FollowUpKind.FILTER_SOURCES,
+                sources = sources
+            )
+        }
+
+        private fun parseFollowUpSources(
+            value: String
+        ): Set<Source> {
+            val normalized =
+                normalizeForSearch(
+                    value
+                )
+
+            val sources =
+                linkedSetOf<Source>()
+
+            if (
+                listOf(
+                    "память",
+                    "памяти"
+                ).any(normalized::contains)
+            ) {
+                sources +=
+                    Source.MEMORY
+            }
+
+            if (
+                listOf(
+                    "история",
+                    "истории"
+                ).any(normalized::contains)
+            ) {
+                sources +=
+                    Source.HISTORY
+            }
+
+            if (
+                listOf(
+                    "задачи",
+                    "задач",
+                    "напоминания",
+                    "напоминаний"
+                ).any(normalized::contains)
+            ) {
+                sources +=
+                    Source.TASKS
+            }
+
+            if (
+                listOf(
+                    "уведомления",
+                    "уведомлений"
+                ).any(normalized::contains)
+            ) {
+                sources +=
+                    Source.NOTIFICATIONS
+            }
+
+            if (
+                listOf(
+                    "файлы",
+                    "файлов",
+                    "файл",
+                    "документы",
+                    "документов",
+                    "документ",
+                    "загрузки"
+                ).any(normalized::contains)
+            ) {
+                sources +=
+                    Source.FILES
+            }
+
+            if (
+                listOf(
+                    "фото",
+                    "фотографии",
+                    "фотографий",
+                    "галерея",
+                    "галереи",
+                    "изображения",
+                    "изображений"
+                ).any(normalized::contains)
+            ) {
+                sources +=
+                    Source.PHOTOS
+            }
+
+            return sources
+        }
 
         /**
          * Conservative routing parser.
