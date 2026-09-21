@@ -60,12 +60,13 @@ import kotlin.math.abs
 
 class AyanaVoiceService : Service() {
 
-    // AYANA v12.22.1 / R9.0.1 HISTORY LIVE-REFRESH PROOF FIX.
+    // AYANA v12.22.2 / R9.0.2 DIAGNOSTIC RECONCILIATION + HISTORY REFRESH FIX.
     // One integrated foundation release on top of device-confirmed R8.5.4:
     // - bounded read-only recovery for incomplete Agent Core completions;
     // - Autonomous Task Graph evidence layered over the proven Durable Goal loop;
     // - diagnostic incident freshness + local/server latency attribution;
-    // - reversible Service-level History live-refresh proof;
+    // - reversible Service-level History live-refresh proof using the real terminal-state refresh trigger;
+    // - post-probe Agent Core health reconciliation after verified online acceptance probes;
     // - fail-closed Development Transaction and Controlled Proactivity foundations;
     // - ATI v1.6 foundation contract probes.
     // ORB, visualizer, Personal Search v1.5.1, Worker v11.1.10 and Registry v3.2.1
@@ -18779,6 +18780,15 @@ append(index + 1)
                     )
             }
 
+        if (
+            mode == AyanaAcceptanceTestEngine.Mode.FULL_ACCEPTANCE ||
+            mode == AyanaAcceptanceTestEngine.Mode.EXHAUSTIVE_ACCEPTANCE
+        ) {
+            reconcileAcceptancePostProbeRuntimeTruth(
+                result
+            )
+        }
+
         result.put(
             "device_evidence_sweep",
             evidenceSweep
@@ -19011,6 +19021,466 @@ append(index + 1)
      * of PASS/FAIL truth while allowing the service to persist a human-readable TXT
      * without requiring a parallel Agent Core turn.
      */
+    /**
+     * R9.0.2 post-probe truth reconciliation.
+     *
+     * HEALTH-001 is intentionally executed near the beginning of the baseline suite,
+     * while ONLINE-001..003 execute later. Those online probes use the isolated
+     * acceptance transport and therefore historically did not refresh Capability
+     * Registry Agent Core health. This helper closes that temporal gap only when all
+     * three bounded online probes are PASS. It never invents PASS from reachability
+     * alone and never rewrites a failed online probe.
+     */
+    private fun reconcileAcceptancePostProbeRuntimeTruth(
+        result: JSONObject
+    ) {
+        val tests =
+            result.optJSONArray("tests")
+                ?: return
+
+        fun testById(
+            id: String
+        ): JSONObject? {
+            for (index in 0 until tests.length()) {
+                val item =
+                    tests.optJSONObject(index)
+                        ?: continue
+
+                if (item.optString("id") == id) {
+                    return item
+                }
+            }
+
+            return null
+        }
+
+        val onlineIds =
+            listOf(
+                "ONLINE-001",
+                "ONLINE-002",
+                "ONLINE-003"
+            )
+
+        val onlineRows =
+            onlineIds.mapNotNull {
+                testById(it)
+            }
+
+        val allOnlinePassed =
+            onlineRows.size == onlineIds.size &&
+                onlineRows.all {
+                    it.optString("status") ==
+                        AyanaAcceptanceTestEngine.STATUS_PASS &&
+                        it.optBoolean("verified", false)
+                }
+
+        if (!allOnlinePassed) {
+            return
+        }
+
+        val ordinaryElapsedMs =
+            testById("ONLINE-001")
+                ?.optJSONObject("evidence")
+                ?.optLong("elapsed_ms", 0L)
+                ?.coerceAtLeast(0L)
+                ?: 0L
+
+        try {
+            capabilityRegistry.recordAgentCoreResult(
+                success = true,
+                latencyMs = ordinaryElapsedMs
+            )
+        } catch (_: Exception) {
+            return
+        }
+
+        val reconciledAt =
+            System.currentTimeMillis()
+
+        fun mergeProbeIntoExistingRow(
+            id: String,
+            probe: JSONObject
+        ) {
+            val row =
+                testById(id)
+                    ?: return
+
+            row
+                .put(
+                    "status",
+                    probe.optString(
+                        "status",
+                        row.optString("status")
+                    )
+                )
+                .put(
+                    "verified",
+                    probe.optBoolean(
+                        "verified",
+                        row.optBoolean("verified", false)
+                    )
+                )
+                .put(
+                    "message",
+                    probe.optString(
+                        "message",
+                        row.optString("message")
+                    )
+                )
+                .put(
+                    "evidence_scope",
+                    probe.optString(
+                        "evidence_scope",
+                        row.optString("evidence_scope")
+                    )
+                )
+
+            val evidence =
+                probe.optJSONObject("evidence")
+                    ?: JSONObject()
+
+            evidence
+                .put("post_probe_reconciled", true)
+                .put("agent_core_live_probe_passes", onlineRows.size)
+                .put("agent_core_reconciled_at_ms", reconciledAt)
+                .put("agent_core_reconciled_latency_ms", ordinaryElapsedMs)
+
+            row.put(
+                "evidence",
+                evidence
+            )
+        }
+
+        val recoveryEvidence =
+            JSONObject()
+                .put(
+                    "agent_core_verified_successes",
+                    onlineRows.size
+                )
+                .put(
+                    "agent_core_verified_at",
+                    reconciledAt
+                )
+
+        // Re-run only the two diagnostic presentation probes after fresh, verified
+        // Agent Core evidence has been persisted. DiagnosticClosure v1.1 receives the
+        // live probe evidence separately, so it can close a matching historical
+        // Agent Core/network incident without pretending probes were user commands.
+        mergeProbeIntoExistingRow(
+            "HEALTH-001",
+            acceptanceDiagnosticsProbe(
+                recoveryEvidence = recoveryEvidence
+            )
+        )
+
+        mergeProbeIntoExistingRow(
+            "EXT-001",
+            acceptanceDiagnosticsDetailProbe(
+                recoveryEvidence = recoveryEvidence
+            )
+        )
+
+        result
+            .put("post_probe_health_reconciled", true)
+            .put("post_probe_agent_core_passes", onlineRows.size)
+            .put("post_probe_agent_core_reconciled_at_ms", reconciledAt)
+
+        recalculateAcceptanceOutcomeAfterReconciliation(
+            result
+        )
+
+        // MainActivity's HOME health cards are render-time snapshots. Re-dispatch the
+        // current internal page so the freshly persisted Agent Core result becomes visible
+        // without requiring the user to navigate away and back manually.
+        refreshCurrentOwnAppPageForRuntimeTruth()
+    }
+
+    private fun recalculateAcceptanceOutcomeAfterReconciliation(
+        result: JSONObject
+    ) {
+        val tests =
+            result.optJSONArray("tests")
+                ?: return
+
+        var passed = 0
+        var warnings = 0
+        var failed = 0
+        var blocked = 0
+        var unsupported = 0
+        var noData = 0
+        var cancelled = 0
+        var criticalFailures = 0
+
+        for (index in 0 until tests.length()) {
+            val item =
+                tests.optJSONObject(index)
+                    ?: continue
+
+            when (item.optString("status")) {
+                AyanaAcceptanceTestEngine.STATUS_PASS ->
+                    passed++
+
+                AyanaAcceptanceTestEngine.STATUS_WARNING ->
+                    warnings++
+
+                AyanaAcceptanceTestEngine.STATUS_FAIL -> {
+                    failed++
+                    if (item.optBoolean("critical", false)) {
+                        criticalFailures++
+                    }
+                }
+
+                AyanaAcceptanceTestEngine.STATUS_BLOCKED ->
+                    blocked++
+
+                AyanaAcceptanceTestEngine.STATUS_UNSUPPORTED ->
+                    unsupported++
+
+                AyanaAcceptanceTestEngine.STATUS_NO_DATA ->
+                    noData++
+
+                AyanaAcceptanceTestEngine.STATUS_CANCELLED ->
+                    cancelled++
+
+                else -> {
+                    failed++
+                    if (item.optBoolean("critical", false)) {
+                        criticalFailures++
+                    }
+                }
+            }
+        }
+
+        val limits =
+            result.optJSONArray("known_limits")
+                ?: JSONArray()
+
+        val grade =
+            when {
+                cancelled > 0 ->
+                    AyanaAcceptanceTestEngine.GRADE_CANCELLED
+
+                criticalFailures > 0 || failed > 0 ->
+                    AyanaAcceptanceTestEngine.GRADE_NOT_READY
+
+                blocked > 0 ||
+                    unsupported > 0 ||
+                    noData > 0 ||
+                    warnings > 0 ->
+                    AyanaAcceptanceTestEngine.GRADE_READY_WITH_LIMITATIONS
+
+                result.optString("mode") !=
+                    AyanaAcceptanceTestEngine.Mode.QUICK_HEALTH.wireName &&
+                    limits.length() > 0 ->
+                    AyanaAcceptanceTestEngine.GRADE_READY_WITH_LIMITATIONS
+
+                else ->
+                    AyanaAcceptanceTestEngine.GRADE_READY
+            }
+
+        result
+            .put("passed", passed)
+            .put("warnings", warnings)
+            .put("failed", failed)
+            .put("blocked", blocked)
+            .put("unsupported", unsupported)
+            .put("no_data", noData)
+            .put("cancelled", cancelled)
+            .put("critical_failures", criticalFailures)
+            .put("grade", grade)
+            .put("execution_success", cancelled == 0)
+            .put("success", cancelled == 0)
+            .put(
+                "summary",
+                buildReconciledAcceptanceSummary(
+                    result = result,
+                    voice = false
+                )
+            )
+            .put(
+                "voice_summary",
+                buildReconciledAcceptanceSummary(
+                    result = result,
+                    voice = true
+                )
+            )
+    }
+
+    private fun buildReconciledAcceptanceSummary(
+        result: JSONObject,
+        voice: Boolean
+    ): String {
+        val tests =
+            result.optJSONArray("tests")
+                ?: JSONArray()
+
+        val nonPass =
+            mutableListOf<JSONObject>()
+
+        for (index in 0 until tests.length()) {
+            val item =
+                tests.optJSONObject(index)
+                    ?: continue
+
+            if (
+                item.optString("status") !=
+                AyanaAcceptanceTestEngine.STATUS_PASS
+            ) {
+                nonPass += item
+            }
+        }
+
+        val priorityOrder =
+            mapOf(
+                AyanaAcceptanceTestEngine.STATUS_FAIL to 0,
+                AyanaAcceptanceTestEngine.STATUS_BLOCKED to 1,
+                AyanaAcceptanceTestEngine.STATUS_WARNING to 2,
+                AyanaAcceptanceTestEngine.STATUS_UNSUPPORTED to 3,
+                AyanaAcceptanceTestEngine.STATUS_NO_DATA to 4,
+                AyanaAcceptanceTestEngine.STATUS_CANCELLED to 5
+            )
+
+        val prioritized =
+            nonPass
+                .sortedWith(
+                    compareBy<JSONObject> {
+                        priorityOrder[
+                            it.optString("status")
+                        ] ?: 99
+                    }.thenByDescending {
+                        it.optBoolean("critical", false)
+                    }
+                )
+                .take(
+                    if (voice) {
+                        3
+                    } else {
+                        5
+                    }
+                )
+
+        val modeLabel =
+            if (
+                result.optString("mode") ==
+                AyanaAcceptanceTestEngine.Mode.EXHAUSTIVE_ACCEPTANCE.wireName
+            ) {
+                "Всесторонняя автономная диагностика AYANA завершена."
+            } else {
+                "Полная диагностика AYANA завершена."
+            }
+
+        return buildString {
+            append(modeLabel)
+            append("\n\n")
+            append(
+                "Итог: PASS ${result.optInt("passed", 0)}, " +
+                    "WARNING ${result.optInt("warnings", 0)}, " +
+                    "FAIL ${result.optInt("failed", 0)}, " +
+                    "BLOCKED ${result.optInt("blocked", 0)}, " +
+                    "UNSUPPORTED ${result.optInt("unsupported", 0)}, " +
+                    "NO_DATA ${result.optInt("no_data", 0)}."
+            )
+            append("\n")
+            append(
+                "Статус готовности: ${result.optString("grade", AyanaAcceptanceTestEngine.GRADE_NOT_READY)}."
+            )
+            append("\n")
+            append(
+                "Время теста: ${result.optLong("duration_ms", 0L)} мс. " +
+                    "Сетевых обращений Agent Core/Worker: ${result.optInt("network_turns", 0)}. " +
+                    "Всего проверок: ${result.optInt("tests_completed", tests.length())}; " +
+                    "самонаправленно сгенерировано: ${result.optInt("adaptive_tests_generated", 0)}."
+            )
+
+            if (prioritized.isNotEmpty()) {
+                append("\n\nТребуют внимания:\n")
+                prioritized.forEachIndexed { index, item ->
+                    append(index + 1)
+                    append(". ")
+                    append(item.optString("title"))
+                    append(": ")
+                    append(
+                        when (item.optString("status")) {
+                            AyanaAcceptanceTestEngine.STATUS_FAIL -> "ошибка"
+                            AyanaAcceptanceTestEngine.STATUS_WARNING -> "предупреждение"
+                            AyanaAcceptanceTestEngine.STATUS_NO_DATA -> "нет данных"
+                            AyanaAcceptanceTestEngine.STATUS_BLOCKED -> "заблокировано"
+                            AyanaAcceptanceTestEngine.STATUS_UNSUPPORTED -> "не поддерживается"
+                            else -> item.optString("status").lowercase(Locale.ROOT)
+                        }
+                    )
+                    append(" — ")
+                    append(
+                        item.optString("message")
+                            .replace("\n", " ")
+                            .take(
+                                if (voice) {
+                                    280
+                                } else {
+                                    560
+                                }
+                            )
+                    )
+                    append("\n")
+                }
+            }
+
+            if (!voice) {
+                append(
+                    "\nПолный список ${tests.length()} проверок сохранён в подробном TXT-отчёте; " +
+                        "в ответе показаны только приоритетные отклонения."
+                )
+            }
+        }
+    }
+
+    private fun refreshCurrentOwnAppPageForRuntimeTruth() {
+        try {
+            val prefs =
+                getSharedPreferences(
+                    MainActivity.UI_STATE_PREFS,
+                    Context.MODE_PRIVATE
+                )
+
+            val page =
+                prefs.getString(
+                    MainActivity.UI_STATE_CURRENT_PAGE,
+                    "HOME"
+                )
+                    .orEmpty()
+                    .takeIf {
+                        it in setOf(
+                            "HOME",
+                            "TASKS",
+                            "MEMORY",
+                            "HISTORY",
+                            "DIAGNOSTICS",
+                            "SETTINGS"
+                        )
+                    }
+                    ?: "HOME"
+
+            startActivity(
+                Intent(
+                    this,
+                    MainActivity::class.java
+                ).apply {
+                    putExtra(
+                        MainActivity.EXTRA_OPEN_PAGE,
+                        page
+                    )
+                    addFlags(
+                        Intent.FLAG_ACTIVITY_NEW_TASK or
+                            Intent.FLAG_ACTIVITY_CLEAR_TOP or
+                            Intent.FLAG_ACTIVITY_SINGLE_TOP
+                    )
+                }
+            )
+        } catch (_: Exception) {
+            // Registry truth is already persisted; UI refresh is best-effort only.
+        }
+    }
+
     private fun buildAcceptanceDetailedReport(
         result: JSONObject
     ): String {
@@ -19893,7 +20363,9 @@ append(index + 1)
         return tests
     }
 
-    private fun acceptanceDiagnosticsProbe(): JSONObject {
+    private fun acceptanceDiagnosticsProbe(
+        recoveryEvidence: JSONObject? = null
+    ): JSONObject {
         val rawDiagnostics =
             selfDiagnostics.run(
                 focus = "all"
@@ -19907,7 +20379,8 @@ append(index + 1)
                         commandHistoryStore
                             .recent(
                                 24
-                            )
+                            ),
+                    recoveryEvidence = recoveryEvidence
                 )
 
         val passed = diagnostics.optInt("passed", 0)
@@ -19988,6 +20461,20 @@ append(index + 1)
                         diagnostics.optInt(
                             "successes_after_last_error",
                             0
+                        )
+                    )
+                    .put(
+                        "live_agent_core_recovery_passes",
+                        diagnostics.optInt(
+                            "live_agent_core_recovery_passes",
+                            0
+                        )
+                    )
+                    .put(
+                        "live_agent_core_recovery_applied",
+                        diagnostics.optBoolean(
+                            "live_agent_core_recovery_applied",
+                            false
                         )
                     )
                     .put("non_pass_checks", nonPass)
@@ -22419,7 +22906,9 @@ plan.optInt(
     // v12.17 EXHAUSTIVE AUTONOMOUS ACCEPTANCE PROBES
     // =========================================================
 
-    private fun acceptanceDiagnosticsDetailProbe(): JSONObject {
+    private fun acceptanceDiagnosticsDetailProbe(
+        recoveryEvidence: JSONObject? = null
+    ): JSONObject {
         val rawResult =
             selfDiagnostics.run(
                 focus = "all"
@@ -22433,7 +22922,8 @@ plan.optInt(
                         commandHistoryStore
                             .recent(
                                 24
-                            )
+                            ),
+                    recoveryEvidence = recoveryEvidence
                 )
 
         val checks =
@@ -22520,6 +23010,20 @@ plan.optInt(
                         result.optInt(
                             "successes_after_last_error",
                             0
+                        )
+                    )
+                    .put(
+                        "live_agent_core_recovery_passes",
+                        result.optInt(
+                            "live_agent_core_recovery_passes",
+                            0
+                        )
+                    )
+                    .put(
+                        "live_agent_core_recovery_applied",
+                        result.optBoolean(
+                            "live_agent_core_recovery_applied",
+                            false
                         )
                     )
                     .put("report", report.take(5000))
@@ -24433,11 +24937,16 @@ requestMethod = "GET"
                     technical = "reversible_acceptance_probe"
                 )
 
-                // MainActivity v7.9 refresh is debounced from live service status.
-                // Trigger the same production signal instead of reaching into UI internals.
+                // MainActivity v7.9 schedules History refresh only on terminal
+                // service states (SUCCESS / ERROR / CANCELLED / STOPPED). The R9.0.1
+                // probe incorrectly emitted STATE_EXECUTING, so the UI refresh runnable
+                // was never scheduled even though the record was persisted correctly.
+                // Emit the same terminal SUCCESS signal used by production command
+                // completion, wait beyond the 280 ms UI debounce, then restore the
+                // diagnostic command's EXECUTING status after the marker check.
                 broadcastStatus(
-                    "Проверяю live-refresh Истории…",
-                    STATE_EXECUTING
+                    "Проверка live-refresh Истории завершена",
+                    STATE_SUCCESS
                 )
 
                 Thread.sleep(
@@ -24473,6 +24982,12 @@ requestMethod = "GET"
                     failureReason =
                         "history_marker_not_visible"
                 }
+
+                // Continue the still-running acceptance command with truthful state.
+                broadcastStatus(
+                    "Продолжаю диагностику AYANA…",
+                    STATE_EXECUTING
+                )
             }
         } finally {
             if (markerId.isNotBlank()) {
@@ -24561,6 +25076,8 @@ requestMethod = "GET"
                     .put("original_page", originalPage)
                     .put("history_tab_opened", historyTabOpened)
                     .put("marker_visible_after_terminal", markerVisible)
+                    .put("history_refresh_signal_state", STATE_SUCCESS)
+                    .put("history_refresh_debounce_wait_ms", HISTORY_LIVE_REFRESH_PROOF_WAIT_MS)
                     .put("cleanup_deleted", cleanupDeleted)
                     .put("page_restored", restoredPage)
                     .put("state_restored", restoredOwnApp)
@@ -41213,9 +41730,9 @@ state
 
     companion object {
 
-        // R9.0.1 RELEASE / FEATURE LINEAGE TRUTH.
+        // R9.0.2 RELEASE / FEATURE LINEAGE TRUTH.
         private const val AYANA_VOICE_SERVICE_RELEASE =
-            "v12.22.1 / R9.0.1 HISTORY LIVE-REFRESH PROOF FIX"
+            "v12.22.2 / R9.0.2 DIAGNOSTIC RECONCILIATION + HISTORY REFRESH FIX"
 
         private const val AYANA_PERSONAL_SEARCH_ENGINE_RELEASE =
             "v1.5.1 IMAGE COVERAGE TRUTH"
@@ -41230,10 +41747,10 @@ state
             "R8.5.4 Remaining Capability Proof — DEVICE-CONFIRMED ACCEPTED"
 
         private const val AYANA_CURRENT_FEATURE_RELEASE =
-            "R9.0.1 HISTORY LIVE-REFRESH PROOF FIX"
+            "R9.0.2 DIAGNOSTIC RECONCILIATION + HISTORY REFRESH FIX"
 
         private const val AYANA_RELEASE_LINEAGE =
-            "Android v12.21.0 / R7.9 truth-hardening + R8.0 multi-attachment + R8.1–R8.4 accepted Personal Global Search stack + R8.5–R8.5.4 capability/evidence truth + R9.0 autonomous agent foundation + R9.0.1 history live-refresh proof fix"
+            "Android v12.21.0 / R7.9 truth-hardening + R8.0 multi-attachment + R8.1–R8.4 accepted Personal Global Search stack + R8.5–R8.5.4 capability/evidence truth + R9.0 autonomous agent foundation + R9.0.1 history live-refresh proof fix + R9.0.2 diagnostic reconciliation/history refresh fix"
 
         // AyanaCommandHistoryStore v2.8 keeps up to 4k chars inline and stores longer
         // results out-of-line. Self-review intentionally remains inline so copied History
