@@ -4,7 +4,7 @@ import org.json.JSONArray
 import org.json.JSONObject
 
 /**
- * AYANA R9.0 Diagnostic Closure v1.0.
+ * AYANA R9.0.2 Diagnostic Closure v1.1.
  *
  * Normalizes diagnostic *presentation* without inventing PASS evidence.
  * Old command errors stop looking like a current degradation once they are outside
@@ -16,7 +16,8 @@ class AyanaDiagnosticClosure {
     fun normalizeSelfDiagnostics(
         raw: JSONObject,
         recentHistory: List<JSONObject>,
-        nowMs: Long = System.currentTimeMillis()
+        nowMs: Long = System.currentTimeMillis(),
+        recoveryEvidence: JSONObject? = null
     ): JSONObject {
         val result = JSONObject(raw.toString())
         val checks = result.optJSONArray("checks") ?: JSONArray()
@@ -46,6 +47,39 @@ class AyanaDiagnosticClosure {
                 Long.MAX_VALUE
             }
 
+        val liveAgentCorePasses =
+            recoveryEvidence
+                ?.optInt(
+                    "agent_core_verified_successes",
+                    0
+                )
+                ?.coerceAtLeast(0)
+                ?: 0
+
+        val liveAgentCoreVerifiedAt =
+            recoveryEvidence
+                ?.optLong(
+                    "agent_core_verified_at",
+                    0L
+                )
+                ?.coerceAtLeast(0L)
+                ?: 0L
+
+        val lastErrorLooksAgentCoreRelated =
+            lastError
+                ?.let {
+                    isAgentCoreRelatedError(it)
+                }
+                ?: false
+
+        val recoveredByLiveAgentCoreEvidence =
+            lastErrorAt > 0L &&
+                lastErrorLooksAgentCoreRelated &&
+                liveAgentCorePasses >=
+                    MIN_LIVE_AGENT_CORE_RECOVERY_PASSES &&
+                liveAgentCoreVerifiedAt >
+                    lastErrorAt
+
         for (index in 0 until checks.length()) {
             val item = checks.optJSONObject(index) ?: continue
             if (item.optString("id") != "recent_command_health") continue
@@ -53,26 +87,49 @@ class AyanaDiagnosticClosure {
             val currentStatus = item.optString("status")
             if (currentStatus != STATUS_WARNING) continue
 
+            val recoveredByHistory =
+                errorAgeMs > ACTIVE_INCIDENT_WINDOW_MS &&
+                    newerSuccesses >= MIN_SUCCESS_AFTER_OLD_ERROR
+
             val recovered =
                 lastError == null ||
-                    errorAgeMs > ACTIVE_INCIDENT_WINDOW_MS &&
-                        newerSuccesses >= MIN_SUCCESS_AFTER_OLD_ERROR
+                    recoveredByLiveAgentCoreEvidence ||
+                    recoveredByHistory
 
             if (recovered) {
+                val recoveryState =
+                    when {
+                        lastError == null ->
+                            "no_active_error"
+
+                        recoveredByLiveAgentCoreEvidence ->
+                            "recovered_by_live_agent_core_probes"
+
+                        else ->
+                            "recovered_historical"
+                    }
+
                 item
                     .put("status", STATUS_PASS)
                     .put("ok", true)
                     .put("verified", true)
                     .put(
                         "details",
-                        if (lastError == null) {
-                            "Активных ERROR в доступной истории нет."
-                        } else {
-                            "Последняя ERROR относится к прошлому состоянию; после неё подтверждено успешных команд: $newerSuccesses. " +
-                                "Возраст ошибки: ${errorAgeMs / 1000L} с."
+                        when {
+                            lastError == null ->
+                                "Активных ERROR в доступной истории нет."
+
+                            recoveredByLiveAgentCoreEvidence ->
+                                "Предыдущая Agent Core/сетевая ERROR закрыта свежими live-проверками: " +
+                                    "успешных Agent Core probe=$liveAgentCorePasses; " +
+                                    "возраст ошибки=${errorAgeMs / 1000L} с."
+
+                            else ->
+                                "Последняя ERROR относится к прошлому состоянию; после неё подтверждено успешных команд: $newerSuccesses. " +
+                                    "Возраст ошибки: ${errorAgeMs / 1000L} с."
                         }
                     )
-                    .put("r9_incident_state", "recovered_historical")
+                    .put("r9_incident_state", recoveryState)
             } else {
                 item.put("r9_incident_state", "active_recent")
             }
@@ -85,6 +142,9 @@ class AyanaDiagnosticClosure {
             .put("active_incident_window_ms", ACTIVE_INCIDENT_WINDOW_MS)
             .put("last_error_age_ms", if (lastErrorAt > 0L) errorAgeMs else -1L)
             .put("successes_after_last_error", newerSuccesses)
+            .put("live_agent_core_recovery_passes", liveAgentCorePasses)
+            .put("live_agent_core_recovery_verified_at", liveAgentCoreVerifiedAt)
+            .put("live_agent_core_recovery_applied", recoveredByLiveAgentCoreEvidence)
 
         return result
     }
@@ -208,6 +268,9 @@ class AyanaDiagnosticClosure {
 
     fun selfTest(): Boolean {
         val now = 1_000_000L
+        val recentAgentErrorAt =
+            now - 30_000L
+
         val checks =
             JSONArray()
                 .put(
@@ -222,7 +285,7 @@ class AyanaDiagnosticClosure {
                         .put("id", "recent_command_health")
                         .put("status", STATUS_WARNING)
                         .put("name", "Последние команды")
-                        .put("details", "old error")
+                        .put("details", "recent Agent Core timeout")
                 )
 
         val raw =
@@ -236,25 +299,54 @@ class AyanaDiagnosticClosure {
         val history =
             listOf(
                 JSONObject()
-                    .put("status", "success")
-                    .put("finished_at", now - 1_000L),
-                JSONObject()
-                    .put("status", "success")
-                    .put("finished_at", now - 2_000L),
-                JSONObject()
-                    .put("status", "success")
-                    .put("finished_at", now - 3_000L),
-                JSONObject()
                     .put("status", "error")
-                    .put("finished_at", now - ACTIVE_INCIDENT_WINDOW_MS - 10_000L)
+                    .put("finished_at", recentAgentErrorAt)
+                    .put("result", "Ошибка Agent Core: timeout")
             )
 
-        val normalized = normalizeSelfDiagnostics(raw, history, now)
-        val normalizedChecks = normalized.optJSONArray("checks") ?: return false
+        val recoveryEvidence =
+            JSONObject()
+                .put(
+                    "agent_core_verified_successes",
+                    3
+                )
+                .put(
+                    "agent_core_verified_at",
+                    now
+                )
+
+        val normalized =
+            normalizeSelfDiagnostics(
+                raw = raw,
+                recentHistory = history,
+                nowMs = now,
+                recoveryEvidence = recoveryEvidence
+            )
+
+        val normalizedChecks =
+            normalized.optJSONArray("checks")
+                ?: return false
+
         val commandHealth =
             (0 until normalizedChecks.length())
-                .mapNotNull { normalizedChecks.optJSONObject(it) }
-                .firstOrNull { it.optString("id") == "recent_command_health" }
+                .mapNotNull {
+                    normalizedChecks.optJSONObject(it)
+                }
+                .firstOrNull {
+                    it.optString("id") ==
+                        "recent_command_health"
+                }
+                ?: return false
+
+        val agentCore =
+            (0 until normalizedChecks.length())
+                .mapNotNull {
+                    normalizedChecks.optJSONObject(it)
+                }
+                .firstOrNull {
+                    it.optString("id") ==
+                        "agent_core"
+                }
                 ?: return false
 
         val latency =
@@ -269,9 +361,35 @@ class AyanaDiagnosticClosure {
             )
 
         return commandHealth.optString("status") == STATUS_PASS &&
+            commandHealth.optString("r9_incident_state") ==
+                "recovered_by_live_agent_core_probes" &&
+            agentCore.optString("status") == STATUS_UNKNOWN &&
             normalized.optInt("warnings") == 0 &&
             normalized.optInt("unknown") == 1 &&
+            normalized.optBoolean("live_agent_core_recovery_applied", false) &&
             latency.optString("classification") == "MODEL_OR_SERVER_WAIT"
+    }
+
+    private fun isAgentCoreRelatedError(
+        record: JSONObject
+    ): Boolean {
+        val haystack =
+            buildString {
+                append(record.optString("result"))
+                append(' ')
+                append(record.optString("technical"))
+                append(' ')
+                append(record.optString("message"))
+                append(' ')
+                append(record.optString("command"))
+            }
+                .lowercase()
+
+        return haystack.contains("agent core") ||
+            haystack.contains("agent_core") ||
+            haystack.contains("agent http") ||
+            haystack.contains("worker") ||
+            haystack.contains("http 502")
     }
 
     private fun recordTime(
@@ -327,7 +445,7 @@ class AyanaDiagnosticClosure {
     }
 
     companion object {
-        const val VERSION = "1.0"
+        const val VERSION = "1.1"
 
         const val STATUS_PASS = "PASS"
         const val STATUS_WARNING = "WARNING"
@@ -336,5 +454,6 @@ class AyanaDiagnosticClosure {
 
         const val ACTIVE_INCIDENT_WINDOW_MS = 15L * 60L * 1000L
         private const val MIN_SUCCESS_AFTER_OLD_ERROR = 2
+        private const val MIN_LIVE_AGENT_CORE_RECOVERY_PASSES = 2
     }
 }
