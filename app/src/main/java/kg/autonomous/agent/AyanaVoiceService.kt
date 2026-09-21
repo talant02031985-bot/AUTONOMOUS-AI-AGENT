@@ -60,10 +60,13 @@ import kotlin.math.abs
 
 class AyanaVoiceService : Service() {
 
-    // AYANA R8.5.3 CAPABILITY PROOF SWEEP.
+    // AYANA R8.5.4 REMAINING CAPABILITY PROOF.
     // Before FULL/EXHAUSTIVE acceptance, safely probes only still-unconfirmed
     // device capabilities and persists machine-verified evidence into Capability Registry.
     // ATI then consumes the same persisted truth in the very same run.
+    // R8.5.4 narrows the remaining proof gaps: structured local query evidence now
+    // follows the real router ownership, while external URL proof accepts only a
+    // foreground package registered for that exact URL and uses bounded polling.
     // ORB/visualizer/Search/Worker remain untouched.
     // Self-review and Autonomous Test Intelligence now resolve effective device proof
     // through one AyanaDeviceEvidenceTruth source. This removes duplicate truth ledgers
@@ -17758,6 +17761,15 @@ append(index + 1)
         var failedNow = 0
         var skippedAlreadyConfirmed = 0
 
+        val confirmedIds =
+            arrayListOf<String>()
+
+        val failedIds =
+            arrayListOf<String>()
+
+        val skippedIds =
+            arrayListOf<String>()
+
         targetIds.forEach { capabilityId ->
             val item =
                 byId[capabilityId]
@@ -17803,6 +17815,9 @@ append(index + 1)
 
             if (alreadyConfirmed) {
                 skippedAlreadyConfirmed++
+                skippedIds.add(
+                    capabilityId
+                )
                 results.put(
                     JSONObject()
                         .put("capability_id", capabilityId)
@@ -17832,7 +17847,7 @@ append(index + 1)
                                 url =
                                     "https://www.google.com/search?tbm=isch&q=" +
                                         Uri.encode(
-                                            "AYANA R8.5.3 device proof"
+                                            "AYANA R8.5.4 device proof"
                                         ),
                                 detail =
                                     "Google Images ACTION_VIEW dispatched to verified external foreground and AYANA restored"
@@ -17875,6 +17890,9 @@ append(index + 1)
 
             if (verified) {
                 confirmedNow++
+                confirmedIds.add(
+                    capabilityId
+                )
 
                 capabilityRegistry.recordCapabilityEvidence(
                     capabilityId = capabilityId,
@@ -17882,13 +17900,21 @@ append(index + 1)
                         probe
                             .optString(
                                 "detail",
-                                "R8.5.3 capability proof sweep verified"
+                                "R8.5.4 remaining capability proof verified"
                             )
                             .take(500),
                     verified = true
                 )
             } else {
                 failedNow++
+                failedIds.add(
+                    capabilityId +
+                        ":" +
+                        probe.optString(
+                            "status",
+                            "UNKNOWN"
+                        )
+                )
             }
 
             results.put(
@@ -17918,19 +17944,45 @@ append(index + 1)
                     skippedAlreadyConfirmed
                 )
                 .put("duration_ms", elapsed)
+                .put(
+                    "confirmed_ids",
+                    JSONArray().apply {
+                        confirmedIds.forEach {
+                            put(it)
+                        }
+                    }
+                )
+                .put(
+                    "failed_ids",
+                    JSONArray().apply {
+                        failedIds.forEach {
+                            put(it)
+                        }
+                    }
+                )
+                .put(
+                    "skipped_ids",
+                    JSONArray().apply {
+                        skippedIds.forEach {
+                            put(it)
+                        }
+                    }
+                )
                 .put("results", results)
 
         commandHistoryStore.addEvent(
             activeCommandHistoryId,
             state = "device_evidence_sweep",
             message =
-                "R8.5.3 capability proof sweep завершён",
+                "R8.5.4 remaining capability proof завершён",
             details =
                 (
                     "pending_before=$pendingBefore; " +
                         "confirmed_now=$confirmedNow; " +
                         "failed_now=$failedNow; " +
                         "skipped=$skippedAlreadyConfirmed; " +
+                        "confirmed=${confirmedIds.joinToString(",")}; " +
+                        "failed=${failedIds.joinToString(",")}; " +
                         "duration_ms=$elapsed"
                     ).take(900)
         )
@@ -17959,7 +18011,7 @@ append(index + 1)
             }
 
         val marker =
-            "AYANA_R853_CLIP_" +
+            "AYANA_R854_CLIP_" +
                 UUID.randomUUID()
                     .toString()
                     .take(8)
@@ -18046,52 +18098,93 @@ append(index + 1)
     }
 
     private fun capabilityProbeStructuredLocalQueries(): JSONObject {
-        val notificationIntent =
+        // R8.5.4: prove the contract the Structured Router actually owns.
+        // Device metrics have their own aggregate local route, so requiring
+        // «покажи заряд батареи» to become StructuredLocalCommandRouter.DeviceMetric
+        // created a false coverage gap even while the production metric route passed.
+        val basicIntent =
             AyanaStructuredLocalCommandRouter
                 .parse(
                     "покажи последние 3 уведомления"
                 )
 
-        val metricIntent =
+        val filteredIntent =
             AyanaStructuredLocalCommandRouter
                 .parse(
-                    "покажи заряд батареи"
+                    "покажи последние 3 уведомления от Google"
                 )
 
-        val notificationTyped =
-            notificationIntent is
-                AyanaStructuredLocalCommandRouter.Intent.NotificationRead &&
-                notificationIntent.limit ==
+        val basicNotification =
+            basicIntent as?
+                AyanaStructuredLocalCommandRouter.Intent.NotificationRead
+
+        val filteredNotification =
+            filteredIntent as?
+                AyanaStructuredLocalCommandRouter.Intent.NotificationRead
+
+        val limitTyped =
+            basicNotification?.limit ==
                 3
 
-        val metricTyped =
-            metricIntent is
-                AyanaStructuredLocalCommandRouter.Intent.DeviceMetric
+        val filterTyped =
+            filteredNotification != null &&
+                filteredNotification.limit ==
+                3 &&
+                filteredNotification.appFilter
+                    .orEmpty()
+                    .contains(
+                        "google",
+                        ignoreCase = true
+                    )
 
-        val state =
+        val backend =
             try {
-                agentGetDeviceState()
-            } catch (_: Exception) {
+                if (filteredNotification == null) {
+                    JSONObject()
+                } else {
+                    AyanaNotificationListenerService
+                        .readRecent(
+                            context = this,
+                            limit = filteredNotification.limit ?: 3,
+                            appFilter = filteredNotification.appFilter,
+                            projection = filteredNotification.projection.wireValue
+                        )
+                }
+            } catch (error: Exception) {
                 JSONObject()
+                    .put("success", false)
+                    .put(
+                        "error",
+                        (
+                            error.message
+                                ?: error.javaClass.simpleName
+                            ).take(300)
+                    )
             }
 
-        val battery =
-            state.optInt(
-                "battery_percent",
-                -1
-            )
-
-        val liveBackend =
-            state.optBoolean(
+        val backendSuccess =
+            backend.optBoolean(
                 "success",
                 false
-            ) &&
-                battery in 0..100
+            )
+
+        val returned =
+            backend
+                .optJSONArray(
+                    "notifications"
+                )
+                ?.length()
+                ?: 0
+
+        val boundedResult =
+            returned <=
+                3
 
         val ok =
-            notificationTyped &&
-                metricTyped &&
-                liveBackend
+            limitTyped &&
+                filterTyped &&
+                backendSuccess &&
+                boundedResult
 
         return JSONObject()
             .put("verified", ok)
@@ -18105,12 +18198,23 @@ append(index + 1)
             )
             .put(
                 "detail",
-                "Structured local router typed notification+device-metric intents and live device-state backend verified"
+                "Structured local notification query preserved typed limit+app filter and executed through live NotificationListener backend"
             )
-            .put("notification_typed", notificationTyped)
-            .put("metric_typed", metricTyped)
-            .put("battery_percent", battery)
-            .put("live_backend", liveBackend)
+            .put("limit_typed", limitTyped)
+            .put("filter_typed", filterTyped)
+            .put(
+                "parsed_app_filter",
+                filteredNotification
+                    ?.appFilter
+                    .orEmpty()
+            )
+            .put("backend_success", backendSuccess)
+            .put("returned", returned)
+            .put("bounded_result", boundedResult)
+            .put(
+                "backend_error",
+                backend.optString("error")
+            )
     }
 
     private fun capabilityProbeScreenContentReading(): JSONObject {
@@ -18251,6 +18355,53 @@ append(index + 1)
                 .put("detail", detail)
         }
 
+        // Google search URLs may legitimately hand off from the default browser to
+        // another installed app that is itself registered for the exact URL. Treat
+        // only such registered handlers as eligible evidence; arbitrary foreground
+        // packages still fail closed.
+        val eligiblePackages =
+            linkedSetOf<String>()
+
+        eligiblePackages.add(
+            expectedPackage
+        )
+
+        fun collectHandlers(
+            flags: Int
+        ) {
+            try {
+                packageManager
+                    .queryIntentActivities(
+                        baseIntent,
+                        flags
+                    )
+                    .forEach { info ->
+                        info.activityInfo
+                            ?.packageName
+                            ?.trim()
+                            ?.takeIf {
+                                it.isNotBlank() &&
+                                    it != packageName
+                            }
+                            ?.let {
+                                eligiblePackages.add(it)
+                            }
+                    }
+            } catch (_: Exception) {
+            }
+        }
+
+        collectHandlers(
+            PackageManager.MATCH_DEFAULT_ONLY
+        )
+        collectHandlers(
+            0
+        )
+
+        eligiblePackages.remove(
+            packageName
+        )
+
         var dispatched =
             false
 
@@ -18274,34 +18425,50 @@ append(index + 1)
             dispatched =
                 true
 
-            Thread.sleep(
-                EXTERNAL_PROOF_SETTLE_MS
-            )
+            val deadline =
+                SystemClock.elapsedRealtime() +
+                    EXTERNAL_PROOF_MAX_WAIT_MS
 
-            val externalState =
-                try {
-                    screenIntelligence.getScreenState()
-                } catch (_: Exception) {
-                    JSONObject()
-                }
-
-            observedPackage =
-                externalState.optString(
-                    "effective_foreground_package",
-                    externalState.optString(
-                        "interaction_package",
-                        externalState.optString(
-                            "package"
-                        )
-                    )
+            while (
+                !externalObserved &&
+                SystemClock.elapsedRealtime() <
+                deadline
+            ) {
+                Thread.sleep(
+                    EXTERNAL_PROOF_POLL_MS
                 )
 
-            // Exact package verification: because the intent is explicitly pinned to
-            // the resolved handler package, any other foreground owner (including the
-            // keyboard or a chooser) must fail closed rather than count as proof.
-            externalObserved =
-                observedPackage ==
-                    expectedPackage
+                val externalState =
+                    try {
+                        screenIntelligence.getScreenState()
+                    } catch (_: Exception) {
+                        JSONObject()
+                    }
+
+                val candidate =
+                    externalState.optString(
+                        "effective_foreground_package",
+                        externalState.optString(
+                            "interaction_package",
+                            externalState.optString(
+                                "package"
+                            )
+                        )
+                    )
+                        .trim()
+
+                if (candidate.isNotBlank()) {
+                    observedPackage =
+                        candidate
+                }
+
+                externalObserved =
+                    candidate.isNotBlank() &&
+                        candidate !=
+                        packageName &&
+                        candidate in
+                        eligiblePackages
+            }
         } finally {
             val restoreDispatched =
                 try {
@@ -18357,6 +18524,16 @@ append(index + 1)
                 externalObserved &&
                 restored
 
+        val eligibleJson =
+            JSONArray()
+
+        eligiblePackages
+            .forEach { packageId ->
+                eligibleJson.put(
+                    packageId
+                )
+            }
+
         return JSONObject()
             .put("verified", ok)
             .put(
@@ -18370,6 +18547,11 @@ append(index + 1)
             .put("detail", detail)
             .put("expected_package", expectedPackage)
             .put("observed_package", observedPackage)
+            .put("eligible_packages", eligibleJson)
+            .put(
+                "verification_mode",
+                "registered_url_handler_foreground"
+            )
             .put("external_foreground_verified", externalObserved)
             .put("state_restored", restored)
             .put("capability_id", capabilityId)
@@ -18908,6 +19090,52 @@ append(index + 1)
                         "skipped=${evidenceSweep.optInt("skipped_already_confirmed", 0)}; " +
                         "duration=${evidenceSweep.optLong("duration_ms", 0L)} мс\n"
                 )
+
+                fun compactSweepIds(
+                    key: String
+                ): String {
+                    val values =
+                        evidenceSweep.optJSONArray(key)
+                            ?: JSONArray()
+
+                    val items =
+                        arrayListOf<String>()
+
+                    for (index in 0 until values.length()) {
+                        values.optString(index)
+                            .trim()
+                            .takeIf {
+                                it.isNotBlank()
+                            }
+                            ?.let {
+                                items.add(it)
+                            }
+                    }
+
+                    return items.joinToString(", ")
+                }
+
+                val confirmedIds =
+                    compactSweepIds(
+                        "confirmed_ids"
+                    )
+
+                val failedIds =
+                    compactSweepIds(
+                        "failed_ids"
+                    )
+
+                if (confirmedIds.isNotBlank()) {
+                    append(
+                        "Device evidence confirmed: $confirmedIds\n"
+                    )
+                }
+
+                if (failedIds.isNotBlank()) {
+                    append(
+                        "Device evidence failed: $failedIds\n"
+                    )
+                }
             }
             append("\n")
             append("КОНТРАКТ ДОСТОВЕРНОСТИ\n")
@@ -21992,7 +22220,7 @@ plan.optInt(
                 },
             message =
                 if (ok) {
-                    "Release metadata согласованы: base v12.21.0 / R7.9; accepted R8.5.2; current R8.5.3 capability proof sweep; Personal Search v1.5.1."
+                    "Release metadata согласованы: base v12.21.0 / R7.9; accepted R8.5.2; current R8.5.4 remaining capability proof; Personal Search v1.5.1."
                 } else {
                     "Release metadata неполны или Capability Registry build-label не соответствует base v12.21.0 / R7.9: build=$registryBuild; app=$appVersion."
                 },
@@ -40064,9 +40292,9 @@ state
 
     companion object {
 
-        // R8.5.3 RELEASE / FEATURE LINEAGE TRUTH.
+        // R8.5.4 RELEASE / FEATURE LINEAGE TRUTH.
         private const val AYANA_VOICE_SERVICE_RELEASE =
-            "v12.21.0 / R8.5.3 CAPABILITY PROOF SWEEP"
+            "v12.21.0 / R8.5.4 REMAINING CAPABILITY PROOF"
 
         private const val AYANA_PERSONAL_SEARCH_ENGINE_RELEASE =
             "v1.5.1 IMAGE COVERAGE TRUTH"
@@ -40081,10 +40309,10 @@ state
             "R8.5.2 Shared Device Evidence Truth — DEVICE-CONFIRMED ACCEPTED"
 
         private const val AYANA_CURRENT_FEATURE_RELEASE =
-            "R8.5.3 CAPABILITY PROOF SWEEP"
+            "R8.5.4 REMAINING CAPABILITY PROOF"
 
         private const val AYANA_RELEASE_LINEAGE =
-            "Android v12.21.0 / R7.9 truth-hardening + R8.0 multi-attachment + R8.1–R8.4 accepted Personal Global Search stack + R8.5/R8.5.1 self-review truth + R8.5.2 shared evidence truth + R8.5.3 capability proof sweep"
+            "Android v12.21.0 / R7.9 truth-hardening + R8.0 multi-attachment + R8.1–R8.4 accepted Personal Global Search stack + R8.5/R8.5.1 self-review truth + R8.5.2 shared evidence truth + R8.5.3 capability proof sweep + R8.5.4 remaining capability proof"
 
         // AyanaCommandHistoryStore v2.8 keeps up to 4k chars inline and stores longer
         // results out-of-line. Self-review intentionally remains inline so copied History
@@ -40093,11 +40321,14 @@ state
             3_900
 
 
-        private const val EXTERNAL_PROOF_SETTLE_MS =
-            950L
+        private const val EXTERNAL_PROOF_MAX_WAIT_MS =
+            2_400L
+
+        private const val EXTERNAL_PROOF_POLL_MS =
+            160L
 
         private const val EXTERNAL_PROOF_RESTORE_MS =
-            700L
+            750L
 
         const val ACTION_START =
             "kg.autonomous.agent.action.START_AYANA"
