@@ -60,14 +60,16 @@ import kotlin.math.abs
 
 class AyanaVoiceService : Service() {
 
-    // AYANA R8.5.4 REMAINING CAPABILITY PROOF.
-    // Before FULL/EXHAUSTIVE acceptance, safely probes only still-unconfirmed
-    // device capabilities and persists machine-verified evidence into Capability Registry.
-    // ATI then consumes the same persisted truth in the very same run.
-    // R8.5.4 narrows the remaining proof gaps: structured local query evidence now
-    // follows the real router ownership, while external URL proof accepts only a
-    // foreground package registered for that exact URL and uses bounded polling.
-    // ORB/visualizer/Search/Worker remain untouched.
+    // AYANA v12.22.0 / R9.0 AUTONOMOUS AGENT FOUNDATION.
+    // One integrated foundation release on top of device-confirmed R8.5.4:
+    // - bounded read-only recovery for incomplete Agent Core completions;
+    // - Autonomous Task Graph evidence layered over the proven Durable Goal loop;
+    // - diagnostic incident freshness + local/server latency attribution;
+    // - reversible Service-level History live-refresh proof;
+    // - fail-closed Development Transaction and Controlled Proactivity foundations;
+    // - ATI v1.6 foundation contract probes.
+    // ORB, visualizer, Personal Search v1.5.1, Worker v11.1.10 and Registry v3.2.1
+    // are intentionally not rewritten by this release.
     // Self-review and Autonomous Test Intelligence now resolve effective device proof
     // through one AyanaDeviceEvidenceTruth source. This removes duplicate truth ledgers
     // and prevents ATI from generating coverage-gap hypotheses for capabilities already
@@ -864,6 +866,25 @@ class AyanaVoiceService : Service() {
         AyanaSafetyPolicy()
     }
 
+    // R9.0 AUTONOMOUS AGENT FOUNDATION.
+    // These modules are deliberately pure/fail-closed. Existing ORB, Search,
+    // Worker transport and proven Durable Goal orchestration remain unchanged.
+    private val agentCoreRecoveryPolicy by lazy {
+        AyanaAgentCoreRecoveryPolicy()
+    }
+
+    private val diagnosticClosure by lazy {
+        AyanaDiagnosticClosure()
+    }
+
+    private val developmentTransactionContract by lazy {
+        AyanaDevelopmentTransactionContract()
+    }
+
+    private val controlledProactivityPolicy by lazy {
+        AyanaControlledProactivityPolicy()
+    }
+
     // v12.19.3: Goal Compiler runtime truth is feature/contract-based, not pinned to compiler_version=2.0.
     // v12.19.2: self-directed diagnostic intelligence consumes fresh baseline
     // runtime-confirmation evidence. It never performs generated side effects in v1.1: capability invariants, installed-app resolver matrix,
@@ -900,6 +921,9 @@ class AyanaVoiceService : Service() {
             },
             plannerProvider = { command ->
                 agentPlannerV2.buildEnvelope(command)
+            },
+            foundationProbeProvider = {
+                runR9FoundationProbes()
             },
             shouldCancel = {
                 cancelRequested ||
@@ -11910,7 +11934,7 @@ respondAndResume(
             STATE_EXECUTING
         )
 
-        val result =
+        val rawResult =
             try {
                 selfDiagnostics.run(
                     focus = "all",
@@ -11939,9 +11963,23 @@ respondAndResume(
                 return
             }
 
+        // R9.0: presentation freshness is resolved against real recent History.
+        // Stale Agent Core/TTS evidence stays UNKNOWN; an old command ERROR may
+        // become recovered only after newer successful device evidence exists.
+        val result =
+            diagnosticClosure
+                .normalizeSelfDiagnostics(
+                    raw = rawResult,
+                    recentHistory =
+                        commandHistoryStore
+                            .recent(
+                                24
+                            )
+                )
+
         val report =
-            selfDiagnostics
-                .reportFromResult(
+            diagnosticClosure
+                .reportFromNormalized(
                     result
                 )
 
@@ -11951,14 +11989,16 @@ respondAndResume(
             message = "Самодиагностика выполнена локально без Agent Core",
             details =
                 (
-                    "overall=${result.optString("overall_status")}; " +
+                    "closure=${AyanaDiagnosticClosure.VERSION}; " +
+                        "overall=${result.optString("overall_status")}; " +
                         "passed=${result.optInt("passed")}; " +
                         "warnings=${result.optInt("warnings")}; " +
                         "unknown=${result.optInt("unknown")}; " +
-                        "failed=${result.optInt("failed")}"
+                        "failed=${result.optInt("failed")}; " +
+                        "successes_after_last_error=${result.optInt("successes_after_last_error", 0)}"
                     )
                     .take(
-                        700
+                        900
                     )
         )
 
@@ -19668,11 +19708,207 @@ append(index + 1)
         }
     }
 
+    private fun runR9FoundationProbes(): JSONArray {
+        val tests =
+            JSONArray()
+
+        fun add(
+            id: String,
+            title: String,
+            critical: Boolean,
+            ok: Boolean,
+            message: String,
+            evidence: JSONObject
+        ) {
+            tests.put(
+                JSONObject()
+                    .put("id", id)
+                    .put("title", title)
+                    .put(
+                        "status",
+                        if (ok) {
+                            AyanaAcceptanceTestEngine.STATUS_PASS
+                        } else {
+                            AyanaAcceptanceTestEngine.STATUS_FAIL
+                        }
+                    )
+                    .put("critical", critical)
+                    .put("verified", ok)
+                    .put("message", message)
+                    .put("evidence_scope", "r9_foundation_contract")
+                    .put("evidence", evidence)
+            )
+        }
+
+        val recoveryOk =
+            try {
+                agentCoreRecoveryPolicy.selfTest()
+            } catch (_: Exception) {
+                false
+            }
+
+        add(
+            id = "R9-FOUND-001",
+            title = "Agent Core bounded completion recovery contract",
+            critical = true,
+            ok = recoveryOk,
+            message =
+                if (recoveryOk) {
+                    "Read-only incomplete-response recovery is bounded and side-effect requests remain fail-closed."
+                } else {
+                    "R9 Agent Core recovery contract self-test failed."
+                },
+            evidence =
+                JSONObject()
+                    .put("version", AyanaAgentCoreRecoveryPolicy.VERSION)
+                    .put("compact_restart_budget", 1)
+                    .put("side_effect_restart_allowed", false)
+        )
+
+        val graphOk =
+            try {
+                AyanaAutonomousTaskGraph.selfTest()
+            } catch (_: Exception) {
+                false
+            }
+
+        add(
+            id = "R9-FOUND-002",
+            title = "Autonomous Task Graph execution-evidence contract",
+            critical = true,
+            ok = graphOk,
+            message =
+                if (graphOk) {
+                    "Task Graph create/step/replan/recovery/terminal/restore contract verified."
+                } else {
+                    "R9 Autonomous Task Graph self-test failed."
+                },
+            evidence =
+                JSONObject()
+                    .put("version", AyanaAutonomousTaskGraph.VERSION)
+                    .put("durable_goal_orchestrator_replaced", false)
+        )
+
+        val diagnosticOk =
+            try {
+                diagnosticClosure.selfTest()
+            } catch (_: Exception) {
+                false
+            }
+
+        add(
+            id = "R9-FOUND-003",
+            title = "Diagnostic freshness and latency attribution contract",
+            critical = false,
+            ok = diagnosticOk,
+            message =
+                if (diagnosticOk) {
+                    "Historical incident closure preserves UNKNOWN truth and separates server/model wait from local latency."
+                } else {
+                    "R9 Diagnostic Closure self-test failed."
+                },
+            evidence =
+                JSONObject()
+                    .put("version", AyanaDiagnosticClosure.VERSION)
+                    .put(
+                        "active_incident_window_ms",
+                        AyanaDiagnosticClosure.ACTIVE_INCIDENT_WINDOW_MS
+                    )
+        )
+
+        val developmentOk =
+            try {
+                developmentTransactionContract.selfTest()
+            } catch (_: Exception) {
+                false
+            }
+
+        val developmentAvailability =
+            developmentTransactionContract.evaluate(
+                AyanaDevelopmentTransactionContract.Availability(
+                    repositoryAuthorized = false,
+                    writeExecutorAvailable = false,
+                    commitPushExecutorAvailable = false,
+                    buildExecutorAvailable = false,
+                    artifactVerifierAvailable = false,
+                    rollbackExecutorAvailable = false
+                )
+            )
+
+        add(
+            id = "R9-FOUND-004",
+            title = "Development transaction fail-closed foundation",
+            critical = true,
+            ok =
+                developmentOk &&
+                    !developmentAvailability.optBoolean(
+                        "ready",
+                        true
+                    ),
+            message =
+                if (
+                    developmentOk &&
+                    !developmentAvailability.optBoolean(
+                        "ready",
+                        true
+                    )
+                ) {
+                    "Development transaction contract exists and correctly remains unavailable without authorized executors."
+                } else {
+                    "Development transaction contract does not fail closed."
+                },
+            evidence =
+                JSONObject()
+                    .put("version", AyanaDevelopmentTransactionContract.VERSION)
+                    .put(
+                        "current_availability",
+                        developmentAvailability
+                    )
+        )
+
+        val proactivityOk =
+            try {
+                controlledProactivityPolicy.selfTest()
+            } catch (_: Exception) {
+                false
+            }
+
+        add(
+            id = "R9-FOUND-005",
+            title = "Controlled proactivity permission/cooldown contract",
+            critical = true,
+            ok = proactivityOk,
+            message =
+                if (proactivityOk) {
+                    "Proactivity foundation is default-closed and requires explicit per-rule authorization."
+                } else {
+                    "Controlled proactivity policy self-test failed."
+                },
+            evidence =
+                JSONObject()
+                    .put("version", AyanaControlledProactivityPolicy.VERSION)
+                    .put("watchers_enabled_by_foundation", false)
+        )
+
+        return tests
+    }
+
     private fun acceptanceDiagnosticsProbe(): JSONObject {
-        val diagnostics =
+        val rawDiagnostics =
             selfDiagnostics.run(
                 focus = "all"
             )
+
+        val diagnostics =
+            diagnosticClosure
+                .normalizeSelfDiagnostics(
+                    raw = rawDiagnostics,
+                    recentHistory =
+                        commandHistoryStore
+                            .recent(
+                                24
+                            )
+                )
 
         val passed = diagnostics.optInt("passed", 0)
         val warnings = diagnostics.optInt("warnings", 0)
@@ -19687,7 +19923,7 @@ append(index + 1)
             val item = checks.optJSONObject(index) ?: continue
             if (
                 item.optString("status") !=
-                AyanaSelfDiagnostics.STATUS_PASS
+                AyanaDiagnosticClosure.STATUS_PASS
             ) {
                 nonPass.put(
                     JSONObject(item.toString())
@@ -19697,7 +19933,7 @@ append(index + 1)
 
         val canonicalReport =
             try {
-                selfDiagnostics.reportFromResult(
+                diagnosticClosure.reportFromNormalized(
                     diagnostics
                 )
             } catch (_: Exception) {
@@ -19717,7 +19953,7 @@ append(index + 1)
             message =
                 buildString {
                     append(
-                        "Self-Diagnostics: PASS $passed, WARNING $warnings, " +
+                        "Self-Diagnostics R9 closure: PASS $passed, WARNING $warnings, " +
                             "NO_DATA $unknown, FAIL $failed."
                     )
                     if (canonicalReport.isNotBlank()) {
@@ -19725,7 +19961,7 @@ append(index + 1)
                         append(canonicalReport.take(2200))
                     }
                 },
-            evidenceScope = "live_runtime",
+            evidenceScope = "live_runtime_plus_incident_freshness",
             verified = failed == 0,
             evidence =
                 JSONObject()
@@ -19733,6 +19969,27 @@ append(index + 1)
                     .put("warnings", warnings)
                     .put("unknown", unknown)
                     .put("failed", failed)
+                    .put(
+                        "diagnostic_closure_version",
+                        diagnostics.optString(
+                            "diagnostic_closure_version",
+                            AyanaDiagnosticClosure.VERSION
+                        )
+                    )
+                    .put(
+                        "last_error_age_ms",
+                        diagnostics.optLong(
+                            "last_error_age_ms",
+                            -1L
+                        )
+                    )
+                    .put(
+                        "successes_after_last_error",
+                        diagnostics.optInt(
+                            "successes_after_last_error",
+                            0
+                        )
+                    )
                     .put("non_pass_checks", nonPass)
                     .put("canonical_report", canonicalReport.take(5000))
         )
@@ -19833,29 +20090,101 @@ append(index + 1)
         val latency =
             capabilityRegistry.agentCoreLatencySnapshot()
 
-        val classification =
-            latency.optString("classification", "NO_DATA")
+        val registryClassification =
+            latency.optString(
+                "classification",
+                "NO_DATA"
+            )
+
+        val split =
+            diagnosticClosure
+                .classifyLatency(
+                    latency
+                )
+
+        val effectiveClassification =
+            if (
+                registryClassification ==
+                "NO_DATA"
+            ) {
+                "NO_DATA"
+            } else {
+                split.optString(
+                    "classification",
+                    registryClassification
+                )
+            }
 
         val status =
-            when (classification) {
-                "NO_DATA" -> AyanaAcceptanceTestEngine.STATUS_NO_DATA
+            when (effectiveClassification) {
+                "NO_DATA" ->
+                    AyanaAcceptanceTestEngine.STATUS_NO_DATA
+
                 "MODEL_OR_SERVER_WAIT",
+                "ANDROID_OR_TRANSPORT_LOCAL",
+                "MIXED",
                 "ANDROID_PREPARE_SLOW",
                 "UPLOAD_SLOW",
                 "RESPONSE_BODY_SLOW",
                 "ANDROID_PARSE_SLOW",
                 "HIGH_LATENCY_UNCLASSIFIED",
-                "CLIENT_PROCESSING_SLOW" -> AyanaAcceptanceTestEngine.STATUS_WARNING
-                else -> AyanaAcceptanceTestEngine.STATUS_PASS
+                "CLIENT_PROCESSING_SLOW" ->
+                    AyanaAcceptanceTestEngine.STATUS_WARNING
+
+                else ->
+                    AyanaAcceptanceTestEngine.STATUS_PASS
             }
+
+        val evidence =
+            JSONObject(
+                latency.toString()
+            )
+                .put(
+                    "registry_classification",
+                    registryClassification
+                )
+                .put(
+                    "r9_effective_classification",
+                    effectiveClassification
+                )
+                .put(
+                    "local_android_transport_ms",
+                    split.optLong(
+                        "local_android_transport_ms",
+                        -1L
+                    )
+                )
+                .put(
+                    "model_server_wait_ms",
+                    split.optLong(
+                        "model_server_wait_ms",
+                        -1L
+                    )
+                )
+                .put(
+                    "remote_share_pct",
+                    split.optLong(
+                        "remote_share_pct",
+                        -1L
+                    )
+                )
+                .put(
+                    "diagnostic_closure_version",
+                    AyanaDiagnosticClosure.VERSION
+                )
 
         return acceptanceProbeResult(
             status = status,
             message =
-                "Agent Core telemetry: class=$classification, total=${latency.optLong("total_ms", -1L)} мс, headers_wait=${latency.optLong("headers_wait_ms", -1L)} мс.",
-            evidenceScope = "stored_measured_telemetry",
-            verified = classification != "NO_DATA",
-            evidence = JSONObject(latency.toString())
+                "Agent Core telemetry R9: class=$effectiveClassification, " +
+                    "total=${latency.optLong("total_ms", -1L)} мс, " +
+                    "local=${split.optLong("local_android_transport_ms", -1L)} мс, " +
+                    "model/server=${split.optLong("model_server_wait_ms", -1L)} мс.",
+            evidenceScope = "stored_measured_telemetry_r9_attribution",
+            verified =
+                effectiveClassification !=
+                    "NO_DATA",
+            evidence = evidence
         )
     }
 
@@ -22091,10 +22420,21 @@ plan.optInt(
     // =========================================================
 
     private fun acceptanceDiagnosticsDetailProbe(): JSONObject {
-        val result =
+        val rawResult =
             selfDiagnostics.run(
                 focus = "all"
             )
+
+        val result =
+            diagnosticClosure
+                .normalizeSelfDiagnostics(
+                    raw = rawResult,
+                    recentHistory =
+                        commandHistoryStore
+                            .recent(
+                                24
+                            )
+                )
 
         val checks =
             result.optJSONArray("checks")
@@ -22110,7 +22450,7 @@ plan.optInt(
 
             if (
                 item.optString("status") !=
-                AyanaSelfDiagnostics.STATUS_PASS
+                AyanaDiagnosticClosure.STATUS_PASS
             ) {
                 nonPass += item
             }
@@ -22118,7 +22458,7 @@ plan.optInt(
 
         val report =
             try {
-                selfDiagnostics.reportFromResult(
+                diagnosticClosure.reportFromNormalized(
                     result
                 )
             } catch (_: Exception) {
@@ -22161,20 +22501,30 @@ plan.optInt(
                 },
             message =
                 if (ok) {
-                    "Self-Diagnostics раскрывает все ${nonPass.size} non-PASS проверки в каноническом отчёте."
+                    "Self-Diagnostics R9 раскрывает все ${nonPass.size} актуальные non-PASS проверки в каноническом отчёте."
                 } else {
-                    "Self-Diagnostics не раскрыл все non-PASS проверки: ${missingFromReport.joinToString(", ")}."
+                    "Self-Diagnostics R9 не раскрыл все актуальные non-PASS проверки: ${missingFromReport.joinToString(", ")}."
                 },
-            evidenceScope = "live_runtime_contract",
+            evidenceScope = "live_runtime_contract_r9_freshness",
             verified = ok,
             evidence =
                 JSONObject()
                     .put("non_pass_count", nonPass.size)
                     .put("missing_from_report", JSONArray(missingFromReport))
+                    .put(
+                        "diagnostic_closure_version",
+                        AyanaDiagnosticClosure.VERSION
+                    )
+                    .put(
+                        "successes_after_last_error",
+                        result.optInt(
+                            "successes_after_last_error",
+                            0
+                        )
+                    )
                     .put("report", report.take(5000))
         )
     }
-
 
     private fun acceptanceReleaseMetadataProbe(): JSONObject {
         val snapshot =
@@ -22220,7 +22570,7 @@ plan.optInt(
                 },
             message =
                 if (ok) {
-                    "Release metadata согласованы: base v12.21.0 / R7.9; accepted R8.5.2; current R8.5.4 remaining capability proof; Personal Search v1.5.1."
+                    "Release metadata согласованы: base v12.21.0 / R7.9; accepted R8.5.4; current R9.0 autonomous agent foundation; Personal Search v1.5.1."
                 } else {
                     "Release metadata неполны или Capability Registry build-label не соответствует base v12.21.0 / R7.9: build=$registryBuild; app=$appVersion."
                 },
@@ -23922,22 +24272,239 @@ requestMethod = "GET"
     }
 
     private fun acceptanceHistoryLiveRefreshCoverageProbe(): JSONObject {
-        return acceptanceProbeResult(
-            status = AyanaAcceptanceTestEngine.STATUS_NO_DATA,
-            message =
-                "MainActivity v7.9 содержит debounced refresh History по terminal status, но Service-level self-test не может device-confirm фактическое обновление UI без instrumentation. Поэтому результат остаётся NO_DATA coverage gap, а не утверждением о текущем дефекте.",
-            evidenceScope = "coverage_gap",
-            verified = false,
-            evidence =
-                JSONObject()
-                    .put(
-                        "persistence_tests",
-                        "EXT-013,EXT-014"
+        val marker =
+            "R9HIST-" +
+                UUID.randomUUID()
+                    .toString()
+                    .replace("-", "")
+                    .take(10)
+
+        var markerId =
+            ""
+
+        var historyTabOpened =
+            false
+
+        var markerVisible =
+            false
+
+        var cleanupDeleted =
+            false
+
+        var restoredOwnApp =
+            false
+
+        var observedPackage =
+            ""
+
+        var failureReason =
+            ""
+
+        try {
+            try {
+                startActivity(
+                    Intent(
+                        this,
+                        MainActivity::class.java
+                    ).apply {
+                        addFlags(
+                            Intent.FLAG_ACTIVITY_NEW_TASK or
+                                Intent.FLAG_ACTIVITY_RESET_TASK_IF_NEEDED
+                        )
+                    }
+                )
+                Thread.sleep(350L)
+            } catch (_: Exception) {
+            }
+
+            val openHistory =
+                try {
+                    screenIntelligence.click(
+                        target = "История",
+                        confirmed = false
                     )
-                    .put(
-                        "ui_instrumentation_available",
+                } catch (error: Exception) {
+                    JSONObject()
+                        .put("success", false)
+                        .put(
+                            "message",
+                            error.message
+                                .orEmpty()
+                        )
+                }
+
+            historyTabOpened =
+                openHistory.optBoolean(
+                    "success",
+                    false
+                ) ||
+                    openHistory.optBoolean(
+                        "verified",
                         false
                     )
+
+            if (!historyTabOpened) {
+                failureReason =
+                    "history_tab_not_opened:" +
+                        openHistory
+                            .optString(
+                                "message",
+                                openHistory.optString(
+                                    "reason"
+                                )
+                            )
+                            .take(180)
+            } else {
+                Thread.sleep(300L)
+
+                markerId =
+                    commandHistoryStore.begin(
+                        command = marker,
+                        source = "selftest"
+                    )
+
+                commandHistoryStore.finish(
+                    id = markerId,
+                    success = true,
+                    result = "R9 history live-refresh proof",
+                    technical = "reversible_acceptance_probe"
+                )
+
+                // MainActivity v7.9 refresh is debounced from live service status.
+                // Trigger the same production signal instead of reaching into UI internals.
+                broadcastStatus(
+                    "Проверяю live-refresh Истории…",
+                    STATE_EXECUTING
+                )
+
+                Thread.sleep(
+                    HISTORY_LIVE_REFRESH_PROOF_WAIT_MS
+                )
+
+                val screen =
+                    try {
+                        screenIntelligence.getScreenState()
+                    } catch (_: Exception) {
+                        JSONObject()
+                    }
+
+                observedPackage =
+                    screen.optString(
+                        "effective_foreground_package",
+                        screen.optString(
+                            "interaction_package",
+                            screen.optString(
+                                "package"
+                            )
+                        )
+                    )
+
+                markerVisible =
+                    diagnosticClosure
+                        .screenContainsMarker(
+                            screen = screen,
+                            marker = marker
+                        )
+
+                if (!markerVisible) {
+                    failureReason =
+                        "history_marker_not_visible"
+                }
+            }
+        } finally {
+            if (markerId.isNotBlank()) {
+                cleanupDeleted =
+                    try {
+                        commandHistoryStore.delete(
+                            markerId
+                        )
+                    } catch (_: Exception) {
+                        false
+                    }
+            } else {
+                cleanupDeleted =
+                    true
+            }
+
+            try {
+                screenIntelligence.click(
+                    target = "Главная",
+                    confirmed = false
+                )
+            } catch (_: Exception) {
+            }
+
+            try {
+                startActivity(
+                    Intent(
+                        this,
+                        MainActivity::class.java
+                    ).apply {
+                        addFlags(
+                            Intent.FLAG_ACTIVITY_NEW_TASK or
+                                Intent.FLAG_ACTIVITY_RESET_TASK_IF_NEEDED
+                        )
+                    }
+                )
+
+                Thread.sleep(
+                    HISTORY_LIVE_REFRESH_RESTORE_WAIT_MS
+                )
+
+                val restore =
+                    screenIntelligence.getScreenState()
+
+                val restorePackage =
+                    restore.optString(
+                        "effective_foreground_package",
+                        restore.optString(
+                            "interaction_package",
+                            restore.optString(
+                                "package"
+                            )
+                        )
+                    )
+
+                restoredOwnApp =
+                    restorePackage ==
+                        packageName
+            } catch (_: Exception) {
+                restoredOwnApp =
+                    false
+            }
+        }
+
+        val ok =
+            historyTabOpened &&
+                markerVisible &&
+                cleanupDeleted &&
+                restoredOwnApp
+
+        return acceptanceProbeResult(
+            status =
+                if (ok) {
+                    AyanaAcceptanceTestEngine.STATUS_PASS
+                } else {
+                    AyanaAcceptanceTestEngine.STATUS_WARNING
+                },
+            message =
+                if (ok) {
+                    "History live-refresh device-confirmed: временная terminal-запись появилась в открытой вкладке История без повторного входа; cleanup и возврат в AYANA подтверждены."
+                } else {
+                    "History live-refresh не удалось подтвердить в этом прогоне: ${failureReason.ifBlank { "ui_roundtrip_unverified" }}."
+                },
+            evidenceScope = "live_ui_reversible_roundtrip",
+            verified = ok,
+            evidence =
+                JSONObject()
+                    .put("ui_instrumentation_available", true)
+                    .put("history_tab_opened", historyTabOpened)
+                    .put("marker_visible_after_terminal", markerVisible)
+                    .put("cleanup_deleted", cleanupDeleted)
+                    .put("state_restored", restoredOwnApp)
+                    .put("observed_package", observedPackage)
+                    .put("marker_prefix", "R9HIST")
+                    .put("failure_reason", failureReason)
         )
     }
 
@@ -24667,15 +25234,14 @@ requestMethod = "GET"
 
         val labels =
             linkedMapOf(
-                "development_agent_transaction" to "Development Agent build/test/rollback transaction пока не реализован на Android",
+                "development_agent_transaction" to "R9.0 transaction contract реализован fail-closed, но авторизованные repository/build/rollback executors ещё отсутствуют",
                 "github_repository_write" to "нет авторизованной записи в GitHub repository",
                 "github_commit_push" to "нет commit/push executor",
                 "android_apk_build" to "AYANA Android не запускает APK build pipeline",
                 "external_mail_calendar_files" to "нет встроенных mail/calendar/files executors",
                 "video_audio_analysis" to "аудиодорожка видео не анализируется",
                 "offline_llm" to "полноценный offline LLM отсутствует",
-                "controlled_proactivity" to "широкая автономная proactivity вне явных задач не реализована",
-                "ui_history_instrumentation" to "History live-refresh пока нельзя доказать из Service-level self-test без UI instrumentation"
+                "controlled_proactivity" to "R9.0 permission/cooldown policy готова, но широкие proactive watchers/actions по умолчанию не включены"
             )
 
         labels.forEach { (id, label) ->
@@ -26449,6 +27015,50 @@ val activeNetwork =
                             }
                 }
 
+                val taskGraphPlannerEnvelope =
+                    resumeGoal
+                        ?.optJSONObject(
+                            "planner_envelope"
+                        )
+                        ?: try {
+                            agentPlannerV2.buildEnvelope(
+                                originalGoal
+                            )
+                        } catch (_: Exception) {
+                            null
+                        }
+
+                val taskGraph =
+                    AyanaAutonomousTaskGraph.restore(
+                        snapshot =
+                            resumeGoal
+                                ?.optJSONObject(
+                                    "task_graph"
+                                ),
+                        fallbackGoal =
+                            originalGoal,
+                        plannerEnvelope =
+                            taskGraphPlannerEnvelope
+                    )
+
+                commandHistoryStore.addEvent(
+                    activeCommandHistoryId,
+                    state =
+                        if (
+                            resumeGoal
+                                ?.optJSONObject(
+                                    "task_graph"
+                                ) !=
+                            null
+                        ) {
+                            "task_graph_restored"
+                        } else {
+                            "task_graph_started"
+                        },
+                    message = "R9 Autonomous Task Graph активирован поверх текущего Durable Goal",
+                    details = taskGraph.compactSummary()
+                )
+
                 var nextMessage:
                     String? =
                         if (resumeGoal == null) {
@@ -26811,6 +27421,12 @@ val activeNetwork =
                                     "voice"
                                 },
                             commandToken = commandToken,
+                            recoveryObserver = { kind, detail ->
+                                taskGraph.recordRecovery(
+                                    kind = kind,
+                                    detail = detail
+                                )
+                            },
                             verifiedDeviceFacts =
                                 if (step == 1) {
                                     verifiedDeviceFacts
@@ -26830,6 +27446,11 @@ val activeNetwork =
 
                     val responseType =
                         response.optString("type")
+
+                    taskGraph.recordAgentStep(
+                        step = step,
+                        responseType = responseType
+                    )
 
                     val responseCompletionDetails =
                         buildString {
@@ -27521,6 +28142,41 @@ val activeNetwork =
                                 details = result.toString()
                             )
 
+                            val toolSuccess =
+                                result.optBoolean(
+                                    "success",
+                                    false
+                                )
+
+                            val toolVerified =
+                                result.optBoolean(
+                                    "verified",
+                                    toolSuccess
+                                )
+
+                            taskGraph.recordToolResult(
+                                toolName = toolName,
+                                success = toolSuccess,
+                                verified = toolVerified,
+                                terminalStatus =
+                                    result.optString(
+                                        "terminal_status",
+                                        result.optString(
+                                            "status"
+                                        )
+                                    ),
+                                evidence =
+                                    result.optString(
+                                        "message",
+                                        result.optString(
+                                            "reason",
+                                            result.optString(
+                                                "status"
+                                            )
+                                        )
+                                    )
+                            )
+
                             if (
                                 isSemanticActionTruthTool(
                                     toolName
@@ -27857,6 +28513,41 @@ result.optBoolean(
                                         commandToken
                                     )
                                 ) {
+                                    taskGraph.finish(
+                                        success = false,
+                                        terminalStatus = "CANCELLED",
+                                        finalEvidence =
+                                            result.optString(
+                                                "message",
+                                                "android_goal_cancelled"
+                                            )
+                                    )
+
+                                    commandHistoryStore.addEvent(
+                                        activeCommandHistoryId,
+                                        state = "task_graph_terminal",
+                                        message = "R9 Autonomous Task Graph отменён вместе с Android goal",
+                                        details = taskGraph.compactSummary()
+                                    )
+
+                                    if (currentDurableGoalId != null) {
+                                        try {
+                                            durableGoalStore.checkpoint(
+                                                currentDurableGoalId,
+                                                JSONObject()
+                                                    .put(
+                                                        "task_graph",
+                                                        taskGraph.persistenceSnapshot()
+                                                    )
+                                                    .put(
+                                                        "last_checkpoint",
+                                                        "r9_task_graph_cancelled"
+                                                    )
+                                            )
+                                        } catch (_: Exception) {
+                                        }
+                                    }
+
                                     return@thread
                                 }
 
@@ -28104,6 +28795,13 @@ result.optBoolean(
                                         message = "Ищу альтернативный путь",
                                         details = result.optString(
                                             "message"
+                                        )
+                                    )
+
+                                    taskGraph.recordReplan(
+                                        result.optString(
+                                            "message",
+                                            "android_goal_replan"
                                         )
                                     )
 
@@ -28495,6 +29193,10 @@ result.optBoolean(
                                                     totalActions
                                                 )
                                                 .put(
+                                                    "task_graph",
+                                                    taskGraph.persistenceSnapshot()
+                                                )
+                                                .put(
                                                     "last_checkpoint",
                                                     "orchestrator_continue"
                                                 )
@@ -28580,6 +29282,37 @@ result.optBoolean(
                     ) &&
                     !artifactToolTerminalReached
                 ) {
+                    taskGraph.finish(
+                        success = false,
+                        terminalStatus = "CANCELLED",
+                        finalEvidence = "command_cancelled"
+                    )
+
+                    commandHistoryStore.addEvent(
+                        activeCommandHistoryId,
+                        state = "task_graph_terminal",
+                        message = "R9 Autonomous Task Graph отменён",
+                        details = taskGraph.compactSummary()
+                    )
+
+                    if (currentDurableGoalId != null) {
+                        try {
+                            durableGoalStore.checkpoint(
+                                currentDurableGoalId,
+                                JSONObject()
+                                    .put(
+                                        "task_graph",
+                                        taskGraph.persistenceSnapshot()
+                                    )
+                                    .put(
+                                        "last_checkpoint",
+                                        "r9_task_graph_cancelled"
+                                    )
+                            )
+                        } catch (_: Exception) {
+                        }
+                    }
+
                     return@thread
                 }
 
@@ -28686,6 +29419,43 @@ result.optBoolean(
 
                         answer =
                             completion.message
+                    }
+                }
+
+                taskGraph.finish(
+                    success = finalSuccess,
+                    terminalStatus =
+                        finalTerminalStatus
+                            ?: if (finalSuccess) {
+                                "SUCCESS"
+                            } else {
+                                "ERROR"
+                            },
+                    finalEvidence = answer
+                )
+
+                commandHistoryStore.addEvent(
+                    activeCommandHistoryId,
+                    state = "task_graph_terminal",
+                    message = "R9 Autonomous Task Graph завершил текущий execution turn",
+                    details = taskGraph.compactSummary()
+                )
+
+                if (currentDurableGoalId != null) {
+                    try {
+                        durableGoalStore.checkpoint(
+                            currentDurableGoalId,
+                            JSONObject()
+                                .put(
+                                    "task_graph",
+                                    taskGraph.persistenceSnapshot()
+                                )
+                                .put(
+                                    "last_checkpoint",
+                                    "r9_task_graph_terminal"
+                                )
+                        )
+                    } catch (_: Exception) {
                     }
                 }
 
@@ -33329,6 +34099,7 @@ connection
         intelligenceContext: String?,
         source: String,
         commandToken: Long,
+        recoveryObserver: ((String, String) -> Unit)? = null,
         verifiedDeviceFacts: String? = null
     ): JSONObject {
         val transportPolicy =
@@ -33349,14 +34120,29 @@ connection
             )
         }
 
-        var attempt = 0
-        var backoffMs = AGENT_CORE_RETRY_BACKOFF_MS
+        val originalMessage =
+            message
+
+        var currentMessage =
+            message
+
+        var currentPreviousResponseId =
+            previousResponseId
+
+        var timeoutAttempt =
+            0
+
+        var timeoutBackoffMs =
+            AGENT_CORE_RETRY_BACKOFF_MS
+
+        var compactRestartUsed =
+            false
 
         while (true) {
             try {
                 return callAgentCore(
-                    message = message,
-                    previousResponseId = previousResponseId,
+                    message = currentMessage,
+                    previousResponseId = currentPreviousResponseId,
                     toolResults = toolResults,
                     memoryContext = memoryContext,
                     intelligenceContext = intelligenceContext,
@@ -33366,34 +34152,107 @@ connection
                 )
             } catch (timeout: SocketTimeoutException) {
                 if (
-                    attempt >= transportPolicy.retryCount ||
+                    timeoutAttempt >= transportPolicy.retryCount ||
                     isCommandCancelled(commandToken) ||
                     shuttingDown
                 ) {
                     throw timeout
                 }
 
-                attempt++
+                timeoutAttempt++
 
                 commandHistoryStore.addEvent(
                     activeCommandHistoryId,
                     state = "agent_retry",
                     message = "Agent Core timeout: выполняю bounded retry",
                     details =
-                        "attempt=$attempt/${transportPolicy.retryCount}; backoff_ms=$backoffMs; " +
+                        "attempt=$timeoutAttempt/${transportPolicy.retryCount}; backoff_ms=$timeoutBackoffMs; " +
                             "reason=${timeout.message.orEmpty().take(180)}"
                 )
 
+                recoveryObserver?.invoke(
+                    "timeout_retry",
+                    "attempt=$timeoutAttempt/${transportPolicy.retryCount}; ${timeout.message.orEmpty().take(260)}"
+                )
+
                 try {
-                    Thread.sleep(backoffMs)
+                    Thread.sleep(timeoutBackoffMs)
                 } catch (_: InterruptedException) {
                     Thread.currentThread().interrupt()
                     throw timeout
                 }
 
-                backoffMs =
-                    (backoffMs * 2L)
-                        .coerceAtMost(AGENT_CORE_RETRY_BACKOFF_MAX_MS)
+                timeoutBackoffMs =
+                    (timeoutBackoffMs * 2L)
+                        .coerceAtMost(
+                            AGENT_CORE_RETRY_BACKOFF_MAX_MS
+                        )
+            } catch (error: IllegalStateException) {
+                val decision =
+                    agentCoreRecoveryPolicy.decide(
+                        error = error,
+                        originalMessage = originalMessage,
+                        source = source,
+                        hasToolResults =
+                            toolResults != null &&
+                                toolResults.length() > 0,
+                        hasVerifiedDeviceFacts =
+                            !verifiedDeviceFacts.isNullOrBlank(),
+                        compactRestartAlreadyUsed =
+                            compactRestartUsed
+                    )
+
+                if (
+                    !decision.recoverable ||
+                    decision.strategy !=
+                    AyanaAgentCoreRecoveryPolicy.Strategy.COMPACT_RESTART ||
+                    isCommandCancelled(commandToken) ||
+                    shuttingDown
+                ) {
+                    throw error
+                }
+
+                compactRestartUsed =
+                    true
+
+                currentMessage =
+                    decision.retryMessage
+                        ?: throw error
+
+                if (!decision.preservePreviousResponseId) {
+                    currentPreviousResponseId =
+                        null
+                }
+
+                commandHistoryStore.addEvent(
+                    activeCommandHistoryId,
+                    state = "agent_completion_recovery",
+                    message = "Незавершённый read-only ответ перезапускается в компактном bounded-режиме",
+                    details =
+                        (
+                            "strategy=${decision.strategy}; " +
+                                "reason=${decision.reason}; " +
+                                "previous_response_preserved=${decision.preservePreviousResponseId}; " +
+                                "budget=1"
+                            )
+                            .take(
+                                700
+                            )
+                )
+
+                recoveryObserver?.invoke(
+                    "compact_restart",
+                    "reason=${decision.reason}; previous_response_preserved=${decision.preservePreviousResponseId}"
+                )
+
+                try {
+                    Thread.sleep(
+                        AGENT_CORE_COMPLETION_RECOVERY_BACKOFF_MS
+                    )
+                } catch (_: InterruptedException) {
+                    Thread.currentThread().interrupt()
+                    throw error
+                }
             }
         }
     }
@@ -40292,9 +41151,9 @@ state
 
     companion object {
 
-        // R8.5.4 RELEASE / FEATURE LINEAGE TRUTH.
+        // R9.0 RELEASE / FEATURE LINEAGE TRUTH.
         private const val AYANA_VOICE_SERVICE_RELEASE =
-            "v12.21.0 / R8.5.4 REMAINING CAPABILITY PROOF"
+            "v12.22.0 / R9.0 AUTONOMOUS AGENT FOUNDATION"
 
         private const val AYANA_PERSONAL_SEARCH_ENGINE_RELEASE =
             "v1.5.1 IMAGE COVERAGE TRUTH"
@@ -40306,13 +41165,13 @@ state
             "v11.1.10 Multi-Attachment"
 
         private const val AYANA_ACCEPTED_FEATURE_CHECKPOINT =
-            "R8.5.2 Shared Device Evidence Truth — DEVICE-CONFIRMED ACCEPTED"
+            "R8.5.4 Remaining Capability Proof — DEVICE-CONFIRMED ACCEPTED"
 
         private const val AYANA_CURRENT_FEATURE_RELEASE =
-            "R8.5.4 REMAINING CAPABILITY PROOF"
+            "R9.0 AUTONOMOUS AGENT FOUNDATION"
 
         private const val AYANA_RELEASE_LINEAGE =
-            "Android v12.21.0 / R7.9 truth-hardening + R8.0 multi-attachment + R8.1–R8.4 accepted Personal Global Search stack + R8.5/R8.5.1 self-review truth + R8.5.2 shared evidence truth + R8.5.3 capability proof sweep + R8.5.4 remaining capability proof"
+            "Android v12.21.0 / R7.9 truth-hardening + R8.0 multi-attachment + R8.1–R8.4 accepted Personal Global Search stack + R8.5–R8.5.4 capability/evidence truth + R9.0 autonomous agent foundation"
 
         // AyanaCommandHistoryStore v2.8 keeps up to 4k chars inline and stores longer
         // results out-of-line. Self-review intentionally remains inline so copied History
@@ -40320,6 +41179,14 @@ state
         private const val SELF_REVIEW_INLINE_SAFE_CHARS =
             3_900
 
+        private const val AGENT_CORE_COMPLETION_RECOVERY_BACKOFF_MS =
+            260L
+
+        private const val HISTORY_LIVE_REFRESH_PROOF_WAIT_MS =
+            850L
+
+        private const val HISTORY_LIVE_REFRESH_RESTORE_WAIT_MS =
+            450L
 
         private const val EXTERNAL_PROOF_MAX_WAIT_MS =
             2_400L
