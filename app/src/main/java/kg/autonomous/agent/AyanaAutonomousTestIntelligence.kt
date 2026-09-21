@@ -6,7 +6,7 @@ import java.security.MessageDigest
 import java.util.Locale
 
 /**
- * AYANA Autonomous Test Intelligence v1.5 — SAFE CAPABILITY DEVICE PROBES.
+ * AYANA Autonomous Test Intelligence v1.6 — R9 FOUNDATION PROBES.
  *
  * This layer is intentionally different from a fixed acceptance checklist.
  * It discovers test opportunities from the current build/runtime itself:
@@ -19,6 +19,7 @@ import java.util.Locale
  * - unresolved implemented+available capabilities may invoke one explicit allow-listed safe probe;
  * - PASS probe evidence is consumed immediately and may be persisted by the Android provider;
  * - accepted historical/device evidence suppresses stale coverage-gap hypotheses;
+ * - R9 foundation contracts can contribute explicit generated tests through one provider;
  * - fresh PASS evidence from baseline runtime probes can satisfy device-confirmation
  *   for that diagnostic run without mutating Capability Registry metadata.
  *
@@ -35,6 +36,7 @@ class AyanaAutonomousTestIntelligence(
     private val resolveAppProvider: (String) -> JSONObject,
     private val plannerProvider: (String) -> JSONObject,
     private val safeCapabilityProbeProvider: (String) -> JSONObject? = { null },
+    private val foundationProbeProvider: () -> JSONArray = { JSONArray() },
     private val shouldCancel: () -> Boolean = { false }
 ) {
 
@@ -64,6 +66,7 @@ class AyanaAutonomousTestIntelligence(
         var plannerTests = 0
         var metamorphicTests = 0
         var historyTests = 0
+        var foundationTests = 0
         var cancelled = false
         var truncated = false
 
@@ -662,7 +665,86 @@ class AyanaAutonomousTestIntelligence(
         }
 
         // ---------------------------------------------------------
-        // 6) Baseline-driven hypothesis generation: any non-PASS becomes a target
+        // 6) R9 foundation probes supplied by the Android owner. These are pure
+        //    contract probes unless the provider explicitly reports otherwise. ATI
+        //    does not invent foundation PASS; it only normalizes provider evidence.
+        // ---------------------------------------------------------
+        val foundationProbes =
+            safeArray {
+                foundationProbeProvider()
+            }
+
+        for (index in 0 until foundationProbes.length()) {
+            if (stopRequested(tests.length())) {
+                cancelled = shouldCancel()
+                truncated = !cancelled
+                break
+            }
+
+            if (tests.length() >= MAX_GENERATED_TESTS) {
+                truncated = true
+                break
+            }
+
+            val raw =
+                foundationProbes.optJSONObject(index)
+                    ?: continue
+
+            val id =
+                raw.optString("id")
+                    .ifBlank { "R9-FOUND-${index + 1}" }
+                    .take(96)
+
+            val rawStatus =
+                raw.optString("status", STATUS_WARNING)
+                    .uppercase(Locale.ROOT)
+
+            val status =
+                when (rawStatus) {
+                    STATUS_PASS -> STATUS_PASS
+                    STATUS_FAIL -> STATUS_FAIL
+                    else -> STATUS_WARNING
+                }
+
+            val verified =
+                status == STATUS_PASS &&
+                    raw.optBoolean("verified", false)
+
+            val evidence =
+                copyJsonObject(
+                    raw.optJSONObject("evidence")
+                        ?: JSONObject()
+                )
+                    .put("provider_status", rawStatus)
+                    .put("provider_verified", raw.optBoolean("verified", false))
+
+            tests.put(
+                result(
+                    id = id,
+                    title = raw.optString("title", "R9 foundation contract").take(220),
+                    status = status,
+                    critical = raw.optBoolean("critical", false),
+                    verified = verified,
+                    message = raw.optString("message").ifBlank {
+                        if (verified) {
+                            "R9 foundation contract verified."
+                        } else {
+                            "R9 foundation contract is not verified."
+                        }
+                    },
+                    evidenceScope = raw.optString("evidence_scope").ifBlank {
+                        "r9_foundation_contract"
+                    },
+                    evidence = evidence
+                )
+            )
+
+            generated++
+            foundationTests++
+        }
+
+        // ---------------------------------------------------------
+        // 7) Baseline-driven hypothesis generation: any non-PASS becomes a target
         //    for a next probe without needing a hard-coded test ID.
         // ---------------------------------------------------------
         val baselineTests = baseline.optJSONArray("tests") ?: JSONArray()
@@ -717,6 +799,7 @@ class AyanaAutonomousTestIntelligence(
                     .put("history_records_examined", history.size)
                     .put("metamorphic_planner_tests", metamorphicTests)
                     .put("history_anomaly_tests", historyTests)
+                    .put("r9_foundation_contract_tests", foundationTests)
                     .put("hypotheses_generated", hypotheses.length())
                     .put("adaptive_tests_generated", generated)
             )
@@ -1141,7 +1224,7 @@ class AyanaAutonomousTestIntelligence(
     }
 
     companion object {
-        const val ENGINE_VERSION = "1.5"
+        const val ENGINE_VERSION = "1.6"
 
         private const val STATUS_PASS = "PASS"
         private const val STATUS_WARNING = "WARNING"
