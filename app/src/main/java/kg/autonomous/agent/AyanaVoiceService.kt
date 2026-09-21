@@ -60,7 +60,7 @@ import kotlin.math.abs
 
 class AyanaVoiceService : Service() {
 
-    // AYANA v12.22.0 / R9.0 AUTONOMOUS AGENT FOUNDATION.
+    // AYANA v12.22.1 / R9.0.1 HISTORY LIVE-REFRESH PROOF FIX.
     // One integrated foundation release on top of device-confirmed R8.5.4:
     // - bounded read-only recovery for incomplete Agent Core completions;
     // - Autonomous Task Graph evidence layered over the proven Durable Goal loop;
@@ -24279,6 +24279,99 @@ requestMethod = "GET"
                     .replace("-", "")
                     .take(10)
 
+        val prefs =
+            getSharedPreferences(
+                MainActivity.UI_STATE_PREFS,
+                Context.MODE_PRIVATE
+            )
+
+        val allowedPages =
+            setOf(
+                "HOME",
+                "TASKS",
+                "MEMORY",
+                "HISTORY",
+                "DIAGNOSTICS",
+                "SETTINGS"
+            )
+
+        val originalPage =
+            prefs.getString(
+                MainActivity.UI_STATE_CURRENT_PAGE,
+                "HOME"
+            )
+                .orEmpty()
+                .let {
+                    if (it in allowedPages) {
+                        it
+                    } else {
+                        "HOME"
+                    }
+                }
+
+        fun openInternalPageForProbe(
+            pageKey: String
+        ): Boolean {
+            if (pageKey !in allowedPages) {
+                return false
+            }
+
+            return try {
+                startActivity(
+                    Intent(
+                        this,
+                        MainActivity::class.java
+                    ).apply {
+                        putExtra(
+                            MainActivity.EXTRA_OPEN_PAGE,
+                            pageKey
+                        )
+
+                        addFlags(
+                            Intent.FLAG_ACTIVITY_NEW_TASK or
+                                Intent.FLAG_ACTIVITY_CLEAR_TOP or
+                                Intent.FLAG_ACTIVITY_SINGLE_TOP
+                        )
+                    }
+                )
+
+                val deadline =
+                    System.currentTimeMillis() +
+                        HISTORY_LIVE_REFRESH_PAGE_VERIFY_TIMEOUT_MS
+
+                var actual =
+                    prefs.getString(
+                        MainActivity.UI_STATE_CURRENT_PAGE,
+                        ""
+                    )
+                        .orEmpty()
+
+                while (
+                    actual != pageKey &&
+                    System.currentTimeMillis() < deadline
+                ) {
+                    try {
+                        Thread.sleep(60L)
+                    } catch (_: InterruptedException) {
+                        Thread.currentThread()
+                            .interrupt()
+                        break
+                    }
+
+                    actual =
+                        prefs.getString(
+                            MainActivity.UI_STATE_CURRENT_PAGE,
+                            ""
+                        )
+                            .orEmpty()
+                }
+
+                actual == pageKey
+            } catch (_: Exception) {
+                false
+            }
+        }
+
         var markerId =
             ""
 
@@ -24294,6 +24387,9 @@ requestMethod = "GET"
         var restoredOwnApp =
             false
 
+        var restoredPage =
+            false
+
         var observedPackage =
             ""
 
@@ -24301,59 +24397,26 @@ requestMethod = "GET"
             ""
 
         try {
-            try {
-                startActivity(
-                    Intent(
-                        this,
-                        MainActivity::class.java
-                    ).apply {
-                        addFlags(
-                            Intent.FLAG_ACTIVITY_NEW_TASK or
-                                Intent.FLAG_ACTIVITY_RESET_TASK_IF_NEEDED
-                        )
-                    }
-                )
-                Thread.sleep(350L)
-            } catch (_: Exception) {
-            }
-
-            val openHistory =
-                try {
-                    screenIntelligence.click(
-                        target = "История",
-                        confirmed = false
-                    )
-                } catch (error: Exception) {
-                    JSONObject()
-                        .put("success", false)
-                        .put(
-                            "message",
-                            error.message
-                                .orEmpty()
-                        )
-                }
-
+            // Use the same production internal-page contract as
+            // runLocalInternalPageNavigation(): MainActivity.EXTRA_OPEN_PAGE +
+            // UI_STATE_CURRENT_PAGE verification. Accessibility semantic click is
+            // intentionally not used here because an in-app navigation tab is not
+            // a generic semantic-object action target.
             historyTabOpened =
-                openHistory.optBoolean(
-                    "success",
-                    false
-                ) ||
-                    openHistory.optBoolean(
-                        "verified",
-                        false
-                    )
+                openInternalPageForProbe(
+                    "HISTORY"
+                )
 
             if (!historyTabOpened) {
+                val actual =
+                    prefs.getString(
+                        MainActivity.UI_STATE_CURRENT_PAGE,
+                        ""
+                    )
+                        .orEmpty()
+
                 failureReason =
-                    "history_tab_not_opened:" +
-                        openHistory
-                            .optString(
-                                "message",
-                                openHistory.optString(
-                                    "reason"
-                                )
-                            )
-                            .take(180)
+                    "history_page_not_verified:actual=$actual"
             } else {
                 Thread.sleep(300L)
 
@@ -24426,51 +24489,46 @@ requestMethod = "GET"
                     true
             }
 
-            try {
-                screenIntelligence.click(
-                    target = "Главная",
-                    confirmed = false
-                )
-            } catch (_: Exception) {
-            }
-
-            try {
-                startActivity(
-                    Intent(
-                        this,
-                        MainActivity::class.java
-                    ).apply {
-                        addFlags(
-                            Intent.FLAG_ACTIVITY_NEW_TASK or
-                                Intent.FLAG_ACTIVITY_RESET_TASK_IF_NEEDED
-                        )
-                    }
+            restoredPage =
+                openInternalPageForProbe(
+                    originalPage
                 )
 
-                Thread.sleep(
-                    HISTORY_LIVE_REFRESH_RESTORE_WAIT_MS
-                )
-
-                val restore =
-                    screenIntelligence.getScreenState()
-
-                val restorePackage =
-                    restore.optString(
-                        "effective_foreground_package",
-                        restore.optString(
-                            "interaction_package",
-                            restore.optString(
-                                "package"
-                            )
-                        )
+            if (restoredPage) {
+                try {
+                    Thread.sleep(
+                        HISTORY_LIVE_REFRESH_RESTORE_WAIT_MS
                     )
 
-                restoredOwnApp =
-                    restorePackage ==
-                        packageName
-            } catch (_: Exception) {
-                restoredOwnApp =
-                    false
+                    val restore =
+                        screenIntelligence.getScreenState()
+
+                    val restorePackage =
+                        restore.optString(
+                            "effective_foreground_package",
+                            restore.optString(
+                                "interaction_package",
+                                restore.optString(
+                                    "package"
+                                )
+                            )
+                        )
+
+                    restoredOwnApp =
+                        restorePackage ==
+                            packageName
+                } catch (_: Exception) {
+                    restoredOwnApp =
+                        false
+                }
+            }
+
+            if (
+                failureReason.isBlank() &&
+                (!restoredPage || !restoredOwnApp)
+            ) {
+                failureReason =
+                    "history_state_restore_unverified"
             }
         }
 
@@ -24478,6 +24536,7 @@ requestMethod = "GET"
             historyTabOpened &&
                 markerVisible &&
                 cleanupDeleted &&
+                restoredPage &&
                 restoredOwnApp
 
         return acceptanceProbeResult(
@@ -24489,7 +24548,7 @@ requestMethod = "GET"
                 },
             message =
                 if (ok) {
-                    "History live-refresh device-confirmed: временная terminal-запись появилась в открытой вкладке История без повторного входа; cleanup и возврат в AYANA подтверждены."
+                    "History live-refresh device-confirmed: временная terminal-запись появилась в открытой вкладке История без повторного входа; cleanup и возврат на исходную вкладку AYANA подтверждены."
                 } else {
                     "History live-refresh не удалось подтвердить в этом прогоне: ${failureReason.ifBlank { "ui_roundtrip_unverified" }}."
                 },
@@ -24498,9 +24557,12 @@ requestMethod = "GET"
             evidence =
                 JSONObject()
                     .put("ui_instrumentation_available", true)
+                    .put("navigation_contract", "MainActivity.EXTRA_OPEN_PAGE")
+                    .put("original_page", originalPage)
                     .put("history_tab_opened", historyTabOpened)
                     .put("marker_visible_after_terminal", markerVisible)
                     .put("cleanup_deleted", cleanupDeleted)
+                    .put("page_restored", restoredPage)
                     .put("state_restored", restoredOwnApp)
                     .put("observed_package", observedPackage)
                     .put("marker_prefix", "R9HIST")
@@ -41151,9 +41213,9 @@ state
 
     companion object {
 
-        // R9.0 RELEASE / FEATURE LINEAGE TRUTH.
+        // R9.0.1 RELEASE / FEATURE LINEAGE TRUTH.
         private const val AYANA_VOICE_SERVICE_RELEASE =
-            "v12.22.0 / R9.0 AUTONOMOUS AGENT FOUNDATION"
+            "v12.22.1 / R9.0.1 HISTORY LIVE-REFRESH PROOF FIX"
 
         private const val AYANA_PERSONAL_SEARCH_ENGINE_RELEASE =
             "v1.5.1 IMAGE COVERAGE TRUTH"
@@ -41168,10 +41230,10 @@ state
             "R8.5.4 Remaining Capability Proof — DEVICE-CONFIRMED ACCEPTED"
 
         private const val AYANA_CURRENT_FEATURE_RELEASE =
-            "R9.0 AUTONOMOUS AGENT FOUNDATION"
+            "R9.0.1 HISTORY LIVE-REFRESH PROOF FIX"
 
         private const val AYANA_RELEASE_LINEAGE =
-            "Android v12.21.0 / R7.9 truth-hardening + R8.0 multi-attachment + R8.1–R8.4 accepted Personal Global Search stack + R8.5–R8.5.4 capability/evidence truth + R9.0 autonomous agent foundation"
+            "Android v12.21.0 / R7.9 truth-hardening + R8.0 multi-attachment + R8.1–R8.4 accepted Personal Global Search stack + R8.5–R8.5.4 capability/evidence truth + R9.0 autonomous agent foundation + R9.0.1 history live-refresh proof fix"
 
         // AyanaCommandHistoryStore v2.8 keeps up to 4k chars inline and stores longer
         // results out-of-line. Self-review intentionally remains inline so copied History
@@ -41181,6 +41243,9 @@ state
 
         private const val AGENT_CORE_COMPLETION_RECOVERY_BACKOFF_MS =
             260L
+
+        private const val HISTORY_LIVE_REFRESH_PAGE_VERIFY_TIMEOUT_MS =
+            1_500L
 
         private const val HISTORY_LIVE_REFRESH_PROOF_WAIT_MS =
             850L
