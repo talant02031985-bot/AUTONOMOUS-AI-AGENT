@@ -6,7 +6,7 @@ import java.security.MessageDigest
 import java.util.Locale
 
 /**
- * AYANA Autonomous Test Intelligence v1.4 — SHARED DEVICE EVIDENCE TRUTH.
+ * AYANA Autonomous Test Intelligence v1.5 — SAFE CAPABILITY DEVICE PROBES.
  *
  * This layer is intentionally different from a fixed acceptance checklist.
  * It discovers test opportunities from the current build/runtime itself:
@@ -16,14 +16,16 @@ import java.util.Locale
  * - recent real commands are mutated into safe planner-only metamorphic checks;
  * - Command History is mined for terminal/evidence contradictions and platform drift;
  * - effective device-confirmation is resolved through AyanaDeviceEvidenceTruth;
+ * - unresolved implemented+available capabilities may invoke one explicit allow-listed safe probe;
+ * - PASS probe evidence is consumed immediately and may be persisted by the Android provider;
  * - accepted historical/device evidence suppresses stale coverage-gap hypotheses;
  * - fresh PASS evidence from baseline runtime probes can satisfy device-confirmation
  *   for that diagnostic run without mutating Capability Registry metadata.
  *
- * All generated tests in v1.4 are READ-ONLY or PURE. No generated test opens an app,
- * writes device state, sends a message, deletes user data, uses the camera, purchases,
- * or performs any other irreversible action. Future active probes must remain behind
- * the same fail-closed safety contract and own restore/cleanup before PASS.
+ * Generated discovery tests remain READ-ONLY/PURE except the dedicated capability-probe
+ * provider. That provider is Android-owned, allow-listed, reversible, and must return PASS
+ * only after restore/cleanup. ATI never invents active probes by itself and never upgrades
+ * WARNING/failed probe evidence to device confirmation.
  */
 class AyanaAutonomousTestIntelligence(
     private val capabilitySnapshotProvider: () -> JSONObject,
@@ -32,6 +34,7 @@ class AyanaAutonomousTestIntelligence(
     private val appCatalogProvider: () -> JSONArray,
     private val resolveAppProvider: (String) -> JSONObject,
     private val plannerProvider: (String) -> JSONObject,
+    private val safeCapabilityProbeProvider: (String) -> JSONObject? = { null },
     private val shouldCancel: () -> Boolean = { false }
 ) {
 
@@ -49,10 +52,12 @@ class AyanaAutonomousTestIntelligence(
         val runtimeConfirmedCapabilities =
             runtimeConfirmedCapabilitiesFromBaseline(
                 baseline
-            )
+            ).toMutableSet()
 
         var generated = 0
         var capabilityTests = 0
+        var capabilityProbeTests = 0
+        var capabilityProbePasses = 0
         var capabilityCoverageGaps = 0
         val sharedHistoricalCapabilities = linkedSetOf<String>()
         var resolverTests = 0
@@ -92,21 +97,105 @@ class AyanaAutonomousTestIntelligence(
             val implemented = item.optBoolean("implemented", false)
             val available = item.optBoolean("available_now", false)
             val registryConfirmed = item.optBoolean("device_confirmed", false)
-            val runtimeProbeConfirmed = id in runtimeConfirmedCapabilities
-            val evidenceResolution =
+            val staticConfirmed = item.optBoolean("static_device_confirmed", false)
+            val persistedConfirmed = item.optBoolean("runtime_evidence_persisted", false)
+            val persistedDetail = item.optString("runtime_evidence_detail")
+
+            var runtimeProbeConfirmed = id in runtimeConfirmedCapabilities
+            var evidenceResolution =
                 AyanaDeviceEvidenceTruth.resolve(
                     capabilityId = id,
                     implemented = implemented,
                     availableNow = available,
                     registryDeviceConfirmed = registryConfirmed,
-                    staticDeviceConfirmed =
-                        item.optBoolean("static_device_confirmed", false),
-                    runtimeEvidencePersisted =
-                        item.optBoolean("runtime_evidence_persisted", false),
-                    runtimeEvidenceDetail =
-                        item.optString("runtime_evidence_detail"),
+                    staticDeviceConfirmed = staticConfirmed,
+                    runtimeEvidencePersisted = persistedConfirmed,
+                    runtimeEvidenceDetail = persistedDetail,
                     runtimeProbeConfirmed = runtimeProbeConfirmed
                 )
+
+            // v1.5: only unresolved implemented+available capabilities are offered to
+            // the Android allow-listed probe provider. Null means "no safe probe".
+            if (
+                implemented &&
+                available &&
+                !evidenceResolution.effectiveConfirmed &&
+                !stopRequested(tests.length())
+            ) {
+                val probeStartedAt = System.currentTimeMillis()
+                val probe =
+                    try {
+                        safeCapabilityProbeProvider(id)
+                    } catch (error: Exception) {
+                        JSONObject()
+                            .put("status", STATUS_WARNING)
+                            .put("verified", false)
+                            .put("message", "Safe capability probe exception: ${error.javaClass.simpleName}.")
+                            .put("evidence_scope", "safe_capability_probe_exception")
+                            .put("evidence", JSONObject().put("error", error.message.orEmpty().take(500)))
+                    }
+
+                if (probe != null) {
+                    val rawStatus = probe.optString("status").uppercase(Locale.ROOT)
+                    val probeStatus =
+                        when (rawStatus) {
+                            STATUS_PASS -> STATUS_PASS
+                            STATUS_FAIL -> STATUS_WARNING
+                            else -> STATUS_WARNING
+                        }
+                    val probeVerified =
+                        probeStatus == STATUS_PASS &&
+                            probe.optBoolean("verified", false)
+
+                    val probeEvidence =
+                        copyJsonObject(
+                            probe.optJSONObject("evidence") ?: JSONObject()
+                        )
+                            .put("capability_id", id)
+                            .put("provider_status", rawStatus.ifBlank { "UNKNOWN" })
+                            .put("probe_verified", probeVerified)
+
+                    tests.put(
+                        JSONObject()
+                            .put("id", "AUTO-PROBE-${shortId(id)}")
+                            .put("title", "Safe device evidence probe: $id")
+                            .put("status", probeStatus)
+                            .put("critical", false)
+                            .put("duration_ms", (System.currentTimeMillis() - probeStartedAt).coerceAtLeast(0L))
+                            .put(
+                                "message",
+                                probe.optString("message")
+                                    .ifBlank { if (probeVerified) "Safe device probe PASS." else "Safe device probe did not confirm capability." }
+                                    .take(1200)
+                            )
+                            .put("evidence_scope", probe.optString("evidence_scope").ifBlank { "safe_capability_device_probe" })
+                            .put("verified", probeVerified)
+                            .put("evidence", probeEvidence)
+                            .put("generated", true)
+                            .put("generator", "AyanaAutonomousTestIntelligence/$ENGINE_VERSION")
+                    )
+                    generated++
+                    capabilityProbeTests++
+
+                    if (probeVerified) {
+                        runtimeConfirmedCapabilities += id
+                        runtimeProbeConfirmed = true
+                        capabilityProbePasses++
+                        evidenceResolution =
+                            AyanaDeviceEvidenceTruth.resolve(
+                                capabilityId = id,
+                                implemented = implemented,
+                                availableNow = available,
+                                registryDeviceConfirmed = registryConfirmed,
+                                staticDeviceConfirmed = staticConfirmed,
+                                runtimeEvidencePersisted = persistedConfirmed,
+                                runtimeEvidenceDetail = persistedDetail,
+                                runtimeProbeConfirmed = true
+                            )
+                    }
+                }
+            }
+
             val confirmed = evidenceResolution.effectiveConfirmed
             val truthState = evidenceResolution.truthState
             val note = item.optString("note").take(MAX_NOTE_CHARS)
@@ -617,6 +706,8 @@ class AyanaAutonomousTestIntelligence(
                     .put("capabilities_discovered", capabilities.length())
                     .put("capability_invariants_tested", capabilityTests)
                     .put("runtime_confirmed_capabilities", runtimeConfirmedCapabilities.size)
+                    .put("safe_capability_probe_tests", capabilityProbeTests)
+                    .put("safe_capability_probe_passes", capabilityProbePasses)
                     .put("shared_device_evidence_truth_version", AyanaDeviceEvidenceTruth.VERSION)
                     .put("shared_historical_evidence_capabilities", sharedHistoricalCapabilities.size)
                     .put("capability_coverage_gaps_after_fusion", capabilityCoverageGaps)
@@ -1050,7 +1141,7 @@ class AyanaAutonomousTestIntelligence(
     }
 
     companion object {
-        const val ENGINE_VERSION = "1.4"
+        const val ENGINE_VERSION = "1.5"
 
         private const val STATUS_PASS = "PASS"
         private const val STATUS_WARNING = "WARNING"
