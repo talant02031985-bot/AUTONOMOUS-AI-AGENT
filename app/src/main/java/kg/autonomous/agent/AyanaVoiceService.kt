@@ -60,7 +60,11 @@ import kotlin.math.abs
 
 class AyanaVoiceService : Service() {
 
-    // AYANA R8.5.2 SHARED DEVICE EVIDENCE TRUTH.
+    // AYANA R8.5.3 CAPABILITY PROOF SWEEP.
+    // Before FULL/EXHAUSTIVE acceptance, safely probes only still-unconfirmed
+    // device capabilities and persists machine-verified evidence into Capability Registry.
+    // ATI then consumes the same persisted truth in the very same run.
+    // ORB/visualizer/Search/Worker remain untouched.
     // Self-review and Autonomous Test Intelligence now resolve effective device proof
     // through one AyanaDeviceEvidenceTruth source. This removes duplicate truth ledgers
     // and prevents ATI from generating coverage-gap hypotheses for capabilities already
@@ -17702,6 +17706,784 @@ append(index + 1)
         }
     }
 
+
+    private fun runCapabilityProofSweep(): JSONObject {
+        val startedAt =
+            System.currentTimeMillis()
+
+        val targetIds =
+            listOf(
+                "clipboard_write",
+                "structured_local_queries",
+                "screen_content_reading",
+                "google_image_search",
+                "speed_test_launcher",
+                "extended_accessibility_semantics"
+            )
+
+        val snapshot =
+            try {
+                capabilityRegistry.snapshot()
+            } catch (_: Exception) {
+                JSONObject()
+            }
+
+        val capabilities =
+            snapshot.optJSONArray("capabilities")
+                ?: JSONArray()
+
+        val byId =
+            linkedMapOf<String, JSONObject>()
+
+        for (index in 0 until capabilities.length()) {
+            val item =
+                capabilities.optJSONObject(index)
+                    ?: continue
+
+            val id =
+                item.optString("id")
+                    .trim()
+
+            if (id.isNotBlank()) {
+                byId[id] =
+                    item
+            }
+        }
+
+        val results =
+            JSONArray()
+
+        var pendingBefore = 0
+        var confirmedNow = 0
+        var failedNow = 0
+        var skippedAlreadyConfirmed = 0
+
+        targetIds.forEach { capabilityId ->
+            val item =
+                byId[capabilityId]
+
+            val implemented =
+                item?.optBoolean(
+                    "implemented",
+                    false
+                ) == true
+
+            val available =
+                item?.optBoolean(
+                    "available_now",
+                    false
+                ) == true
+
+            val alreadyConfirmed =
+                item?.optBoolean(
+                    "device_confirmed",
+                    false
+                ) == true
+
+            if (
+                !implemented ||
+                !available
+            ) {
+                results.put(
+                    JSONObject()
+                        .put("capability_id", capabilityId)
+                        .put("status", "SKIPPED_UNAVAILABLE")
+                        .put("verified", false)
+                        .put(
+                            "reason",
+                            if (!implemented) {
+                                "not_implemented"
+                            } else {
+                                "unavailable_now"
+                            }
+                        )
+                )
+                return@forEach
+            }
+
+            if (alreadyConfirmed) {
+                skippedAlreadyConfirmed++
+                results.put(
+                    JSONObject()
+                        .put("capability_id", capabilityId)
+                        .put("status", "ALREADY_CONFIRMED")
+                        .put("verified", true)
+                )
+                return@forEach
+            }
+
+            pendingBefore++
+
+            val probe =
+                try {
+                    when (capabilityId) {
+                        "clipboard_write" ->
+                            capabilityProbeClipboardWrite()
+
+                        "structured_local_queries" ->
+                            capabilityProbeStructuredLocalQueries()
+
+                        "screen_content_reading" ->
+                            capabilityProbeScreenContentReading()
+
+                        "google_image_search" ->
+                            capabilityProbeExternalUrlRoundTrip(
+                                capabilityId = capabilityId,
+                                url =
+                                    "https://www.google.com/search?tbm=isch&q=" +
+                                        Uri.encode(
+                                            "AYANA R8.5.3 device proof"
+                                        ),
+                                detail =
+                                    "Google Images ACTION_VIEW dispatched to verified external foreground and AYANA restored"
+                            )
+
+                        "speed_test_launcher" ->
+                            capabilityProbeExternalUrlRoundTrip(
+                                capabilityId = capabilityId,
+                                url = "https://fast.com/",
+                                detail =
+                                    "FAST.com launcher ACTION_VIEW dispatched to verified external foreground and AYANA restored; no Mbps claim"
+                            )
+
+                        "extended_accessibility_semantics" ->
+                            capabilityProbeExtendedAccessibilitySemantics()
+
+                        else ->
+                            JSONObject()
+                                .put("verified", false)
+                                .put("status", "UNKNOWN_PROBE")
+                    }
+                } catch (error: Exception) {
+                    JSONObject()
+                        .put("verified", false)
+                        .put("status", "EXCEPTION")
+                        .put(
+                            "message",
+                            (
+                                error.message
+                                    ?: error.javaClass.simpleName
+                                ).take(400)
+                        )
+                }
+
+            val verified =
+                probe.optBoolean(
+                    "verified",
+                    false
+                )
+
+            if (verified) {
+                confirmedNow++
+
+                capabilityRegistry.recordCapabilityEvidence(
+                    capabilityId = capabilityId,
+                    detail =
+                        probe
+                            .optString(
+                                "detail",
+                                "R8.5.3 capability proof sweep verified"
+                            )
+                            .take(500),
+                    verified = true
+                )
+            } else {
+                failedNow++
+            }
+
+            results.put(
+                JSONObject(probe.toString())
+                    .put(
+                        "capability_id",
+                        capabilityId
+                    )
+            )
+        }
+
+        val elapsed =
+            (
+                System.currentTimeMillis() -
+                    startedAt
+                ).coerceAtLeast(0L)
+
+        val sweep =
+            JSONObject()
+                .put("version", "1.0")
+                .put("requested", targetIds.size)
+                .put("pending_before", pendingBefore)
+                .put("confirmed_now", confirmedNow)
+                .put("failed_now", failedNow)
+                .put(
+                    "skipped_already_confirmed",
+                    skippedAlreadyConfirmed
+                )
+                .put("duration_ms", elapsed)
+                .put("results", results)
+
+        commandHistoryStore.addEvent(
+            activeCommandHistoryId,
+            state = "device_evidence_sweep",
+            message =
+                "R8.5.3 capability proof sweep завершён",
+            details =
+                (
+                    "pending_before=$pendingBefore; " +
+                        "confirmed_now=$confirmedNow; " +
+                        "failed_now=$failedNow; " +
+                        "skipped=$skippedAlreadyConfirmed; " +
+                        "duration_ms=$elapsed"
+                    ).take(900)
+        )
+
+        return sweep
+    }
+
+    private fun capabilityProbeClipboardWrite(): JSONObject {
+        val clipboard =
+            getSystemService(
+                Context.CLIPBOARD_SERVICE
+            ) as ClipboardManager
+
+        val originalClip =
+            try {
+                clipboard.primaryClip
+            } catch (_: Exception) {
+                null
+            }
+
+        val hadOriginal =
+            try {
+                clipboard.hasPrimaryClip()
+            } catch (_: Exception) {
+                originalClip != null
+            }
+
+        val marker =
+            "AYANA_R853_CLIP_" +
+                UUID.randomUUID()
+                    .toString()
+                    .take(8)
+
+        var observed =
+            false
+
+        var restored =
+            false
+
+        try {
+            clipboard.setPrimaryClip(
+                ClipData.newPlainText(
+                    "AYANA acceptance",
+                    marker
+                )
+            )
+
+            Thread.sleep(60L)
+
+            observed =
+                try {
+                    clipboard
+                        .primaryClip
+                        ?.getItemAt(0)
+                        ?.coerceToText(this)
+                        ?.toString() ==
+                        marker
+                } catch (_: Exception) {
+                    false
+                }
+        } finally {
+            restored =
+                try {
+                    if (
+                        hadOriginal &&
+                        originalClip != null
+                    ) {
+                        clipboard.setPrimaryClip(
+                            originalClip
+                        )
+                    } else {
+                        if (
+                            Build.VERSION.SDK_INT >=
+                            Build.VERSION_CODES.P
+                        ) {
+                            clipboard.clearPrimaryClip()
+                        } else {
+                            clipboard.setPrimaryClip(
+                                ClipData.newPlainText(
+                                    "AYANA",
+                                    ""
+                                )
+                            )
+                        }
+                    }
+
+                    true
+                } catch (_: Exception) {
+                    false
+                }
+        }
+
+        val ok =
+            observed &&
+                restored
+
+        return JSONObject()
+            .put("verified", ok)
+            .put(
+                "status",
+                if (ok) {
+                    "PASS"
+                } else {
+                    "FAIL"
+                }
+            )
+            .put(
+                "detail",
+                "ClipboardManager temporary write + exact read-back + restore verified"
+            )
+            .put("write_readback_verified", observed)
+            .put("state_restored", restored)
+    }
+
+    private fun capabilityProbeStructuredLocalQueries(): JSONObject {
+        val notificationIntent =
+            AyanaStructuredLocalCommandRouter
+                .parse(
+                    "покажи последние 3 уведомления"
+                )
+
+        val metricIntent =
+            AyanaStructuredLocalCommandRouter
+                .parse(
+                    "покажи заряд батареи"
+                )
+
+        val notificationTyped =
+            notificationIntent is
+                AyanaStructuredLocalCommandRouter.Intent.NotificationRead &&
+                notificationIntent.limit ==
+                3
+
+        val metricTyped =
+            metricIntent is
+                AyanaStructuredLocalCommandRouter.Intent.DeviceMetric
+
+        val state =
+            try {
+                agentGetDeviceState()
+            } catch (_: Exception) {
+                JSONObject()
+            }
+
+        val battery =
+            state.optInt(
+                "battery_percent",
+                -1
+            )
+
+        val liveBackend =
+            state.optBoolean(
+                "success",
+                false
+            ) &&
+                battery in 0..100
+
+        val ok =
+            notificationTyped &&
+                metricTyped &&
+                liveBackend
+
+        return JSONObject()
+            .put("verified", ok)
+            .put(
+                "status",
+                if (ok) {
+                    "PASS"
+                } else {
+                    "FAIL"
+                }
+            )
+            .put(
+                "detail",
+                "Structured local router typed notification+device-metric intents and live device-state backend verified"
+            )
+            .put("notification_typed", notificationTyped)
+            .put("metric_typed", metricTyped)
+            .put("battery_percent", battery)
+            .put("live_backend", liveBackend)
+    }
+
+    private fun capabilityProbeScreenContentReading(): JSONObject {
+        val state =
+            try {
+                agentGetDeviceState()
+            } catch (_: Exception) {
+                JSONObject()
+            }
+
+        val screen =
+            state.optJSONObject(
+                "screen"
+            ) ?: JSONObject()
+
+        val contentState =
+            screen.optString(
+                "primary_content_state",
+                screen.optString(
+                    "content_status",
+                    "unknown"
+                )
+            )
+
+        val textCount =
+            maxOf(
+                screen.optInt(
+                    "primary_readable_text_count",
+                    0
+                ),
+                screen.optInt(
+                    "primary_live_readable_text_count",
+                    0
+                )
+            )
+
+        val available =
+            screen.optBoolean(
+                "primary_content_available",
+                false
+            )
+
+        val ok =
+            screen.optBoolean(
+                "success",
+                false
+            ) &&
+                available &&
+                contentState in
+                setOf(
+                    "readable",
+                    "partial"
+                ) &&
+                textCount >
+                0
+
+        return JSONObject()
+            .put("verified", ok)
+            .put(
+                "status",
+                if (ok) {
+                    "PASS"
+                } else {
+                    "FAIL"
+                }
+            )
+            .put(
+                "detail",
+                "Live screen content exposed readable/partial primary content with non-zero readable text"
+            )
+            .put("content_state", contentState)
+            .put("text_count", textCount)
+            .put(
+                "package",
+                screen.optString(
+                    "package"
+                )
+            )
+    }
+
+    private fun capabilityProbeExternalUrlRoundTrip(
+        capabilityId: String,
+        url: String,
+        detail: String
+    ): JSONObject {
+        val network =
+            readNetworkTruthSnapshot()
+
+        if (
+            !network.observationAvailable ||
+            !network.connected
+        ) {
+            return JSONObject()
+                .put("verified", false)
+                .put("status", "NO_NETWORK")
+                .put("detail", detail)
+                .put(
+                    "network_transport",
+                    network.transport
+                )
+        }
+
+        val uri =
+            Uri.parse(
+                url
+            )
+
+        val baseIntent =
+            Intent(
+                Intent.ACTION_VIEW,
+                uri
+            ).apply {
+                addFlags(
+                    Intent.FLAG_ACTIVITY_NEW_TASK
+                )
+            }
+
+        val resolved =
+            try {
+                packageManager.resolveActivity(
+                    baseIntent,
+                    PackageManager.MATCH_DEFAULT_ONLY
+                )
+            } catch (_: Exception) {
+                null
+            }
+
+        val expectedPackage =
+            resolved
+                ?.activityInfo
+                ?.packageName
+                .orEmpty()
+
+        if (expectedPackage.isBlank()) {
+            return JSONObject()
+                .put("verified", false)
+                .put("status", "NO_HANDLER")
+                .put("detail", detail)
+        }
+
+        var dispatched =
+            false
+
+        var externalObserved =
+            false
+
+        var observedPackage =
+            ""
+
+        var restored =
+            false
+
+        try {
+            startActivity(
+                Intent(baseIntent)
+                    .setPackage(
+                        expectedPackage
+                    )
+            )
+
+            dispatched =
+                true
+
+            Thread.sleep(
+                EXTERNAL_PROOF_SETTLE_MS
+            )
+
+            val externalState =
+                try {
+                    screenIntelligence.getScreenState()
+                } catch (_: Exception) {
+                    JSONObject()
+                }
+
+            observedPackage =
+                externalState.optString(
+                    "effective_foreground_package",
+                    externalState.optString(
+                        "interaction_package",
+                        externalState.optString(
+                            "package"
+                        )
+                    )
+                )
+
+            // Exact package verification: because the intent is explicitly pinned to
+            // the resolved handler package, any other foreground owner (including the
+            // keyboard or a chooser) must fail closed rather than count as proof.
+            externalObserved =
+                observedPackage ==
+                    expectedPackage
+        } finally {
+            val restoreDispatched =
+                try {
+                    startActivity(
+                        Intent(
+                            this,
+                            MainActivity::class.java
+                        ).apply {
+                            addFlags(
+                                Intent.FLAG_ACTIVITY_NEW_TASK or
+                                    Intent.FLAG_ACTIVITY_RESET_TASK_IF_NEEDED
+                            )
+                        }
+                    )
+
+                    true
+                } catch (_: Exception) {
+                    false
+                }
+
+            if (restoreDispatched) {
+                try {
+                    Thread.sleep(
+                        EXTERNAL_PROOF_RESTORE_MS
+                    )
+
+                    val restoreState =
+                        screenIntelligence.getScreenState()
+
+                    val restorePackage =
+                        restoreState.optString(
+                            "effective_foreground_package",
+                            restoreState.optString(
+                                "interaction_package",
+                                restoreState.optString(
+                                    "package"
+                                )
+                            )
+                        )
+
+                    restored =
+                        restorePackage ==
+                            packageName
+                } catch (_: Exception) {
+                    restored =
+                        false
+                }
+            }
+        }
+
+        val ok =
+            dispatched &&
+                externalObserved &&
+                restored
+
+        return JSONObject()
+            .put("verified", ok)
+            .put(
+                "status",
+                if (ok) {
+                    "PASS"
+                } else {
+                    "FAIL"
+                }
+            )
+            .put("detail", detail)
+            .put("expected_package", expectedPackage)
+            .put("observed_package", observedPackage)
+            .put("external_foreground_verified", externalObserved)
+            .put("state_restored", restored)
+            .put("capability_id", capabilityId)
+    }
+
+    private fun capabilityProbeExtendedAccessibilitySemantics(): JSONObject {
+        val registry =
+            try {
+                capabilityRegistry.snapshot()
+            } catch (_: Exception) {
+                JSONObject()
+            }
+
+        val runtime =
+            registry.optJSONObject(
+                "runtime"
+            ) ?: JSONObject()
+
+        val accessibilityConnected =
+            runtime.optBoolean(
+                "accessibility_connected",
+                false
+            )
+
+        val screen =
+            try {
+                screenIntelligence.getScreenState()
+            } catch (_: Exception) {
+                JSONObject()
+            }
+
+        val fusionVersion =
+            screen.optInt(
+                "perception_fusion_version",
+                0
+            )
+
+        val effectivePackage =
+            screen.optString(
+                "effective_foreground_package",
+                screen.optString(
+                    "interaction_package",
+                    screen.optString(
+                        "package"
+                    )
+                )
+            )
+
+        val rawPackage =
+            screen.optString(
+                "raw_interaction_package",
+                screen.optString(
+                    "interaction_package"
+                )
+            )
+
+        val windowCount =
+            screen.optInt(
+                "window_count",
+                screen.optInt(
+                    "raw_window_count",
+                    0
+                )
+            )
+
+        val ok =
+            accessibilityConnected &&
+                screen.optBoolean(
+                    "success",
+                    false
+                ) &&
+                fusionVersion >=
+                1 &&
+                effectivePackage.isNotBlank() &&
+                rawPackage.isNotBlank() &&
+                windowCount >=
+                1
+
+        return JSONObject()
+            .put("verified", ok)
+            .put(
+                "status",
+                if (ok) {
+                    "PASS"
+                } else {
+                    "FAIL"
+                }
+            )
+            .put(
+                "detail",
+                "Live Accessibility semantics verified: connected service + owner-fusion + raw/effective package + window evidence"
+            )
+            .put(
+                "accessibility_connected",
+                accessibilityConnected
+            )
+            .put(
+                "perception_fusion_version",
+                fusionVersion
+            )
+            .put(
+                "effective_package",
+                effectivePackage
+            )
+            .put(
+                "raw_package",
+                rawPackage
+            )
+            .put(
+                "window_count",
+                windowCount
+            )
+    }
+
     private fun runLocalAcceptanceTestCommand(
         mode: AyanaAcceptanceTestEngine.Mode,
         silent: Boolean
@@ -17727,6 +18509,24 @@ append(index + 1)
             },
             STATE_EXECUTING
         )
+
+        val evidenceSweep =
+            if (
+                mode == AyanaAcceptanceTestEngine.Mode.FULL_ACCEPTANCE ||
+                mode == AyanaAcceptanceTestEngine.Mode.EXHAUSTIVE_ACCEPTANCE
+            ) {
+                runCapabilityProofSweep()
+            } else {
+                JSONObject()
+                    .put("version", "1.0")
+                    .put("requested", 0)
+                    .put("pending_before", 0)
+                    .put("confirmed_now", 0)
+                    .put("failed_now", 0)
+                    .put("skipped_already_confirmed", 0)
+                    .put("duration_ms", 0L)
+                    .put("results", JSONArray())
+            }
 
         val result =
             try {
@@ -17756,6 +18556,11 @@ append(index + 1)
                         "Локальный acceptance-test не завершён: ${error.message ?: error.javaClass.simpleName}"
                     )
             }
+
+        result.put(
+            "device_evidence_sweep",
+            evidenceSweep
+        )
 
         try {
             capabilityRegistry.recordAcceptanceResult(
@@ -17790,7 +18595,10 @@ append(index + 1)
                         "duration_ms=${result.optLong("duration_ms")}; " +
                         "network_turns=${result.optInt("network_turns", 0)}; " +
                         "baseline_tests=${result.optInt("baseline_tests_requested", result.optInt("tests_requested", 0))}; " +
-                        "adaptive_tests=${result.optInt("adaptive_tests_generated", 0)}"
+                        "adaptive_tests=${result.optInt("adaptive_tests_generated", 0)}; " +
+                        "evidence_sweep_confirmed=${evidenceSweep.optInt("confirmed_now", 0)}; " +
+                        "evidence_sweep_failed=${evidenceSweep.optInt("failed_now", 0)}; " +
+                        "evidence_sweep_pending_before=${evidenceSweep.optInt("pending_before", 0)}"
                     ).take(1200)
         )
 
@@ -18086,6 +18894,20 @@ append(index + 1)
             val adaptiveEngine = result.optString("adaptive_engine")
             if (adaptiveEngine.isNotBlank()) {
                 append("Adaptive engine: $adaptiveEngine v${result.optString("adaptive_engine_version", "unknown")}\n")
+            }
+
+            val evidenceSweep =
+                result.optJSONObject("device_evidence_sweep")
+                    ?: JSONObject()
+
+            if (evidenceSweep.length() > 0) {
+                append(
+                    "Device evidence sweep: pending_before=${evidenceSweep.optInt("pending_before", 0)}; " +
+                        "confirmed_now=${evidenceSweep.optInt("confirmed_now", 0)}; " +
+                        "failed_now=${evidenceSweep.optInt("failed_now", 0)}; " +
+                        "skipped=${evidenceSweep.optInt("skipped_already_confirmed", 0)}; " +
+                        "duration=${evidenceSweep.optLong("duration_ms", 0L)} мс\n"
+                )
             }
             append("\n")
             append("КОНТРАКТ ДОСТОВЕРНОСТИ\n")
@@ -21170,7 +21992,7 @@ plan.optInt(
                 },
             message =
                 if (ok) {
-                    "Release metadata согласованы: base v12.21.0 / R7.9; accepted R8.5.1; current R8.5.2 shared device-evidence truth; Personal Search v1.5.1."
+                    "Release metadata согласованы: base v12.21.0 / R7.9; accepted R8.5.2; current R8.5.3 capability proof sweep; Personal Search v1.5.1."
                 } else {
                     "Release metadata неполны или Capability Registry build-label не соответствует base v12.21.0 / R7.9: build=$registryBuild; app=$appVersion."
                 },
@@ -39242,9 +40064,9 @@ state
 
     companion object {
 
-        // R8.5.2 RELEASE / FEATURE LINEAGE TRUTH.
+        // R8.5.3 RELEASE / FEATURE LINEAGE TRUTH.
         private const val AYANA_VOICE_SERVICE_RELEASE =
-            "v12.21.0 / R8.5.2 SHARED DEVICE EVIDENCE TRUTH"
+            "v12.21.0 / R8.5.3 CAPABILITY PROOF SWEEP"
 
         private const val AYANA_PERSONAL_SEARCH_ENGINE_RELEASE =
             "v1.5.1 IMAGE COVERAGE TRUTH"
@@ -39256,13 +40078,13 @@ state
             "v11.1.10 Multi-Attachment"
 
         private const val AYANA_ACCEPTED_FEATURE_CHECKPOINT =
-            "R8.5.1 Self-Review Evidence Fusion + Inline Completeness — DEVICE-CONFIRMED ACCEPTED"
+            "R8.5.2 Shared Device Evidence Truth — DEVICE-CONFIRMED ACCEPTED"
 
         private const val AYANA_CURRENT_FEATURE_RELEASE =
-            "R8.5.2 SHARED DEVICE EVIDENCE TRUTH"
+            "R8.5.3 CAPABILITY PROOF SWEEP"
 
         private const val AYANA_RELEASE_LINEAGE =
-            "Android v12.21.0 / R7.9 truth-hardening + R8.0 multi-attachment + R8.1–R8.4 accepted Personal Global Search stack + R8.5/R8.5.1 self-review truth + R8.5.2 shared evidence truth"
+            "Android v12.21.0 / R7.9 truth-hardening + R8.0 multi-attachment + R8.1–R8.4 accepted Personal Global Search stack + R8.5/R8.5.1 self-review truth + R8.5.2 shared evidence truth + R8.5.3 capability proof sweep"
 
         // AyanaCommandHistoryStore v2.8 keeps up to 4k chars inline and stores longer
         // results out-of-line. Self-review intentionally remains inline so copied History
@@ -39270,6 +40092,12 @@ state
         private const val SELF_REVIEW_INLINE_SAFE_CHARS =
             3_900
 
+
+        private const val EXTERNAL_PROOF_SETTLE_MS =
+            950L
+
+        private const val EXTERNAL_PROOF_RESTORE_MS =
+            700L
 
         const val ACTION_START =
             "kg.autonomous.agent.action.START_AYANA"
