@@ -60,7 +60,7 @@ import kotlin.math.abs
 
 class AyanaVoiceService : Service() {
 
-    // AYANA v12.22.2 / R9.0.2 DIAGNOSTIC RECONCILIATION + HISTORY REFRESH FIX.
+    // AYANA v12.22.3 / R9.0.3 TTS HEALTH RECONCILIATION.
     // One integrated foundation release on top of device-confirmed R8.5.4:
     // - bounded read-only recovery for incomplete Agent Core completions;
     // - Autonomous Task Graph evidence layered over the proven Durable Goal loop;
@@ -19022,7 +19022,7 @@ append(index + 1)
      * without requiring a parallel Agent Core turn.
      */
     /**
-     * R9.0.2 post-probe truth reconciliation.
+     * R9.0.3 post-probe truth reconciliation.
      *
      * HEALTH-001 is intentionally executed near the beginning of the baseline suite,
      * while ONLINE-001..003 execute later. Those online probes use the isolated
@@ -19162,10 +19162,45 @@ append(index + 1)
                     reconciledAt
                 )
 
+        // R9.0.3: HEALTH-001 is measured before ONLINE/TTS probes. If Marin is
+        // UNKNOWN only because its previous measurement is stale, perform a tiny
+        // production /tts round-trip without AudioTrack playback, persist that live
+        // result, then re-run the diagnostic presentation probes. This proves the
+        // actual Worker voice contract (Marin/profile/speed + first PCM bytes) and
+        // does not infer TTS health from generic network reachability.
+        val ttsFreshnessNeeded =
+            acceptanceHealthNeedsFreshTts(
+                testById("HEALTH-001")
+            )
+
+        val ttsProof =
+            if (ttsFreshnessNeeded) {
+                runAcceptanceTtsFreshnessProof()
+            } else {
+                JSONObject()
+                    .put("attempted", false)
+                    .put("success", true)
+                    .put("reason", "fresh_tts_measurement_already_present")
+            }
+
+        if (ttsFreshnessNeeded) {
+            result.put(
+                "network_turns",
+                result.optInt("network_turns", 0) + 1
+            )
+
+            result.put(
+                "duration_ms",
+                result.optLong("duration_ms", 0L) +
+                    ttsProof.optLong("elapsed_ms", 0L)
+            )
+        }
+
         // Re-run only the two diagnostic presentation probes after fresh, verified
-        // Agent Core evidence has been persisted. DiagnosticClosure v1.1 receives the
-        // live probe evidence separately, so it can close a matching historical
-        // Agent Core/network incident without pretending probes were user commands.
+        // Agent Core evidence and optional live Marin evidence have been persisted.
+        // DiagnosticClosure v1.1 receives Agent Core recovery evidence separately,
+        // so it can close a matching historical network incident without pretending
+        // acceptance probes were user commands.
         mergeProbeIntoExistingRow(
             "HEALTH-001",
             acceptanceDiagnosticsProbe(
@@ -19180,19 +19215,315 @@ append(index + 1)
             )
         )
 
+        testById("HEALTH-001")
+            ?.optJSONObject("evidence")
+            ?.apply {
+                put(
+                    "tts_live_probe_attempted",
+                    ttsProof.optBoolean("attempted", false)
+                )
+                put(
+                    "tts_live_probe_success",
+                    ttsProof.optBoolean("success", false)
+                )
+                put(
+                    "tts_live_probe_http_code",
+                    ttsProof.optInt("http_code", -1)
+                )
+                put(
+                    "tts_live_probe_first_byte_ms",
+                    ttsProof.optLong("first_byte_ms", -1L)
+                )
+                put(
+                    "tts_live_probe_bytes_observed",
+                    ttsProof.optInt("bytes_observed", 0)
+                )
+                put(
+                    "tts_live_probe_voice_contract_verified",
+                    ttsProof.optBoolean(
+                        "voice_contract_verified",
+                        false
+                    )
+                )
+                put(
+                    "tts_live_probe_error",
+                    ttsProof.optString("error")
+                )
+            }
+
         result
             .put("post_probe_health_reconciled", true)
             .put("post_probe_agent_core_passes", onlineRows.size)
             .put("post_probe_agent_core_reconciled_at_ms", reconciledAt)
+            .put(
+                "post_probe_tts_reconciliation_attempted",
+                ttsProof.optBoolean("attempted", false)
+            )
+            .put(
+                "post_probe_tts_reconciliation_success",
+                ttsProof.optBoolean("success", false)
+            )
+            .put(
+                "post_probe_tts_first_byte_ms",
+                ttsProof.optLong("first_byte_ms", -1L)
+            )
 
         recalculateAcceptanceOutcomeAfterReconciliation(
             result
         )
 
         // MainActivity's HOME health cards are render-time snapshots. Re-dispatch the
-        // current internal page so the freshly persisted Agent Core result becomes visible
-        // without requiring the user to navigate away and back manually.
+        // current internal page so freshly persisted Agent Core / Marin results become
+        // visible without requiring the user to navigate away and back manually.
         refreshCurrentOwnAppPageForRuntimeTruth()
+    }
+
+    private fun acceptanceHealthNeedsFreshTts(
+        healthRow: JSONObject?
+    ): Boolean {
+        val nonPass =
+            healthRow
+                ?.optJSONObject("evidence")
+                ?.optJSONArray("non_pass_checks")
+                ?: return false
+
+        for (index in 0 until nonPass.length()) {
+            val item =
+                nonPass.optJSONObject(index)
+                    ?: continue
+
+            if (
+                item.optString("id") == "tts" &&
+                item.optString("status") ==
+                    AyanaDiagnosticClosure.STATUS_UNKNOWN
+            ) {
+                return true
+            }
+        }
+
+        return false
+    }
+
+    private fun runAcceptanceTtsFreshnessProof(): JSONObject {
+        val startedAt =
+            SystemClock.elapsedRealtime()
+
+        var connection:
+            HttpsURLConnection? = null
+
+        var httpCode =
+            -1
+
+        var firstByteMs =
+            -1L
+
+        var bytesObserved =
+            0
+
+        var voiceContractVerified =
+            false
+
+        return try {
+            connection =
+                URL(
+                    "$WORKER_URL/tts"
+                )
+                    .openConnection()
+                    as HttpsURLConnection
+
+            executionKernel.bindConnection(
+                connection
+            )
+
+            connection.requestMethod =
+                "POST"
+
+            connection.setRequestProperty(
+                "Content-Type",
+                "application/json"
+            )
+
+            connection.setRequestProperty(
+                "Accept",
+                "application/octet-stream"
+            )
+
+            connection.connectTimeout =
+                TTS_CONNECT_TIMEOUT_MS
+
+            connection.readTimeout =
+                TTS_READ_TIMEOUT_MS
+
+            connection.doOutput =
+                true
+
+            val requestJson =
+                JSONObject()
+                    .put(
+                        "text",
+                        "Да."
+                    )
+                    .put(
+                        "format",
+                        "pcm"
+                    )
+                    .put(
+                        "voice_profile",
+                        TTS_VOICE_PROFILE
+                    )
+
+            val requestBytes =
+                requestJson
+                    .toString()
+                    .toByteArray(
+                        Charsets.UTF_8
+                    )
+
+            connection.setFixedLengthStreamingMode(
+                requestBytes.size
+            )
+
+            connection.outputStream
+                .use { output ->
+                    output.write(
+                        requestBytes
+                    )
+                }
+
+            httpCode =
+                connection.responseCode
+
+            if (httpCode !in 200..299) {
+                val body =
+                    try {
+                        connection.errorStream
+                            ?.bufferedReader()
+                            ?.use {
+                                it.readText()
+                            }
+                            .orEmpty()
+                            .take(400)
+                    } catch (_: Exception) {
+                        ""
+                    }
+
+                throw IllegalStateException(
+                    "TTS HTTP $httpCode ${body.trim()}"
+                        .trim()
+                )
+            }
+
+            verifyTtsVoiceContract(
+                connection
+            )
+
+            voiceContractVerified =
+                true
+
+            connection.inputStream
+                .use { input ->
+                    val buffer =
+                        ByteArray(
+                            512
+                        )
+
+                    val read =
+                        input.read(
+                            buffer
+                        )
+
+                    if (read <= 0) {
+                        throw IllegalStateException(
+                            "TTS PCM health probe was empty"
+                        )
+                    }
+
+                    bytesObserved =
+                        read
+
+                    firstByteMs =
+                        (
+                            SystemClock.elapsedRealtime() -
+                                startedAt
+                            )
+                            .coerceAtLeast(0L)
+                }
+
+            capabilityRegistry.recordTtsResult(
+                success = true,
+                firstByteMs = firstByteMs,
+                error = ""
+            )
+
+            JSONObject()
+                .put("attempted", true)
+                .put("success", true)
+                .put("http_code", httpCode)
+                .put("first_byte_ms", firstByteMs)
+                .put("bytes_observed", bytesObserved)
+                .put(
+                    "voice_contract_verified",
+                    voiceContractVerified
+                )
+                .put(
+                    "elapsed_ms",
+                    (
+                        SystemClock.elapsedRealtime() -
+                            startedAt
+                        )
+                        .coerceAtLeast(0L)
+                )
+                .put("error", "")
+        } catch (error: Exception) {
+            val technical =
+                ttsTechnicalError(
+                    error
+                )
+
+            try {
+                capabilityRegistry.recordTtsResult(
+                    success = false,
+                    firstByteMs = firstByteMs,
+                    error = technical
+                )
+            } catch (_: Exception) {
+            }
+
+            JSONObject()
+                .put("attempted", true)
+                .put("success", false)
+                .put("http_code", httpCode)
+                .put("first_byte_ms", firstByteMs)
+                .put("bytes_observed", bytesObserved)
+                .put(
+                    "voice_contract_verified",
+                    voiceContractVerified
+                )
+                .put(
+                    "elapsed_ms",
+                    (
+                        SystemClock.elapsedRealtime() -
+                            startedAt
+                        )
+                        .coerceAtLeast(0L)
+                )
+                .put(
+                    "error",
+                    technical.take(600)
+                )
+        } finally {
+            connection
+                ?.let {
+                    executionKernel.clearConnection(
+                        it
+                    )
+                }
+
+            try {
+                connection?.disconnect()
+            } catch (_: Exception) {
+            }
+        }
     }
 
     private fun recalculateAcceptanceOutcomeAfterReconciliation(
@@ -41730,9 +42061,9 @@ state
 
     companion object {
 
-        // R9.0.2 RELEASE / FEATURE LINEAGE TRUTH.
+        // R9.0.3 RELEASE / FEATURE LINEAGE TRUTH.
         private const val AYANA_VOICE_SERVICE_RELEASE =
-            "v12.22.2 / R9.0.2 DIAGNOSTIC RECONCILIATION + HISTORY REFRESH FIX"
+            "v12.22.3 / R9.0.3 TTS HEALTH RECONCILIATION"
 
         private const val AYANA_PERSONAL_SEARCH_ENGINE_RELEASE =
             "v1.5.1 IMAGE COVERAGE TRUTH"
@@ -41747,10 +42078,10 @@ state
             "R8.5.4 Remaining Capability Proof — DEVICE-CONFIRMED ACCEPTED"
 
         private const val AYANA_CURRENT_FEATURE_RELEASE =
-            "R9.0.2 DIAGNOSTIC RECONCILIATION + HISTORY REFRESH FIX"
+            "R9.0.3 TTS HEALTH RECONCILIATION"
 
         private const val AYANA_RELEASE_LINEAGE =
-            "Android v12.21.0 / R7.9 truth-hardening + R8.0 multi-attachment + R8.1–R8.4 accepted Personal Global Search stack + R8.5–R8.5.4 capability/evidence truth + R9.0 autonomous agent foundation + R9.0.1 history live-refresh proof fix + R9.0.2 diagnostic reconciliation/history refresh fix"
+            "Android v12.21.0 / R7.9 truth-hardening + R8.0 multi-attachment + R8.1–R8.4 accepted Personal Global Search stack + R8.5–R8.5.4 capability/evidence truth + R9.0 autonomous agent foundation + R9.0.1 history live-refresh proof fix + R9.0.2 diagnostic reconciliation/history refresh fix + R9.0.3 TTS health reconciliation"
 
         // AyanaCommandHistoryStore v2.8 keeps up to 4k chars inline and stores longer
         // results out-of-line. Self-review intentionally remains inline so copied History
