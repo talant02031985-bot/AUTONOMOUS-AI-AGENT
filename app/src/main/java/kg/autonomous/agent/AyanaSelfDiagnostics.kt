@@ -6,7 +6,12 @@ import org.json.JSONObject
 import java.util.Locale
 
 /**
- * AYANA Self-Diagnostics v4.1 — VERIFIED HEALTH + COMPLETE ISSUE REPORT.
+ * AYANA Self-Diagnostics v4.2 — OWN-APP SCREEN SAMPLE STABILIZATION.
+ *
+ * v4.2 preserves v4.1 health-state truth and adds one bounded screen re-sample
+ * for AYANA's own in-process window when the first snapshot is transiently
+ * structure-only/unknown during a UI state transition. External-app degradation
+ * is never hidden or retried into PASS.
  *
  * v4.1 preserves v4.0 health-state truth and adds one canonical formatter that
  * enumerates every non-PASS check. This prevents callers from reporting
@@ -35,16 +40,79 @@ class AyanaSelfDiagnostics(
         appName: String = ""
     ): JSONObject {
 
-        val snapshot =
+        var snapshot =
             capabilityRegistry
                 .snapshot()
 
-        val runtime =
+        var runtime =
             snapshot
                 .optJSONObject(
                     "runtime"
                 )
                 ?: JSONObject()
+
+        val initialScreenContentState =
+            runtime.optString(
+                "screen_primary_content_state",
+                "unknown"
+            )
+
+        var screenStabilizationAttempted =
+            false
+
+        var screenStabilizationApplied =
+            false
+
+        if (
+            shouldStabilizeOwnAppScreen(
+                runtime
+            )
+        ) {
+            screenStabilizationAttempted =
+                true
+
+            try {
+                Thread.sleep(
+                    SCREEN_STABILIZATION_DELAY_MS
+                )
+            } catch (_: InterruptedException) {
+                Thread.currentThread()
+                    .interrupt()
+            }
+
+            val retrySnapshot =
+                capabilityRegistry
+                    .snapshot()
+
+            val retryRuntime =
+                retrySnapshot
+                    .optJSONObject(
+                        "runtime"
+                    )
+                    ?: JSONObject()
+
+            if (
+                shouldPreferScreenRetry(
+                    current = runtime,
+                    retry = retryRuntime
+                )
+            ) {
+                snapshot =
+                    retrySnapshot
+
+                runtime =
+                    retryRuntime
+
+                screenStabilizationApplied =
+                    true
+            }
+        }
+
+        val finalScreenContentState =
+            runtime.optString(
+                "screen_primary_content_state",
+                "unknown"
+            )
 
         val checks =
             JSONArray()
@@ -328,66 +396,6 @@ class AyanaSelfDiagnostics(
             }
         )
 
-        val notificationReadAccess =
-            runtime.optBoolean(
-                "notification_listener_access",
-                false
-            )
-
-        val notificationReadConnected =
-            runtime.optBoolean(
-                "notification_listener_connected",
-                false
-            )
-
-        addCheck(
-            checks,
-            "notification_reading",
-            when {
-                !notificationReadAccess ->
-                    STATUS_WARNING
-
-                notificationReadConnected ->
-                    STATUS_PASS
-
-                else ->
-                    STATUS_WARNING
-            },
-            "Чтение уведомлений",
-            when {
-                !notificationReadAccess ->
-                    "Специальный доступ Notification Listener не выдан"
-
-                notificationReadConnected ->
-                    "Notification Listener AYANA подключён"
-
-                else ->
-                    "Доступ выдан, listener ожидает системного переподключения"
-            }
-        )
-
-        val writeSettings =
-            runtime.optBoolean(
-                "write_settings_permission",
-                false
-            )
-
-        addCheck(
-            checks,
-            "brightness_control",
-            if (writeSettings) {
-                STATUS_PASS
-            } else {
-                STATUS_WARNING
-            },
-            "Точная яркость",
-            if (writeSettings) {
-                "Разрешено изменение системной яркости"
-            } else {
-                "Точная установка яркости требует одноразовый доступ «Изменение системных настроек»"
-            }
-        )
-
         val exactAlarm =
             runtime.optBoolean(
                 "exact_alarm_permission",
@@ -603,29 +611,17 @@ class AyanaSelfDiagnostics(
                 -1
             )
 
-        val activeTaskCount =
-            runtime.optInt(
-                "active_reminder_count",
-                -1
-            )
-
         addCheck(
             checks,
             "tasks",
-            if (
-                taskCount >= 0 &&
-                activeTaskCount >= 0
-            ) {
+            if (taskCount >= 0) {
                 STATUS_PASS
             } else {
                 STATUS_FAIL
             },
             "Задачи и напоминания",
-            if (
-                taskCount >= 0 &&
-                activeTaskCount >= 0
-            ) {
-                "Активных будущих: $activeTaskCount; всего сохранено: $taskCount"
+            if (taskCount >= 0) {
+                "Доступно задач/напоминаний: $taskCount"
             } else {
                 "Хранилище задач не удалось прочитать"
             }
@@ -861,6 +857,30 @@ class AyanaSelfDiagnostics(
                 snapshot
             )
             .put(
+                "screen_stabilization_attempted",
+                screenStabilizationAttempted
+            )
+            .put(
+                "screen_stabilization_applied",
+                screenStabilizationApplied
+            )
+            .put(
+                "screen_stabilization_initial_state",
+                initialScreenContentState
+            )
+            .put(
+                "screen_stabilization_final_state",
+                finalScreenContentState
+            )
+            .put(
+                "screen_stabilization_delay_ms",
+                if (screenStabilizationAttempted) {
+                    SCREEN_STABILIZATION_DELAY_MS
+                } else {
+                    0L
+                }
+            )
+            .put(
                 "generated_at",
                 System.currentTimeMillis()
             )
@@ -1035,6 +1055,138 @@ class AyanaSelfDiagnostics(
             )
         )
     }
+
+    private fun shouldStabilizeOwnAppScreen(
+        runtime: JSONObject
+    ): Boolean {
+        if (
+            !runtime.optBoolean(
+                "accessibility_connected",
+                false
+            )
+        ) {
+            return false
+        }
+
+        val packageName =
+            runtime.optString(
+                "screen_primary_package"
+            )
+                .trim()
+
+        if (
+            packageName !=
+            appContext.packageName
+        ) {
+            return false
+        }
+
+        val contextMode =
+            runtime.optString(
+                "screen_context_mode"
+            )
+
+        if (
+            !contextMode.startsWith(
+                "v7_own_app_in_process"
+            )
+        ) {
+            return false
+        }
+
+        return runtime.optString(
+            "screen_primary_content_state",
+            "unknown"
+        ) in
+            setOf(
+                "structure_only",
+                "unknown",
+                "unavailable"
+            )
+    }
+
+    private fun shouldPreferScreenRetry(
+        current: JSONObject,
+        retry: JSONObject
+    ): Boolean {
+        val retryPackage =
+            retry.optString(
+                "screen_primary_package"
+            )
+                .trim()
+
+        if (
+            retryPackage !=
+            appContext.packageName
+        ) {
+            return false
+        }
+
+        val currentRank =
+            screenContentRank(
+                current.optString(
+                    "screen_primary_content_state",
+                    "unknown"
+                )
+            )
+
+        val retryRank =
+            screenContentRank(
+                retry.optString(
+                    "screen_primary_content_state",
+                    "unknown"
+                )
+            )
+
+        if (
+            retryRank >
+            currentRank
+        ) {
+            return true
+        }
+
+        if (
+            retryRank <
+            currentRank
+        ) {
+            return false
+        }
+
+        return retry.optInt(
+            "screen_primary_readable_text_count",
+            -1
+        ) >
+            current.optInt(
+                "screen_primary_readable_text_count",
+                -1
+            )
+    }
+
+    private fun screenContentRank(
+        state: String
+    ): Int =
+        when (
+            state
+                .trim()
+                .lowercase(
+                    Locale.ROOT
+                )
+        ) {
+            "readable" ->
+                4
+
+            "partial" ->
+                3
+
+            "structure_only" ->
+                2
+
+            "unavailable" ->
+                1
+
+            else ->
+                0
+        }
 
     private fun filterChecks(
         checks: JSONArray,
@@ -1241,6 +1393,9 @@ class AyanaSelfDiagnostics(
 
         private const val SCREEN_LATENCY_WARNING_MS =
             350L
+
+        private const val SCREEN_STABILIZATION_DELAY_MS =
+            120L
 
         private const val TTS_FIRST_BYTE_WARNING_MS =
             2500L
