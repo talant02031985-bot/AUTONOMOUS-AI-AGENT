@@ -36,6 +36,7 @@ import android.os.Handler
 import android.os.IBinder
 import android.os.Looper
 import android.os.SystemClock
+import android.provider.CalendarContract
 import android.provider.Settings
 import android.util.Base64
 import com.k2fsa.sherpa.onnx.FeatureConfig
@@ -60,6 +61,16 @@ import kotlin.math.abs
 
 class AyanaVoiceService : Service() {
 
+    // AYANA v12.25.0 / R9.3 APP INTEGRATION FRAMEWORK.
+    // Builds only on DEVICE-CONFIRMED R9.2.1.
+    // - one registry owns app/action/risk/verification truth for the first five integrations;
+    // - package names remain device-validated hints through AyanaAppResolver;
+    // - YouTube and browser search now require verified foreground handoff;
+    // - Calendar create action opens a DRAFT only and never claims the event was saved;
+    // - file/photo discovery remains delegated to Personal Search instead of brittle UI tapping;
+    // - no send/delete/payment/account mutation is exposed by this first integration release.
+    // ORB, visualizer, MainActivity, Worker, Accessibility v7.2 and Personal Search remain unchanged.
+    //
     // AYANA v12.24.0 / R9.2 AUTONOMOUS RECOVERY + LONG TASK EXECUTION.
     // Builds only on DEVICE-CONFIRMED R9.1.
     // - Autonomous Recovery Coordinator retries only allow-listed read-only observations;
@@ -521,6 +532,12 @@ class AyanaVoiceService : Service() {
         AyanaAppResolver(
             applicationContext
         )
+    }
+
+    // R9.3 APP INTEGRATION FRAMEWORK.  Registry is pure policy/route truth;
+    // VoiceService remains the only Android executor and verifier.
+    private val appIntegrationRegistry by lazy {
+        AyanaAppIntegrationRegistry()
     }
 
     private val capabilityRegistry by lazy {
@@ -4104,6 +4121,18 @@ mainHandler.post {
                     return
                 }
             }
+
+        // R9.3 APP INTEGRATION FRAMEWORK — deterministic app actions before
+        // generic lifecycle/Agent Core routing. Personal Search already had priority
+        // above this block, so file/photo content search remains owned by that engine.
+        if (
+            runLocalAppIntegrationCommand(
+                command = originalCommand,
+                silent = silent
+            )
+        ) {
+            return
+        }
 
         // LOCAL CONVERSATION FAST-PATH v11.2
         // Trivial acknowledgements should not spend a network round-trip.
@@ -11538,74 +11567,500 @@ respondAndResume(
         }
     }
 
-    private fun openYouTubeSearch(
-        query: String,
+    private fun runLocalAppIntegrationCommand(
+        command: String,
         silent: Boolean
-    ) {
+    ): Boolean {
+        val parsed =
+            appIntegrationRegistry
+                .parse(command)
+                ?: return false
 
-        val uri =
-            Uri.parse(
-                "https://www.youtube.com/results" +
-                    "?search_query=" +
-                    Uri.encode(query)
+        executionPhase(
+            phase = "local_app_integration",
+            executor = "app_integration_registry"
+        )
+
+        if (
+            parsed.actionKey ==
+            AyanaAppIntegrationRegistry.ACTION_DESCRIBE
+        ) {
+            respondAndResume(
+                appIntegrationRegistry.describe(parsed.appKey),
+                silent,
+                success = true,
+                technical =
+                    "app_integration_registry=${AyanaAppIntegrationRegistry.VERSION}; " +
+                        "app=${parsed.appKey}; source=${parsed.source}"
+            )
+            return true
+        }
+
+        val result =
+            executeAppIntegrationAction(
+                appKey = parsed.appKey,
+                actionKey = parsed.actionKey,
+                payload = parsed.payload
             )
 
-        try {
+        commandHistoryStore.addEvent(
+            activeCommandHistoryId,
+            state = "app_integration",
+            message =
+                "${parsed.appKey}:${parsed.actionKey}",
+            details =
+                result.toString().take(1600)
+        )
 
+        val success =
+            result.optBoolean("success", false) &&
+                result.optBoolean("verified", false)
+
+        val message =
+            result
+                .optString("message")
+                .ifBlank {
+                    if (success) {
+                        "Действие приложения выполнено и подтверждено."
+                    } else {
+                        "Действие приложения не удалось подтвердить."
+                    }
+                }
+
+        if (success) {
+            finishLocalCommand(
+                message,
+                silent,
+                technical =
+                    "app_integration=${parsed.appKey}:${parsed.actionKey}; " +
+                        "verified=true; observed=${result.optString("observed_package")}" 
+            )
+        } else {
+            respondAndResume(
+                message,
+                silent,
+                success = false,
+                technical =
+                    "app_integration=${parsed.appKey}:${parsed.actionKey}; " +
+                        "verified=${result.optBoolean("verified", false)}; " +
+                        "dispatched=${result.optBoolean("action_dispatched", false)}; " +
+                        "observed=${result.optString("observed_package")}"
+            )
+        }
+
+        return true
+    }
+
+    private fun executeAppIntegrationAction(
+        appKey: String,
+        actionKey: String,
+        payload: String = ""
+    ): JSONObject {
+        val spec =
+            appIntegrationRegistry.app(appKey)
+                ?: return appIntegrationFailure(
+                    appKey = appKey,
+                    actionKey = actionKey,
+                    message = "Интеграция приложения не зарегистрирована."
+                )
+
+        val action =
+            appIntegrationRegistry.action(
+                appKey,
+                actionKey
+            )
+                ?: return appIntegrationFailure(
+                    appKey = appKey,
+                    actionKey = actionKey,
+                    message = "Действие не зарегистрировано для ${spec.displayName}."
+                )
+
+        if (
+            !action.autonomousAllowed ||
+            action.commitSemantics ==
+            AyanaAppIntegrationRegistry.CommitSemantics.MUTATION
+        ) {
+            return appIntegrationFailure(
+                appKey = appKey,
+                actionKey = actionKey,
+                message = "Это действие не разрешено автономному App Integration v1.0."
+            )
+                .put("terminal_status", "BLOCKED")
+        }
+
+        return when (actionKey) {
+            AyanaAppIntegrationRegistry.ACTION_OPEN ->
+                launchRegisteredIntegrationApp(spec)
+
+            AyanaAppIntegrationRegistry.ACTION_SEARCH ->
+                when (appKey) {
+                    AyanaAppIntegrationRegistry.APP_YOUTUBE ->
+                        openRegisteredUriAction(
+                            spec = spec,
+                            actionKey = actionKey,
+                            uri =
+                                Uri.parse(
+                                    "https://www.youtube.com/results?search_query=" +
+                                        Uri.encode(payload.trim())
+                                ),
+                            successMessage =
+                                "Открыт и подтверждён поиск YouTube: ${payload.trim()}"
+                        )
+
+                    AyanaAppIntegrationRegistry.APP_BROWSER ->
+                        openRegisteredUriAction(
+                            spec = spec,
+                            actionKey = actionKey,
+                            uri =
+                                Uri.parse(
+                                    "https://www.google.com/search?q=" +
+                                        Uri.encode(payload.trim())
+                                ),
+                            successMessage =
+                                "Открыт и подтверждён веб-поиск: ${payload.trim()}"
+                        )
+
+                    else ->
+                        appIntegrationFailure(
+                            appKey = appKey,
+                            actionKey = actionKey,
+                            message = "Поиск для ${spec.displayName} не зарегистрирован."
+                        )
+                }
+
+            AyanaAppIntegrationRegistry.ACTION_OPEN_URL -> {
+                val target = normalizeAppIntegrationUrl(payload)
+                if (target == null) {
+                    appIntegrationFailure(
+                        appKey = appKey,
+                        actionKey = actionKey,
+                        message = "Не удалось безопасно разобрать адрес сайта."
+                    )
+                } else {
+                    openRegisteredUriAction(
+                        spec = spec,
+                        actionKey = actionKey,
+                        uri = Uri.parse(target),
+                        successMessage = "Сайт открыт и браузер подтверждён."
+                    )
+                        .put("requested_url", target)
+                }
+            }
+
+            AyanaAppIntegrationRegistry.ACTION_CREATE_EVENT_DRAFT ->
+                openCalendarEventDraft(
+                    spec = spec,
+                    title = payload.trim()
+                )
+
+            else ->
+                appIntegrationFailure(
+                    appKey = appKey,
+                    actionKey = actionKey,
+                    message = "Действие App Integration пока не имеет Android executor."
+                )
+        }
+            .put("registry_version", AyanaAppIntegrationRegistry.VERSION)
+            .put("app_key", appKey)
+            .put("action_key", actionKey)
+            .put("commit_semantics", action.commitSemantics.name)
+            .put("verification_mode", action.verificationMode.name)
+    }
+
+    private fun launchRegisteredIntegrationApp(
+        spec: AyanaAppIntegrationRegistry.AppSpec
+    ): JSONObject {
+        val launch =
+            try {
+                appResolver.launchWithHints(
+                    requestedName = spec.displayName,
+                    preferredPackages = spec.preferredPackages
+                )
+            } catch (error: Exception) {
+                JSONObject()
+                    .put("success", false)
+                    .put(
+                        "message",
+                        error.message ?: "Ошибка App Resolver"
+                    )
+            }
+
+        val dispatched =
+            launch.optBoolean("success", false)
+
+        val expectedPackage =
+            launch.optString("package").trim()
+
+        val observed =
+            if (
+                dispatched &&
+                expectedPackage.isNotBlank()
+            ) {
+                waitForForegroundPackage(
+                    expectedPackage = expectedPackage
+                )
+            } else {
+                currentForegroundPackage()
+            }
+
+        val verified =
+            dispatched &&
+                expectedPackage.isNotBlank() &&
+                observed == expectedPackage
+
+        return JSONObject()
+            .put("success", verified)
+            .put("verified", verified)
+            .put("terminal_status", if (verified) "SUCCESS" else "ERROR")
+            .put("action_dispatched", dispatched)
+            .put("target_package", expectedPackage)
+            .put("observed_package", observed)
+            .put(
+                "resolver_source",
+                launch.optString("source")
+            )
+            .put(
+                "message",
+                if (verified) {
+                    "Открыто и подтверждено приложение ${spec.displayName}."
+                } else {
+                    "Открытие ${spec.displayName} не удалось подтвердить."
+                }
+            )
+    }
+
+    private fun openRegisteredUriAction(
+        spec: AyanaAppIntegrationRegistry.AppSpec,
+        actionKey: String,
+        uri: Uri,
+        successMessage: String
+    ): JSONObject {
+        val resolution =
+            resolveRegisteredIntegrationApp(spec)
+
+        if (!resolution.success) {
+            return appIntegrationFailure(
+                appKey = spec.key,
+                actionKey = actionKey,
+                message =
+                    "${spec.displayName} не найден среди запускаемых приложений этого устройства."
+            )
+                .put("resolver_reason", resolution.reason)
+        }
+
+        val expectedPackage =
+            resolution.packageName.trim()
+
+        var dispatched = false
+        var dispatchError = ""
+
+        try {
             startActivity(
                 Intent(
                     Intent.ACTION_VIEW,
                     uri
                 ).apply {
-
-                    setPackage(
-                        "com.google.android.youtube"
-                    )
-
-                    addFlags(
-                        Intent.FLAG_ACTIVITY_NEW_TASK
-                    )
+                    setPackage(expectedPackage)
+                    addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
                 }
             )
+            dispatched = true
+        } catch (error: Exception) {
+            dispatchError =
+                error.message
+                    ?: error.javaClass.simpleName
+        }
 
-            finishLocalCommand(
-                "Ищу в YouTube: $query",
-                silent
+        val observed =
+            if (dispatched) {
+                waitForForegroundPackage(expectedPackage)
+            } else {
+                currentForegroundPackage()
+            }
+
+        val verified =
+            dispatched &&
+                observed == expectedPackage
+
+        return JSONObject()
+            .put("success", verified)
+            .put("verified", verified)
+            .put("terminal_status", if (verified) "SUCCESS" else "ERROR")
+            .put("action_dispatched", dispatched)
+            .put("target_package", expectedPackage)
+            .put("observed_package", observed)
+            .put("uri_scheme", uri.scheme.orEmpty())
+            .put("dispatch_error", dispatchError.take(400))
+            .put(
+                "message",
+                if (verified) {
+                    successMessage
+                } else {
+                    "Действие в ${spec.displayName} было отправлено, но foreground не подтверждён."
+                }
+            )
+    }
+
+    private fun openCalendarEventDraft(
+        spec: AyanaAppIntegrationRegistry.AppSpec,
+        title: String
+    ): JSONObject {
+        if (title.isBlank()) {
+            return appIntegrationFailure(
+                appKey = spec.key,
+                actionKey = AyanaAppIntegrationRegistry.ACTION_CREATE_EVENT_DRAFT,
+                message = "Не указан заголовок события."
+            )
+        }
+
+        val resolution =
+            resolveRegisteredIntegrationApp(spec)
+
+        if (!resolution.success) {
+            return appIntegrationFailure(
+                appKey = spec.key,
+                actionKey = AyanaAppIntegrationRegistry.ACTION_CREATE_EVENT_DRAFT,
+                message = "Календарь не найден среди запускаемых приложений устройства."
+            )
+        }
+
+        val expectedPackage = resolution.packageName.trim()
+        var dispatched = false
+        var dispatchError = ""
+
+        try {
+            startActivity(
+                Intent(Intent.ACTION_INSERT).apply {
+                    data = CalendarContract.Events.CONTENT_URI
+                    setPackage(expectedPackage)
+                    putExtra(
+                        CalendarContract.Events.TITLE,
+                        title.take(240)
+                    )
+                    addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                }
+            )
+            dispatched = true
+        } catch (error: Exception) {
+            dispatchError =
+                error.message
+                    ?: error.javaClass.simpleName
+        }
+
+        val observed =
+            if (dispatched) {
+                waitForForegroundPackage(expectedPackage)
+            } else {
+                currentForegroundPackage()
+            }
+
+        val verified =
+            dispatched &&
+                observed == expectedPackage
+
+        return JSONObject()
+            .put("success", verified)
+            .put("verified", verified)
+            .put("terminal_status", if (verified) "SUCCESS" else "ERROR")
+            .put("action_dispatched", dispatched)
+            .put("action_committed", false)
+            .put("draft_only", true)
+            .put("target_package", expectedPackage)
+            .put("observed_package", observed)
+            .put("dispatch_error", dispatchError.take(400))
+            .put(
+                "message",
+                if (verified) {
+                    "Черновик события «${title.take(120)}» открыт в календаре. Событие ещё не сохранено."
+                } else {
+                    "Не удалось подтвердить открытие черновика события в календаре."
+                }
+            )
+    }
+
+    private fun resolveRegisteredIntegrationApp(
+        spec: AyanaAppIntegrationRegistry.AppSpec
+    ): AyanaAppResolver.Resolution =
+        appResolver.resolveWithHints(
+            requestedName = spec.displayName,
+            preferredPackages = spec.preferredPackages
+        )
+
+    private fun normalizeAppIntegrationUrl(
+        raw: String
+    ): String? {
+        val value = raw.trim()
+        if (value.isBlank() || value.contains(" ")) return null
+
+        val candidate =
+            if (
+                value.startsWith("https://", ignoreCase = true) ||
+                value.startsWith("http://", ignoreCase = true)
+            ) {
+                value
+            } else {
+                "https://$value"
+            }
+
+        val parsed =
+            try {
+                Uri.parse(candidate)
+            } catch (_: Exception) {
+                return null
+            }
+
+        val scheme = parsed.scheme?.lowercase(Locale.ROOT).orEmpty()
+        val host = parsed.host.orEmpty()
+
+        return candidate.takeIf {
+            scheme in setOf("http", "https") &&
+                host.contains('.') &&
+                host.length >= 3
+        }
+    }
+
+    private fun appIntegrationFailure(
+        appKey: String,
+        actionKey: String,
+        message: String
+    ): JSONObject =
+        JSONObject()
+            .put("success", false)
+            .put("verified", false)
+            .put("terminal_status", "ERROR")
+            .put("action_dispatched", false)
+            .put("app_key", appKey)
+            .put("action_key", actionKey)
+            .put("message", message)
+
+    private fun openYouTubeSearch(
+        query: String,
+        silent: Boolean
+    ) {
+        val result =
+            executeAppIntegrationAction(
+                appKey = AyanaAppIntegrationRegistry.APP_YOUTUBE,
+                actionKey = AyanaAppIntegrationRegistry.ACTION_SEARCH,
+                payload = query
             )
 
-        } catch (
-            _: ActivityNotFoundException
+        if (
+            result.optBoolean("success", false) &&
+            result.optBoolean("verified", false)
         ) {
-
-            try {
-
-                startActivity(
-                    Intent(
-                        Intent.ACTION_VIEW,
-                        uri
-                    ).apply {
-
-                        addFlags(
-                            Intent.FLAG_ACTIVITY_NEW_TASK
-                        )
-                    }
-                )
-
-                finishLocalCommand(
-                    "Ищу в YouTube: $query",
-                    silent
-                )
-
-            } catch (
-                _: ActivityNotFoundException
-            ) {
-
-                respondAndResume(
-                    "Не удалось открыть YouTube.",
-                    silent,
-                    success = false
-                )
-            }
+            finishLocalCommand(
+                result.optString("message"),
+                silent
+            )
+        } else {
+            respondAndResume(
+                result.optString(
+                    "message",
+                    "Не удалось подтвердить поиск YouTube."
+                ),
+                silent,
+                success = false
+            )
         }
     }
 
@@ -11613,38 +12068,27 @@ respondAndResume(
         query: String,
         silent: Boolean
     ) {
-
-        val uri =
-            Uri.parse(
-                "https://www.google.com/search?q=" +
-                    Uri.encode(query)
+        val result =
+            executeAppIntegrationAction(
+                appKey = AyanaAppIntegrationRegistry.APP_BROWSER,
+                actionKey = AyanaAppIntegrationRegistry.ACTION_SEARCH,
+                payload = query
             )
 
-        try {
-
-            startActivity(
-                Intent(
-                    Intent.ACTION_VIEW,
-                    uri
-                ).apply {
-
-                    addFlags(
-                        Intent.FLAG_ACTIVITY_NEW_TASK
-                    )
-                }
-            )
-
+        if (
+            result.optBoolean("success", false) &&
+            result.optBoolean("verified", false)
+        ) {
             finishLocalCommand(
-                "Ищу в Google: $query",
+                result.optString("message"),
                 silent
             )
-
-        } catch (
-            _: ActivityNotFoundException
-        ) {
-
+        } else {
             respondAndResume(
-                "Не удалось открыть поиск.",
+                result.optString(
+                    "message",
+                    "Не удалось подтвердить веб-поиск."
+                ),
                 silent,
                 success = false
             )
@@ -20843,6 +21287,35 @@ append(index + 1)
                     .put("blind_side_effect_retry_allowed", false)
         )
 
+        val appIntegrationOk =
+            try {
+                appIntegrationRegistry.selfTest()
+            } catch (_: Exception) {
+                false
+            }
+
+        add(
+            id = "R9-FOUND-007",
+            title = "App Integration registry / verified-handoff contract",
+            critical = true,
+            ok = appIntegrationOk,
+            message =
+                if (appIntegrationOk) {
+                    "R9.3 registers five app domains, exposes no autonomous mutation action and preserves Personal Search ownership for file/photo discovery."
+                } else {
+                    "R9.3 App Integration Registry self-test failed."
+                },
+            evidence =
+                JSONObject()
+                    .put("version", AyanaAppIntegrationRegistry.VERSION)
+                    .put("registered_app_domains", appIntegrationRegistry.allApps().size)
+                    .put("worker_schema_replaced", false)
+                    .put("package_hints_require_device_validation", true)
+                    .put("file_photo_search_delegated_to_personal_search", true)
+                    .put("calendar_event_commit_claimed", false)
+                    .put("autonomous_mutation_actions", 0)
+        )
+
         return tests
     }
 
@@ -26325,7 +26798,7 @@ requestMethod = "GET"
                 "github_repository_write" to "нет авторизованной записи в GitHub repository",
                 "github_commit_push" to "нет commit/push executor",
                 "android_apk_build" to "AYANA Android не запускает APK build pipeline",
-                "external_mail_calendar_files" to "нет встроенных mail/calendar/files executors",
+                "external_mail_calendar_files" to "нет авторизованных внешних mail/calendar/files account executors; R9.3 local app integration не заменяет account API",
                 "video_audio_analysis" to "аудиодорожка видео не анализируется",
                 "offline_llm" to "полноценный offline LLM отсутствует",
                 "controlled_proactivity" to "R9.2 recovery-event permission/evidence/cooldown policy готова, но широкие proactive watchers/actions по умолчанию не включены"
@@ -40185,129 +40658,35 @@ appTarget = label,
     private fun agentYouTubeSearch(
         query: String
     ): JSONObject {
-
         if (query.isBlank()) {
-
             return toolResult(
                 false,
                 "Пустой запрос YouTube"
             )
         }
 
-        val uri =
-            Uri.parse(
-                "https://www.youtube.com/results" +
-                    "?search_query=" +
-                    Uri.encode(query)
-            )
-
-        return try {
-
-            try {
-
-                startActivity(
-                    Intent(
-                        Intent.ACTION_VIEW,
-                        uri
-                    ).apply {
-
-                        setPackage(
-                            "com.google.android.youtube"
-                        )
-
-                        addFlags(
-                            Intent.FLAG_ACTIVITY_NEW_TASK
-                        )
-                    }
-                )
-
-            } catch (
-                _: ActivityNotFoundException
-            ) {
-
-                startActivity(
-                    Intent(
-                        Intent.ACTION_VIEW,
-                        uri
-                    ).apply {
-
-                        addFlags(
-                            Intent.FLAG_ACTIVITY_NEW_TASK
-                        )
-                    }
-                )
-            }
-
-            toolResult(
-                true,
-                "Открыт поиск YouTube: $query"
-            )
-
-        } catch (
-            error: Exception
-        ) {
-
-            toolResult(
-                false,
-                "Не удалось открыть поиск YouTube: " +
-                    (
-                        error.message
-                            ?: "неизвестная ошибка"
-                        )
-            )
-        }
+        return executeAppIntegrationAction(
+            appKey = AyanaAppIntegrationRegistry.APP_YOUTUBE,
+            actionKey = AyanaAppIntegrationRegistry.ACTION_SEARCH,
+            payload = query
+        )
     }
 
     private fun agentGoogleSearch(
         query: String
     ): JSONObject {
-
         if (query.isBlank()) {
-
             return toolResult(
                 false,
                 "Пустой поисковый запрос"
             )
         }
 
-        val uri =
-            Uri.parse(
-                "https://www.google.com/search?q=" +
-                    Uri.encode(query)
-            )
-
-        return try {
-
-            startActivity(
-                Intent(
-                    Intent.ACTION_VIEW,
-                    uri
-                ).apply {
-
-                    addFlags(
-                        Intent.FLAG_ACTIVITY_NEW_TASK
-                    )
-                }
-            )
-
-            toolResult(
-                true,
-                "Открыт Google-поиск: $query"
-            )
-
-        } catch (
-            error: Exception
-        ) {
-
-            toolResult(
-                false,
-                "Не удалось открыть Google-поиск: " +
-                    (
-                        error.message
-                            ?: "неизвестная ошибка"
-                        )
-            )
-        }
+        return executeAppIntegrationAction(
+            appKey = AyanaAppIntegrationRegistry.APP_BROWSER,
+            actionKey = AyanaAppIntegrationRegistry.ACTION_SEARCH,
+            payload = query
+        )
     }
 
     private fun agentMapSearch(
@@ -42811,9 +43190,9 @@ state
 
     companion object {
 
-        // R9.2.1 RELEASE / FEATURE LINEAGE TRUTH.
+        // R9.3 RELEASE / FEATURE LINEAGE TRUTH.
         private const val AYANA_VOICE_SERVICE_RELEASE =
-            "v12.24.1 / R9.2.1 HYPOTHESIS RECONCILIATION"
+            "v12.25.0 / R9.3 APP INTEGRATION FRAMEWORK"
 
         private const val AYANA_PERSONAL_SEARCH_ENGINE_RELEASE =
             "v1.5.1 IMAGE COVERAGE TRUTH"
@@ -42825,13 +43204,13 @@ state
             "v11.1.10 Multi-Attachment"
 
         private const val AYANA_ACCEPTED_FEATURE_CHECKPOINT =
-            "R9.1 Perception + Telemetry Truth — DEVICE-CONFIRMED ACCEPTED"
+            "R9.2.1 Hypothesis Reconciliation — DEVICE-CONFIRMED ACCEPTED"
 
         private const val AYANA_CURRENT_FEATURE_RELEASE =
-            "R9.2.1 HYPOTHESIS RECONCILIATION"
+            "R9.3 APP INTEGRATION FRAMEWORK"
 
         private const val AYANA_RELEASE_LINEAGE =
-            "Android v12.21.0 / R7.9 truth-hardening + R8.0 multi-attachment + R8.1–R8.4 accepted Personal Global Search stack + R8.5–R8.5.4 capability/evidence truth + R9.0 autonomous agent foundation + R9.0.1 history live-refresh proof fix + R9.0.2 diagnostic reconciliation/history refresh fix + R9.0.3 TTS health reconciliation + R9.1 IME perception/active telemetry truth + R9.2 autonomous recovery/long-task reconciliation + R9.2.1 adaptive hypothesis reconciliation"
+            "Android v12.21.0 / R7.9 truth-hardening + R8.0 multi-attachment + R8.1–R8.4 accepted Personal Global Search stack + R8.5–R8.5.4 capability/evidence truth + R9.0 autonomous agent foundation + R9.0.1 history live-refresh proof fix + R9.0.2 diagnostic reconciliation/history refresh fix + R9.0.3 TTS health reconciliation + R9.1 IME perception/active telemetry truth + R9.2 autonomous recovery/long-task reconciliation + R9.2.1 adaptive hypothesis reconciliation + R9.3 app integration framework"
 
         // AyanaCommandHistoryStore v2.8 keeps up to 4k chars inline and stores longer
         // results out-of-line. Self-review intentionally remains inline so copied History
