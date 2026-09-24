@@ -19285,6 +19285,14 @@ append(index + 1)
                 ttsProof.optLong("first_byte_ms", -1L)
             )
 
+        // R9.2.1: Adaptive hypotheses are generated before the post-probe
+        // Agent Core/TTS reconciliation. If a baseline non-PASS row becomes PASS
+        // after fresh evidence, remove only that now-stale follow-up hypothesis.
+        // Other adaptive hypotheses and historical anomalies remain untouched.
+        reconcileAdaptiveHypothesesAgainstFinalTests(
+            result
+        )
+
         recalculateAcceptanceOutcomeAfterReconciliation(
             result
         )
@@ -19293,6 +19301,96 @@ append(index + 1)
         // current internal page so freshly persisted Agent Core / Marin results become
         // visible without requiring the user to navigate away and back manually.
         refreshCurrentOwnAppPageForRuntimeTruth()
+    }
+
+    private fun reconcileAdaptiveHypothesesAgainstFinalTests(
+        result: JSONObject
+    ) {
+        val hypotheses =
+            result.optJSONArray("adaptive_hypotheses")
+                ?: return
+
+        val tests =
+            result.optJSONArray("tests")
+                ?: return
+
+        val finalStatuses =
+            mutableMapOf<String, String>()
+
+        for (index in 0 until tests.length()) {
+            val item =
+                tests.optJSONObject(index)
+                    ?: continue
+
+            val id =
+                item.optString("id")
+                    .trim()
+
+            if (id.isNotBlank()) {
+                finalStatuses[id] =
+                    item.optString("status")
+            }
+        }
+
+        val reconciled =
+            JSONArray()
+
+        var removed =
+            0
+
+        for (index in 0 until hypotheses.length()) {
+            val item =
+                hypotheses.optJSONObject(index)
+                    ?: continue
+
+            val staleBaselineFollowUp =
+                item.optString("kind") ==
+                    "baseline_non_pass_follow_up" &&
+                    finalStatuses[
+                        item.optString("source_test_id")
+                    ] ==
+                    AyanaAcceptanceTestEngine.STATUS_PASS
+
+            if (staleBaselineFollowUp) {
+                removed++
+                continue
+            }
+
+            reconciled.put(
+                JSONObject(
+                    item.toString()
+                )
+            )
+        }
+
+        result
+            .put(
+                "adaptive_hypotheses",
+                reconciled
+            )
+            .put(
+                "adaptive_hypotheses_reconciled",
+                true
+            )
+            .put(
+                "adaptive_hypotheses_removed_after_reconciliation",
+                removed
+            )
+
+        result
+            .optJSONObject(
+                "adaptive_coverage"
+            )
+            ?.apply {
+                put(
+                    "hypotheses_generated",
+                    reconciled.length()
+                )
+                put(
+                    "hypotheses_reconciled_removed",
+                    removed
+                )
+            }
     }
 
     private fun acceptanceHealthNeedsFreshTts(
@@ -42713,9 +42811,9 @@ state
 
     companion object {
 
-        // R9.2 RELEASE / FEATURE LINEAGE TRUTH.
+        // R9.2.1 RELEASE / FEATURE LINEAGE TRUTH.
         private const val AYANA_VOICE_SERVICE_RELEASE =
-            "v12.24.0 / R9.2 AUTONOMOUS RECOVERY + LONG TASK EXECUTION"
+            "v12.24.1 / R9.2.1 HYPOTHESIS RECONCILIATION"
 
         private const val AYANA_PERSONAL_SEARCH_ENGINE_RELEASE =
             "v1.5.1 IMAGE COVERAGE TRUTH"
@@ -42730,10 +42828,10 @@ state
             "R9.1 Perception + Telemetry Truth — DEVICE-CONFIRMED ACCEPTED"
 
         private const val AYANA_CURRENT_FEATURE_RELEASE =
-            "R9.2 AUTONOMOUS RECOVERY + LONG TASK EXECUTION"
+            "R9.2.1 HYPOTHESIS RECONCILIATION"
 
         private const val AYANA_RELEASE_LINEAGE =
-            "Android v12.21.0 / R7.9 truth-hardening + R8.0 multi-attachment + R8.1–R8.4 accepted Personal Global Search stack + R8.5–R8.5.4 capability/evidence truth + R9.0 autonomous agent foundation + R9.0.1 history live-refresh proof fix + R9.0.2 diagnostic reconciliation/history refresh fix + R9.0.3 TTS health reconciliation + R9.1 IME perception/active telemetry truth + R9.2 autonomous recovery/long-task reconciliation"
+            "Android v12.21.0 / R7.9 truth-hardening + R8.0 multi-attachment + R8.1–R8.4 accepted Personal Global Search stack + R8.5–R8.5.4 capability/evidence truth + R9.0 autonomous agent foundation + R9.0.1 history live-refresh proof fix + R9.0.2 diagnostic reconciliation/history refresh fix + R9.0.3 TTS health reconciliation + R9.1 IME perception/active telemetry truth + R9.2 autonomous recovery/long-task reconciliation + R9.2.1 adaptive hypothesis reconciliation"
 
         // AyanaCommandHistoryStore v2.8 keeps up to 4k chars inline and stores longer
         // results out-of-line. Self-review intentionally remains inline so copied History
