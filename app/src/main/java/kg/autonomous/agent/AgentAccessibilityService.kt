@@ -8,6 +8,7 @@ import android.graphics.Rect
 import android.os.Build
 import android.os.Bundle
 import android.os.SystemClock
+import android.provider.Settings
 import android.view.accessibility.AccessibilityEvent
 import android.view.accessibility.AccessibilityNodeInfo
 import android.view.accessibility.AccessibilityWindowInfo
@@ -20,12 +21,14 @@ import kotlin.math.max
 class AgentAccessibilityService :
     AccessibilityService() {
 
-    // AYANA Accessibility v7.2 — FOREGROUND FUSION + EXTENDED SEMANTIC TEXT RECOVERY.
-    // v7.2 preserves v7.1 owner truth and expands read-only node text extraction with
-    // Android hint/state/pane/tooltip semantics. Modern Compose/WebView surfaces may expose
-    // useful accessibility meaning outside node.text/contentDescription; these fields are
-    // now merged only inside the same factual window/package and remain password-hidden.
-    // No OCR/screenshot inference is fabricated when Accessibility still exposes no text.
+    // AYANA Accessibility v7.2 — IME UNDERLAY FOREGROUND FUSION.
+    // Samsung Keyboard / other configured IME surfaces are transient input overlays,
+    // not application ownership transitions. v7.2 keeps v7.1 verified-owner truth but
+    // excludes a proven IME surface from foreground ownership and primary app selection.
+    // Package identity alone is never sufficient for application-typed windows: class
+    // and/or panel geometry must also agree. Full-screen settings/apps remain eligible.
+    // No package/content is fabricated.
+    //
     // AYANA Accessibility v7.1 — VERIFIED FOREGROUND FUSION + OWNER HANDOFF CONTINUITY.
     // v7.0 preserves v6.9 generic ownership/evidence guards and adds one explicit truth handoff:
     // when an upper execution layer has already VERIFIED a package-owned external surface from
@@ -213,6 +216,14 @@ class AgentAccessibilityService :
     @Volatile
     private var lastForegroundSnapshotRecoveryKey =
         ""
+
+    @Volatile
+    private var cachedInputMethodPackage =
+        ""
+
+    @Volatile
+    private var cachedInputMethodPackageAtElapsed =
+        0L
 
     @Volatile
     private var lastScrollEventState:
@@ -4974,6 +4985,16 @@ class AgentAccessibilityService :
                 .map { it.contextId }
                 .toSet()
 
+        val inputMethodContexts =
+            allContexts
+                .filter(::isInputMethodContext)
+
+        val inputMethodPackage =
+            inputMethodContexts
+                .firstOrNull()
+                ?.packageName
+                .orEmpty()
+
         val primary =
             primaryWindowContext(
                 allContexts
@@ -5351,21 +5372,30 @@ class AgentAccessibilityService :
                 .orEmpty()
                 .trim()
 
+        val stickyForegroundOwnerPackage =
+            lastForegroundOwnerPackage
+                .takeUnless { owner ->
+                    ownAppBridgeActive &&
+                        owner.isNotBlank() &&
+                        isConfiguredInputMethodPackage(owner)
+                }
+                .orEmpty()
+
         val effectiveForegroundPackage =
             when {
                 primaryPackage.isNotBlank() &&
                     primaryPackage != packageName ->
                     primaryPackage
 
-                lastForegroundOwnerPackage.isNotBlank() &&
-                    lastForegroundOwnerPackage != packageName ->
-                    lastForegroundOwnerPackage
+                stickyForegroundOwnerPackage.isNotBlank() &&
+                    stickyForegroundOwnerPackage != packageName ->
+                    stickyForegroundOwnerPackage
 
                 primaryPackage.isNotBlank() ->
                     primaryPackage
 
                 else ->
-                    lastForegroundOwnerPackage
+                    stickyForegroundOwnerPackage
             }
 
         val ayanaOwnWindowSuppressedForForeground =
@@ -5392,7 +5422,7 @@ class AgentAccessibilityService :
             .put("primary_live_readable_text_count", primaryLiveReadableTextCount)
             .put("primary_evidence_readable_text_count", primaryEvidenceReadableTextCount)
             .put("primary_node_count", primaryNodeCount)
-            .put("window_context_mode", "v7_1_verified_foreground_fusion")
+            .put("window_context_mode", "v7_2_ime_underlay_foreground_fusion")
             .put("window_count", allContexts.size)
             .put("raw_window_count", safeWindowCount())
             .put("readable_window_count", readableWindowCount)
@@ -5411,16 +5441,24 @@ class AgentAccessibilityService :
             .put("event_class", lastEventClass)
             .put("event_window_id", lastEventWindowId)
             .put("foreground_owner_package", lastForegroundOwnerPackage)
+            .put(
+                "foreground_owner_ime_suppressed",
+                lastForegroundOwnerPackage.isNotBlank() &&
+                    stickyForegroundOwnerPackage.isBlank()
+            )
             .put("foreground_owner_window_id", lastForegroundOwnerWindowId)
             .put("foreground_owner_source", lastForegroundOwnerSource)
             .put("effective_foreground_package", effectiveForegroundPackage)
+            .put("input_method_visible", inputMethodContexts.isNotEmpty())
+            .put("input_method_package", inputMethodPackage)
+            .put("input_method_context_count", inputMethodContexts.size)
             .put(
                 "ayana_own_window_suppressed_for_foreground",
                 ayanaOwnWindowSuppressedForForeground
             )
             .put(
                 "foreground_fusion_mode",
-                "external_primary_else_verified_owner_over_own_app"
+                "external_primary_else_verified_owner_over_own_app_ime_excluded"
             )
             .put(
                 "foreground_owner_age_ms",
@@ -5859,6 +5897,15 @@ class AgentAccessibilityService :
             )
         }
 
+        // When AYANA's own activity is still window-focused, an event from the
+        // configured IME is a keyboard surface, not an application ownership handoff.
+        if (
+            MainActivity.isOwnAppSemanticBridgeActive() &&
+            isConfiguredInputMethodPackage(eventPackage)
+        ) {
+            return false
+        }
+
         val eventWindowId =
             try {
                 event.windowId
@@ -5910,6 +5957,30 @@ class AgentAccessibilityService :
                     ""
                 }
 
+            val matchingBounds =
+                Rect().also { bounds ->
+                    try {
+                        matchingWindow.getBoundsInScreen(bounds)
+                    } catch (_: Exception) {
+                    }
+                }
+
+            val eventClassName =
+                event.className
+                    ?.toString()
+                    .orEmpty()
+
+            if (
+                isInputMethodSurface(
+                    packageNameValue = eventPackage,
+                    classNameValue = eventClassName,
+                    type = type,
+                    bounds = matchingBounds
+                )
+            ) {
+                return false
+            }
+
             if (
                 type == AccessibilityWindowInfo.TYPE_APPLICATION &&
                 (active || focused) &&
@@ -5940,6 +6011,38 @@ class AgentAccessibilityService :
             event.eventType == AccessibilityEvent.TYPE_WINDOWS_CHANGED
         ) {
             return false
+        }
+
+        if (
+            isConfiguredInputMethodPackage(eventPackage)
+        ) {
+            val eventSource =
+                try { event.source } catch (_: Exception) { null }
+
+            if (eventSource != null) {
+                val eventBounds =
+                    Rect().also { bounds ->
+                        try {
+                            highestUsableEventRoot(eventSource)
+                                .getBoundsInScreen(bounds)
+                        } catch (_: Exception) {
+                            try {
+                                eventSource.getBoundsInScreen(bounds)
+                            } catch (_: Exception) {
+                            }
+                        }
+                    }
+
+                if (
+                    hasInputMethodPanelGeometry(eventBounds) ||
+                    classHintAllowedForBounds(
+                        className = event.className?.toString().orEmpty(),
+                        bounds = eventBounds
+                    )
+                ) {
+                    return false
+                }
+            }
         }
 
         val source =
@@ -6027,7 +6130,8 @@ class AgentAccessibilityService :
 
         if (
             ownerPackage.isNotBlank() &&
-            ownerPackage != packageName
+            ownerPackage != packageName &&
+            !isConfiguredInputMethodPackage(ownerPackage)
         ) {
             return false
         }
@@ -6044,6 +6148,7 @@ class AgentAccessibilityService :
                 context.packageName.isNotBlank() &&
                     context.packageName != packageName &&
                     context.type == AccessibilityWindowInfo.TYPE_APPLICATION &&
+                    !isInputMethodContext(context) &&
                     (context.focused || context.active)
             }
 
@@ -6757,6 +6862,164 @@ class AgentAccessibilityService :
             .sortedByDescending { it.rank }
     }
 
+    /**
+     * R9.1 / v7.2 IME truth. TYPE_INPUT_METHOD is definitive. Some Samsung One UI
+     * builds expose Honeyboard as TYPE_APPLICATION, so application-typed windows
+     * are classified as IME only when the configured/default IME package matches
+     * and keyboard-like class or bottom-panel geometry also agrees.
+     */
+    private fun configuredInputMethodPackage(): String {
+        val now = SystemClock.elapsedRealtime()
+        val cached = cachedInputMethodPackage
+        val age =
+            (now - cachedInputMethodPackageAtElapsed)
+                .coerceAtLeast(0L)
+
+        if (
+            cached.isNotBlank() &&
+            age <= INPUT_METHOD_PACKAGE_CACHE_TTL_MS
+        ) {
+            return cached
+        }
+
+        val resolved =
+            try {
+                Settings.Secure
+                    .getString(
+                        contentResolver,
+                        Settings.Secure.DEFAULT_INPUT_METHOD
+                    )
+                    .orEmpty()
+                    .substringBefore('/')
+                    .trim()
+            } catch (_: Exception) {
+                ""
+            }
+
+        cachedInputMethodPackage = resolved
+        cachedInputMethodPackageAtElapsed = now
+        return resolved
+    }
+
+    private fun isConfiguredInputMethodPackage(
+        candidate: String
+    ): Boolean {
+        val clean = candidate.trim()
+        if (clean.isBlank()) {
+            return false
+        }
+
+        val configured = configuredInputMethodPackage()
+        if (
+            configured.isNotBlank() &&
+            clean == configured
+        ) {
+            return true
+        }
+
+        // Device-proven fallback for Galaxy Tab / Samsung Keyboard when the secure
+        // setting is transiently unavailable. Classification still additionally
+        // requires input-surface evidence, so package identity alone is not enough.
+        return configured.isBlank() &&
+            clean == SAMSUNG_HONEYBOARD_PACKAGE
+    }
+
+    private fun hasInputMethodClassHint(
+        className: String
+    ): Boolean {
+        val normalized =
+            className
+                .lowercase(Locale.ROOT)
+
+        return listOf(
+            "inputmethodservice",
+            "inputmethod",
+            "softinputwindow",
+            "softinput",
+            "keyboardview",
+            "inputview",
+            "extractedit"
+        ).any(normalized::contains)
+    }
+
+    private fun hasInputMethodPanelGeometry(
+        bounds: Rect
+    ): Boolean {
+        val screenWidth =
+            resources.displayMetrics.widthPixels
+                .coerceAtLeast(1)
+        val screenHeight =
+            resources.displayMetrics.heightPixels
+                .coerceAtLeast(1)
+        val width = bounds.width().coerceAtLeast(0)
+        val height = bounds.height().coerceAtLeast(0)
+
+        if (width <= 1 || height <= 1) {
+            return false
+        }
+
+        val widthRatio = width.toDouble() / screenWidth.toDouble()
+        val heightRatio = height.toDouble() / screenHeight.toDouble()
+        val bottomAnchored =
+            bounds.bottom >= (screenHeight * 0.78).toInt()
+
+        return bottomAnchored &&
+            widthRatio >= 0.35 &&
+            heightRatio in 0.12..0.78
+    }
+
+    private fun classHintAllowedForBounds(
+        className: String,
+        bounds: Rect
+    ): Boolean {
+        val screenHeight =
+            resources.displayMetrics.heightPixels
+                .coerceAtLeast(1)
+        val heightRatio =
+            bounds.height()
+                .coerceAtLeast(0)
+                .toDouble() /
+                screenHeight.toDouble()
+
+        return heightRatio in 0.08..0.82 &&
+            hasInputMethodClassHint(className)
+    }
+
+    private fun isInputMethodSurface(
+        packageNameValue: String,
+        classNameValue: String,
+        type: Int,
+        bounds: Rect
+    ): Boolean {
+        if (type == AccessibilityWindowInfo.TYPE_INPUT_METHOD) {
+            return true
+        }
+
+        if (!isConfiguredInputMethodPackage(packageNameValue)) {
+            return false
+        }
+
+        if (MainActivity.isOwnAppSemanticBridgeActive()) {
+            return true
+        }
+
+        return hasInputMethodPanelGeometry(bounds) ||
+            classHintAllowedForBounds(
+                className = classNameValue,
+                bounds = bounds
+            )
+    }
+
+    private fun isInputMethodContext(
+        context: WindowContext
+    ): Boolean =
+        isInputMethodSurface(
+            packageNameValue = context.packageName,
+            classNameValue = context.className,
+            type = context.type,
+            bounds = context.bounds
+        )
+
     private fun primaryWindowContext(
         contexts: List<WindowContext>
     ): WindowContext? {
@@ -6772,9 +7035,9 @@ class AgentAccessibilityService :
         // only when Android exposes nothing else.
         val usable =
             contexts
-                .filter {
-                    it.type != AccessibilityWindowInfo.TYPE_INPUT_METHOD &&
-                        it.packageName.isNotBlank()
+                .filter { context ->
+                    !isInputMethodContext(context) &&
+                        context.packageName.isNotBlank()
                 }
 
         return usable
@@ -6788,9 +7051,10 @@ class AgentAccessibilityService :
                 .maxByOrNull { it.rank }
             ?: usable.maxByOrNull { it.rank }
             ?: contexts
-                .filter { it.type != AccessibilityWindowInfo.TYPE_INPUT_METHOD }
+                .filter { context ->
+                    !isInputMethodContext(context)
+                }
                 .maxByOrNull { it.rank }
-            ?: contexts.maxByOrNull { it.rank }
     }
 
     private fun interactionWindowContexts(
@@ -7973,11 +8237,7 @@ class AgentAccessibilityService :
 
         listOf(
             node.optString("text"),
-            node.optString("description"),
-            node.optString("hint_text"),
-            node.optString("state_description"),
-            node.optString("pane_title"),
-            node.optString("tooltip_text")
+            node.optString("description")
         )
             .map { safeText(it) }
             .filter { it.isNotBlank() && it != "[PASSWORD_HIDDEN]" }
@@ -8114,66 +8374,6 @@ class AgentAccessibilityService :
                     .orEmpty()
             }
 
-        val hintText =
-            if (password) {
-                "[PASSWORD_HIDDEN]"
-            } else if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-                try {
-                    node.hintText
-                        ?.toString()
-                        .orEmpty()
-                } catch (_: Exception) {
-                    ""
-                }
-            } else {
-                ""
-            }
-
-        val paneTitle =
-            if (password) {
-                "[PASSWORD_HIDDEN]"
-            } else if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
-                try {
-                    node.paneTitle
-                        ?.toString()
-                        .orEmpty()
-                } catch (_: Exception) {
-                    ""
-                }
-            } else {
-                ""
-            }
-
-        val tooltipText =
-            if (password) {
-                "[PASSWORD_HIDDEN]"
-            } else if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
-                try {
-                    node.tooltipText
-                        ?.toString()
-                        .orEmpty()
-                } catch (_: Exception) {
-                    ""
-                }
-            } else {
-                ""
-            }
-
-        val stateDescription =
-            if (password) {
-                "[PASSWORD_HIDDEN]"
-            } else if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
-                try {
-                    node.stateDescription
-                        ?.toString()
-                        .orEmpty()
-                } catch (_: Exception) {
-                    ""
-                }
-            } else {
-                ""
-            }
-
         return JSONObject()
             .put(
                 "index",
@@ -8193,30 +8393,6 @@ class AgentAccessibilityService :
                 "description",
                 safeText(
                     description
-                )
-            )
-            .put(
-                "hint_text",
-                safeText(
-                    hintText
-                )
-            )
-            .put(
-                "state_description",
-                safeText(
-                    stateDescription
-                )
-            )
-            .put(
-                "pane_title",
-                safeText(
-                    paneTitle
-                )
-            )
-            .put(
-                "tooltip_text",
-                safeText(
-                    tooltipText
                 )
             )
             .put(
@@ -8318,17 +8494,24 @@ class AgentAccessibilityService :
                     )
                     ?: continue
 
-            val textValues =
-                listOf(
-                    item.optString("text"),
-                    item.optString("description"),
-                    item.optString("hint_text"),
-                    item.optString("state_description"),
-                    item.optString("pane_title"),
-                    item.optString("tooltip_text")
-                )
+            val text =
+                item
+                    .optString(
+                        "text"
+                    )
+                    .trim()
 
-            textValues
+            val description =
+                item
+                    .optString(
+                        "description"
+                    )
+                    .trim()
+
+            listOf(
+                text,
+                description
+            )
                 .filter {
                     it.isNotBlank() &&
                         it !=
@@ -8929,44 +9112,6 @@ class AgentAccessibilityService :
                             description
                         )
                     }
-
-                    val extraSemantics =
-                        mutableListOf<String>()
-
-                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-                        try {
-                            safeText(node.hintText?.toString().orEmpty())
-                                .takeIf { it.isNotBlank() }
-                                ?.let(extraSemantics::add)
-                        } catch (_: Exception) {
-                        }
-                    }
-
-                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
-                        try {
-                            safeText(node.paneTitle?.toString().orEmpty())
-                                .takeIf { it.isNotBlank() }
-                                ?.let(extraSemantics::add)
-                        } catch (_: Exception) {
-                        }
-                        try {
-                            safeText(node.tooltipText?.toString().orEmpty())
-                                .takeIf { it.isNotBlank() }
-                                ?.let(extraSemantics::add)
-                        } catch (_: Exception) {
-                        }
-                    }
-
-                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
-                        try {
-                            safeText(node.stateDescription?.toString().orEmpty())
-                                .takeIf { it.isNotBlank() }
-                                ?.let(extraSemantics::add)
-                        } catch (_: Exception) {
-                        }
-                    }
-
-                    extraSemantics.forEach(seenTexts::add)
                 }
 
                 if (
@@ -9655,6 +9800,12 @@ class AgentAccessibilityService :
 
         private const val SETTINGS_PACKAGE =
             "com.android.settings"
+
+        private const val SAMSUNG_HONEYBOARD_PACKAGE =
+            "com.samsung.android.honeyboard"
+
+        private const val INPUT_METHOD_PACKAGE_CACHE_TTL_MS =
+            60_000L
 
         private const val ROOT_SEMANTIC_PROBE_NODE_LIMIT =
             48
