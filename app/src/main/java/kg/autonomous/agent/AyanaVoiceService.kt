@@ -60,6 +60,13 @@ import kotlin.math.abs
 
 class AyanaVoiceService : Service() {
 
+    // AYANA v12.23.0 / R9.1 PERCEPTION + TELEMETRY TRUTH.
+    // Builds only on DEVICE-CONFIRMED R9.0.3. Accessibility v7.2 excludes a
+    // verified keyboard/IME overlay from application ownership; ATI v1.7 keeps
+    // stale latency records as historical evidence without current-health WARNING.
+    // MODEL_OR_SERVER_WAIT remains measured evidence but is not an Android-local
+    // defect. Worker, ORB, visualizer, MainActivity and Personal Search unchanged.
+    //
     // AYANA v12.22.3 / R9.0.3 TTS HEALTH RECONCILIATION.
     // One integrated foundation release on top of device-confirmed R8.5.4:
     // - bounded read-only recovery for incomplete Agent Core completions;
@@ -20900,6 +20907,11 @@ append(index + 1)
                     .put("raw_interaction_package", screen.optString("raw_interaction_package"))
                     .put("content_state", state)
                     .put("perception_fusion_version", screen.optInt("perception_fusion_version", 0))
+                    .put("window_context_mode", screen.optString("window_context_mode"))
+                    .put("input_method_visible", screen.optBoolean("input_method_visible", false))
+                    .put("input_method_package", screen.optString("input_method_package"))
+                    .put("input_method_context_count", screen.optInt("input_method_context_count", 0))
+                    .put("primary_acquisition_source", screen.optString("primary_acquisition_source"))
                     .put("snapshot_duration_ms", screen.optLong("snapshot_duration_ms", -1L))
         )
     }
@@ -20938,7 +20950,9 @@ append(index + 1)
                 "NO_DATA" ->
                     AyanaAcceptanceTestEngine.STATUS_NO_DATA
 
-                "MODEL_OR_SERVER_WAIT",
+                "MODEL_OR_SERVER_WAIT" ->
+                    AyanaAcceptanceTestEngine.STATUS_PASS
+
                 "ANDROID_OR_TRANSPORT_LOCAL",
                 "MIXED",
                 "ANDROID_PREPARE_SLOW",
@@ -20952,6 +20966,10 @@ append(index + 1)
                 else ->
                     AyanaAcceptanceTestEngine.STATUS_PASS
             }
+
+        val externalWaitOnly =
+            effectiveClassification ==
+                "MODEL_OR_SERVER_WAIT"
 
         val evidence =
             JSONObject(
@@ -20986,6 +21004,11 @@ append(index + 1)
                         -1L
                     )
                 )
+                .put("external_wait_only", externalWaitOnly)
+                .put(
+                    "current_local_health_warning",
+                    status == AyanaAcceptanceTestEngine.STATUS_WARNING
+                )
                 .put(
                     "diagnostic_closure_version",
                     AyanaDiagnosticClosure.VERSION
@@ -20994,14 +21017,23 @@ append(index + 1)
         return acceptanceProbeResult(
             status = status,
             message =
-                "Agent Core telemetry R9: class=$effectiveClassification, " +
-                    "total=${latency.optLong("total_ms", -1L)} мс, " +
-                    "local=${split.optLong("local_android_transport_ms", -1L)} мс, " +
-                    "model/server=${split.optLong("model_server_wait_ms", -1L)} мс.",
-            evidenceScope = "stored_measured_telemetry_r9_attribution",
-            verified =
-                effectiveClassification !=
-                    "NO_DATA",
+                if (externalWaitOnly) {
+                    "Agent Core telemetry R9.1: внешний model/server wait=${split.optLong("model_server_wait_ms", -1L)} мс; " +
+                        "локальный Android/transport=${split.optLong("local_android_transport_ms", -1L)} мс. " +
+                        "Измерение сохранено как performance evidence и не считается локальным дефектом AYANA."
+                } else {
+                    "Agent Core telemetry R9.1: class=$effectiveClassification, " +
+                        "total=${latency.optLong("total_ms", -1L)} мс, " +
+                        "local=${split.optLong("local_android_transport_ms", -1L)} мс, " +
+                        "model/server=${split.optLong("model_server_wait_ms", -1L)} мс."
+                },
+            evidenceScope =
+                if (externalWaitOnly) {
+                    "stored_measured_telemetry_external_wait_informational"
+                } else {
+                    "stored_measured_telemetry_r9_attribution"
+                },
+            verified = effectiveClassification != "NO_DATA",
             evidence = evidence
         )
     }
@@ -23405,7 +23437,7 @@ plan.optInt(
                 },
             message =
                 if (ok) {
-                    "Release metadata согласованы: base v12.21.0 / R7.9; accepted R8.5.4; current R9.0 autonomous agent foundation; Personal Search v1.5.1."
+                    "Release metadata согласованы: base v12.21.0 / R7.9; accepted R9.0.3; current R9.1 perception + telemetry truth; Personal Search v1.5.1."
                 } else {
                     "Release metadata неполны или Capability Registry build-label не соответствует base v12.21.0 / R7.9: build=$registryBuild; app=$appVersion."
                 },
@@ -42061,9 +42093,9 @@ state
 
     companion object {
 
-        // R9.0.3 RELEASE / FEATURE LINEAGE TRUTH.
+        // R9.1 RELEASE / FEATURE LINEAGE TRUTH.
         private const val AYANA_VOICE_SERVICE_RELEASE =
-            "v12.22.3 / R9.0.3 TTS HEALTH RECONCILIATION"
+            "v12.23.0 / R9.1 PERCEPTION + TELEMETRY TRUTH"
 
         private const val AYANA_PERSONAL_SEARCH_ENGINE_RELEASE =
             "v1.5.1 IMAGE COVERAGE TRUTH"
@@ -42075,13 +42107,13 @@ state
             "v11.1.10 Multi-Attachment"
 
         private const val AYANA_ACCEPTED_FEATURE_CHECKPOINT =
-            "R8.5.4 Remaining Capability Proof — DEVICE-CONFIRMED ACCEPTED"
+            "R9.0.3 TTS Health Reconciliation — DEVICE-CONFIRMED ACCEPTED"
 
         private const val AYANA_CURRENT_FEATURE_RELEASE =
-            "R9.0.3 TTS HEALTH RECONCILIATION"
+            "R9.1 PERCEPTION + TELEMETRY TRUTH"
 
         private const val AYANA_RELEASE_LINEAGE =
-            "Android v12.21.0 / R7.9 truth-hardening + R8.0 multi-attachment + R8.1–R8.4 accepted Personal Global Search stack + R8.5–R8.5.4 capability/evidence truth + R9.0 autonomous agent foundation + R9.0.1 history live-refresh proof fix + R9.0.2 diagnostic reconciliation/history refresh fix + R9.0.3 TTS health reconciliation"
+            "Android v12.21.0 / R7.9 truth-hardening + R8.0 multi-attachment + R8.1–R8.4 accepted Personal Global Search stack + R8.5–R8.5.4 capability/evidence truth + R9.0 autonomous agent foundation + R9.0.1 history live-refresh proof fix + R9.0.2 diagnostic reconciliation/history refresh fix + R9.0.3 TTS health reconciliation + R9.1 IME perception/active telemetry truth"
 
         // AyanaCommandHistoryStore v2.8 keeps up to 4k chars inline and stores longer
         // results out-of-line. Self-review intentionally remains inline so copied History
