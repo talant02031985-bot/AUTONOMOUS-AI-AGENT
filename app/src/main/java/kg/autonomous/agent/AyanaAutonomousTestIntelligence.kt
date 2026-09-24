@@ -6,7 +6,7 @@ import java.security.MessageDigest
 import java.util.Locale
 
 /**
- * AYANA Autonomous Test Intelligence v1.6 — R9 FOUNDATION PROBES.
+ * AYANA Autonomous Test Intelligence v1.7 — ACTIVE HISTORY LATENCY TRUTH.
  *
  * This layer is intentionally different from a fixed acceptance checklist.
  * It discovers test opportunities from the current build/runtime itself:
@@ -14,6 +14,7 @@ import java.util.Locale
  * - the installed launcher map is tested end-to-end through App Resolver;
  * - planner tests are generated from the apps that actually exist on the device;
  * - recent real commands are mutated into safe planner-only metamorphic checks;
+ * - old latency records remain evidence but do not masquerade as current-health warnings;
  * - Command History is mined for terminal/evidence contradictions and platform drift;
  * - effective device-confirmation is resolved through AyanaDeviceEvidenceTruth;
  * - unresolved implemented+available capabilities may invoke one explicit allow-listed safe probe;
@@ -616,6 +617,18 @@ class AyanaAutonomousTestIntelligence(
                     return@forEach
                 }
                 anomalyKindCounts[kind] = currentKindCount + 1
+
+                val historyAgeMs =
+                    historyRecordAgeMs(
+                        record = record,
+                        nowMs = System.currentTimeMillis()
+                    )
+
+                val staleLatencyEvidence =
+                    kind == "latency_outlier" &&
+                        historyAgeMs >= 0L &&
+                        historyAgeMs > HISTORY_LATENCY_ACTIVE_WINDOW_MS
+
                 if (tests.length() >= MAX_GENERATED_TESTS) {
                     truncated = true
                     return@forEach
@@ -632,6 +645,14 @@ class AyanaAutonomousTestIntelligence(
                         .put("result_preview", resultText.take(1200))
                         .put("technical_preview", technical.take(1200))
 
+                if (staleLatencyEvidence) {
+                    evidence
+                        .put("history_age_ms", historyAgeMs)
+                        .put("active_window_ms", HISTORY_LATENCY_ACTIVE_WINDOW_MS)
+                        .put("warning_suppressed", true)
+                        .put("stale_historical_evidence", true)
+                }
+
                 anomalies.put(
                     copyJsonObject(evidence)
                         .put("test_id", anomalyId)
@@ -640,27 +661,49 @@ class AyanaAutonomousTestIntelligence(
                 tests.put(
                     result(
                         id = anomalyId,
-                        title = anomaly.optString("title", "History anomaly candidate"),
-                        status = STATUS_WARNING,
+                        title =
+                            if (staleLatencyEvidence) {
+                                "Historical latency evidence freshness"
+                            } else {
+                                anomaly.optString("title", "History anomaly candidate")
+                            },
+                        status =
+                            if (staleLatencyEvidence) {
+                                STATUS_PASS
+                            } else {
+                                STATUS_WARNING
+                            },
                         critical = false,
                         verified = true,
-                        message = anomaly.optString("message"),
-                        evidenceScope = "self_directed_history_mining",
+                        message =
+                            if (staleLatencyEvidence) {
+                                "Historical latency outlier retained as evidence but is outside the active current-health window."
+                            } else {
+                                anomaly.optString("message")
+                            },
+                        evidenceScope =
+                            if (staleLatencyEvidence) {
+                                "self_directed_history_mining_stale_evidence"
+                            } else {
+                                "self_directed_history_mining"
+                            },
                         evidence = evidence
                     )
                 )
                 generated++
                 historyTests++
 
-                hypotheses.put(
-                    JSONObject()
-                        .put("id", "HYP-${shortId(anomalyId)}")
-                        .put("kind", anomaly.optString("kind"))
-                        .put("priority", anomaly.optString("priority", "medium"))
-                        .put("source_test_id", anomalyId)
-                        .put("safe_execution", anomaly.optString("safe_execution", "reproduce_with_safe_contract_probe"))
-                        .put("hypothesis", anomaly.optString("hypothesis", anomaly.optString("message")))
-                )
+                if (!staleLatencyEvidence) {
+                    hypotheses.put(
+                        JSONObject()
+                            .put("id", "HYP-${shortId(anomalyId)}")
+                            .put("kind", anomaly.optString("kind"))
+                            .put("priority", anomaly.optString("priority", "medium"))
+                            .put("source_test_id", anomalyId)
+                            .put("safe_execution", anomaly.optString("safe_execution", "reproduce_with_safe_contract_probe"))
+                            .put("hypothesis", anomaly.optString("hypothesis", anomaly.optString("message")))
+                    )
+                }
             }
         }
 
@@ -1104,6 +1147,41 @@ class AyanaAutonomousTestIntelligence(
         return anomalies
     }
 
+    private fun historyRecordAgeMs(
+        record: JSONObject,
+        nowMs: Long
+    ): Long {
+        val explicitCandidates =
+            listOf(
+                record.optLong("finished_at_ms", 0L),
+                record.optLong("completed_at_ms", 0L),
+                record.optLong("timestamp_ms", 0L),
+                record.optLong("created_at_ms", 0L),
+                record.optLong("started_at_ms", 0L)
+            )
+
+        val explicit =
+            explicitCandidates
+                .firstOrNull { it > 0L }
+                ?: 0L
+
+        val idEpoch =
+            record
+                .optString("id")
+                .substringBefore('-')
+                .toLongOrNull()
+                ?: 0L
+
+        val observedAt =
+            if (explicit > 0L) explicit else idEpoch
+
+        if (observedAt <= 0L || nowMs < observedAt) {
+            return -1L
+        }
+
+        return (nowMs - observedAt).coerceAtLeast(0L)
+    }
+
     private fun anomaly(
         kind: String,
         title: String,
@@ -1224,7 +1302,7 @@ class AyanaAutonomousTestIntelligence(
     }
 
     companion object {
-        const val ENGINE_VERSION = "1.6"
+        const val ENGINE_VERSION = "1.7"
 
         private const val STATUS_PASS = "PASS"
         private const val STATUS_WARNING = "WARNING"
@@ -1239,6 +1317,7 @@ class AyanaAutonomousTestIntelligence(
         private const val MAX_METAMORPHIC_COMMAND_CHARS = 600
         private const val MAX_GENERATED_TESTS = 180
         private const val HISTORY_SLOW_WARNING_MS = 30_000L
+        private const val HISTORY_LATENCY_ACTIVE_WINDOW_MS = 4 * 60 * 60 * 1000L
         private const val DIAGNOSTIC_HARD_WARNING_MS = 180_000L
     }
 }
