@@ -61,6 +61,15 @@ import kotlin.math.abs
 
 class AyanaVoiceService : Service() {
 
+    // AYANA v12.25.2 / R9.3.2 HISTORY LATENCY RECOVERY RECONCILIATION.
+    // Builds only on the R9.3.1 candidate over DEVICE-CONFIRMED R9.2.1.
+    // - ATI v1.8 retains latency outliers but closes a recent outlier as recovered
+    //   evidence only when a NEWER successful run of the same normalized command
+    //   completes inside its normal latency budget;
+    // - repeated slow runs remain WARNING and continue to generate a follow-up;
+    // - stale (>4h) latency evidence keeps the existing historical PASS behavior;
+    // - App Integration R9.3 and Screen Health R9.3.1 remain unchanged.
+    //
     // AYANA v12.25.1 / R9.3.1 SCREEN HEALTH RECONCILIATION.
     // Builds only on the R9.3 app-integration candidate over DEVICE-CONFIRMED R9.2.1.
     // - Self-Diagnostics v4.2 performs one bounded own-app screen re-sample when
@@ -43242,9 +43251,9 @@ state
 
     companion object {
 
-        // R9.3.1 RELEASE / FEATURE LINEAGE TRUTH.
+        // R9.3.2 RELEASE / FEATURE LINEAGE TRUTH.
         private const val AYANA_VOICE_SERVICE_RELEASE =
-            "v12.25.1 / R9.3.1 SCREEN HEALTH RECONCILIATION"
+            "v12.25.2 / R9.3.2 HISTORY LATENCY RECOVERY RECONCILIATION"
 
         private const val AYANA_PERSONAL_SEARCH_ENGINE_RELEASE =
             "v1.5.1 IMAGE COVERAGE TRUTH"
@@ -43259,10 +43268,10 @@ state
             "R9.2.1 Hypothesis Reconciliation — DEVICE-CONFIRMED ACCEPTED"
 
         private const val AYANA_CURRENT_FEATURE_RELEASE =
-            "R9.3.1 SCREEN HEALTH RECONCILIATION"
+            "R9.3.2 HISTORY LATENCY RECOVERY RECONCILIATION"
 
         private const val AYANA_RELEASE_LINEAGE =
-            "Android v12.21.0 / R7.9 truth-hardening + R8.0 multi-attachment + R8.1–R8.4 accepted Personal Global Search stack + R8.5–R8.5.4 capability/evidence truth + R9.0 autonomous agent foundation + R9.0.1 history live-refresh proof fix + R9.0.2 diagnostic reconciliation/history refresh fix + R9.0.3 TTS health reconciliation + R9.1 IME perception/active telemetry truth + R9.2 autonomous recovery/long-task reconciliation + R9.2.1 adaptive hypothesis reconciliation + R9.3 app integration framework + R9.3.1 screen health reconciliation"
+            "Android v12.21.0 / R7.9 truth-hardening + R8.0 multi-attachment + R8.1–R8.4 accepted Personal Global Search stack + R8.5–R8.5.4 capability/evidence truth + R9.0 autonomous agent foundation + R9.0.1 history live-refresh proof fix + R9.0.2 diagnostic reconciliation/history refresh fix + R9.0.3 TTS health reconciliation + R9.1 IME perception/active telemetry truth + R9.2 autonomous recovery/long-task reconciliation + R9.2.1 adaptive hypothesis reconciliation + R9.3 app integration framework + R9.3.1 screen health reconciliation + R9.3.2 history latency recovery reconciliation"
 
         // AyanaCommandHistoryStore v2.8 keeps up to 4k chars inline and stores longer
         // results out-of-line. Self-review intentionally remains inline so copied History
