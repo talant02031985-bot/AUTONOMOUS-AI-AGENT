@@ -6,7 +6,7 @@ import java.security.MessageDigest
 import java.util.Locale
 
 /**
- * AYANA Autonomous Test Intelligence v1.7 — ACTIVE HISTORY LATENCY TRUTH.
+ * AYANA Autonomous Test Intelligence v1.8 — HISTORY LATENCY RECOVERY RECONCILIATION.
  *
  * This layer is intentionally different from a fixed acceptance checklist.
  * It discovers test opportunities from the current build/runtime itself:
@@ -15,6 +15,7 @@ import java.util.Locale
  * - planner tests are generated from the apps that actually exist on the device;
  * - recent real commands are mutated into safe planner-only metamorphic checks;
  * - old latency records remain evidence but do not masquerade as current-health warnings;
+ * - a newer healthy SUCCESS of the same normalized command closes a recent latency outlier as recovered historical evidence;
  * - Command History is mined for terminal/evidence contradictions and platform drift;
  * - effective device-confirmation is resolved through AyanaDeviceEvidenceTruth;
  * - unresolved implemented+available capabilities may invoke one explicit allow-listed safe probe;
@@ -431,6 +432,14 @@ class AyanaAutonomousTestIntelligence(
         val resolvedAndroidProjectCodeCommandIndices =
             linkedMapOf<String, Int>()
 
+        // v1.8: newest-first history allows a newer healthy SUCCESS of the same
+        // normalized command to close an older recent latency outlier. The old
+        // measurement is retained as evidence; only its current-health WARNING
+        // and follow-up hypothesis are suppressed. A repeated slow SUCCESS does
+        // not qualify as recovery.
+        val healthyLatencyRecoveryRecords =
+            linkedMapOf<String, JSONObject>()
+
         history.forEachIndexed { historyIndex, record ->
             val status =
                 record.optString("status")
@@ -459,6 +468,38 @@ class AyanaAutonomousTestIntelligence(
                                     "интерфейс" in command
                                 )
                         )
+
+            val durationMs =
+                record.optLong("duration_ms", -1L)
+
+            if (
+                (status == STATUS_PASS || status == "SUCCESS") &&
+                isHealthyLatencyRecovery(
+                    normalizedCommand = command,
+                    durationMs = durationMs
+                )
+            ) {
+                val recoveryKey =
+                    latencyRecoveryKey(command)
+
+                if (recoveryKey.isNotBlank()) {
+                    val existing =
+                        healthyLatencyRecoveryRecords[recoveryKey]
+
+                    val existingIndex =
+                        existing?.optInt("index", Int.MAX_VALUE)
+                            ?: Int.MAX_VALUE
+
+                    if (historyIndex < existingIndex) {
+                        healthyLatencyRecoveryRecords[recoveryKey] =
+                            JSONObject()
+                                .put("index", historyIndex)
+                                .put("history_id", record.optString("id"))
+                                .put("duration_ms", durationMs)
+                                .put("status", status)
+                    }
+                }
+            }
 
             if (
                 (status == STATUS_PASS || status == "SUCCESS") &&
@@ -612,6 +653,21 @@ class AyanaAutonomousTestIntelligence(
                     return@forEach
                 }
 
+                val latencyRecovery =
+                    if (kind == "latency_outlier") {
+                        healthyLatencyRecoveryRecords[
+                            latencyRecoveryKey(
+                                normalize(command)
+                            )
+                        ]
+                    } else {
+                        null
+                    }
+
+                val latencyRecoveredByNewerSuccess =
+                    latencyRecovery != null &&
+                        latencyRecovery.optInt("index", Int.MAX_VALUE) < index
+
                 val currentKindCount = anomalyKindCounts[kind] ?: 0
                 if (currentKindCount >= maxAnomaliesForKind(kind)) {
                     return@forEach
@@ -628,6 +684,10 @@ class AyanaAutonomousTestIntelligence(
                     kind == "latency_outlier" &&
                         historyAgeMs >= 0L &&
                         historyAgeMs > HISTORY_LATENCY_ACTIVE_WINDOW_MS
+
+                val recoveredLatencyEvidence =
+                    kind == "latency_outlier" &&
+                        latencyRecoveredByNewerSuccess
 
                 if (tests.length() >= MAX_GENERATED_TESTS) {
                     truncated = true
@@ -653,6 +713,24 @@ class AyanaAutonomousTestIntelligence(
                         .put("stale_historical_evidence", true)
                 }
 
+                if (recoveredLatencyEvidence) {
+                    evidence
+                        .put("warning_suppressed", true)
+                        .put("recovered_by_later_success", true)
+                        .put(
+                            "recovery_history_id",
+                            latencyRecovery?.optString("history_id").orEmpty()
+                        )
+                        .put(
+                            "recovery_duration_ms",
+                            latencyRecovery?.optLong("duration_ms", -1L) ?: -1L
+                        )
+                        .put(
+                            "recovery_record_index",
+                            latencyRecovery?.optInt("index", -1) ?: -1
+                        )
+                }
+
                 anomalies.put(
                     copyJsonObject(evidence)
                         .put("test_id", anomalyId)
@@ -662,13 +740,18 @@ class AyanaAutonomousTestIntelligence(
                     result(
                         id = anomalyId,
                         title =
-                            if (staleLatencyEvidence) {
-                                "Historical latency evidence freshness"
-                            } else {
-                                anomaly.optString("title", "History anomaly candidate")
+                            when {
+                                recoveredLatencyEvidence ->
+                                    "Historical latency recovery evidence"
+
+                                staleLatencyEvidence ->
+                                    "Historical latency evidence freshness"
+
+                                else ->
+                                    anomaly.optString("title", "History anomaly candidate")
                             },
                         status =
-                            if (staleLatencyEvidence) {
+                            if (staleLatencyEvidence || recoveredLatencyEvidence) {
                                 STATUS_PASS
                             } else {
                                 STATUS_WARNING
@@ -676,16 +759,26 @@ class AyanaAutonomousTestIntelligence(
                         critical = false,
                         verified = true,
                         message =
-                            if (staleLatencyEvidence) {
-                                "Historical latency outlier retained as evidence but is outside the active current-health window."
-                            } else {
-                                anomaly.optString("message")
+                            when {
+                                recoveredLatencyEvidence ->
+                                    "Historical latency outlier retained as evidence; a newer successful run of the same command completed within its normal latency budget."
+
+                                staleLatencyEvidence ->
+                                    "Historical latency outlier retained as evidence but is outside the active current-health window."
+
+                                else ->
+                                    anomaly.optString("message")
                             },
                         evidenceScope =
-                            if (staleLatencyEvidence) {
-                                "self_directed_history_mining_stale_evidence"
-                            } else {
-                                "self_directed_history_mining"
+                            when {
+                                recoveredLatencyEvidence ->
+                                    "self_directed_history_mining_recovered_evidence"
+
+                                staleLatencyEvidence ->
+                                    "self_directed_history_mining_stale_evidence"
+
+                                else ->
+                                    "self_directed_history_mining"
                             },
                         evidence = evidence
                     )
@@ -693,7 +786,7 @@ class AyanaAutonomousTestIntelligence(
                 generated++
                 historyTests++
 
-                if (!staleLatencyEvidence) {
+                if (!staleLatencyEvidence && !recoveredLatencyEvidence) {
                     hypotheses.put(
                         JSONObject()
                             .put("id", "HYP-${shortId(anomalyId)}")
@@ -1147,6 +1240,30 @@ class AyanaAutonomousTestIntelligence(
         return anomalies
     }
 
+    private fun latencyRecoveryKey(
+        normalizedCommand: String
+    ): String =
+        normalize(normalizedCommand)
+
+    private fun isHealthyLatencyRecovery(
+        normalizedCommand: String,
+        durationMs: Long
+    ): Boolean {
+        if (durationMs < 0L) {
+            return false
+        }
+
+        return if (
+            isExpectedLongDiagnosticCommand(
+                normalizedCommand
+            )
+        ) {
+            durationMs < DIAGNOSTIC_HARD_WARNING_MS
+        } else {
+            durationMs < HISTORY_SLOW_WARNING_MS
+        }
+    }
+
     private fun historyRecordAgeMs(
         record: JSONObject,
         nowMs: Long
@@ -1302,7 +1419,7 @@ class AyanaAutonomousTestIntelligence(
     }
 
     companion object {
-        const val ENGINE_VERSION = "1.7"
+        const val ENGINE_VERSION = "1.8"
 
         private const val STATUS_PASS = "PASS"
         private const val STATUS_WARNING = "WARNING"
