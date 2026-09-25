@@ -61,6 +61,17 @@ import kotlin.math.abs
 
 class AyanaVoiceService : Service() {
 
+    // AYANA v12.25.4 / R9.3.4 APP INTEGRATION DEVICE ACCEPTANCE.
+    // Builds only on DEVICE-CONFIRMED R9.3.3.
+    // - adds one bounded, navigation-only device probe for the five R9.3 app domains;
+    // - checks My Files open, Gallery open, YouTube search, Browser URL and Calendar draft;
+    // - restores AYANA to the foreground after every step and preserves the current AYANA page;
+    // - calendar probe remains draft-only and never presses Save or claims persistence;
+    // - no send/delete/payment/account mutation authority is added;
+    // - full diagnostics only validates the probe contract; real app switching runs only on
+    //   the explicit user command «проверь интеграции приложений».
+    // ORB, visualizer, MainActivity, Worker, Accessibility and Personal Search remain unchanged.
+    //
     // AYANA v12.25.3 / R9.3.3 INFORMATIONAL TERMINAL RECONCILIATION.
     // Builds only on the R9.3.2 candidate over DEVICE-CONFIRMED R9.2.1.
     // - verified informational finals cannot be downgraded by a contradictory
@@ -567,6 +578,14 @@ class AyanaVoiceService : Service() {
     // VoiceService remains the only Android executor and verifier.
     private val appIntegrationRegistry by lazy {
         AyanaAppIntegrationRegistry()
+    }
+
+    // R9.3.4 targeted real-device acceptance for the five registered app domains.
+    // The provider is pure orchestration; Android dispatch/foreground truth stays here.
+    private val appIntegrationDeviceProbe by lazy {
+        AyanaAppIntegrationDeviceProbe(
+            appIntegrationRegistry
+        )
     }
 
     private val capabilityRegistry by lazy {
@@ -4150,6 +4169,21 @@ mainHandler.post {
                     return
                 }
             }
+
+        // R9.3.4 APP INTEGRATION DEVICE ACCEPTANCE.
+        // One explicit command performs all five real navigation handoffs and restores
+        // AYANA after every step. It is intentionally separate from full diagnostics so
+        // ordinary acceptance runs do not unexpectedly switch windows five times.
+        if (
+            isAppIntegrationDeviceAcceptanceCommand(
+                routingNormalized
+            )
+        ) {
+            runLocalAppIntegrationDeviceAcceptance(
+                silent = silent
+            )
+            return
+        }
 
         // R9.3 APP INTEGRATION FRAMEWORK — deterministic app actions before
         // generic lifecycle/Agent Core routing. Personal Search already had priority
@@ -11593,6 +11627,376 @@ respondAndResume(
                 silent,
                 success = false
             )
+        }
+    }
+
+    private fun isAppIntegrationDeviceAcceptanceCommand(
+        value: String
+    ): Boolean {
+        val normalized =
+            value
+                .trim()
+                .lowercase(Locale.ROOT)
+                .replace('ё', 'е')
+                .replace(Regex("\\s+"), " ")
+
+        return normalized in
+            setOf(
+                "проверь интеграции приложений",
+                "проверь интеграции приложений ayana",
+                "протестируй интеграции приложений",
+                "протестируй интеграции приложений ayana",
+                "проверь app integration",
+                "протестируй app integration",
+                "проверь работу ayana с приложениями",
+                "протестируй работу ayana с приложениями"
+            )
+    }
+
+    private fun runLocalAppIntegrationDeviceAcceptance(
+        silent: Boolean
+    ) {
+        executionPhase(
+            phase = "app_integration_device_acceptance",
+            executor = "app_integration_device_probe"
+        )
+
+        val commandToken =
+            activeCommandToken
+
+        val originalPage =
+            currentAyanaPageKeyForAppIntegrationProbe()
+
+        val worker =
+            thread(
+                start = false,
+                name = "AyanaAppIntegrationDeviceProbe"
+            ) {
+                try {
+                    val report =
+                        appIntegrationDeviceProbe.run(
+                            execute = { step ->
+                                if (
+                                    isCommandCancelled(commandToken) ||
+                                    commandToken != activeCommandToken
+                                ) {
+                                    JSONObject()
+                                        .put("success", false)
+                                        .put("verified", false)
+                                        .put("terminal_status", "CANCELLED")
+                                        .put("message", "Команда отменена до следующего app-action.")
+                                } else {
+                                    commandHistoryStore.addEvent(
+                                        activeCommandHistoryId,
+                                        state = "app_integration_device_probe_step",
+                                        message = "Проверка ${step.key}",
+                                        details =
+                                            "app=${step.appKey}; action=${step.actionKey}; phase=dispatch"
+                                    )
+
+                                    val stepResult =
+                                        executeAppIntegrationAction(
+                                            appKey = step.appKey,
+                                            actionKey = step.actionKey,
+                                            payload = step.payload
+                                        )
+
+                                    commandHistoryStore.addEvent(
+                                        activeCommandHistoryId,
+                                        state = "app_integration_device_probe_step_result",
+                                        message =
+                                            "${step.key}: ${
+                                                if (
+                                                    stepResult.optBoolean("success", false) &&
+                                                    stepResult.optBoolean("verified", false)
+                                                ) {
+                                                    "PASS"
+                                                } else {
+                                                    "FAIL"
+                                                }
+                                            }",
+                                        details =
+                                            stepResult
+                                                .toString()
+                                                .take(2200)
+                                    )
+
+                                    stepResult
+                                }
+                            },
+                            restore = { step ->
+                                restoreAyanaAfterAppIntegrationProbe(
+                                    pageKey = originalPage,
+                                    stepKey = step.key
+                                )
+                            },
+                            shouldCancel = {
+                                isCommandCancelled(commandToken) ||
+                                    commandToken != activeCommandToken ||
+                                    Thread.currentThread().isInterrupted
+                            }
+                        )
+
+                    if (
+                        report.optBoolean(
+                            "cancelled",
+                            false
+                        ) ||
+                        isCommandCancelled(commandToken) ||
+                        commandToken != activeCommandToken
+                    ) {
+                        return@thread
+                    }
+
+                    val success =
+                        report.optBoolean(
+                            "success",
+                            false
+                        ) &&
+                            report.optBoolean(
+                                "verified",
+                                false
+                            )
+
+                    val resultText =
+                        renderAppIntegrationDeviceProbeSummary(
+                            report
+                        )
+
+                    val technical =
+                        buildString {
+                            append("app_integration_device_probe=")
+                            append(AyanaAppIntegrationDeviceProbe.VERSION)
+                            append("; passed=")
+                            append(report.optInt("passed", 0))
+                            append("/")
+                            append(report.optInt("steps_total", 0))
+                            append("; failed=")
+                            append(report.optInt("failed", 0))
+                            append("; duration_ms=")
+                            append(report.optLong("duration_ms", 0L))
+                            append("; mutation_committed_detected=")
+                            append(
+                                report.optBoolean(
+                                    "mutation_committed_detected",
+                                    false
+                                )
+                            )
+                            append("; report=")
+                            append(
+                                report
+                                    .toString()
+                                    .take(3600)
+                            )
+                        }
+
+                    commandHistoryStore.addEvent(
+                        activeCommandHistoryId,
+                        state = "app_integration_device_probe_complete",
+                        message =
+                            if (success) {
+                                "Пять app-integration device checks подтверждены"
+                            } else {
+                                "App-integration device acceptance обнаружил отклонения"
+                            },
+                        details = technical.take(4200)
+                    )
+
+                    mainHandler.post {
+                        if (
+                            isCommandCancelled(commandToken) ||
+                            commandToken != activeCommandToken
+                        ) {
+                            return@post
+                        }
+
+                        respondAndResume(
+                            text = resultText,
+                            silent = silent,
+                            success = success,
+                            technical = technical
+                        )
+                    }
+                } finally {
+                    if (
+                        Thread.currentThread() ===
+                        currentAgentThread
+                    ) {
+                        currentAgentThread =
+                            null
+                    }
+                }
+            }
+
+        currentAgentThread =
+            worker
+
+        executionKernel
+            .bindThread(
+                worker
+            )
+
+        worker.start()
+    }
+
+    private fun currentAyanaPageKeyForAppIntegrationProbe(): String =
+        try {
+            getSharedPreferences(
+                MainActivity.UI_STATE_PREFS,
+                Context.MODE_PRIVATE
+            )
+                .getString(
+                    MainActivity.UI_STATE_CURRENT_PAGE,
+                    ""
+                )
+                .orEmpty()
+                .trim()
+        } catch (_: Exception) {
+            ""
+        }
+
+    private fun restoreAyanaAfterAppIntegrationProbe(
+        pageKey: String,
+        stepKey: String
+    ): JSONObject {
+        var dispatched =
+            false
+
+        var dispatchError =
+            ""
+
+        try {
+            startActivity(
+                Intent(
+                    this,
+                    MainActivity::class.java
+                ).apply {
+                    if (
+                        pageKey.isNotBlank()
+                    ) {
+                        putExtra(
+                            MainActivity.EXTRA_OPEN_PAGE,
+                            pageKey
+                        )
+                    }
+
+                    addFlags(
+                        Intent.FLAG_ACTIVITY_NEW_TASK or
+                            Intent.FLAG_ACTIVITY_CLEAR_TOP or
+                            Intent.FLAG_ACTIVITY_SINGLE_TOP
+                    )
+                }
+            )
+
+            dispatched =
+                true
+        } catch (error: Exception) {
+            dispatchError =
+                error.message
+                    ?: error.javaClass.simpleName
+        }
+
+        val observed =
+            if (dispatched) {
+                waitForForegroundPackage(
+                    expectedPackage = packageName,
+                    timeoutMs = APP_INTEGRATION_PROBE_RESTORE_TIMEOUT_MS
+                )
+            } else {
+                currentForegroundPackage()
+            }
+
+        val verified =
+            dispatched &&
+                observed ==
+                packageName
+
+        return JSONObject()
+            .put("success", verified)
+            .put("verified", verified)
+            .put(
+                "terminal_status",
+                if (verified) {
+                    "SUCCESS"
+                } else {
+                    "ERROR"
+                }
+            )
+            .put("step_key", stepKey)
+            .put("action_dispatched", dispatched)
+            .put("target_package", packageName)
+            .put("observed_package", observed)
+            .put("requested_page", pageKey)
+            .put(
+                "dispatch_error",
+                dispatchError.take(400)
+            )
+    }
+
+    private fun renderAppIntegrationDeviceProbeSummary(
+        report: JSONObject
+    ): String {
+        val passed =
+            report.optInt(
+                "passed",
+                0
+            )
+
+        val total =
+            report.optInt(
+                "steps_total",
+                AyanaAppIntegrationDeviceProbe.EXPECTED_STEP_COUNT
+            )
+
+        val failedKeys =
+            mutableListOf<String>()
+
+        val results =
+            report.optJSONArray(
+                "results"
+            ) ?: JSONArray()
+
+        for (
+            index in
+            0 until results.length()
+        ) {
+            val item =
+                results.optJSONObject(index)
+                    ?: continue
+
+            if (
+                !item.optBoolean(
+                    "success",
+                    false
+                )
+            ) {
+                failedKeys +=
+                    item
+                        .optString(
+                            "key",
+                            "step_${index + 1}"
+                        )
+            }
+        }
+
+        return if (
+            report.optBoolean(
+                "success",
+                false
+            )
+        ) {
+            "Интеграции приложений проверены на планшете: $passed/$total PASS. " +
+                "Мои файлы, Галерея, поиск YouTube, браузер и черновик Календаря подтверждены; " +
+                "AYANA возвращена на передний план после каждого шага. " +
+                "Событие календаря не сохранялось."
+        } else {
+            "Проверка интеграций приложений завершена: $passed/$total PASS. " +
+                "Не подтверждены: ${
+                    failedKeys
+                        .joinToString(", ")
+                        .ifBlank { "неизвестный шаг" }
+                }. " +
+                "Постоянные изменения не выполнялись; событие календаря не сохранялось."
         }
     }
 
@@ -21519,6 +21923,64 @@ append(index + 1)
                     .put("file_photo_search_delegated_to_personal_search", true)
                     .put("calendar_event_commit_claimed", false)
                     .put("autonomous_mutation_actions", 0)
+        )
+
+        val appIntegrationDeviceProbeOk =
+            try {
+                appIntegrationDeviceProbe.selfTest() &&
+                    isAppIntegrationDeviceAcceptanceCommand(
+                        "проверь интеграции приложений"
+                    ) &&
+                    !isAppIntegrationDeviceAcceptanceCommand(
+                        "открой YouTube"
+                    )
+            } catch (_: Exception) {
+                false
+            }
+
+        add(
+            id = "R9-FOUND-008",
+            title = "App Integration real-device acceptance orchestration contract",
+            critical = true,
+            ok = appIntegrationDeviceProbeOk,
+            message =
+                if (appIntegrationDeviceProbeOk) {
+                    "R9.3.4 defines five bounded navigation-only device checks, restores AYANA after every step and keeps Calendar draft unsaved."
+                } else {
+                    "R9.3.4 App Integration Device Probe self-test failed."
+                },
+            evidence =
+                JSONObject()
+                    .put(
+                        "version",
+                        AyanaAppIntegrationDeviceProbe.VERSION
+                    )
+                    .put(
+                        "planned_device_steps",
+                        appIntegrationDeviceProbe
+                            .plan()
+                            .size
+                    )
+                    .put(
+                        "expected_device_steps",
+                        AyanaAppIntegrationDeviceProbe.EXPECTED_STEP_COUNT
+                    )
+                    .put(
+                        "persistent_mutation_authority",
+                        false
+                    )
+                    .put(
+                        "calendar_save_claimed",
+                        false
+                    )
+                    .put(
+                        "restore_ayana_after_every_step",
+                        true
+                    )
+                    .put(
+                        "full_diagnostics_switches_external_apps",
+                        false
+                    )
         )
 
         return tests
@@ -43555,9 +44017,9 @@ state
 
     companion object {
 
-        // R9.3.3 RELEASE / FEATURE LINEAGE TRUTH.
+        // R9.3.4 RELEASE / FEATURE LINEAGE TRUTH.
         private const val AYANA_VOICE_SERVICE_RELEASE =
-            "v12.25.3 / R9.3.3 INFORMATIONAL TERMINAL RECONCILIATION"
+            "v12.25.4 / R9.3.4 APP INTEGRATION DEVICE ACCEPTANCE"
 
         private const val AYANA_PERSONAL_SEARCH_ENGINE_RELEASE =
             "v1.5.1 IMAGE COVERAGE TRUTH"
@@ -43569,13 +44031,13 @@ state
             "v11.1.10 Multi-Attachment"
 
         private const val AYANA_ACCEPTED_FEATURE_CHECKPOINT =
-            "R9.2.1 Hypothesis Reconciliation — DEVICE-CONFIRMED ACCEPTED"
+            "R9.3.3 Informational Terminal Reconciliation — DEVICE-CONFIRMED ACCEPTED"
 
         private const val AYANA_CURRENT_FEATURE_RELEASE =
-            "R9.3.3 INFORMATIONAL TERMINAL RECONCILIATION"
+            "R9.3.4 APP INTEGRATION DEVICE ACCEPTANCE"
 
         private const val AYANA_RELEASE_LINEAGE =
-            "Android v12.21.0 / R7.9 truth-hardening + R8.0 multi-attachment + R8.1–R8.4 accepted Personal Global Search stack + R8.5–R8.5.4 capability/evidence truth + R9.0 autonomous agent foundation + R9.0.1 history live-refresh proof fix + R9.0.2 diagnostic reconciliation/history refresh fix + R9.0.3 TTS health reconciliation + R9.1 IME perception/active telemetry truth + R9.2 autonomous recovery/long-task reconciliation + R9.2.1 adaptive hypothesis reconciliation + R9.3 app integration framework + R9.3.1 screen health reconciliation + R9.3.2 history latency recovery reconciliation + R9.3.3 informational terminal reconciliation"
+            "Android v12.21.0 / R7.9 truth-hardening + R8.0 multi-attachment + R8.1–R8.4 accepted Personal Global Search stack + R8.5–R8.5.4 capability/evidence truth + R9.0 autonomous agent foundation + R9.0.1 history live-refresh proof fix + R9.0.2 diagnostic reconciliation/history refresh fix + R9.0.3 TTS health reconciliation + R9.1 IME perception/active telemetry truth + R9.2 autonomous recovery/long-task reconciliation + R9.2.1 adaptive hypothesis reconciliation + R9.3 app integration framework + R9.3.1 screen health reconciliation + R9.3.2 history latency recovery reconciliation + R9.3.3 informational terminal reconciliation + R9.3.4 app integration device acceptance"
 
         // AyanaCommandHistoryStore v2.8 keeps up to 4k chars inline and stores longer
         // results out-of-line. Self-review intentionally remains inline so copied History
@@ -43603,6 +44065,9 @@ state
 
         private const val EXTERNAL_PROOF_RESTORE_MS =
             750L
+
+        private const val APP_INTEGRATION_PROBE_RESTORE_TIMEOUT_MS =
+            2_400L
 
         const val ACTION_START =
             "kg.autonomous.agent.action.START_AYANA"
