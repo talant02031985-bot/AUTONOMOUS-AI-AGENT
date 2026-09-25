@@ -61,6 +61,16 @@ import kotlin.math.abs
 
 class AyanaVoiceService : Service() {
 
+    // AYANA v12.25.3 / R9.3.3 INFORMATIONAL TERMINAL RECONCILIATION.
+    // Builds only on the R9.3.2 candidate over DEVICE-CONFIRMED R9.2.1.
+    // - verified informational finals cannot be downgraded by a contradictory
+    //   Worker machine ERROR when transport completion is sentinel/API verified;
+    // - explicit action commands remain fail-closed and never receive this override;
+    // - post-probe health reconciliation now accepts two independent verified Agent Core
+    //   successes (including ONLINE-001) so one specialized probe cannot manufacture stale
+    //   Agent Core/TTS NO_DATA while live Agent Core evidence exists;
+    // - R9.3.2 history latency recovery, R9.3.1 screen health and R9.3 App Integration remain unchanged.
+    //
     // AYANA v12.25.2 / R9.3.2 HISTORY LATENCY RECOVERY RECONCILIATION.
     // Builds only on the R9.3.1 candidate over DEVICE-CONFIRMED R9.2.1.
     // - ATI v1.8 retains latency outliers but closes a recent outlier as recovered
@@ -16790,6 +16800,165 @@ append(index + 1)
         }
     }
 
+
+    /**
+     * R9.3.3 informational terminal reconciliation.
+     *
+     * Worker terminal_status is authoritative for actions, but an informational
+     * final can occasionally arrive with a contradictory machine ERROR even though
+     * the response is complete, integrity-verified and contains a substantive answer.
+     * Treat only that narrow read-only contradiction as SUCCESS. Explicit action
+     * commands, incomplete responses and transport/error replies remain fail-closed.
+     */
+    private fun isClearlyInformationalAgentRequest(
+        originalCommand: String
+    ): Boolean {
+        val command =
+            normalizeRecognitionText(
+                originalCommand
+            )
+                .replace(
+                    Regex(
+                        "^(?:аяна|ayana)[\\s,.:;!?—-]+"
+                    ),
+                    ""
+                )
+                .trim()
+
+        if (command.isBlank()) {
+            return false
+        }
+
+        val questionPrefixes =
+            listOf(
+                "что ",
+                "кто ",
+                "как ",
+                "почему ",
+                "зачем ",
+                "какой ",
+                "какая ",
+                "какие ",
+                "какое ",
+                "сколько ",
+                "где ",
+                "когда "
+            )
+
+        if (
+            questionPrefixes.any { prefix ->
+                command.startsWith(prefix)
+            }
+        ) {
+            return true
+        }
+
+        return Regex(
+            "^(?:(?:подробно|кратко|простыми словами|пожалуйста)\\s+)*(?:опиши|объясни|расскажи|перечисли|сравни|проанализируй|охарактеризуй|резюмируй)(?:\\s|$)"
+        )
+            .containsMatchIn(
+                command
+            )
+    }
+
+    private fun shouldReconcileInformationalMachineError(
+        originalCommand: String,
+        response: JSONObject,
+        reply: String
+    ): Boolean {
+        if (
+            response
+                .optString(
+                    "terminal_status"
+                )
+                .uppercase(Locale.ROOT) !=
+            "ERROR"
+        ) {
+            return false
+        }
+
+        if (
+            !isClearlyInformationalAgentRequest(
+                originalCommand
+            )
+        ) {
+            return false
+        }
+
+        if (
+            response.optString("type") !=
+            "final"
+        ) {
+            return false
+        }
+
+        val completionStatus =
+            response
+                .optString(
+                    "completion_status"
+                )
+                .lowercase(Locale.ROOT)
+
+        if (
+            completionStatus.isNotBlank() &&
+            completionStatus !=
+                "completed"
+        ) {
+            return false
+        }
+
+        val completionIntegrity =
+            response
+                .optString(
+                    "completion_integrity"
+                )
+                .lowercase(Locale.ROOT)
+
+        val completionVerified =
+            completionIntegrity ==
+                "sentinel_verified" ||
+                completionIntegrity ==
+                "api_status_verified"
+
+        if (!completionVerified) {
+            return false
+        }
+
+        if (
+            response
+                .optString(
+                    "error"
+                )
+                .isNotBlank()
+        ) {
+            return false
+        }
+
+        if (
+            reply
+                .trim()
+                .length <
+            INFORMATIONAL_FINAL_MIN_REPLY_CHARS
+        ) {
+            return false
+        }
+
+        val answer =
+            normalizeRecognitionText(
+                reply
+            )
+
+        val hardFailureReply =
+            INFORMATIONAL_FINAL_HARD_FAILURE_MARKERS.any { marker ->
+                answer.startsWith(marker) ||
+                    answer.contains(
+                        " $marker"
+                    )
+            }
+
+        return !hardFailureReply
+    }
+
     /**
      * R7.9 artifact follow-up contract.
      * A request such as "создай файл TXT с готовым кодом" immediately after a
@@ -19507,9 +19676,9 @@ append(index + 1)
      * HEALTH-001 is intentionally executed near the beginning of the baseline suite,
      * while ONLINE-001..003 execute later. Those online probes use the isolated
      * acceptance transport and therefore historically did not refresh Capability
-     * Registry Agent Core health. This helper closes that temporal gap only when all
-     * three bounded online probes are PASS. It never invents PASS from reachability
-     * alone and never rewrites a failed online probe.
+     * Registry Agent Core health. R9.3.3 closes that temporal gap when ONLINE-001
+     * plus one additional independent online probe are verified PASS. It never invents
+     * PASS from reachability alone and never rewrites a failed specialized online probe.
      */
     private fun reconcileAcceptancePostProbeRuntimeTruth(
         result: JSONObject
@@ -19546,15 +19715,32 @@ append(index + 1)
                 testById(it)
             }
 
-        val allOnlinePassed =
-            onlineRows.size == onlineIds.size &&
-                onlineRows.all {
-                    it.optString("status") ==
-                        AyanaAcceptanceTestEngine.STATUS_PASS &&
-                        it.optBoolean("verified", false)
-                }
+        val verifiedOnlineRows =
+            onlineRows.filter { row ->
+                row.optString("status") ==
+                    AyanaAcceptanceTestEngine.STATUS_PASS &&
+                    row.optBoolean("verified", false)
+            }
 
-        if (!allOnlinePassed) {
+        val ordinaryOnlinePassed =
+            testById("ONLINE-001")
+                ?.let { row ->
+                    row.optString("status") ==
+                        AyanaAcceptanceTestEngine.STATUS_PASS &&
+                        row.optBoolean("verified", false)
+                } ==
+                true
+
+        // R9.3.3: health freshness is about live Agent Core availability, not
+        // whether every specialized online contract passed. Require ONLINE-001
+        // plus one additional independent verified online success. A real
+        // specialized FAIL remains visible in its own row and is never rewritten.
+        val enoughLiveAgentCoreProof =
+            ordinaryOnlinePassed &&
+                verifiedOnlineRows.size >=
+                2
+
+        if (!enoughLiveAgentCoreProof) {
             return
         }
 
@@ -19621,7 +19807,7 @@ append(index + 1)
 
             evidence
                 .put("post_probe_reconciled", true)
-                .put("agent_core_live_probe_passes", onlineRows.size)
+                .put("agent_core_live_probe_passes", verifiedOnlineRows.size)
                 .put("agent_core_reconciled_at_ms", reconciledAt)
                 .put("agent_core_reconciled_latency_ms", ordinaryElapsedMs)
 
@@ -19635,7 +19821,7 @@ append(index + 1)
             JSONObject()
                 .put(
                     "agent_core_verified_successes",
-                    onlineRows.size
+                    verifiedOnlineRows.size
                 )
                 .put(
                     "agent_core_verified_at",
@@ -19733,7 +19919,7 @@ append(index + 1)
 
         result
             .put("post_probe_health_reconciled", true)
-            .put("post_probe_agent_core_passes", onlineRows.size)
+            .put("post_probe_agent_core_passes", verifiedOnlineRows.size)
             .put("post_probe_agent_core_reconciled_at_ms", reconciledAt)
             .put(
                 "post_probe_tts_reconciliation_attempted",
@@ -23681,6 +23867,33 @@ plan.optInt(
                     "Не могу напрямую скопировать текст в буфер обмена: инструмент работы с буфером сейчас недоступен."
             )
 
+        val informationalErrorEnvelope =
+            JSONObject()
+                .put("type", "final")
+                .put("terminal_status", "ERROR")
+                .put("execution_success", false)
+                .put("completion_status", "completed")
+                .put("completion_integrity", "sentinel_verified")
+                .put("error", "")
+
+        val informationalTerminalReconciliationOk =
+            shouldReconcileInformationalMachineError(
+                originalCommand =
+                    "подробно опиши солнечную систему",
+                response = informationalErrorEnvelope,
+                reply =
+                    "Солнечная система включает Солнце, планеты, их спутники, карликовые планеты, астероиды и кометы. Это полноценный информационный ответ с подтверждённым завершением транспорта."
+            )
+
+        val actionTerminalStillFailClosed =
+            !shouldReconcileInformationalMachineError(
+                originalCommand =
+                    "открой YouTube",
+                response = informationalErrorEnvelope,
+                reply =
+                    "YouTube не удалось открыть и подтвердить на переднем плане; действие не выполнено."
+            )
+
         val unsupportedDevelopmentAction =
             unsupportedExecutionCapabilityReason(
                 "измени код AYANA в GitHub, сделай commit, запусти сборку APK и дай мне готовый APK"
@@ -23878,6 +24091,8 @@ plan.optInt(
                 clipboardRoutingOk &&
                 lifecycleSemanticObjectRejected &&
                 refusalFailClosed &&
+                informationalTerminalReconciliationOk &&
+                actionTerminalStillFailClosed &&
                 artifact &&
                 artifactSemanticContentOk &&
                 artifactFollowUpContractOk &&
@@ -23897,9 +24112,9 @@ plan.optInt(
                 },
             message =
                 if (ok) {
-                    "Whole-goal routing guard распознал lifecycle verification, App Detail final target, clipboard local route, Personal Global Search local route, semantic-object lifecycle guard, fail-closed refusal truth, artifact semantic-content gate + follow-up payload contract, pure multi-metric fast path, verified-facts reasoning handoff и artifact deliverable без greedy interception."
+                    "Whole-goal routing guard распознал lifecycle verification, App Detail final target, clipboard local route, Personal Global Search local route, semantic-object lifecycle guard, fail-closed action truth, verified informational-terminal reconciliation, artifact semantic-content gate + follow-up payload contract, pure multi-metric fast path, verified-facts reasoning handoff и artifact deliverable без greedy interception."
                 } else {
-                    "Whole-goal routing regression: lifecycle=$lifecycleOk, app_detail=$appDetailOk, metrics=$metricsOk, volume_target=$volumeTargetOk, unsupported_terminal=$unsupportedTerminalOk, clipboard_route=$clipboardRoutingOk, lifecycle_semantic_guard=$lifecycleSemanticObjectRejected, refusal_fail_closed=$refusalFailClosed, artifact=$artifact, artifact_semantic_content=$artifactSemanticContentOk, artifact_follow_up=$artifactFollowUpContractOk, personal_search_route=$personalSearchRoutingOk, artifact_metric_guard=$artifactMetricsSuppressed, mixed_metric_guard=$mixedSideEffectMetricsSuppressed, pure_metric_local=$pureMetricGoalTerminalLocal, analytical_handoff=$analyticalMetricGoalRequiresHandoff, conditional_handoff=$conditionalMetricGoalRequiresHandoff."
+                    "Whole-goal routing regression: lifecycle=$lifecycleOk, app_detail=$appDetailOk, metrics=$metricsOk, volume_target=$volumeTargetOk, unsupported_terminal=$unsupportedTerminalOk, clipboard_route=$clipboardRoutingOk, lifecycle_semantic_guard=$lifecycleSemanticObjectRejected, refusal_fail_closed=$refusalFailClosed, informational_terminal=$informationalTerminalReconciliationOk, action_terminal_fail_closed=$actionTerminalStillFailClosed, artifact=$artifact, artifact_semantic_content=$artifactSemanticContentOk, artifact_follow_up=$artifactFollowUpContractOk, personal_search_route=$personalSearchRoutingOk, artifact_metric_guard=$artifactMetricsSuppressed, mixed_metric_guard=$mixedSideEffectMetricsSuppressed, pure_metric_local=$pureMetricGoalTerminalLocal, analytical_handoff=$analyticalMetricGoalRequiresHandoff, conditional_handoff=$conditionalMetricGoalRequiresHandoff."
                 },
             evidenceScope = "live_pure_contract",
             verified = ok,
@@ -23913,6 +24128,8 @@ plan.optInt(
                     .put("clipboard_routing_ok", clipboardRoutingOk)
                     .put("lifecycle_semantic_object_guard_ok", lifecycleSemanticObjectRejected)
                     .put("agent_refusal_fail_closed_ok", refusalFailClosed)
+                    .put("informational_terminal_reconciliation_ok", informationalTerminalReconciliationOk)
+                    .put("action_terminal_still_fail_closed", actionTerminalStillFailClosed)
                     .put("artifact_ok", artifact)
                     .put("artifact_semantic_content_ok", artifactSemanticContentOk)
                     .put("artifact_follow_up_contract_ok", artifactFollowUpContractOk)
@@ -26428,15 +26645,35 @@ requestMethod = "GET"
                 "reply"
             )
 
+        val rawTerminalStatus =
+            data
+                .optString(
+                    "terminal_status"
+                )
+                .uppercase(Locale.ROOT)
+
+        val informationalTerminalReconciled =
+            shouldReconcileInformationalMachineError(
+                originalCommand =
+                    "что такое фотосинтез",
+                response = data,
+                reply = reply
+            )
+
+        val effectiveTerminalStatus =
+            if (informationalTerminalReconciled) {
+                "SUCCESS"
+            } else {
+                rawTerminalStatus
+            }
+
         val ok =
             code in 200..299 &&
                 data.optString(
                     "type"
                 ) ==
                 "final" &&
-                data.optString(
-                    "terminal_status"
-                ) ==
+                effectiveTerminalStatus ==
                 "SUCCESS" &&
                 reply.length >=
                 40
@@ -26476,9 +26713,15 @@ requestMethod = "GET"
                     )
                     .put(
                         "terminal_status",
-                        data.optString(
-                            "terminal_status"
-                        )
+                        rawTerminalStatus
+                    )
+                    .put(
+                        "effective_terminal_status",
+                        effectiveTerminalStatus
+                    )
+                    .put(
+                        "informational_terminal_reconciled",
+                        informationalTerminalReconciled
                     )
                     .put(
                         "completion_integrity",
@@ -26542,24 +26785,45 @@ requestMethod = "GET"
                 "reply"
             )
 
+        val rawTerminalStatus =
+            data
+                .optString(
+                    "terminal_status"
+                )
+                .uppercase(Locale.ROOT)
+
+        val informationalTerminalReconciled =
+            shouldReconcileInformationalMachineError(
+                originalCommand =
+                    "подробно опиши солнечную систему",
+                response = data,
+                reply = reply
+            )
+
+        val effectiveTerminalStatus =
+            if (informationalTerminalReconciled) {
+                "SUCCESS"
+            } else {
+                rawTerminalStatus
+            }
+
+        val transportCompletionVerified =
+            data.optString(
+                "completion_integrity"
+            ) ==
+                "sentinel_verified" ||
+                reply.length >=
+                    2200
+
         val ok =
             code in 200..299 &&
                 data.optString(
                     "type"
                 ) ==
                 "final" &&
-                data.optString(
-                    "terminal_status"
-                ) ==
-                "SUCCESS" &&
-                (
-                    data.optString(
-                        "completion_integrity"
-                    ) ==
-                        "sentinel_verified" ||
-                        reply.length >=
-                        2200
-                    )
+                effectiveTerminalStatus ==
+                    "SUCCESS" &&
+                transportCompletionVerified
 
         return acceptanceProbeResult(
             status =
@@ -26596,9 +26860,19 @@ requestMethod = "GET"
                     )
                     .put(
                         "terminal_status",
-                        data.optString(
-                            "terminal_status"
-                        )
+                        rawTerminalStatus
+                    )
+                    .put(
+                        "effective_terminal_status",
+                        effectiveTerminalStatus
+                    )
+                    .put(
+                        "informational_terminal_reconciled",
+                        informationalTerminalReconciled
+                    )
+                    .put(
+                        "transport_completion_verified",
+                        transportCompletionVerified
                     )
                     .put(
                         "completion_integrity",
@@ -29240,12 +29514,42 @@ val activeNetwork =
                                         "Готово."
                                     }
 
-                            val machineTerminalStatus =
+                            val rawMachineTerminalStatus =
                                 response
                                     .optString(
                                         "terminal_status"
                                     )
                                     .uppercase(Locale.ROOT)
+
+                            val informationalTerminalReconciled =
+                                lastSemanticActionResult == null &&
+                                    shouldReconcileInformationalMachineError(
+                                        originalCommand = originalGoal,
+                                        response = response,
+                                        reply = finalAnswer.orEmpty()
+                                    )
+
+                            val machineTerminalStatus =
+                                if (informationalTerminalReconciled) {
+                                    "SUCCESS"
+                                } else {
+                                    rawMachineTerminalStatus
+                                }
+
+                            if (informationalTerminalReconciled) {
+                                commandHistoryStore.addEvent(
+                                    activeCommandHistoryId,
+                                    state = "agent_informational_terminal_reconciled",
+                                    message = "Противоречивый ERROR для verified informational final согласован как SUCCESS",
+                                    details =
+                                        (
+                                            "raw_terminal=$rawMachineTerminalStatus; " +
+                                                "completion_integrity=${response.optString("completion_integrity")}; " +
+                                                "completion_status=${response.optString("completion_status")}; " +
+                                                "reply_chars=${finalAnswer?.length ?: 0}"
+                                            ).take(900)
+                                )
+                            }
 
                             when (
                                 machineTerminalStatus
@@ -29303,7 +29607,7 @@ val activeNetwork =
                                     state = "agent_machine_terminal",
                                     message = "Agent Core final получил машинный terminal status",
                                     details =
-                                        "terminal=${response.optString("terminal_status")}; reply=${finalAnswer?.take(500).orEmpty()}"
+                                        "raw_terminal=$rawMachineTerminalStatus; effective_terminal=$machineTerminalStatus; reply=${finalAnswer?.take(500).orEmpty()}"
                                 )
                             }
 
@@ -43251,9 +43555,9 @@ state
 
     companion object {
 
-        // R9.3.2 RELEASE / FEATURE LINEAGE TRUTH.
+        // R9.3.3 RELEASE / FEATURE LINEAGE TRUTH.
         private const val AYANA_VOICE_SERVICE_RELEASE =
-            "v12.25.2 / R9.3.2 HISTORY LATENCY RECOVERY RECONCILIATION"
+            "v12.25.3 / R9.3.3 INFORMATIONAL TERMINAL RECONCILIATION"
 
         private const val AYANA_PERSONAL_SEARCH_ENGINE_RELEASE =
             "v1.5.1 IMAGE COVERAGE TRUTH"
@@ -43268,10 +43572,10 @@ state
             "R9.2.1 Hypothesis Reconciliation — DEVICE-CONFIRMED ACCEPTED"
 
         private const val AYANA_CURRENT_FEATURE_RELEASE =
-            "R9.3.2 HISTORY LATENCY RECOVERY RECONCILIATION"
+            "R9.3.3 INFORMATIONAL TERMINAL RECONCILIATION"
 
         private const val AYANA_RELEASE_LINEAGE =
-            "Android v12.21.0 / R7.9 truth-hardening + R8.0 multi-attachment + R8.1–R8.4 accepted Personal Global Search stack + R8.5–R8.5.4 capability/evidence truth + R9.0 autonomous agent foundation + R9.0.1 history live-refresh proof fix + R9.0.2 diagnostic reconciliation/history refresh fix + R9.0.3 TTS health reconciliation + R9.1 IME perception/active telemetry truth + R9.2 autonomous recovery/long-task reconciliation + R9.2.1 adaptive hypothesis reconciliation + R9.3 app integration framework + R9.3.1 screen health reconciliation + R9.3.2 history latency recovery reconciliation"
+            "Android v12.21.0 / R7.9 truth-hardening + R8.0 multi-attachment + R8.1–R8.4 accepted Personal Global Search stack + R8.5–R8.5.4 capability/evidence truth + R9.0 autonomous agent foundation + R9.0.1 history live-refresh proof fix + R9.0.2 diagnostic reconciliation/history refresh fix + R9.0.3 TTS health reconciliation + R9.1 IME perception/active telemetry truth + R9.2 autonomous recovery/long-task reconciliation + R9.2.1 adaptive hypothesis reconciliation + R9.3 app integration framework + R9.3.1 screen health reconciliation + R9.3.2 history latency recovery reconciliation + R9.3.3 informational terminal reconciliation"
 
         // AyanaCommandHistoryStore v2.8 keeps up to 4k chars inline and stores longer
         // results out-of-line. Self-review intentionally remains inline so copied History
@@ -43833,6 +44137,22 @@ state
                 "нет возможности",
                 "не выполнено",
                 "не получилось"
+            )
+
+        private const val INFORMATIONAL_FINAL_MIN_REPLY_CHARS =
+            80
+
+        private val INFORMATIONAL_FINAL_HARD_FAILURE_MARKERS =
+            listOf(
+                "ошибка agent core",
+                "ошибка openai",
+                "не удалось получить ответ",
+                "ответ не завершен",
+                "ответ не завершён",
+                "response incomplete",
+                "request timeout",
+                "network error",
+                "сетевая ошибка"
             )
 
         private val LIFECYCLE_CLARIFICATION_NOISE_TOKENS =
