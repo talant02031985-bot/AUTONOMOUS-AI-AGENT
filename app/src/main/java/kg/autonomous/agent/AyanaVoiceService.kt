@@ -61,6 +61,17 @@ import kotlin.math.abs
 
 class AyanaVoiceService : Service() {
 
+    // AYANA v12.26.0 / R9.4 MULTI-APP TASK ORCHESTRATION.
+    // Builds only on DEVICE-CONFIRMED R9.3.4.
+    // - one explicit user goal can contain 2..5 registered app steps;
+    // - orchestration reuses App Integration Registry + Task Graph v2 + Durable Goal;
+    // - each step is checkpointed before/after dispatch and requires verified app evidence;
+    // - AYANA restore is part of step completion, not a cosmetic post-action;
+    // - first failed/unverified step stops the workflow; blind continuation/replay is forbidden;
+    // - Calendar remains draft-only and persistent mutation authority remains false;
+    // - safe automatic restart is intentionally disabled for this first R9.4 release.
+    // ORB, visualizer, MainActivity, Worker, Accessibility and Personal Search remain unchanged.
+    //
     // AYANA v12.25.4 / R9.3.4 APP INTEGRATION DEVICE ACCEPTANCE.
     // Builds only on DEVICE-CONFIRMED R9.3.3.
     // - adds one bounded, navigation-only device probe for the five R9.3 app domains;
@@ -584,6 +595,14 @@ class AyanaVoiceService : Service() {
     // The provider is pure orchestration; Android dispatch/foreground truth stays here.
     private val appIntegrationDeviceProbe by lazy {
         AyanaAppIntegrationDeviceProbe(
+            appIntegrationRegistry
+        )
+    }
+
+    // R9.4 MULTI-APP TASK ORCHESTRATION. Pure planner/execution ledger; Android
+    // dispatch stays in VoiceService and every action reuses the R9.3 registry.
+    private val multiAppTaskOrchestrator by lazy {
+        AyanaMultiAppTaskOrchestrator(
             appIntegrationRegistry
         )
     }
@@ -4169,6 +4188,18 @@ mainHandler.post {
                     return
                 }
             }
+
+        // R9.4 MULTI-APP TASK ORCHESTRATION.
+        // Claims only explicit 2..5-step registered app commands (or the dedicated R9.4
+        // acceptance command). Single-app commands remain owned by the existing R9.3 route.
+        if (
+            runLocalMultiAppTaskCommand(
+                command = originalCommand,
+                silent = silent
+            )
+        ) {
+            return
+        }
 
         // R9.3.4 APP INTEGRATION DEVICE ACCEPTANCE.
         // One explicit command performs all five real navigation handoffs and restores
@@ -11997,6 +12028,349 @@ respondAndResume(
                         .ifBlank { "неизвестный шаг" }
                 }. " +
                 "Постоянные изменения не выполнялись; событие календаря не сохранялось."
+        }
+    }
+
+    private fun runLocalMultiAppTaskCommand(
+        command: String,
+        silent: Boolean
+    ): Boolean {
+        val plan =
+            multiAppTaskOrchestrator
+                .parse(command)
+                ?: return false
+
+        executionPhase(
+            phase = "multi_app_task_orchestration",
+            executor = "multi_app_task_orchestrator"
+        )
+
+        val commandToken =
+            activeCommandToken
+
+        val originalPage =
+            currentAyanaPageKeyForAppIntegrationProbe()
+
+        val worker =
+            thread(
+                start = false,
+                name = "AyanaMultiAppTaskOrchestrator"
+            ) {
+                var goalId: String? = null
+
+                try {
+                    val durable =
+                        durableGoalStore.startGoal(
+                            command = plan.originalCommand,
+                            source = if (silent) "text" else "voice",
+                            mode = AyanaDurableGoalStore.MODE_ORCHESTRATOR,
+                            safeAutoResume = false
+                        )
+
+                    goalId =
+                        durable
+                            .optString("id")
+                            .trim()
+                            .takeIf { it.isNotBlank() }
+
+                    currentDurableGoalId =
+                        goalId
+
+                    val envelope =
+                        multiAppTaskOrchestrator
+                            .plannerEnvelope(plan)
+
+                    durableGoalStore
+                        .attachPlannerEnvelope(
+                            goalId,
+                            envelope
+                        )
+
+                    val taskGraph =
+                        AyanaAutonomousTaskGraph.create(
+                            goal = plan.originalCommand,
+                            plannerEnvelope = envelope
+                        )
+
+                    durableGoalStore.checkpoint(
+                        goalId,
+                        JSONObject()
+                            .put(
+                                "task_graph",
+                                taskGraph.persistenceSnapshot()
+                            )
+                            .put("safe_auto_resume", false)
+                            .put("last_checkpoint", "r9_4_multi_app_started")
+                    )
+
+                    commandHistoryStore.addEvent(
+                        activeCommandHistoryId,
+                        state = "multi_app_task_started",
+                        message =
+                            "R9.4 Multi-App Task Orchestrator запущен: ${plan.steps.size} шага",
+                        details =
+                            "goal_id=${goalId.orEmpty()}; plan=${plan.key}; " +
+                                "source=${plan.source}; graph=${taskGraph.compactSummary()}"
+                    )
+
+                    val report =
+                        multiAppTaskOrchestrator.run(
+                            plan = plan,
+                            taskGraph = taskGraph,
+                            execute = { step ->
+                                if (
+                                    isCommandCancelled(commandToken) ||
+                                    commandToken != activeCommandToken
+                                ) {
+                                    JSONObject()
+                                        .put("success", false)
+                                        .put("verified", false)
+                                        .put("terminal_status", "CANCELLED")
+                                        .put("action_dispatched", false)
+                                        .put("message", "Команда отменена до следующего app-step.")
+                                } else {
+                                    commandHistoryStore.addEvent(
+                                        activeCommandHistoryId,
+                                        state = "multi_app_task_step",
+                                        message =
+                                            "Шаг ${step.appKey}:${step.actionKey}",
+                                        details =
+                                            "payload=${step.payload.take(260)}; phase=dispatch"
+                                    )
+
+                                    executeAppIntegrationAction(
+                                        appKey = step.appKey,
+                                        actionKey = step.actionKey,
+                                        payload = step.payload
+                                    )
+                                }
+                            },
+                            restore = { step ->
+                                restoreAyanaAfterAppIntegrationProbe(
+                                    pageKey = originalPage,
+                                    stepKey = step.key
+                                )
+                            },
+                            checkpoint = { phase, index, step, evidence ->
+                                val graphSnapshot =
+                                    evidence
+                                        .optJSONObject("task_graph")
+                                        ?: taskGraph.persistenceSnapshot()
+
+                                durableGoalStore.checkpoint(
+                                    goalId,
+                                    JSONObject()
+                                        .put("task_graph", graphSnapshot)
+                                        .put("safe_auto_resume", false)
+                                        .put(
+                                            "last_checkpoint",
+                                            "r9_4_${phase.take(60)}"
+                                        )
+                                        .put(
+                                            "last_tool_name",
+                                            if (step == null) {
+                                                "multi_app_orchestrator"
+                                            } else {
+                                                "app_integration:${step.appKey}:${step.actionKey}"
+                                            }
+                                        )
+                                        .put(
+                                            "last_result",
+                                            evidence
+                                                .toString()
+                                                .take(1400)
+                                        )
+                                )
+
+                                commandHistoryStore.addEvent(
+                                    activeCommandHistoryId,
+                                    state = "multi_app_task_checkpoint",
+                                    message =
+                                        "R9.4 checkpoint: $phase",
+                                    details =
+                                        "goal_id=${goalId.orEmpty()}; index=$index; " +
+                                            "step=${step?.key.orEmpty()}"
+                                )
+                            },
+                            shouldCancel = {
+                                isCommandCancelled(commandToken) ||
+                                    commandToken != activeCommandToken ||
+                                    Thread.currentThread().isInterrupted
+                            }
+                        )
+
+                    val cancelled =
+                        report.optBoolean("cancelled", false) ||
+                            isCommandCancelled(commandToken) ||
+                            commandToken != activeCommandToken
+
+                    val success =
+                        !cancelled &&
+                            report.optBoolean("success", false) &&
+                            report.optBoolean("verified", false)
+
+                    when {
+                        cancelled ->
+                            durableGoalStore.markCancelled(
+                                goalId,
+                                "R9.4 multi-app task cancelled"
+                            )
+
+                        success ->
+                            durableGoalStore.markCompleted(
+                                goalId,
+                                "R9.4 verified multi-app task ${report.optInt("passed", 0)}/${report.optInt("steps_total", 0)}"
+                            )
+
+                        report.optBoolean("mutation_committed_detected", false) ||
+                            report.optString("terminal_status") == "PAUSED" ->
+                            durableGoalStore.markPaused(
+                                goalId,
+                                "R9.4 stopped on uncertain/unexpected side effect; blind replay blocked"
+                            )
+
+                        else ->
+                            durableGoalStore.markFailed(
+                                goalId,
+                                "R9.4 multi-app step failed verification"
+                            )
+                    }
+
+                    if (cancelled) {
+                        return@thread
+                    }
+
+                    val resultText =
+                        renderMultiAppTaskSummary(
+                            report = report,
+                            acceptanceProbe = plan.acceptanceProbe
+                        )
+
+                    val technical =
+                        buildString {
+                            append("multi_app_orchestrator=")
+                            append(AyanaMultiAppTaskOrchestrator.VERSION)
+                            append("; goal_id=")
+                            append(goalId.orEmpty())
+                            append("; passed=")
+                            append(report.optInt("passed", 0))
+                            append("/")
+                            append(report.optInt("steps_total", 0))
+                            append("; failed=")
+                            append(report.optInt("failed", 0))
+                            append("; terminal=")
+                            append(report.optString("terminal_status"))
+                            append("; mutation_committed_detected=")
+                            append(report.optBoolean("mutation_committed_detected", false))
+                            append("; restore_failure_detected=")
+                            append(report.optBoolean("restore_failure_detected", false))
+                            append("; report=")
+                            append(report.toString().take(4200))
+                        }
+
+                    commandHistoryStore.addEvent(
+                        activeCommandHistoryId,
+                        state = "multi_app_task_complete",
+                        message =
+                            if (success) {
+                                "R9.4 multi-app task подтверждена"
+                            } else {
+                                "R9.4 multi-app task остановлена fail-closed"
+                            },
+                        details = technical.take(4600)
+                    )
+
+                    mainHandler.post {
+                        if (
+                            isCommandCancelled(commandToken) ||
+                            commandToken != activeCommandToken
+                        ) {
+                            return@post
+                        }
+
+                        respondAndResume(
+                            text = resultText,
+                            silent = silent,
+                            success = success,
+                            technical = technical
+                        )
+                    }
+                } catch (error: Exception) {
+                    try {
+                        durableGoalStore.markFailed(
+                            goalId,
+                            "R9.4 orchestrator exception: ${error.message ?: error.javaClass.simpleName}"
+                        )
+                    } catch (_: Exception) {
+                    }
+
+                    mainHandler.post {
+                        if (
+                            !isCommandCancelled(commandToken) &&
+                            commandToken == activeCommandToken
+                        ) {
+                            respondAndResume(
+                                text = "Многошаговая задача остановлена: внутренний orchestrator не смог подтвердить безопасное продолжение.",
+                                silent = silent,
+                                success = false,
+                                technical =
+                                    "multi_app_orchestrator=${AyanaMultiAppTaskOrchestrator.VERSION}; " +
+                                        "error=${(error.message ?: error.javaClass.simpleName).take(500)}"
+                            )
+                        }
+                    }
+                } finally {
+                    if (
+                        currentDurableGoalId == goalId
+                    ) {
+                        currentDurableGoalId = null
+                    }
+
+                    if (
+                        Thread.currentThread() ===
+                        currentAgentThread
+                    ) {
+                        currentAgentThread = null
+                    }
+                }
+            }
+
+        currentAgentThread =
+            worker
+
+        executionKernel
+            .bindThread(worker)
+
+        worker.start()
+        return true
+    }
+
+    private fun renderMultiAppTaskSummary(
+        report: JSONObject,
+        acceptanceProbe: Boolean
+    ): String {
+        val passed = report.optInt("passed", 0)
+        val total = report.optInt("steps_total", 0)
+        val failed = report.optInt("failed", 0)
+        val terminal = report.optString("terminal_status")
+
+        return if (
+            report.optBoolean("success", false) &&
+            report.optBoolean("verified", false)
+        ) {
+            if (acceptanceProbe) {
+                "Многошаговая работа приложений подтверждена: $passed/$total PASS. " +
+                    "Браузер, YouTube и черновик Календаря выполнены одной задачей; " +
+                    "после каждого шага AYANA возвращена на передний план. " +
+                    "Событие календаря не сохранялось."
+            } else {
+                "Многошаговая задача выполнена и подтверждена: $passed/$total шага. " +
+                    "Каждый переход приложения проверен, AYANA возвращена после каждого шага; " +
+                    "постоянные изменения не выполнялись."
+            }
+        } else {
+            "Многошаговая задача остановлена: подтверждено $passed/$total, ошибок=$failed, terminal=$terminal. " +
+                "AYANA не продолжила выполнение после неподтверждённого шага и не повторяла действие вслепую."
         }
     }
 
@@ -21981,6 +22355,37 @@ append(index + 1)
                         "full_diagnostics_switches_external_apps",
                         false
                     )
+        )
+
+        val multiAppOrchestratorOk =
+            try {
+                multiAppTaskOrchestrator.selfTest()
+            } catch (_: Exception) {
+                false
+            }
+
+        add(
+            id = "R9-FOUND-009",
+            title = "Multi-App Task Graph / Durable Goal orchestration contract",
+            critical = true,
+            ok = multiAppOrchestratorOk,
+            message =
+                if (multiAppOrchestratorOk) {
+                    "R9.4 parses explicit 2..5-step app goals, checkpoints through Task Graph/Durable Goal, restores AYANA after every verified step and forbids blind continuation."
+                } else {
+                    "R9.4 Multi-App Task Orchestrator self-test failed."
+                },
+            evidence =
+                JSONObject()
+                    .put("version", AyanaMultiAppTaskOrchestrator.VERSION)
+                    .put("max_steps", AyanaMultiAppTaskOrchestrator.MAX_STEPS)
+                    .put("acceptance_steps", AyanaMultiAppTaskOrchestrator.ACCEPTANCE_STEP_COUNT)
+                    .put("task_graph_version", AyanaAutonomousTaskGraph.VERSION)
+                    .put("durable_goal_checkpointing", true)
+                    .put("safe_auto_resume", false)
+                    .put("blind_replay_allowed", false)
+                    .put("restore_ayana_after_every_step", true)
+                    .put("persistent_mutation_authority", false)
         )
 
         return tests
@@ -44017,9 +44422,9 @@ state
 
     companion object {
 
-        // R9.3.4 RELEASE / FEATURE LINEAGE TRUTH.
+        // R9.4 RELEASE / FEATURE LINEAGE TRUTH.
         private const val AYANA_VOICE_SERVICE_RELEASE =
-            "v12.25.4 / R9.3.4 APP INTEGRATION DEVICE ACCEPTANCE"
+            "v12.26.0 / R9.4 MULTI-APP TASK ORCHESTRATION"
 
         private const val AYANA_PERSONAL_SEARCH_ENGINE_RELEASE =
             "v1.5.1 IMAGE COVERAGE TRUTH"
@@ -44031,13 +44436,13 @@ state
             "v11.1.10 Multi-Attachment"
 
         private const val AYANA_ACCEPTED_FEATURE_CHECKPOINT =
-            "R9.3.3 Informational Terminal Reconciliation — DEVICE-CONFIRMED ACCEPTED"
+            "R9.3.4 App Integration Device Acceptance — DEVICE-CONFIRMED ACCEPTED"
 
         private const val AYANA_CURRENT_FEATURE_RELEASE =
-            "R9.3.4 APP INTEGRATION DEVICE ACCEPTANCE"
+            "R9.4 MULTI-APP TASK ORCHESTRATION"
 
         private const val AYANA_RELEASE_LINEAGE =
-            "Android v12.21.0 / R7.9 truth-hardening + R8.0 multi-attachment + R8.1–R8.4 accepted Personal Global Search stack + R8.5–R8.5.4 capability/evidence truth + R9.0 autonomous agent foundation + R9.0.1 history live-refresh proof fix + R9.0.2 diagnostic reconciliation/history refresh fix + R9.0.3 TTS health reconciliation + R9.1 IME perception/active telemetry truth + R9.2 autonomous recovery/long-task reconciliation + R9.2.1 adaptive hypothesis reconciliation + R9.3 app integration framework + R9.3.1 screen health reconciliation + R9.3.2 history latency recovery reconciliation + R9.3.3 informational terminal reconciliation + R9.3.4 app integration device acceptance"
+            "Android v12.21.0 / R7.9 truth-hardening + R8.0 multi-attachment + R8.1–R8.4 accepted Personal Global Search stack + R8.5–R8.5.4 capability/evidence truth + R9.0 autonomous agent foundation + R9.0.1 history live-refresh proof fix + R9.0.2 diagnostic reconciliation/history refresh fix + R9.0.3 TTS health reconciliation + R9.1 IME perception/active telemetry truth + R9.2 autonomous recovery/long-task reconciliation + R9.2.1 adaptive hypothesis reconciliation + R9.3 app integration framework + R9.3.1 screen health reconciliation + R9.3.2 history latency recovery reconciliation + R9.3.3 informational terminal reconciliation + R9.3.4 app integration device acceptance + R9.4 multi-app task orchestration"
 
         // AyanaCommandHistoryStore v2.8 keeps up to 4k chars inline and stores longer
         // results out-of-line. Self-review intentionally remains inline so copied History
