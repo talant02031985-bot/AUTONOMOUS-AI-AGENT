@@ -61,6 +61,18 @@ import kotlin.math.abs
 
 class AyanaVoiceService : Service() {
 
+    // AYANA v12.27.0 / R9.5 VERIFIED RESULT TRANSFER BETWEEN APP STEPS.
+    // Builds only on DEVICE-CONFIRMED R9.4.1.
+    // - provenance-bound Result Transfer v1.0 can carry only verified fields/content;
+    // - screen-derived transfer requires exact foreground package + readable content;
+    // - Multi-App Task Orchestrator v1.1 binds consumer payloads only from verified records;
+    // - capture/binding failure stops before the next app action; no guessed/stale payload is used;
+    // - dedicated device acceptance observes Example Domain in Browser, transfers the verified
+    //   marker to YouTube search and an unsaved Calendar draft;
+    // - Task Graph/Durable Goal checkpoints persist transfer evidence and fingerprint;
+    // - no mutation/replay/auto-resume authority is added.
+    // ORB, visualizer, Worker, MainActivity, Personal Search and Accessibility untouched.
+    //
     // AYANA v12.26.1 / R9.4.1 SCREEN OWNERSHIP UNION RECONCILIATION.
     // Builds only on R9.4 candidate over DEVICE-CONFIRMED R9.3.4.
     // - Self-Diagnostics v4.3 starts one bounded own-app screen retry when either
@@ -608,11 +620,18 @@ class AyanaVoiceService : Service() {
         )
     }
 
-    // R9.4 MULTI-APP TASK ORCHESTRATION. Pure planner/execution ledger; Android
-    // dispatch stays in VoiceService and every action reuses the R9.3 registry.
+    // R9.5 VERIFIED RESULT TRANSFER. Pure provenance/binding layer; it does not
+    // dispatch Android actions and cannot promote unverified screen content.
+    private val verifiedResultTransfer by lazy {
+        AyanaVerifiedResultTransfer()
+    }
+
+    // R9.5 / R9.4 MULTI-APP TASK ORCHESTRATION. Android dispatch stays in
+    // VoiceService and every action reuses the R9.3 registry.
     private val multiAppTaskOrchestrator by lazy {
         AyanaMultiAppTaskOrchestrator(
-            appIntegrationRegistry
+            registry = appIntegrationRegistry,
+            resultTransfer = verifiedResultTransfer
         )
     }
 
@@ -11973,6 +11992,220 @@ respondAndResume(
             )
     }
 
+    private fun observeVerifiedResultTransferScreen(
+        step: AyanaMultiAppTaskOrchestrator.TaskStep,
+        actionResult: JSONObject,
+        commandToken: Long
+    ): JSONObject {
+        val expectedPackage =
+            actionResult
+                .optString("observed_package")
+                .trim()
+                .ifBlank {
+                    actionResult
+                        .optString("target_package")
+                        .trim()
+                }
+
+        if (
+            !actionResult.optBoolean("success", false) ||
+            !actionResult.optBoolean("verified", false) ||
+            expectedPackage.isBlank()
+        ) {
+            return JSONObject()
+                .put("success", false)
+                .put("verified", false)
+                .put("reason", "source_action_not_verified_for_observation")
+                .put("expected_package", expectedPackage)
+        }
+
+        val startedAt =
+            SystemClock.elapsedRealtime()
+
+        val deadline =
+            startedAt +
+                RESULT_TRANSFER_OBSERVATION_TIMEOUT_MS
+
+        var attempts = 0
+        var bestRank = Int.MIN_VALUE
+        var best =
+            JSONObject()
+                .put("success", false)
+                .put("verified", false)
+                .put("reason", "no_screen_sample")
+
+        do {
+            if (
+                isCommandCancelled(commandToken) ||
+                commandToken != activeCommandToken ||
+                Thread.currentThread().isInterrupted
+            ) {
+                return JSONObject(best.toString())
+                    .put("success", false)
+                    .put("verified", false)
+                    .put("transfer_observation_cancelled", true)
+                    .put("transfer_observation_attempts", attempts)
+                    .put("expected_package", expectedPackage)
+            }
+
+            val screen =
+                try {
+                    screenIntelligence.getScreenState()
+                } catch (error: Exception) {
+                    JSONObject()
+                        .put("success", false)
+                        .put(
+                            "reason",
+                            error.message ?: error.javaClass.simpleName
+                        )
+                }
+
+            attempts++
+
+            val observedPackage =
+                screen
+                    .optString("effective_foreground_package")
+                    .trim()
+                    .ifBlank {
+                        screen
+                            .optString("package")
+                            .trim()
+                    }
+                    .ifBlank {
+                        screen
+                            .optString("interaction_package")
+                            .trim()
+                    }
+
+            val contentState =
+                screen
+                    .optString("primary_content_state")
+                    .trim()
+                    .lowercase(Locale.ROOT)
+                    .ifBlank {
+                        screen
+                            .optString("content_state")
+                            .trim()
+                            .lowercase(Locale.ROOT)
+                    }
+                    .ifBlank {
+                        screen
+                            .optString("content_status")
+                            .trim()
+                            .lowercase(Locale.ROOT)
+                    }
+                    .ifBlank { "unknown" }
+
+            val packageMatch =
+                observedPackage ==
+                    expectedPackage
+
+            val stateRank =
+                when (contentState) {
+                    "readable" -> 40
+                    "partial" -> 30
+                    "structure_only" -> 20
+                    "unavailable" -> 10
+                    else -> 0
+                }
+
+            val textEvidence =
+                screen
+                    .optString("verification_text")
+                    .isNotBlank() ||
+                    screen
+                        .optString("primary_window_title")
+                        .isNotBlank() ||
+                    (
+                        screen
+                            .optJSONArray("visible_text")
+                            ?.length()
+                            ?: 0
+                        ) > 0
+
+            val rank =
+                (if (screen.optBoolean("success", false)) 10 else 0) +
+                    (if (packageMatch) 100 else 0) +
+                    stateRank +
+                    (if (textEvidence) 5 else 0)
+
+            if (rank > bestRank) {
+                bestRank = rank
+                best =
+                    JSONObject(screen.toString())
+                        .put("expected_package", expectedPackage)
+                        .put("observed_package_for_transfer", observedPackage)
+                        .put("transfer_package_match", packageMatch)
+                        .put("transfer_content_state", contentState)
+            }
+
+            if (
+                screen.optBoolean("success", false) &&
+                packageMatch &&
+                contentState == "readable" &&
+                textEvidence
+            ) {
+                val verifiedSample =
+                    JSONObject(screen.toString())
+                        .put("verified", true)
+                        .put("expected_package", expectedPackage)
+                        .put("observed_package_for_transfer", observedPackage)
+                        .put("transfer_package_match", true)
+                        .put("transfer_content_state", contentState)
+                        .put("transfer_observation_attempts", attempts)
+                        .put(
+                            "transfer_observation_elapsed_ms",
+                            (
+                                SystemClock.elapsedRealtime() -
+                                    startedAt
+                                )
+                                .coerceAtLeast(0L)
+                        )
+                        .put("transfer_observation_timeout", false)
+
+                commandHistoryStore.addEvent(
+                    activeCommandHistoryId,
+                    state = "verified_result_transfer_observation",
+                    message =
+                        "R9.5 source observation verified: ${step.appKey}:${step.actionKey}",
+                    details =
+                        "step=${step.key}; package=$observedPackage; " +
+                            "content=$contentState; attempts=$attempts"
+                )
+
+                return verifiedSample
+            }
+
+            try {
+                Thread.sleep(
+                    RESULT_TRANSFER_OBSERVATION_POLL_MS
+                )
+            } catch (_: InterruptedException) {
+                Thread.currentThread()
+                    .interrupt()
+                break
+            }
+        } while (
+            SystemClock.elapsedRealtime() <
+                deadline &&
+            !shuttingDown
+        )
+
+        return JSONObject(best.toString())
+            .put("verified", false)
+            .put("expected_package", expectedPackage)
+            .put("transfer_observation_attempts", attempts)
+            .put(
+                "transfer_observation_elapsed_ms",
+                (
+                    SystemClock.elapsedRealtime() -
+                        startedAt
+                    )
+                    .coerceAtLeast(0L)
+            )
+            .put("transfer_observation_timeout", true)
+    }
+
     private fun renderAppIntegrationDeviceProbeSummary(
         report: JSONObject
     ): String {
@@ -12109,14 +12342,14 @@ respondAndResume(
                                 taskGraph.persistenceSnapshot()
                             )
                             .put("safe_auto_resume", false)
-                            .put("last_checkpoint", "r9_4_multi_app_started")
+                            .put("last_checkpoint", "r9_5_multi_app_started")
                     )
 
                     commandHistoryStore.addEvent(
                         activeCommandHistoryId,
                         state = "multi_app_task_started",
                         message =
-                            "R9.4 Multi-App Task Orchestrator запущен: ${plan.steps.size} шага",
+                            "R9.5 Multi-App Task Orchestrator v${AyanaMultiAppTaskOrchestrator.VERSION} запущен: ${plan.steps.size} шага",
                         details =
                             "goal_id=${goalId.orEmpty()}; plan=${plan.key}; " +
                                 "source=${plan.source}; graph=${taskGraph.compactSummary()}"
@@ -12154,6 +12387,13 @@ respondAndResume(
                                     )
                                 }
                             },
+                            observe = { step, actionResult ->
+                                observeVerifiedResultTransferScreen(
+                                    step = step,
+                                    actionResult = actionResult,
+                                    commandToken = commandToken
+                                )
+                            },
                             restore = { step ->
                                 restoreAyanaAfterAppIntegrationProbe(
                                     pageKey = originalPage,
@@ -12173,7 +12413,7 @@ respondAndResume(
                                         .put("safe_auto_resume", false)
                                         .put(
                                             "last_checkpoint",
-                                            "r9_4_${phase.take(60)}"
+                                            "r9_5_${phase.take(60)}"
                                         )
                                         .put(
                                             "last_tool_name",
@@ -12195,7 +12435,7 @@ respondAndResume(
                                     activeCommandHistoryId,
                                     state = "multi_app_task_checkpoint",
                                     message =
-                                        "R9.4 checkpoint: $phase",
+                                        "R9.5 checkpoint: $phase",
                                     details =
                                         "goal_id=${goalId.orEmpty()}; index=$index; " +
                                             "step=${step?.key.orEmpty()}"
@@ -12222,26 +12462,26 @@ respondAndResume(
                         cancelled ->
                             durableGoalStore.markCancelled(
                                 goalId,
-                                "R9.4 multi-app task cancelled"
+                                "R9.5 multi-app task cancelled"
                             )
 
                         success ->
                             durableGoalStore.markCompleted(
                                 goalId,
-                                "R9.4 verified multi-app task ${report.optInt("passed", 0)}/${report.optInt("steps_total", 0)}"
+                                "R9.5 verified multi-app task ${report.optInt("passed", 0)}/${report.optInt("steps_total", 0)}"
                             )
 
                         report.optBoolean("mutation_committed_detected", false) ||
                             report.optString("terminal_status") == "PAUSED" ->
                             durableGoalStore.markPaused(
                                 goalId,
-                                "R9.4 stopped on uncertain/unexpected side effect; blind replay blocked"
+                                "R9.5 stopped on uncertain/unexpected side effect; blind replay blocked"
                             )
 
                         else ->
                             durableGoalStore.markFailed(
                                 goalId,
-                                "R9.4 multi-app step failed verification"
+                                "R9.5 multi-app step/result transfer failed verification"
                             )
                     }
 
@@ -12273,6 +12513,10 @@ respondAndResume(
                             append(report.optBoolean("mutation_committed_detected", false))
                             append("; restore_failure_detected=")
                             append(report.optBoolean("restore_failure_detected", false))
+                            append("; result_transfer_version=")
+                            append(report.optString("result_transfer_version"))
+                            append("; transfer_count=")
+                            append(report.optInt("transfer_count", 0))
                             append("; report=")
                             append(report.toString().take(4200))
                         }
@@ -12282,9 +12526,9 @@ respondAndResume(
                         state = "multi_app_task_complete",
                         message =
                             if (success) {
-                                "R9.4 multi-app task подтверждена"
+                                "R9.5 multi-app task подтверждена"
                             } else {
-                                "R9.4 multi-app task остановлена fail-closed"
+                                "R9.5 multi-app task остановлена fail-closed"
                             },
                         details = technical.take(4600)
                     )
@@ -12308,7 +12552,7 @@ respondAndResume(
                     try {
                         durableGoalStore.markFailed(
                             goalId,
-                            "R9.4 orchestrator exception: ${error.message ?: error.javaClass.simpleName}"
+                            "R9.5 orchestrator exception: ${error.message ?: error.javaClass.simpleName}"
                         )
                     } catch (_: Exception) {
                     }
@@ -12363,19 +12607,48 @@ respondAndResume(
         val failed = report.optInt("failed", 0)
         val terminal = report.optString("terminal_status")
 
+        val planKey =
+            report.optString("plan_key")
+
         return if (
             report.optBoolean("success", false) &&
             report.optBoolean("verified", false)
         ) {
-            if (acceptanceProbe) {
-                "Многошаговая работа приложений подтверждена: $passed/$total PASS. " +
-                    "Браузер, YouTube и черновик Календаря выполнены одной задачей; " +
-                    "после каждого шага AYANA возвращена на передний план. " +
-                    "Событие календаря не сохранялось."
-            } else {
-                "Многошаговая задача выполнена и подтверждена: $passed/$total шага. " +
-                    "Каждый переход приложения проверен, AYANA возвращена после каждого шага; " +
-                    "постоянные изменения не выполнялись."
+            when {
+                planKey ==
+                    "r9.5-result-transfer-device-acceptance" -> {
+                    val ledger =
+                        report.optJSONObject("transfer_ledger")
+                            ?: JSONObject()
+
+                    val record =
+                        ledger.optJSONObject(
+                            AyanaMultiAppTaskOrchestrator
+                                .RESULT_TRANSFER_ACCEPTANCE_KEY
+                        )
+
+                    val value =
+                        record
+                            ?.optString("value")
+                            .orEmpty()
+                            .ifBlank { "подтверждённый результат" }
+
+                    "Перенос результата между приложениями подтверждён: $passed/$total PASS. " +
+                        "Браузер подтвердил «${value.take(100)}», этот verified result использован " +
+                        "в поиске YouTube и в несохранённом черновике Календаря. " +
+                        "AYANA возвращена после каждого шага; постоянных изменений нет."
+                }
+
+                acceptanceProbe ->
+                    "Многошаговая работа приложений подтверждена: $passed/$total PASS. " +
+                        "Браузер, YouTube и черновик Календаря выполнены одной задачей; " +
+                        "после каждого шага AYANA возвращена на передний план. " +
+                        "Событие календаря не сохранялось."
+
+                else ->
+                    "Многошаговая задача выполнена и подтверждена: $passed/$total шага. " +
+                        "Каждый переход приложения проверен, AYANA возвращена после каждого шага; " +
+                        "постоянные изменения не выполнялись."
             }
         } else {
             "Многошаговая задача остановлена: подтверждено $passed/$total, ошибок=$failed, terminal=$terminal. " +
@@ -12522,6 +12795,10 @@ respondAndResume(
                             successMessage =
                                 "Открыт и подтверждён поиск YouTube: ${payload.trim()}"
                         )
+                            .put(
+                                "requested_query",
+                                payload.trim().take(240)
+                            )
 
                     AyanaAppIntegrationRegistry.APP_BROWSER ->
                         openRegisteredUriAction(
@@ -12535,6 +12812,10 @@ respondAndResume(
                             successMessage =
                                 "Открыт и подтверждён веб-поиск: ${payload.trim()}"
                         )
+                            .put(
+                                "requested_query",
+                                payload.trim().take(240)
+                            )
 
                     else ->
                         appIntegrationFailure(
@@ -12781,6 +13062,7 @@ respondAndResume(
             .put("action_dispatched", dispatched)
             .put("action_committed", false)
             .put("draft_only", true)
+            .put("requested_title", title.take(240))
             .put("target_package", expectedPackage)
             .put("observed_package", observed)
             .put("dispatch_error", dispatchError.take(400))
@@ -22380,9 +22662,9 @@ append(index + 1)
             ok = multiAppOrchestratorOk,
             message =
                 if (multiAppOrchestratorOk) {
-                    "R9.4 parses explicit 2..5-step app goals, checkpoints through Task Graph/Durable Goal, restores AYANA after every verified step and forbids blind continuation."
+                    "R9.4/R9.5 parses explicit 2..5-step app goals, checkpoints through Task Graph/Durable Goal, restores AYANA after every verified step and forbids blind continuation."
                 } else {
-                    "R9.4 Multi-App Task Orchestrator self-test failed."
+                    "R9.5 Multi-App Task Orchestrator self-test failed."
                 },
             evidence =
                 JSONObject()
@@ -22394,6 +22676,42 @@ append(index + 1)
                     .put("safe_auto_resume", false)
                     .put("blind_replay_allowed", false)
                     .put("restore_ayana_after_every_step", true)
+                    .put("persistent_mutation_authority", false)
+        )
+
+        val verifiedResultTransferOk =
+            try {
+                verifiedResultTransfer.selfTest() &&
+                    multiAppTaskOrchestrator.selfTest()
+            } catch (_: Exception) {
+                false
+            }
+
+        add(
+            id = "R9-FOUND-010",
+            title = "Verified cross-app result provenance / binding contract",
+            critical = true,
+            ok = verifiedResultTransferOk,
+            message =
+                if (verifiedResultTransferOk) {
+                    "R9.5 transfers only provenance-bound verified results; package/readability mismatch, unverified records and committed side effects are rejected before consumer dispatch."
+                } else {
+                    "R9.5 Verified Result Transfer self-test failed."
+                },
+            evidence =
+                JSONObject()
+                    .put("version", AyanaVerifiedResultTransfer.VERSION)
+                    .put("orchestrator_version", AyanaMultiAppTaskOrchestrator.VERSION)
+                    .put(
+                        "transfer_acceptance_steps",
+                        AyanaMultiAppTaskOrchestrator.RESULT_TRANSFER_ACCEPTANCE_STEP_COUNT
+                    )
+                    .put("source_action_must_be_verified", true)
+                    .put("source_package_match_required", true)
+                    .put("screen_readable_required", true)
+                    .put("verified_record_required_for_binding", true)
+                    .put("committed_source_rejected", true)
+                    .put("blind_replay_allowed", false)
                     .put("persistent_mutation_authority", false)
         )
 
@@ -28077,6 +28395,15 @@ requestMethod = "GET"
                     )
             )
         }
+
+        limits.put(
+            JSONObject()
+                .put("id", "verified_result_transfer_semantics_v1")
+                .put(
+                    "label",
+                    "R9.5 переносит только явно подтверждённые visible marker/title/action fields; скрытое содержимое страницы и свободная семантическая интерпретация не считаются verified result"
+                )
+        )
 
         return JSONObject()
             .put("success", true)
@@ -44466,9 +44793,9 @@ state
 
     companion object {
 
-        // R9.4.1 RELEASE / FEATURE LINEAGE TRUTH.
+        // R9.5 RELEASE / FEATURE LINEAGE TRUTH.
         private const val AYANA_VOICE_SERVICE_RELEASE =
-            "v12.26.1 / R9.4.1 SCREEN OWNERSHIP UNION RECONCILIATION"
+            "v12.27.0 / R9.5 VERIFIED RESULT TRANSFER BETWEEN APP STEPS"
 
         private const val AYANA_PERSONAL_SEARCH_ENGINE_RELEASE =
             "v1.5.1 IMAGE COVERAGE TRUTH"
@@ -44480,13 +44807,13 @@ state
             "v11.1.10 Multi-Attachment"
 
         private const val AYANA_ACCEPTED_FEATURE_CHECKPOINT =
-            "R9.3.4 App Integration Device Acceptance — DEVICE-CONFIRMED ACCEPTED"
+            "R9.4.1 Screen Ownership Union Reconciliation — DEVICE-CONFIRMED ACCEPTED"
 
         private const val AYANA_CURRENT_FEATURE_RELEASE =
-            "R9.4.1 SCREEN OWNERSHIP UNION RECONCILIATION"
+            "R9.5 VERIFIED RESULT TRANSFER BETWEEN APP STEPS"
 
         private const val AYANA_RELEASE_LINEAGE =
-            "Android v12.21.0 / R7.9 truth-hardening + R8.0 multi-attachment + R8.1–R8.4 accepted Personal Global Search stack + R8.5–R8.5.4 capability/evidence truth + R9.0 autonomous agent foundation + R9.0.1 history live-refresh proof fix + R9.0.2 diagnostic reconciliation/history refresh fix + R9.0.3 TTS health reconciliation + R9.1 IME perception/active telemetry truth + R9.2 autonomous recovery/long-task reconciliation + R9.2.1 adaptive hypothesis reconciliation + R9.3 app integration framework + R9.3.1 screen health reconciliation + R9.3.2 history latency recovery reconciliation + R9.3.3 informational terminal reconciliation + R9.3.4 app integration device acceptance + R9.4 multi-app task orchestration + R9.4.1 screen ownership union reconciliation"
+            "Android v12.21.0 / R7.9 truth-hardening + R8.0 multi-attachment + R8.1–R8.4 accepted Personal Global Search stack + R8.5–R8.5.4 capability/evidence truth + R9.0 autonomous agent foundation + R9.0.1 history live-refresh proof fix + R9.0.2 diagnostic reconciliation/history refresh fix + R9.0.3 TTS health reconciliation + R9.1 IME perception/active telemetry truth + R9.2 autonomous recovery/long-task reconciliation + R9.2.1 adaptive hypothesis reconciliation + R9.3 app integration framework + R9.3.1 screen health reconciliation + R9.3.2 history latency recovery reconciliation + R9.3.3 informational terminal reconciliation + R9.3.4 app integration device acceptance + R9.4 multi-app task orchestration + R9.4.1 screen ownership union reconciliation + R9.5 verified result transfer between app steps"
 
         // AyanaCommandHistoryStore v2.8 keeps up to 4k chars inline and stores longer
         // results out-of-line. Self-review intentionally remains inline so copied History
@@ -44517,6 +44844,12 @@ state
 
         private const val APP_INTEGRATION_PROBE_RESTORE_TIMEOUT_MS =
             2_400L
+
+        private const val RESULT_TRANSFER_OBSERVATION_TIMEOUT_MS =
+            2_600L
+
+        private const val RESULT_TRANSFER_OBSERVATION_POLL_MS =
+            180L
 
         const val ACTION_START =
             "kg.autonomous.agent.action.START_AYANA"
