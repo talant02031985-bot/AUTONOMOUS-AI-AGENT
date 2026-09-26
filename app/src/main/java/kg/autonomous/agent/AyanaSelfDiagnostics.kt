@@ -6,7 +6,14 @@ import org.json.JSONObject
 import java.util.Locale
 
 /**
- * AYANA Self-Diagnostics v4.2 — OWN-APP SCREEN SAMPLE STABILIZATION.
+ * AYANA Self-Diagnostics v4.3 — OWN-APP SCREEN OWNERSHIP UNION STABILIZATION.
+ *
+ * v4.3 preserves v4.2 health-state truth and fixes a transient ownership race:
+ * a bounded own-app screen retry may start when EITHER the primary package OR
+ * the in-process context proves AYANA ownership. v4.2 required both signals at
+ * once, so a structure-only transition frame could skip stabilization entirely.
+ * The retry may still be ADOPTED only when its primary package is explicitly
+ * kg.autonomous.agent, so external-app degradation cannot be promoted to PASS.
  *
  * v4.2 preserves v4.1 health-state truth and adds one bounded screen re-sample
  * for AYANA's own in-process window when the first snapshot is transiently
@@ -56,6 +63,18 @@ class AyanaSelfDiagnostics(
                 "screen_primary_content_state",
                 "unknown"
             )
+
+        val initialScreenPackage =
+            runtime.optString(
+                "screen_primary_package"
+            )
+                .trim()
+
+        val initialScreenContextMode =
+            runtime.optString(
+                "screen_context_mode"
+            )
+                .trim()
 
         var screenStabilizationAttempted =
             false
@@ -113,6 +132,18 @@ class AyanaSelfDiagnostics(
                 "screen_primary_content_state",
                 "unknown"
             )
+
+        val finalScreenPackage =
+            runtime.optString(
+                "screen_primary_package"
+            )
+                .trim()
+
+        val finalScreenContextMode =
+            runtime.optString(
+                "screen_context_mode"
+            )
+                .trim()
 
         val checks =
             JSONArray()
@@ -873,6 +904,26 @@ class AyanaSelfDiagnostics(
                 finalScreenContentState
             )
             .put(
+                "screen_stabilization_initial_package",
+                initialScreenPackage
+            )
+            .put(
+                "screen_stabilization_initial_context_mode",
+                initialScreenContextMode
+            )
+            .put(
+                "screen_stabilization_final_package",
+                finalScreenPackage
+            )
+            .put(
+                "screen_stabilization_final_context_mode",
+                finalScreenContextMode
+            )
+            .put(
+                "screen_stabilization_ownership_policy",
+                "package_or_context_to_attempt__explicit_ayana_package_to_adopt"
+            )
+            .put(
                 "screen_stabilization_delay_ms",
                 if (screenStabilizationAttempted) {
                     SCREEN_STABILIZATION_DELAY_MS
@@ -1068,41 +1119,54 @@ class AyanaSelfDiagnostics(
             return false
         }
 
+        val contentState =
+            runtime.optString(
+                "screen_primary_content_state",
+                "unknown"
+            )
+                .trim()
+                .lowercase(
+                    Locale.ROOT
+                )
+
+        if (
+            contentState !in
+            setOf(
+                "structure_only",
+                "unknown",
+                "unavailable"
+            )
+        ) {
+            return false
+        }
+
         val packageName =
             runtime.optString(
                 "screen_primary_package"
             )
                 .trim()
 
-        if (
-            packageName !=
-            appContext.packageName
-        ) {
-            return false
-        }
-
         val contextMode =
             runtime.optString(
                 "screen_context_mode"
             )
+                .trim()
 
-        if (
-            !contextMode.startsWith(
+        val packageOwnsScreen =
+            packageName ==
+                appContext.packageName
+
+        val contextOwnsScreen =
+            contextMode.startsWith(
                 "v7_own_app_in_process"
             )
-        ) {
-            return false
-        }
 
-        return runtime.optString(
-            "screen_primary_content_state",
-            "unknown"
-        ) in
-            setOf(
-                "structure_only",
-                "unknown",
-                "unavailable"
-            )
+        // R9.4.1: transient own-app snapshots do not always publish package and
+        // context identity atomically. Either verified own-app signal is enough
+        // to ATTEMPT one bounded re-sample. shouldPreferScreenRetry() remains
+        // stricter and accepts an improvement only when retryPackage == AYANA.
+        return packageOwnsScreen ||
+            contextOwnsScreen
     }
 
     private fun shouldPreferScreenRetry(
