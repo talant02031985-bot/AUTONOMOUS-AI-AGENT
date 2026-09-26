@@ -6,7 +6,7 @@ import java.security.MessageDigest
 import java.util.Locale
 
 /**
- * AYANA R9.5.1 Verified Result Transfer v1.1.
+ * AYANA R9.5.2 Verified Result Transfer v1.2.
  *
  * Pure provenance/evidence layer for transferring a verified result from one
  * application step into a later application step. It never performs Android
@@ -236,13 +236,10 @@ class AyanaVerifiedResultTransfer {
                         }
 
                         markerVerified =
-                            interactionContexts(observation)
-                                .any { context ->
-                                    normalizeText(context)
-                                        .contains(
-                                            normalizeText(marker)
-                                        )
-                                }
+                            isMarkerObserved(
+                                observation = observation,
+                                marker = marker
+                            )
 
                         if (!markerVerified) {
                             return captureFailure(
@@ -512,6 +509,49 @@ class AyanaVerifiedResultTransfer {
         }
 
         return true
+    }
+
+    /**
+     * Read-only readiness predicate shared by VoiceService observation polling
+     * and final capture validation. It prevents the observer from returning on
+     * generic browser chrome text before the requested page marker/title exists.
+     */
+    fun isObservationReadyForCapture(
+        spec: CaptureSpec,
+        observation: JSONObject
+    ): Boolean =
+        when (spec.kind) {
+            CaptureKind.SCREEN_MARKER -> {
+                val state = contentState(observation)
+                (state == "readable" || state == "partial") &&
+                    isMarkerObserved(
+                        observation = observation,
+                        marker = spec.marker
+                    )
+            }
+
+            CaptureKind.SCREEN_TITLE ->
+                contentState(observation) == "readable" &&
+                    primaryTitle(observation).isNotBlank()
+
+            CaptureKind.ACTION_FIELD ->
+                true
+        }
+
+    fun isMarkerObserved(
+        observation: JSONObject,
+        marker: String
+    ): Boolean {
+        val normalizedMarker =
+            normalizeText(marker)
+
+        if (normalizedMarker.isBlank()) return false
+
+        return interactionContexts(observation)
+            .any { context ->
+                normalizeText(context)
+                    .contains(normalizedMarker)
+            }
     }
 
     fun selfTest(): Boolean {
@@ -972,7 +1012,7 @@ class AyanaVerifiedResultTransfer {
             Regex("^[a-z0-9][a-z0-9_.-]*$").matches(key)
 
     companion object {
-        const val VERSION = "1.1"
+        const val VERSION = "1.2"
         const val DEFAULT_PLACEHOLDER = "{{value}}"
         const val MAX_VALUE_CHARS = 180
         const val MAX_BOUND_PAYLOAD_CHARS = 240
