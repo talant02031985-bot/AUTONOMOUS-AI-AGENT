@@ -223,7 +223,9 @@ class AyanaMultiAppTaskOrchestrator(
 
         if (transferProbe.steps.size != RESULT_TRANSFER_ACCEPTANCE_STEP_COUNT) return false
         if (!transferProbe.acceptanceProbe) return false
-        if (transferProbe.steps.first().captureSpec == null) return false
+        val acceptanceCapture = transferProbe.steps.first().captureSpec ?: return false
+        if (acceptanceCapture.kind != AyanaVerifiedResultTransfer.CaptureKind.ACTION_FIELD) return false
+        if (acceptanceCapture.actionField != "requested_url") return false
         if (transferProbe.steps.drop(1).any { it.bindingSpec == null }) return false
 
         val transferEnvelope = plannerEnvelope(transferProbe)
@@ -942,8 +944,8 @@ class AyanaMultiAppTaskOrchestrator(
             steps =
                 listOf(
                     TaskStep(
-                        key = "browser-example-domain",
-                        label = "Browser verified Example Domain observation",
+                        key = "browser-verified-url",
+                        label = "Browser verified action-result URL",
                         appKey = AyanaAppIntegrationRegistry.APP_BROWSER,
                         actionKey = AyanaAppIntegrationRegistry.ACTION_OPEN_URL,
                         payload = RESULT_TRANSFER_ACCEPTANCE_URL,
@@ -953,8 +955,8 @@ class AyanaMultiAppTaskOrchestrator(
                                 kind =
                                     AyanaVerifiedResultTransfer
                                         .CaptureKind
-                                        .SCREEN_MARKER,
-                                marker = RESULT_TRANSFER_ACCEPTANCE_MARKER
+                                        .ACTION_FIELD,
+                                actionField = "requested_url"
                             )
                     ),
                     TaskStep(
@@ -1204,7 +1206,7 @@ class AyanaMultiAppTaskOrchestrator(
             .replace(Regex("\\s+"), " ")
 
     companion object {
-        const val VERSION = "1.2"
+        const val VERSION = "1.3"
         const val MAX_STEPS = 5
         const val ACCEPTANCE_STEP_COUNT = 3
         const val RESULT_TRANSFER_ACCEPTANCE_STEP_COUNT = 3
@@ -1218,10 +1220,7 @@ class AyanaMultiAppTaskOrchestrator(
         const val RESULT_TRANSFER_ACCEPTANCE_URL =
             "https://example.com/"
 
-        const val RESULT_TRANSFER_ACCEPTANCE_MARKER =
-            "Example Domain"
-
         const val RESULT_TRANSFER_ACCEPTANCE_KEY =
-            "browser_page_marker"
+            "browser_verified_url"
     }
 }
