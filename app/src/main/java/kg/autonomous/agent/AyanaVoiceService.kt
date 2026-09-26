@@ -61,7 +61,7 @@ import kotlin.math.abs
 
 class AyanaVoiceService : Service() {
 
-    // AYANA v12.27.1 / R9.5.1 PARTIAL MARKER PROVENANCE RECONCILIATION.
+    // AYANA v12.27.2 / R9.5.2 BOUNDED MARKER OBSERVATION.
     // Builds only on DEVICE-CONFIRMED R9.4.1.
     // - provenance-bound Result Transfer v1.1 can carry only verified fields/content;
     // - exact SCREEN_MARKER transfer may use package-matched partial content only when the marker itself is observed;
@@ -12140,8 +12140,11 @@ respondAndResume(
                         .put("transfer_content_state", contentState)
             }
 
+            val captureSpec =
+                step.captureSpec
+
             val captureKind =
-                step.captureSpec?.kind
+                captureSpec?.kind
 
             val contentTransferEligible =
                 when (captureKind) {
@@ -12156,11 +12159,20 @@ respondAndResume(
                         contentState == "readable"
                 }
 
+            val captureEvidenceReady =
+                captureSpec != null &&
+                    verifiedResultTransfer
+                        .isObservationReadyForCapture(
+                            spec = captureSpec,
+                            observation = screen
+                        )
+
             if (
                 screen.optBoolean("success", false) &&
                 packageMatch &&
                 contentTransferEligible &&
-                textEvidence
+                textEvidence &&
+                captureEvidenceReady
             ) {
                 val verifiedSample =
                     JSONObject(screen.toString())
@@ -12195,7 +12207,8 @@ respondAndResume(
                         "R9.5 source observation verified: ${step.appKey}:${step.actionKey}",
                     details =
                         "step=${step.key}; package=$observedPackage; " +
-                            "content=$contentState; capture_kind=${captureKind?.name.orEmpty()}; attempts=$attempts"
+                            "content=$contentState; capture_kind=${captureKind?.name.orEmpty()}; " +
+                            "capture_ready=$captureEvidenceReady; attempts=$attempts"
                 )
 
                 return verifiedSample
@@ -12229,6 +12242,33 @@ respondAndResume(
                     .coerceAtLeast(0L)
             )
             .put("transfer_observation_timeout", true)
+            .put(
+                "transfer_expected_marker",
+                step.captureSpec
+                    ?.takeIf {
+                        it.kind ==
+                            AyanaVerifiedResultTransfer.CaptureKind.SCREEN_MARKER
+                    }
+                    ?.marker
+                    .orEmpty()
+                    .take(240)
+            )
+            .put(
+                "transfer_marker_observed",
+                step.captureSpec
+                    ?.takeIf {
+                        it.kind ==
+                            AyanaVerifiedResultTransfer.CaptureKind.SCREEN_MARKER
+                    }
+                    ?.let { spec ->
+                        verifiedResultTransfer
+                            .isMarkerObserved(
+                                observation = best,
+                                marker = spec.marker
+                            )
+                    }
+                    ?: false
+            )
     }
 
     private fun renderAppIntegrationDeviceProbeSummary(
@@ -22723,9 +22763,9 @@ append(index + 1)
             ok = verifiedResultTransferOk,
             message =
                 if (verifiedResultTransferOk) {
-                    "R9.5.1 transfers only provenance-bound verified results; exact screen markers may use package-matched partial content, while titles still require readable content; structure_only, package mismatch, unverified records and committed side effects remain rejected before consumer dispatch."
+                    "R9.5.2 keeps provenance-bound transfer fail-closed and makes source observation capture-aware: SCREEN_MARKER waits for the requested marker and SCREEN_TITLE waits for an actual readable title; generic browser chrome text cannot end observation early."
                 } else {
-                    "R9.5.1 Verified Result Transfer self-test failed."
+                    "R9.5.2 Verified Result Transfer self-test failed."
                 },
             evidence =
                 JSONObject()
@@ -44826,7 +44866,7 @@ state
 
         // R9.5.1 RELEASE / FEATURE LINEAGE TRUTH.
         private const val AYANA_VOICE_SERVICE_RELEASE =
-            "v12.27.1 / R9.5.1 PARTIAL MARKER PROVENANCE RECONCILIATION"
+            "v12.27.2 / R9.5.2 BOUNDED MARKER OBSERVATION"
 
         private const val AYANA_PERSONAL_SEARCH_ENGINE_RELEASE =
             "v1.5.1 IMAGE COVERAGE TRUTH"
@@ -44841,10 +44881,10 @@ state
             "R9.4.1 Screen Ownership Union Reconciliation — DEVICE-CONFIRMED ACCEPTED"
 
         private const val AYANA_CURRENT_FEATURE_RELEASE =
-            "R9.5.1 PARTIAL MARKER PROVENANCE RECONCILIATION"
+            "R9.5.2 BOUNDED MARKER OBSERVATION"
 
         private const val AYANA_RELEASE_LINEAGE =
-            "Android v12.21.0 / R7.9 truth-hardening + R8.0 multi-attachment + R8.1–R8.4 accepted Personal Global Search stack + R8.5–R8.5.4 capability/evidence truth + R9.0 autonomous agent foundation + R9.0.1 history live-refresh proof fix + R9.0.2 diagnostic reconciliation/history refresh fix + R9.0.3 TTS health reconciliation + R9.1 IME perception/active telemetry truth + R9.2 autonomous recovery/long-task reconciliation + R9.2.1 adaptive hypothesis reconciliation + R9.3 app integration framework + R9.3.1 screen health reconciliation + R9.3.2 history latency recovery reconciliation + R9.3.3 informational terminal reconciliation + R9.3.4 app integration device acceptance + R9.4 multi-app task orchestration + R9.4.1 screen ownership union reconciliation + R9.5 verified result transfer between app steps + R9.5.1 partial marker provenance reconciliation"
+            "Android v12.21.0 / R7.9 truth-hardening + R8.0 multi-attachment + R8.1–R8.4 accepted Personal Global Search stack + R8.5–R8.5.4 capability/evidence truth + R9.0 autonomous agent foundation + R9.0.1 history live-refresh proof fix + R9.0.2 diagnostic reconciliation/history refresh fix + R9.0.3 TTS health reconciliation + R9.1 IME perception/active telemetry truth + R9.2 autonomous recovery/long-task reconciliation + R9.2.1 adaptive hypothesis reconciliation + R9.3 app integration framework + R9.3.1 screen health reconciliation + R9.3.2 history latency recovery reconciliation + R9.3.3 informational terminal reconciliation + R9.3.4 app integration device acceptance + R9.4 multi-app task orchestration + R9.4.1 screen ownership union reconciliation + R9.5 verified result transfer between app steps + R9.5.1 partial marker provenance reconciliation + R9.5.2 bounded marker observation"
 
         // AyanaCommandHistoryStore v2.8 keeps up to 4k chars inline and stores longer
         // results out-of-line. Self-review intentionally remains inline so copied History
@@ -44877,7 +44917,7 @@ state
             2_400L
 
         private const val RESULT_TRANSFER_OBSERVATION_TIMEOUT_MS =
-            2_600L
+            4_200L
 
         private const val RESULT_TRANSFER_OBSERVATION_POLL_MS =
             180L
