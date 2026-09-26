@@ -5,23 +5,26 @@ import org.json.JSONObject
 import java.util.Locale
 
 /**
- * AYANA R9.4 Multi-App Task Orchestrator v1.0.
+ * AYANA R9.5 Multi-App Task Orchestrator v1.1 — VERIFIED RESULT TRANSFER.
  *
- * Pure orchestration layer above the already device-confirmed R9.3 App Integration
- * Registry and R9.2 Autonomous Task Graph. It does not execute Android actions by
- * itself and does not create a second device-control stack.
+ * Extends the device-confirmed R9.4 orchestrator without creating a second
+ * execution stack. Android dispatch remains in AyanaVoiceService; this class
+ * owns only deterministic plan/ledger semantics.
  *
  * Contract:
- * - parse only explicit multi-step app commands (2..5 registered steps);
- * - every step must be autonomousAllowed and non-MUTATION in the registry;
- * - Task Graph is checkpointed before and after each app step;
- * - AYANA restore evidence is part of step completion;
+ * - preserve all R9.4 2..5-step registered app orchestration;
+ * - every app step remains autonomousAllowed and non-MUTATION;
+ * - Task Graph + Durable Goal checkpoints remain mandatory;
+ * - optional result capture happens only after a verified source action;
+ * - transfer payloads are rendered only from AyanaVerifiedResultTransfer records;
+ * - a capture/binding failure stops the plan fail-closed;
+ * - AYANA restore evidence remains part of every dispatched step;
  * - Calendar remains DRAFT_ONLY and action_committed must remain false;
- * - first failed/unverified step stops the plan; no blind continuation/replay;
- * - no automatic restart authority is granted by this class.
+ * - no blind continuation, replay or automatic restart authority is granted.
  */
 class AyanaMultiAppTaskOrchestrator(
-    private val registry: AyanaAppIntegrationRegistry
+    private val registry: AyanaAppIntegrationRegistry,
+    private val resultTransfer: AyanaVerifiedResultTransfer
 ) {
 
     data class TaskStep(
@@ -29,7 +32,9 @@ class AyanaMultiAppTaskOrchestrator(
         val label: String,
         val appKey: String,
         val actionKey: String,
-        val payload: String = ""
+        val payload: String = "",
+        val captureSpec: AyanaVerifiedResultTransfer.CaptureSpec? = null,
+        val bindingSpec: AyanaVerifiedResultTransfer.BindingSpec? = null
     )
 
     data class TaskPlan(
@@ -49,6 +54,13 @@ class AyanaMultiAppTaskOrchestrator(
                 .replace(Regex("\\s+"), " ")
 
         if (clean.isBlank()) return null
+
+        if (isResultTransferAcceptanceCommand(clean)) {
+            return resultTransferAcceptancePlan(clean)
+        }
+
+        parseVerifiedTransferUserPlan(clean)
+            ?.let { return it }
 
         if (isAcceptanceCommand(clean)) {
             return acceptancePlan(clean)
@@ -133,6 +145,21 @@ class AyanaMultiAppTaskOrchestrator(
             .put("plan_key", plan.key)
             .put("step_count", plan.steps.size)
             .put("acceptance_probe", plan.acceptanceProbe)
+            .put(
+                "result_capture_count",
+                plan.steps.count { it.captureSpec != null }
+            )
+            .put(
+                "result_binding_count",
+                plan.steps.count { it.bindingSpec != null }
+            )
+            .put(
+                "verified_result_transfer",
+                plan.steps.any {
+                    it.captureSpec != null ||
+                        it.bindingSpec != null
+                }
+            )
             .put("subgoals", subgoals)
             .put(
                 "terminal_criterion",
@@ -140,6 +167,8 @@ class AyanaMultiAppTaskOrchestrator(
             )
             .put("safe_auto_resume", false)
             .put("blind_replay_allowed", false)
+            .put("transfer_requires_verified_provenance", true)
+            .put("transfer_persistent_mutation_authority", false)
     }
 
     fun selfTest(): Boolean {
@@ -186,19 +215,48 @@ class AyanaMultiAppTaskOrchestrator(
         if (envelope.optBoolean("safe_auto_resume", true)) return false
         if (envelope.optBoolean("blind_replay_allowed", true)) return false
 
-        return true
+        val transferProbe =
+            resultTransferAcceptancePlan(
+                "проверь перенос результата между приложениями"
+            )
+
+        if (transferProbe.steps.size != RESULT_TRANSFER_ACCEPTANCE_STEP_COUNT) return false
+        if (!transferProbe.acceptanceProbe) return false
+        if (transferProbe.steps.first().captureSpec == null) return false
+        if (transferProbe.steps.drop(1).any { it.bindingSpec == null }) return false
+
+        val transferEnvelope = plannerEnvelope(transferProbe)
+        if (!transferEnvelope.optBoolean("verified_result_transfer", false)) return false
+        if (transferEnvelope.optInt("result_capture_count", 0) != 1) return false
+        if (transferEnvelope.optInt("result_binding_count", 0) != 2) return false
+        if (!transferEnvelope.optBoolean("transfer_requires_verified_provenance", false)) return false
+
+        val userTransfer =
+            parse(
+                "открой сайт example.com затем найди в YouTube название страницы"
+            ) ?: return false
+
+        if (userTransfer.steps.size != 2) return false
+        if (userTransfer.steps[0].captureSpec?.kind != AyanaVerifiedResultTransfer.CaptureKind.SCREEN_TITLE) {
+            return false
+        }
+        if (userTransfer.steps[1].bindingSpec == null) return false
+
+        return resultTransfer.selfTest()
     }
 
     fun run(
         plan: TaskPlan,
         taskGraph: AyanaAutonomousTaskGraph,
         execute: (TaskStep) -> JSONObject,
+        observe: (TaskStep, JSONObject) -> JSONObject = { _, _ -> JSONObject() },
         restore: (TaskStep) -> JSONObject,
         checkpoint: (String, Int, TaskStep?, JSONObject) -> Unit = { _, _, _, _ -> },
         shouldCancel: () -> Boolean = { false }
     ): JSONObject {
         val startedAt = System.currentTimeMillis()
         val results = JSONArray()
+        val transferLedger = JSONObject()
 
         var passed = 0
         var failed = 0
@@ -257,15 +315,82 @@ class AyanaMultiAppTaskOrchestrator(
                 break
             }
 
+            val bindingResult =
+                if (step.bindingSpec != null) {
+                    resultTransfer.bind(
+                        spec = step.bindingSpec,
+                        ledger = transferLedger
+                    )
+                } else {
+                    JSONObject()
+                        .put("success", true)
+                        .put("verified", true)
+                        .put("payload", step.payload)
+                        .put("reason", "static_payload")
+                }
+
+            if (
+                !bindingResult.optBoolean("success", false) ||
+                !bindingResult.optBoolean("verified", false)
+            ) {
+                failed += 1
+
+                taskGraph.recordToolDispatch(
+                    toolName = "result_transfer:bind",
+                    signature =
+                        "result_transfer|bind|${step.bindingSpec?.transferKey.orEmpty()}",
+                    mayMutate = false
+                )
+                taskGraph.recordToolResult(
+                    toolName = "result_transfer:bind",
+                    success = false,
+                    verified = false,
+                    terminalStatus = "ERROR",
+                    evidence = bindingResult.toString().take(1200),
+                    actionDispatched = false
+                )
+                taskGraph.finish(
+                    success = false,
+                    terminalStatus = "ERROR",
+                    finalEvidence =
+                        "result transfer binding failed before multi-app step ${index + 1}"
+                )
+
+                results.put(
+                    failureResult(
+                        step = step,
+                        index = index,
+                        reason =
+                            "result_binding_failed:" +
+                                bindingResult.optString("reason")
+                    )
+                        .put(
+                            "binding",
+                            JSONObject(bindingResult.toString())
+                        )
+                )
+                break
+            }
+
+            val resolvedPayload =
+                bindingResult
+                    .optString("payload", step.payload)
+                    .trim()
+
+            val resolvedStep =
+                step.copy(
+                    payload = resolvedPayload
+                )
+
             val signature =
                 buildString {
                     append("multi_app|")
-                    append(step.appKey)
+                    append(resolvedStep.appKey)
                     append('|')
-                    append(step.actionKey)
-                    if (step.payload.isNotBlank()) {
+                    append(resolvedStep.actionKey)
+                    if (resolvedStep.payload.isNotBlank()) {
                         append('|')
-                        append(step.payload.take(220))
+                        append(resolvedStep.payload.take(220))
                     }
                 }
 
@@ -278,7 +403,7 @@ class AyanaMultiAppTaskOrchestrator(
             checkpoint(
                 "before_step",
                 index,
-                step,
+                resolvedStep,
                 stateEvidence(
                     plan = plan,
                     taskGraph = taskGraph,
@@ -286,6 +411,14 @@ class AyanaMultiAppTaskOrchestrator(
                         JSONObject()
                             .put("signature", signature)
                             .put("registry_safe", true)
+                            .put(
+                                "binding",
+                                JSONObject(bindingResult.toString())
+                            )
+                            .put(
+                                "transfer_ledger",
+                                JSONObject(transferLedger.toString())
+                            )
                 )
             )
 
@@ -293,7 +426,7 @@ class AyanaMultiAppTaskOrchestrator(
 
             val actionResult =
                 try {
-                    execute(step)
+                    execute(resolvedStep)
                 } catch (error: Exception) {
                     JSONObject()
                         .put("success", false)
@@ -332,9 +465,63 @@ class AyanaMultiAppTaskOrchestrator(
                     !actionCommitted
                 }
 
+            val observation =
+                if (
+                    actionVerified &&
+                    resolvedStep.captureSpec != null
+                ) {
+                    try {
+                        observe(
+                            resolvedStep,
+                            actionResult
+                        )
+                    } catch (error: Exception) {
+                        JSONObject()
+                            .put("success", false)
+                            .put("verified", false)
+                            .put(
+                                "reason",
+                                error.message ?: error.javaClass.simpleName
+                            )
+                    }
+                } else {
+                    JSONObject()
+                        .put("success", true)
+                        .put("verified", true)
+                        .put("reason", "capture_not_requested")
+                }
+
+            val captureResult =
+                if (resolvedStep.captureSpec != null) {
+                    resultTransfer.capture(
+                        spec = resolvedStep.captureSpec,
+                        sourceStepKey = resolvedStep.key,
+                        appKey = resolvedStep.appKey,
+                        actionKey = resolvedStep.actionKey,
+                        actionResult = actionResult,
+                        observation = observation
+                    )
+                } else {
+                    JSONObject()
+                        .put("success", true)
+                        .put("verified", true)
+                        .put("reason", "capture_not_requested")
+                }
+
+            val captureVerified =
+                resolvedStep.captureSpec == null ||
+                    (
+                        captureResult.optBoolean("success", false) &&
+                            captureResult.optBoolean("verified", false) &&
+                            resultTransfer.store(
+                                ledger = transferLedger,
+                                record = captureResult
+                            )
+                        )
+
             val restoreResult =
                 try {
-                    restore(step)
+                    restore(resolvedStep)
                 } catch (error: Exception) {
                     JSONObject()
                         .put("success", false)
@@ -354,14 +541,19 @@ class AyanaMultiAppTaskOrchestrator(
             val stepOk =
                 actionVerified &&
                     calendarGuard &&
+                    captureVerified &&
                     restoreVerified &&
                     !actionCommitted
 
             val evidence =
                 JSONObject()
                     .put("action", JSONObject(actionResult.toString()))
-                    .put("restore", JSONObject(restoreResult.toString()))
+                    .put("observation", JSONObject(observation.toString()))
+                    .put("capture", JSONObject(captureResult.toString()))
+                    .put("binding", JSONObject(bindingResult.toString()))
+                    .put("transfer_ledger", JSONObject(transferLedger.toString()))
                     .put("calendar_no_commit_guard", calendarGuard)
+                    .put("capture_verified", captureVerified)
                     .put("action_committed", actionCommitted)
                     .put("step_ok", stepOk)
 
@@ -381,9 +573,16 @@ class AyanaMultiAppTaskOrchestrator(
                     .put("label", step.label)
                     .put("app_key", step.appKey)
                     .put("action_key", step.actionKey)
-                    .put("payload_present", step.payload.isNotBlank())
+                    .put("payload_present", resolvedStep.payload.isNotBlank())
+                    .put("resolved_payload", resolvedStep.payload.take(240))
                     .put("action_verified", actionVerified)
                     .put("calendar_no_commit_guard", calendarGuard)
+                    .put("capture_requested", resolvedStep.captureSpec != null)
+                    .put("capture_verified", captureVerified)
+                    .put(
+                        "binding_requested",
+                        resolvedStep.bindingSpec != null
+                    )
                     .put("restore_verified", restoreVerified)
                     .put("action_committed", actionCommitted)
                     .put("success", stepOk)
@@ -392,13 +591,16 @@ class AyanaMultiAppTaskOrchestrator(
                         (System.currentTimeMillis() - stepStartedAt).coerceAtLeast(0L)
                     )
                     .put("action", JSONObject(actionResult.toString()))
+                    .put("observation", JSONObject(observation.toString()))
+                    .put("capture", JSONObject(captureResult.toString()))
+                    .put("binding", JSONObject(bindingResult.toString()))
                     .put("restore", JSONObject(restoreResult.toString()))
             )
 
             checkpoint(
                 "after_step",
                 index,
-                step,
+                resolvedStep,
                 stateEvidence(
                     plan = plan,
                     taskGraph = taskGraph,
@@ -482,6 +684,22 @@ class AyanaMultiAppTaskOrchestrator(
                 .put("restore_failure_detected", restoreFailureDetected)
                 .put("safe_auto_resume", false)
                 .put("blind_replay_allowed", false)
+                .put(
+                    "result_transfer_version",
+                    AyanaVerifiedResultTransfer.VERSION
+                )
+                .put(
+                    "transfer_count",
+                    transferLedger.length()
+                )
+                .put(
+                    "transfer_ledger",
+                    JSONObject(transferLedger.toString())
+                )
+                .put(
+                    "transfer_requires_verified_provenance",
+                    true
+                )
                 .put("task_graph", taskGraph.persistenceSnapshot())
                 .put(
                     "duration_ms",
@@ -546,6 +764,197 @@ class AyanaMultiAppTaskOrchestrator(
                     )
                 )
         )
+
+    private fun resultTransferAcceptancePlan(
+        command: String
+    ): TaskPlan =
+        TaskPlan(
+            key = "r9.5-result-transfer-device-acceptance",
+            originalCommand = command.trim(),
+            source = "r9_5_result_transfer_acceptance_command",
+            acceptanceProbe = true,
+            steps =
+                listOf(
+                    TaskStep(
+                        key = "browser-example-domain",
+                        label = "Browser verified Example Domain observation",
+                        appKey = AyanaAppIntegrationRegistry.APP_BROWSER,
+                        actionKey = AyanaAppIntegrationRegistry.ACTION_OPEN_URL,
+                        payload = RESULT_TRANSFER_ACCEPTANCE_URL,
+                        captureSpec =
+                            AyanaVerifiedResultTransfer.CaptureSpec(
+                                transferKey = RESULT_TRANSFER_ACCEPTANCE_KEY,
+                                kind =
+                                    AyanaVerifiedResultTransfer
+                                        .CaptureKind
+                                        .SCREEN_MARKER,
+                                marker = RESULT_TRANSFER_ACCEPTANCE_MARKER
+                            )
+                    ),
+                    TaskStep(
+                        key = "youtube-transferred-result",
+                        label = "YouTube search from verified transferred result",
+                        appKey = AyanaAppIntegrationRegistry.APP_YOUTUBE,
+                        actionKey = AyanaAppIntegrationRegistry.ACTION_SEARCH,
+                        bindingSpec =
+                            AyanaVerifiedResultTransfer.BindingSpec(
+                                transferKey = RESULT_TRANSFER_ACCEPTANCE_KEY,
+                                template =
+                                    AyanaVerifiedResultTransfer.DEFAULT_PLACEHOLDER
+                            )
+                    ),
+                    TaskStep(
+                        key = "calendar-transferred-result-draft",
+                        label = "Calendar draft from verified transferred result",
+                        appKey = AyanaAppIntegrationRegistry.APP_CALENDAR,
+                        actionKey =
+                            AyanaAppIntegrationRegistry
+                                .ACTION_CREATE_EVENT_DRAFT,
+                        bindingSpec =
+                            AyanaVerifiedResultTransfer.BindingSpec(
+                                transferKey = RESULT_TRANSFER_ACCEPTANCE_KEY,
+                                template =
+                                    "AYANA R9.5 — " +
+                                        AyanaVerifiedResultTransfer.DEFAULT_PLACEHOLDER +
+                                        " — не сохранять"
+                            )
+                    )
+                )
+        )
+
+    private fun parseVerifiedTransferUserPlan(
+        clean: String
+    ): TaskPlan? {
+        val browserYoutube =
+            Regex(
+                """^(?:открой|перейди\s+на|зайди\s+на)\s+(?:сайт\s+)?(\S+)\s+(?:затем|потом|после этого)\s+(?:найди|поищи|поиск)\s+(?:в\s+)?(?:youtube|ютубе|ютьюбе|ютуб|ютьюб)\s+(?:название|заголовок)\s+(?:этой\s+)?страницы$""",
+                RegexOption.IGNORE_CASE
+            )
+                .matchEntire(clean)
+
+        if (browserYoutube != null) {
+            val url =
+                browserYoutube
+                    .groupValues
+                    .getOrNull(1)
+                    ?.trim()
+                    .orEmpty()
+
+            if (url.isNotBlank()) {
+                return pageTitleTransferPlan(
+                    originalCommand = clean,
+                    url = url,
+                    consumer = "youtube"
+                )
+            }
+        }
+
+        val browserCalendar =
+            Regex(
+                """^(?:открой|перейди\s+на|зайди\s+на)\s+(?:сайт\s+)?(\S+)\s+(?:затем|потом|после этого)\s+(?:создай|добавь|подготовь)\s+(?:черновик\s+)?(?:событие|мероприятие)\s+(?:в\s+календар(?:е|ь)\s+)?(?:с\s+)?(?:названием|заголовком)\s+(?:этой\s+)?страницы$""",
+                RegexOption.IGNORE_CASE
+            )
+                .matchEntire(clean)
+
+        if (browserCalendar != null) {
+            val url =
+                browserCalendar
+                    .groupValues
+                    .getOrNull(1)
+                    ?.trim()
+                    .orEmpty()
+
+            if (url.isNotBlank()) {
+                return pageTitleTransferPlan(
+                    originalCommand = clean,
+                    url = url,
+                    consumer = "calendar"
+                )
+            }
+        }
+
+        return null
+    }
+
+    private fun pageTitleTransferPlan(
+        originalCommand: String,
+        url: String,
+        consumer: String
+    ): TaskPlan {
+        val captureKey = "page_title"
+
+        val source =
+            TaskStep(
+                key = "browser-page-title-source",
+                label = "Browser page title source",
+                appKey = AyanaAppIntegrationRegistry.APP_BROWSER,
+                actionKey = AyanaAppIntegrationRegistry.ACTION_OPEN_URL,
+                payload = url,
+                captureSpec =
+                    AyanaVerifiedResultTransfer.CaptureSpec(
+                        transferKey = captureKey,
+                        kind =
+                            AyanaVerifiedResultTransfer
+                                .CaptureKind
+                                .SCREEN_TITLE
+                    )
+            )
+
+        val target =
+            if (consumer == "calendar") {
+                TaskStep(
+                    key = "calendar-page-title-draft",
+                    label = "Calendar draft from verified page title",
+                    appKey = AyanaAppIntegrationRegistry.APP_CALENDAR,
+                    actionKey =
+                        AyanaAppIntegrationRegistry
+                            .ACTION_CREATE_EVENT_DRAFT,
+                    bindingSpec =
+                        AyanaVerifiedResultTransfer.BindingSpec(
+                            transferKey = captureKey,
+                            template =
+                                AyanaVerifiedResultTransfer.DEFAULT_PLACEHOLDER
+                        )
+                )
+            } else {
+                TaskStep(
+                    key = "youtube-page-title-search",
+                    label = "YouTube search from verified page title",
+                    appKey = AyanaAppIntegrationRegistry.APP_YOUTUBE,
+                    actionKey = AyanaAppIntegrationRegistry.ACTION_SEARCH,
+                    bindingSpec =
+                        AyanaVerifiedResultTransfer.BindingSpec(
+                            transferKey = captureKey,
+                            template =
+                                AyanaVerifiedResultTransfer.DEFAULT_PLACEHOLDER
+                        )
+                )
+            }
+
+        return TaskPlan(
+            key = "verified-page-title-transfer",
+            originalCommand = originalCommand,
+            source = "r9_5_verified_page_title_grammar",
+            steps = listOf(source, target),
+            acceptanceProbe = false
+        )
+    }
+
+    private fun isResultTransferAcceptanceCommand(
+        value: String
+    ): Boolean {
+        val normalized = normalize(value)
+
+        return normalized in
+            setOf(
+                "проверь перенос результата между приложениями",
+                "протестируй перенос результата между приложениями",
+                "проверь передачу результата между приложениями",
+                "протестируй передачу результата между приложениями",
+                "проверь verified result transfer",
+                "протестируй verified result transfer"
+            )
+    }
 
     private fun isAcceptanceCommand(
         value: String
@@ -629,14 +1038,24 @@ class AyanaMultiAppTaskOrchestrator(
             .replace(Regex("\\s+"), " ")
 
     companion object {
-        const val VERSION = "1.0"
+        const val VERSION = "1.1"
         const val MAX_STEPS = 5
         const val ACCEPTANCE_STEP_COUNT = 3
+        const val RESULT_TRANSFER_ACCEPTANCE_STEP_COUNT = 3
 
         const val ACCEPTANCE_QUERY =
             "AYANA R9.4 multi-app orchestration probe"
 
         const val ACCEPTANCE_CALENDAR_TITLE =
             "AYANA R9.4 multi-app orchestration probe — не сохранять"
+
+        const val RESULT_TRANSFER_ACCEPTANCE_URL =
+            "https://example.com/"
+
+        const val RESULT_TRANSFER_ACCEPTANCE_MARKER =
+            "Example Domain"
+
+        const val RESULT_TRANSFER_ACCEPTANCE_KEY =
+            "browser_page_marker"
     }
 }
