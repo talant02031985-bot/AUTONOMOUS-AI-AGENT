@@ -61,15 +61,15 @@ import kotlin.math.abs
 
 class AyanaVoiceService : Service() {
 
-    // AYANA v12.27.2 / R9.5.2 BOUNDED MARKER OBSERVATION.
+    // AYANA v12.27.3 / R9.5.3 VERIFIED ACTION RESULT TRANSFER.
     // Builds only on DEVICE-CONFIRMED R9.4.1.
-    // - provenance-bound Result Transfer v1.1 can carry only verified fields/content;
+    // - provenance-bound Result Transfer v1.2 can carry only verified allow-listed action fields or verified screen content;
     // - exact SCREEN_MARKER transfer may use package-matched partial content only when the marker itself is observed;
     // - SCREEN_TITLE still requires readable content; structure_only/unavailable remain blocked;
-    // - Multi-App Task Orchestrator v1.1 binds consumer payloads only from verified records;
+    // - Multi-App Task Orchestrator v1.3 binds consumer payloads only from verified records;
     // - capture/binding failure stops before the next app action; no guessed/stale payload is used;
-    // - dedicated device acceptance observes Example Domain in Browser, transfers the verified
-    //   marker to YouTube search and an unsaved Calendar draft;
+    // - dedicated device acceptance transfers Browser requested_url only after the open_url action itself is verified
+    //   and then reuses that provenance-bound value in YouTube search and an unsaved Calendar draft;
     // - Task Graph/Durable Goal checkpoints persist transfer evidence and fingerprint;
     // - no mutation/replay/auto-resume authority is added.
     // ORB, visualizer, Worker, MainActivity, Personal Search and Accessibility untouched.
@@ -12703,8 +12703,8 @@ respondAndResume(
                             .ifBlank { "подтверждённый результат" }
 
                     "Перенос результата между приложениями подтверждён: $passed/$total PASS. " +
-                        "Браузер подтвердил «${value.take(100)}», этот verified result использован " +
-                        "в поиске YouTube и в несохранённом черновике Календаря. " +
+                        "Browser app-step подтвердил открытие URL «${value.take(100)}»; это allow-listed значение " +
+                        "из verified action-result использовано в поиске YouTube и в несохранённом черновике Календаря. " +
                         "AYANA возвращена после каждого шага; постоянных изменений нет."
                 }
 
@@ -22763,9 +22763,9 @@ append(index + 1)
             ok = verifiedResultTransferOk,
             message =
                 if (verifiedResultTransferOk) {
-                    "R9.5.2 keeps provenance-bound transfer fail-closed and makes source observation capture-aware: SCREEN_MARKER waits for the requested marker and SCREEN_TITLE waits for an actual readable title; generic browser chrome text cannot end observation early."
+                    "R9.5.3 keeps provenance-bound transfer fail-closed and validates the device-acceptance handoff from an allow-listed field of a verified Browser action-result; screen-derived marker/title transfer remains available only when Screen Intelligence actually exposes the source content."
                 } else {
-                    "R9.5.2 Verified Result Transfer self-test failed."
+                    "R9.5.3 Verified Result Transfer self-test failed."
                 },
             evidence =
                 JSONObject()
@@ -22776,6 +22776,9 @@ append(index + 1)
                         AyanaMultiAppTaskOrchestrator.RESULT_TRANSFER_ACCEPTANCE_STEP_COUNT
                     )
                     .put("source_action_must_be_verified", true)
+                    .put("acceptance_capture_kind", "ACTION_FIELD")
+                    .put("acceptance_action_field", "requested_url")
+                    .put("action_field_allow_list_required", true)
                     .put("source_package_match_required", true)
                     .put("screen_marker_partial_allowed_with_exact_marker", true)
                     .put("screen_title_readable_required", true)
@@ -44866,7 +44869,7 @@ state
 
         // R9.5.1 RELEASE / FEATURE LINEAGE TRUTH.
         private const val AYANA_VOICE_SERVICE_RELEASE =
-            "v12.27.2 / R9.5.2 BOUNDED MARKER OBSERVATION"
+            "v12.27.3 / R9.5.3 VERIFIED ACTION RESULT TRANSFER"
 
         private const val AYANA_PERSONAL_SEARCH_ENGINE_RELEASE =
             "v1.5.1 IMAGE COVERAGE TRUTH"
@@ -44881,10 +44884,10 @@ state
             "R9.4.1 Screen Ownership Union Reconciliation — DEVICE-CONFIRMED ACCEPTED"
 
         private const val AYANA_CURRENT_FEATURE_RELEASE =
-            "R9.5.2 BOUNDED MARKER OBSERVATION"
+            "R9.5.3 VERIFIED ACTION RESULT TRANSFER"
 
         private const val AYANA_RELEASE_LINEAGE =
-            "Android v12.21.0 / R7.9 truth-hardening + R8.0 multi-attachment + R8.1–R8.4 accepted Personal Global Search stack + R8.5–R8.5.4 capability/evidence truth + R9.0 autonomous agent foundation + R9.0.1 history live-refresh proof fix + R9.0.2 diagnostic reconciliation/history refresh fix + R9.0.3 TTS health reconciliation + R9.1 IME perception/active telemetry truth + R9.2 autonomous recovery/long-task reconciliation + R9.2.1 adaptive hypothesis reconciliation + R9.3 app integration framework + R9.3.1 screen health reconciliation + R9.3.2 history latency recovery reconciliation + R9.3.3 informational terminal reconciliation + R9.3.4 app integration device acceptance + R9.4 multi-app task orchestration + R9.4.1 screen ownership union reconciliation + R9.5 verified result transfer between app steps + R9.5.1 partial marker provenance reconciliation + R9.5.2 bounded marker observation"
+            "Android v12.21.0 / R7.9 truth-hardening + R8.0 multi-attachment + R8.1–R8.4 accepted Personal Global Search stack + R8.5–R8.5.4 capability/evidence truth + R9.0 autonomous agent foundation + R9.0.1 history live-refresh proof fix + R9.0.2 diagnostic reconciliation/history refresh fix + R9.0.3 TTS health reconciliation + R9.1 IME perception/active telemetry truth + R9.2 autonomous recovery/long-task reconciliation + R9.2.1 adaptive hypothesis reconciliation + R9.3 app integration framework + R9.3.1 screen health reconciliation + R9.3.2 history latency recovery reconciliation + R9.3.3 informational terminal reconciliation + R9.3.4 app integration device acceptance + R9.4 multi-app task orchestration + R9.4.1 screen ownership union reconciliation + R9.5 verified result transfer between app steps + R9.5.1 partial marker provenance reconciliation + R9.5.2 bounded marker observation + R9.5.3 verified action result transfer"
 
         // AyanaCommandHistoryStore v2.8 keeps up to 4k chars inline and stores longer
         // results out-of-line. Self-review intentionally remains inline so copied History
