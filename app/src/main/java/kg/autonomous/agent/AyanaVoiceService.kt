@@ -61,6 +61,15 @@ import kotlin.math.abs
 
 class AyanaVoiceService : Service() {
 
+    // AYANA v12.26.1 / R9.4.1 SCREEN OWNERSHIP UNION RECONCILIATION.
+    // Builds only on R9.4 candidate over DEVICE-CONFIRMED R9.3.4.
+    // - Self-Diagnostics v4.3 starts one bounded own-app screen retry when either
+    //   package ownership OR v7 in-process context proves AYANA ownership;
+    // - retry adoption still requires explicit AYANA package evidence;
+    // - external-app degradation remains fail-closed and cannot be promoted;
+    // - R9.4 Multi-App Task Orchestrator behavior is unchanged.
+    // ORB, visualizer, Worker, MainActivity, Personal Search and Accessibility untouched.
+    //
     // AYANA v12.26.0 / R9.4 MULTI-APP TASK ORCHESTRATION.
     // Builds only on DEVICE-CONFIRMED R9.3.4.
     // - one explicit user goal can contain 2..5 registered app steps;
@@ -104,7 +113,7 @@ class AyanaVoiceService : Service() {
     //
     // AYANA v12.25.1 / R9.3.1 SCREEN HEALTH RECONCILIATION.
     // Builds only on the R9.3 app-integration candidate over DEVICE-CONFIRMED R9.2.1.
-    // - Self-Diagnostics v4.2 performs one bounded own-app screen re-sample when
+    // - Self-Diagnostics v4.3 supersedes v4.2 and performs one bounded own-app screen re-sample when
     //   the first in-process snapshot is transiently structure-only/unknown;
     // - external-app partial/unavailable evidence is never promoted or hidden;
     // - HEALTH-001 exposes stabilization evidence;
@@ -22535,6 +22544,41 @@ append(index + 1)
                             ""
                         )
                     )
+                    .put(
+                        "screen_stabilization_initial_package",
+                        diagnostics.optString(
+                            "screen_stabilization_initial_package",
+                            ""
+                        )
+                    )
+                    .put(
+                        "screen_stabilization_initial_context_mode",
+                        diagnostics.optString(
+                            "screen_stabilization_initial_context_mode",
+                            ""
+                        )
+                    )
+                    .put(
+                        "screen_stabilization_final_package",
+                        diagnostics.optString(
+                            "screen_stabilization_final_package",
+                            ""
+                        )
+                    )
+                    .put(
+                        "screen_stabilization_final_context_mode",
+                        diagnostics.optString(
+                            "screen_stabilization_final_context_mode",
+                            ""
+                        )
+                    )
+                    .put(
+                        "screen_stabilization_ownership_policy",
+                        diagnostics.optString(
+                            "screen_stabilization_ownership_policy",
+                            ""
+                        )
+                    )
         )
     }
 
@@ -44422,9 +44466,9 @@ state
 
     companion object {
 
-        // R9.4 RELEASE / FEATURE LINEAGE TRUTH.
+        // R9.4.1 RELEASE / FEATURE LINEAGE TRUTH.
         private const val AYANA_VOICE_SERVICE_RELEASE =
-            "v12.26.0 / R9.4 MULTI-APP TASK ORCHESTRATION"
+            "v12.26.1 / R9.4.1 SCREEN OWNERSHIP UNION RECONCILIATION"
 
         private const val AYANA_PERSONAL_SEARCH_ENGINE_RELEASE =
             "v1.5.1 IMAGE COVERAGE TRUTH"
@@ -44439,10 +44483,10 @@ state
             "R9.3.4 App Integration Device Acceptance — DEVICE-CONFIRMED ACCEPTED"
 
         private const val AYANA_CURRENT_FEATURE_RELEASE =
-            "R9.4 MULTI-APP TASK ORCHESTRATION"
+            "R9.4.1 SCREEN OWNERSHIP UNION RECONCILIATION"
 
         private const val AYANA_RELEASE_LINEAGE =
-            "Android v12.21.0 / R7.9 truth-hardening + R8.0 multi-attachment + R8.1–R8.4 accepted Personal Global Search stack + R8.5–R8.5.4 capability/evidence truth + R9.0 autonomous agent foundation + R9.0.1 history live-refresh proof fix + R9.0.2 diagnostic reconciliation/history refresh fix + R9.0.3 TTS health reconciliation + R9.1 IME perception/active telemetry truth + R9.2 autonomous recovery/long-task reconciliation + R9.2.1 adaptive hypothesis reconciliation + R9.3 app integration framework + R9.3.1 screen health reconciliation + R9.3.2 history latency recovery reconciliation + R9.3.3 informational terminal reconciliation + R9.3.4 app integration device acceptance + R9.4 multi-app task orchestration"
+            "Android v12.21.0 / R7.9 truth-hardening + R8.0 multi-attachment + R8.1–R8.4 accepted Personal Global Search stack + R8.5–R8.5.4 capability/evidence truth + R9.0 autonomous agent foundation + R9.0.1 history live-refresh proof fix + R9.0.2 diagnostic reconciliation/history refresh fix + R9.0.3 TTS health reconciliation + R9.1 IME perception/active telemetry truth + R9.2 autonomous recovery/long-task reconciliation + R9.2.1 adaptive hypothesis reconciliation + R9.3 app integration framework + R9.3.1 screen health reconciliation + R9.3.2 history latency recovery reconciliation + R9.3.3 informational terminal reconciliation + R9.3.4 app integration device acceptance + R9.4 multi-app task orchestration + R9.4.1 screen ownership union reconciliation"
 
         // AyanaCommandHistoryStore v2.8 keeps up to 4k chars inline and stores longer
         // results out-of-line. Self-review intentionally remains inline so copied History
