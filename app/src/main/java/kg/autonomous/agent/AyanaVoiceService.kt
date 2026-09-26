@@ -61,10 +61,11 @@ import kotlin.math.abs
 
 class AyanaVoiceService : Service() {
 
-    // AYANA v12.27.0 / R9.5 VERIFIED RESULT TRANSFER BETWEEN APP STEPS.
+    // AYANA v12.27.1 / R9.5.1 PARTIAL MARKER PROVENANCE RECONCILIATION.
     // Builds only on DEVICE-CONFIRMED R9.4.1.
-    // - provenance-bound Result Transfer v1.0 can carry only verified fields/content;
-    // - screen-derived transfer requires exact foreground package + readable content;
+    // - provenance-bound Result Transfer v1.1 can carry only verified fields/content;
+    // - exact SCREEN_MARKER transfer may use package-matched partial content only when the marker itself is observed;
+    // - SCREEN_TITLE still requires readable content; structure_only/unavailable remain blocked;
     // - Multi-App Task Orchestrator v1.1 binds consumer payloads only from verified records;
     // - capture/binding failure stops before the next app action; no guessed/stale payload is used;
     // - dedicated device acceptance observes Example Domain in Browser, transfers the verified
@@ -12139,10 +12140,26 @@ respondAndResume(
                         .put("transfer_content_state", contentState)
             }
 
+            val captureKind =
+                step.captureSpec?.kind
+
+            val contentTransferEligible =
+                when (captureKind) {
+                    AyanaVerifiedResultTransfer.CaptureKind.SCREEN_MARKER ->
+                        contentState == "readable" ||
+                            contentState == "partial"
+
+                    AyanaVerifiedResultTransfer.CaptureKind.SCREEN_TITLE ->
+                        contentState == "readable"
+
+                    else ->
+                        contentState == "readable"
+                }
+
             if (
                 screen.optBoolean("success", false) &&
                 packageMatch &&
-                contentState == "readable" &&
+                contentTransferEligible &&
                 textEvidence
             ) {
                 val verifiedSample =
@@ -12152,6 +12169,14 @@ respondAndResume(
                         .put("observed_package_for_transfer", observedPackage)
                         .put("transfer_package_match", true)
                         .put("transfer_content_state", contentState)
+                        .put(
+                            "transfer_capture_kind",
+                            captureKind?.name.orEmpty()
+                        )
+                        .put(
+                            "transfer_content_eligible",
+                            true
+                        )
                         .put("transfer_observation_attempts", attempts)
                         .put(
                             "transfer_observation_elapsed_ms",
@@ -12170,7 +12195,7 @@ respondAndResume(
                         "R9.5 source observation verified: ${step.appKey}:${step.actionKey}",
                     details =
                         "step=${step.key}; package=$observedPackage; " +
-                            "content=$contentState; attempts=$attempts"
+                            "content=$contentState; capture_kind=${captureKind?.name.orEmpty()}; attempts=$attempts"
                 )
 
                 return verifiedSample
@@ -12517,6 +12542,10 @@ respondAndResume(
                             append(report.optString("result_transfer_version"))
                             append("; transfer_count=")
                             append(report.optInt("transfer_count", 0))
+                            append("; first_failure_stage=")
+                            append(report.optString("first_failure_stage"))
+                            append("; first_failure_reason=")
+                            append(report.optString("first_failure_reason").take(300))
                             append("; report=")
                             append(report.toString().take(4200))
                         }
@@ -22694,9 +22723,9 @@ append(index + 1)
             ok = verifiedResultTransferOk,
             message =
                 if (verifiedResultTransferOk) {
-                    "R9.5 transfers only provenance-bound verified results; package/readability mismatch, unverified records and committed side effects are rejected before consumer dispatch."
+                    "R9.5.1 transfers only provenance-bound verified results; exact screen markers may use package-matched partial content, while titles still require readable content; structure_only, package mismatch, unverified records and committed side effects remain rejected before consumer dispatch."
                 } else {
-                    "R9.5 Verified Result Transfer self-test failed."
+                    "R9.5.1 Verified Result Transfer self-test failed."
                 },
             evidence =
                 JSONObject()
@@ -22708,7 +22737,9 @@ append(index + 1)
                     )
                     .put("source_action_must_be_verified", true)
                     .put("source_package_match_required", true)
-                    .put("screen_readable_required", true)
+                    .put("screen_marker_partial_allowed_with_exact_marker", true)
+                    .put("screen_title_readable_required", true)
+                    .put("structure_only_transfer_rejected", true)
                     .put("verified_record_required_for_binding", true)
                     .put("committed_source_rejected", true)
                     .put("blind_replay_allowed", false)
@@ -44793,9 +44824,9 @@ state
 
     companion object {
 
-        // R9.5 RELEASE / FEATURE LINEAGE TRUTH.
+        // R9.5.1 RELEASE / FEATURE LINEAGE TRUTH.
         private const val AYANA_VOICE_SERVICE_RELEASE =
-            "v12.27.0 / R9.5 VERIFIED RESULT TRANSFER BETWEEN APP STEPS"
+            "v12.27.1 / R9.5.1 PARTIAL MARKER PROVENANCE RECONCILIATION"
 
         private const val AYANA_PERSONAL_SEARCH_ENGINE_RELEASE =
             "v1.5.1 IMAGE COVERAGE TRUTH"
@@ -44810,10 +44841,10 @@ state
             "R9.4.1 Screen Ownership Union Reconciliation — DEVICE-CONFIRMED ACCEPTED"
 
         private const val AYANA_CURRENT_FEATURE_RELEASE =
-            "R9.5 VERIFIED RESULT TRANSFER BETWEEN APP STEPS"
+            "R9.5.1 PARTIAL MARKER PROVENANCE RECONCILIATION"
 
         private const val AYANA_RELEASE_LINEAGE =
-            "Android v12.21.0 / R7.9 truth-hardening + R8.0 multi-attachment + R8.1–R8.4 accepted Personal Global Search stack + R8.5–R8.5.4 capability/evidence truth + R9.0 autonomous agent foundation + R9.0.1 history live-refresh proof fix + R9.0.2 diagnostic reconciliation/history refresh fix + R9.0.3 TTS health reconciliation + R9.1 IME perception/active telemetry truth + R9.2 autonomous recovery/long-task reconciliation + R9.2.1 adaptive hypothesis reconciliation + R9.3 app integration framework + R9.3.1 screen health reconciliation + R9.3.2 history latency recovery reconciliation + R9.3.3 informational terminal reconciliation + R9.3.4 app integration device acceptance + R9.4 multi-app task orchestration + R9.4.1 screen ownership union reconciliation + R9.5 verified result transfer between app steps"
+            "Android v12.21.0 / R7.9 truth-hardening + R8.0 multi-attachment + R8.1–R8.4 accepted Personal Global Search stack + R8.5–R8.5.4 capability/evidence truth + R9.0 autonomous agent foundation + R9.0.1 history live-refresh proof fix + R9.0.2 diagnostic reconciliation/history refresh fix + R9.0.3 TTS health reconciliation + R9.1 IME perception/active telemetry truth + R9.2 autonomous recovery/long-task reconciliation + R9.2.1 adaptive hypothesis reconciliation + R9.3 app integration framework + R9.3.1 screen health reconciliation + R9.3.2 history latency recovery reconciliation + R9.3.3 informational terminal reconciliation + R9.3.4 app integration device acceptance + R9.4 multi-app task orchestration + R9.4.1 screen ownership union reconciliation + R9.5 verified result transfer between app steps + R9.5.1 partial marker provenance reconciliation"
 
         // AyanaCommandHistoryStore v2.8 keeps up to 4k chars inline and stores longer
         // results out-of-line. Self-review intentionally remains inline so copied History
