@@ -6,7 +6,7 @@ import java.security.MessageDigest
 import java.util.Locale
 
 /**
- * AYANA R9.5 Verified Result Transfer v1.0.
+ * AYANA R9.5.1 Verified Result Transfer v1.1.
  *
  * Pure provenance/evidence layer for transferring a verified result from one
  * application step into a later application step. It never performs Android
@@ -15,7 +15,8 @@ import java.util.Locale
  * Contract:
  * - source app action must already be success=true + verified=true;
  * - a source action reporting action_committed=true is never transferable;
- * - screen-derived values require exact source-package ownership and readable content;
+ * - screen-marker values require exact source-package ownership and an observed marker in readable/partial content;
+ * - screen-title values still require fully readable content; structure_only/unavailable remain rejected;
  * - screen-marker capture requires the marker to exist inside one interaction context
  *   (or the legacy top-level context when structured windows are unavailable);
  * - action-field capture is limited to an explicit allow-list;
@@ -194,10 +195,23 @@ class AyanaVerifiedResultTransfer {
                 sourceContentState =
                     contentState(observation)
 
-                if (sourceContentState != "readable") {
+                val contentStateTransferable =
+                    when (spec.kind) {
+                        CaptureKind.SCREEN_MARKER ->
+                            sourceContentState == "readable" ||
+                                sourceContentState == "partial"
+
+                        CaptureKind.SCREEN_TITLE ->
+                            sourceContentState == "readable"
+
+                        else ->
+                            false
+                    }
+
+                if (!contentStateTransferable) {
                     return captureFailure(
                         key = key,
-                        reason = "screen_not_readable"
+                        reason = "screen_content_state_not_transferable"
                     )
                 }
 
@@ -470,15 +484,22 @@ class AyanaVerifiedResultTransfer {
             record.optString("capture_kind")
 
         if (
-            kind == CaptureKind.SCREEN_MARKER.name ||
-            kind == CaptureKind.SCREEN_TITLE.name
+            kind == CaptureKind.SCREEN_MARKER.name
         ) {
-            if (record.optString("source_content_state") != "readable") return false
+            val state =
+                record.optString("source_content_state")
+            if (
+                state != "readable" &&
+                state != "partial"
+            ) {
+                return false
+            }
+            if (!record.optBoolean("marker_verified", false)) return false
         }
 
         if (
-            kind == CaptureKind.SCREEN_MARKER.name &&
-            !record.optBoolean("marker_verified", false)
+            kind == CaptureKind.SCREEN_TITLE.name &&
+            record.optString("source_content_state") != "readable"
         ) {
             return false
         }
@@ -537,6 +558,44 @@ class AyanaVerifiedResultTransfer {
 
         if (!isVerifiedRecord(markerRecord)) return false
         if (markerRecord.optString("value") != "Example Domain") return false
+
+        val partialMarkerRecord =
+            capture(
+                spec =
+                    CaptureSpec(
+                        transferKey = "partial_page_marker",
+                        kind = CaptureKind.SCREEN_MARKER,
+                        marker = "Example Domain"
+                    ),
+                sourceStepKey = "browser-open-partial",
+                appKey = "browser",
+                actionKey = "open_url",
+                actionResult = action,
+                observation =
+                    JSONObject(screen.toString())
+                        .put("primary_content_state", "partial")
+            )
+
+        if (!isVerifiedRecord(partialMarkerRecord)) return false
+        if (partialMarkerRecord.optString("value") != "Example Domain") return false
+
+        val partialTitleRecord =
+            capture(
+                spec =
+                    CaptureSpec(
+                        transferKey = "partial_page_title",
+                        kind = CaptureKind.SCREEN_TITLE
+                    ),
+                sourceStepKey = "browser-open-partial-title",
+                appKey = "browser",
+                actionKey = "open_url",
+                actionResult = action,
+                observation =
+                    JSONObject(screen.toString())
+                        .put("primary_content_state", "partial")
+            )
+
+        if (partialTitleRecord.optBoolean("success", true)) return false
 
         val ledger = JSONObject()
         if (!store(ledger, markerRecord)) return false
@@ -913,7 +972,7 @@ class AyanaVerifiedResultTransfer {
             Regex("^[a-z0-9][a-z0-9_.-]*$").matches(key)
 
     companion object {
-        const val VERSION = "1.0"
+        const val VERSION = "1.1"
         const val DEFAULT_PLACEHOLDER = "{{value}}"
         const val MAX_VALUE_CHARS = 180
         const val MAX_BOUND_PAYLOAD_CHARS = 240
