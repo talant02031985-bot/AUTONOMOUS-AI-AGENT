@@ -5,7 +5,7 @@ import org.json.JSONObject
 import java.util.Locale
 
 /**
- * AYANA R9.5 Multi-App Task Orchestrator v1.1 — VERIFIED RESULT TRANSFER.
+ * AYANA R9.5.1 Multi-App Task Orchestrator v1.2 — VERIFIED RESULT TRANSFER + FAILURE DIAGNOSTICS.
  *
  * Extends the device-confirmed R9.4 orchestrator without creating a second
  * execution stack. Android dispatch remains in AyanaVoiceService; this class
@@ -18,6 +18,7 @@ import java.util.Locale
  * - optional result capture happens only after a verified source action;
  * - transfer payloads are rendered only from AyanaVerifiedResultTransfer records;
  * - a capture/binding failure stops the plan fail-closed;
+ * - first failed stage/reason is surfaced at report top level for device debugging;
  * - AYANA restore evidence remains part of every dispatched step;
  * - Calendar remains DRAFT_ONLY and action_committed must remain false;
  * - no blind continuation, replay or automatic restart authority is granted.
@@ -664,6 +665,169 @@ class AyanaMultiAppTaskOrchestrator(
                 else -> "ERROR"
             }
 
+        val firstFailedResult =
+            (0 until results.length())
+                .mapNotNull { resultIndex ->
+                    results.optJSONObject(resultIndex)
+                }
+                .firstOrNull { item ->
+                    !item.optBoolean("success", false)
+                }
+
+        val firstFailureStage =
+            if (firstFailedResult == null) {
+                ""
+            } else {
+                val directReason =
+                    firstFailedResult.optString("reason")
+                        .trim()
+
+                val binding =
+                    firstFailedResult.optJSONObject("binding")
+                        ?: JSONObject()
+
+                val action =
+                    firstFailedResult.optJSONObject("action")
+                        ?: JSONObject()
+
+                val observation =
+                    firstFailedResult.optJSONObject("observation")
+                        ?: JSONObject()
+
+                val restoreEvidence =
+                    firstFailedResult.optJSONObject("restore")
+                        ?: JSONObject()
+
+                when {
+                    directReason.startsWith("registry_blocked") ->
+                        "registry"
+
+                    directReason.startsWith("result_binding_failed") ||
+                        (
+                            binding.length() > 0 &&
+                                !binding.optBoolean("verified", false)
+                            ) ->
+                        "binding"
+
+                    !firstFailedResult.optBoolean("action_verified", true) ||
+                        (
+                            action.length() > 0 &&
+                                !action.optBoolean("verified", false)
+                            ) ->
+                        "action"
+
+                    firstFailedResult.optBoolean("capture_requested", false) &&
+                        observation.length() > 0 &&
+                        !observation.optBoolean("verified", false) ->
+                        "observation"
+
+                    firstFailedResult.optBoolean("capture_requested", false) &&
+                        !firstFailedResult.optBoolean("capture_verified", false) ->
+                        "capture"
+
+                    firstFailedResult.optBoolean("action_committed", false) ||
+                        !firstFailedResult.optBoolean("calendar_no_commit_guard", true) ->
+                        "commit_guard"
+
+                    !firstFailedResult.optBoolean("restore_verified", true) ||
+                        (
+                            restoreEvidence.length() > 0 &&
+                                !restoreEvidence.optBoolean("verified", false)
+                            ) ->
+                        "restore"
+
+                    else ->
+                        "step_verification"
+                }
+            }
+
+        val firstFailureReason =
+            if (firstFailedResult == null) {
+                ""
+            } else {
+                val directReason =
+                    firstFailedResult.optString("reason")
+                        .trim()
+
+                val binding =
+                    firstFailedResult.optJSONObject("binding")
+                        ?: JSONObject()
+
+                val action =
+                    firstFailedResult.optJSONObject("action")
+                        ?: JSONObject()
+
+                val observation =
+                    firstFailedResult.optJSONObject("observation")
+                        ?: JSONObject()
+
+                val capture =
+                    firstFailedResult.optJSONObject("capture")
+                        ?: JSONObject()
+
+                val restoreEvidence =
+                    firstFailedResult.optJSONObject("restore")
+                        ?: JSONObject()
+
+                when (firstFailureStage) {
+                    "registry" ->
+                        directReason.ifBlank { "registry_blocked" }
+
+                    "binding" ->
+                        binding.optString("reason")
+                            .ifBlank { directReason }
+                            .ifBlank { "binding_not_verified" }
+
+                    "action" ->
+                        action.optString("message")
+                            .ifBlank {
+                                action.optString("reason")
+                            }
+                            .ifBlank { directReason }
+                            .ifBlank { "action_not_verified" }
+
+                    "observation" ->
+                        observation.optString("reason")
+                            .ifBlank {
+                                "content=" +
+                                    observation.optString(
+                                        "transfer_content_state",
+                                        observation.optString(
+                                            "primary_content_state",
+                                            "unknown"
+                                        )
+                                    ) +
+                                    "; package_match=" +
+                                    observation.optBoolean(
+                                        "transfer_package_match",
+                                        false
+                                    ) +
+                                    "; timeout=" +
+                                    observation.optBoolean(
+                                        "transfer_observation_timeout",
+                                        false
+                                    )
+                            }
+
+                    "capture" ->
+                        capture.optString("reason")
+                            .ifBlank { "capture_not_verified" }
+
+                    "commit_guard" ->
+                        "unexpected_or_unverified_commit"
+
+                    "restore" ->
+                        restoreEvidence.optString("message")
+                            .ifBlank {
+                                restoreEvidence.optString("reason")
+                            }
+                            .ifBlank { "ayana_restore_not_verified" }
+
+                    else ->
+                        directReason.ifBlank { "step_not_verified" }
+                }
+            }
+
         val report =
             JSONObject()
                 .put("version", VERSION)
@@ -678,6 +842,8 @@ class AyanaMultiAppTaskOrchestrator(
                 .put("steps_completed", passed + failed)
                 .put("passed", passed)
                 .put("failed", failed)
+                .put("first_failure_stage", firstFailureStage)
+                .put("first_failure_reason", firstFailureReason.take(500))
                 .put("restore_after_every_step", true)
                 .put("persistent_mutation_authority", false)
                 .put("mutation_committed_detected", mutationCommittedDetected)
@@ -1038,7 +1204,7 @@ class AyanaMultiAppTaskOrchestrator(
             .replace(Regex("\\s+"), " ")
 
     companion object {
-        const val VERSION = "1.1"
+        const val VERSION = "1.2"
         const val MAX_STEPS = 5
         const val ACCEPTANCE_STEP_COUNT = 3
         const val RESULT_TRANSFER_ACCEPTANCE_STEP_COUNT = 3
