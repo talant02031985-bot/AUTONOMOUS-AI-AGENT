@@ -61,8 +61,8 @@ import kotlin.math.abs
 
 class AyanaVoiceService : Service() {
 
-    // AYANA v12.29.0 / R9.7 STRUCTURED SCREEN READING.
-    // Builds on DEVICE-CONFIRMED R9.6.1.
+    // AYANA v12.29.1 / R9.7.1 CONVERSATION ROUTING + TERMINAL TRUTH.
+    // Builds on DEVICE-CONFIRMED R9.7 STRUCTURED SCREEN READING.
     // - Accessibility remains the primary low-latency semantic source for external screens;
     // - when Accessibility is partial/unreadable, the proven package-bound screenshot path may
     //   perform one bounded read-only structured visual observation;
@@ -7728,6 +7728,182 @@ if (
         return target
     }
 
+    /**
+     * R9.7.1 conversation-vs-execution truth.
+     *
+     * Capability words are DATA until the user actually asks AYANA to perform an
+     * external/development action. A sentence may mention GitHub/commit/push/APK
+     * while criticising, comparing or discussing AYANA; keyword presence alone must
+     * never manufacture an execution intent.
+     */
+    private fun normalizedConversationIntentText(
+        command: String
+    ): String {
+        var normalized =
+            normalizeRecognitionText(
+                command
+            )
+                .replace(
+                    Regex(
+                        "^(?:аяна|ayana)\\s+"
+                    ),
+                    ""
+                )
+                .trim()
+
+        // Remove discourse/politeness lead-ins only from the beginning. The remaining
+        // first semantic token owns intent; words inside the sentence are never enough.
+        repeat(4) {
+            val stripped =
+                normalized
+                    .replace(
+                        Regex(
+                            "^(?:а|ну|но|так|слушай|смотри|вообще|короче|пожалуйста)\\s+"
+                        ),
+                        ""
+                    )
+                    .trim()
+
+            if (stripped == normalized) {
+                return normalized
+            }
+
+            normalized = stripped
+        }
+
+        return normalized
+    }
+
+    private fun hasExplicitUnavailableExecutionIntent(
+        command: String
+    ): Boolean {
+        val c =
+            normalizedConversationIntentText(
+                command
+            )
+
+        if (c.isBlank()) {
+            return false
+        }
+
+        val directImperative =
+            Regex(
+                "^(?:измени|запиши|обнови|загрузи|удали|сделай|выполни|запусти|отправь|собери|подпиши|дай|передай|закоммить|запушь|commit|push|коммит|пуш)(?:\\s|$)"
+            )
+                .containsMatchIn(
+                    c
+                )
+
+        val modalExecutionRequest =
+            Regex(
+                "^(?:можешь|сможешь)\\s+(?!ли(?:\\s|$))(?:мне\\s+)?(?:изменить|записать|обновить|загрузить|удалить|сделать|выполнить|запустить|отправить|собрать|подписать|дать|передать|закоммитить|запушить|commit|push|коммит|пуш)(?:\\s|$)"
+            )
+                .containsMatchIn(
+                    c
+                )
+
+        val explicitApkDeliveryRequest =
+            Regex(
+                "^(?:мне\\s+)?(?:дай|передай)\\s+(?:мне\\s+)?(?:готовый\\s+)?(?:apk|апк)(?:\\s|$)"
+            )
+                .containsMatchIn(
+                    c
+                )
+
+        val explicitDesiredExecution =
+            Regex(
+                "^(?:(?:я\\s+)?хочу|мне\\s+(?:нужно|надо)|нужно|надо)\\s+(?:чтобы\\s+ты\\s+)?(?:изменил(?:а)?|изменить|записал(?:а)?|записать|обновил(?:а)?|обновить|загрузил(?:а)?|загрузить|удалил(?:а)?|удалить|сделал(?:а)?|сделать|выполнил(?:а)?|выполнить|запустил(?:а)?|запустить|отправил(?:а)?|отправить|собрал(?:а)?|собрать|подписал(?:а)?|подписать|дал(?:а)?|дать|передал(?:а)?|передать|закоммитил(?:а)?|закоммитить|запушил(?:а)?|запушить)(?:\\s|$)"
+            )
+                .containsMatchIn(
+                    c
+                )
+
+        return directImperative ||
+            modalExecutionRequest ||
+            explicitApkDeliveryRequest ||
+            explicitDesiredExecution
+    }
+
+    private fun hasExplicitAgentSideEffectIntent(
+        command: String
+    ): Boolean {
+        val c =
+            normalizedConversationIntentText(
+                command
+            )
+
+        if (c.isBlank()) {
+            return false
+        }
+
+        val modalSideEffectRequest =
+            Regex(
+                "^(?:можешь|сможешь)\\s+(?!ли(?:\\s|$))(?:мне\\s+)?(?:открыть|закрыть|свернуть|запустить|включить|выключить|установить|поставить|уменьшить|увеличить|создать|удалить|скопировать|копировать|записать|поместить|сохранить|положить|нажать|выбрать|перейти|зайти|проверить|выполнить|напомнить)(?:\\s|$)"
+            )
+                .containsMatchIn(
+                    c
+                )
+
+        val desiredSideEffectRequest =
+            Regex(
+                "^(?:(?:я\\s+)?хочу|мне\\s+(?:нужно|надо)|нужно|надо)\\s+(?:чтобы\\s+ты\\s+)?(?:открыл(?:а)?|открыть|закрыл(?:а)?|закрыть|свернул(?:а)?|свернуть|запустил(?:а)?|запустить|включил(?:а)?|включить|выключил(?:а)?|выключить|установил(?:а)?|установить|поставил(?:а)?|поставить|уменьшил(?:а)?|уменьшить|увеличил(?:а)?|увеличить|создал(?:а)?|создать|удалил(?:а)?|удалить|скопировал(?:а)?|скопировать|записал(?:а)?|записать|сохранил(?:а)?|сохранить|нажал(?:а)?|нажать|выбрал(?:а)?|выбрать|перешел|перешла|перейти|зашел|зашла|зайти|проверил(?:а)?|проверить|выполнил(?:а)?|выполнить|напомнил(?:а)?|напомнить)(?:\\s|$)"
+            )
+                .containsMatchIn(
+                    c
+                )
+
+        return AGENT_FAIL_CLOSED_ACTION_PREFIXES.any { prefix ->
+                c.startsWith(
+                    prefix
+                )
+            } ||
+            modalSideEffectRequest ||
+            desiredSideEffectRequest ||
+            hasExplicitUnavailableExecutionIntent(
+                c
+            )
+    }
+
+    private fun agentConversationGuidance(
+        message: String
+    ): String {
+        val c =
+            normalizeRecognitionText(
+                message
+            )
+
+        val broadAutonomyQuestion =
+            (
+                c.contains("что ты умеешь") ||
+                    c.contains("что умеешь") ||
+                    c.contains("что ты можешь") ||
+                    c.contains("твои возможности") ||
+                    c.contains("твои функции")
+                ) &&
+                (
+                    c.contains("автоном") ||
+                        c.contains("ии агент") ||
+                        c.contains("ai agent") ||
+                        c.contains("ai агент")
+                    )
+
+        return buildString {
+            append(
+                "R9.7.1 CONVERSATION INTENT POLICY: capability names mentioned inside discussion, criticism, comparison or explanation are data, not execution requests. Treat an external/development action as requested only when the user explicitly asks to perform it. "
+            )
+            append(
+                "A complete read-only conversational answer must not be converted into an execution failure merely because the user used criticism or a statement instead of a question. "
+            )
+
+            if (broadAutonomyQuestion) {
+                append(
+                    "For this broad autonomy/capability question, lead with verified positive autonomous capabilities and the main functional gaps. Do not volunteer GitHub/commit/push/APK limitations unless the user directly asks about development tooling or those limits are necessary to answer the current goal. "
+                )
+            }
+        }
+            .trim()
+    }
+
     private fun unsupportedExecutionCapabilityReason(
         command: String
     ): String? {
@@ -7742,20 +7918,13 @@ if (
             return null
         }
 
-        val informationalPrefix =
-            listOf(
-                "почему ",
-                "зачем ",
-                "как ",
-                "что ",
-                "какие ",
-                "расскажи ",
-                "объясни ",
-                "можешь ли ",
-                "умеешь ли "
-            ).any { c.startsWith(it) }
-
-        if (informationalPrefix) {
+        // R9.7.1: negative capability terminal truth is an EXECUTION guard, not a
+        // keyword detector. Discussion of a limitation must reach normal conversation.
+        if (
+            !hasExplicitUnavailableExecutionIntent(
+                c
+            )
+        ) {
             return null
         }
 
@@ -7793,7 +7962,11 @@ if (
                     "запусти",
                     "запустить",
                     "отправь",
-                    "отправить"
+                    "отправить",
+                    "закоммить",
+                    "закоммитить",
+                    "запушь",
+                    "запушить"
                 ).any { c.contains(it) }
 
         val apkBuildOrDelivery =
@@ -18374,18 +18547,22 @@ append(index + 1)
         originalCommand: String
     ): Boolean {
         val command =
-            normalizeRecognitionText(
+            normalizedConversationIntentText(
                 originalCommand
             )
-                .replace(
-                    Regex(
-                        "^(?:аяна|ayana)[\\s,.:;!?—-]+"
-                    ),
-                    ""
-                )
-                .trim()
 
         if (command.isBlank()) {
+            return false
+        }
+
+        // R9.7.1: a complete conversational turn is read-only even when it is a
+        // statement, criticism or follow-up rather than a grammatical question.
+        // Only explicit side-effect/action intent stays outside reconciliation.
+        if (
+            hasExplicitAgentSideEffectIntent(
+                command
+            )
+        ) {
             return false
         }
 
@@ -18413,12 +18590,21 @@ append(index + 1)
             return true
         }
 
-        return Regex(
-            "^(?:(?:подробно|кратко|простыми словами|пожалуйста)\\s+)*(?:опиши|объясни|расскажи|перечисли|сравни|проанализируй|охарактеризуй|резюмируй)(?:\\s|$)"
-        )
-            .containsMatchIn(
-                command
+        if (
+            Regex(
+                "^(?:(?:подробно|кратко|простыми словами|пожалуйста)\\s+)*(?:опиши|объясни|расскажи|перечисли|сравни|проанализируй|охарактеризуй|резюмируй)(?:\\s|$)"
             )
+                .containsMatchIn(
+                    command
+                )
+        ) {
+            return true
+        }
+
+        // No explicit side-effect intent: ordinary dialogue/criticism/follow-up is an
+        // informational turn for terminal truth purposes. Transport integrity and hard
+        // error guards in shouldReconcileInformationalMachineError still must pass.
+        return true
     }
 
     private fun shouldReconcileInformationalMachineError(
@@ -26179,6 +26365,66 @@ plan.optInt(
                 "почему AYANA пока не может собрать APK"
             )
 
+        // R9.7.1 regressions copied from real device conversation history.
+        val githubDiscussionNotExecution =
+            unsupportedExecutionCapabilityReason(
+                "а что ты зациклилась на GitHub как будто нет других приложений и задач и как будто если ты самостоятельно делать commit github ты станешь полноценным ии агентом"
+            ) == null
+
+        val githubCriticismNotExecution =
+            unsupportedExecutionCapabilityReason(
+                "ты все время говоришь об ограничении гитхаб"
+            ) == null
+
+        val explicitGithubCommitStillUnsupported =
+            !unsupportedExecutionCapabilityReason(
+                "сделай commit в GitHub"
+            ).isNullOrBlank()
+
+        val criticismTerminalReconciliationOk =
+            shouldReconcileInformationalMachineError(
+                originalCommand =
+                    "ты дура, не понимаешь что я написал даже, ты сильно ограничена",
+                response = informationalErrorEnvelope,
+                reply =
+                    "Я поняла смысл замечания: речь идёт о широкой автономности агента, а не об одном инструменте. Нужно оценивать понимание цели, планирование, межприложенное выполнение, проверку результата и восстановление после ошибок."
+            )
+
+        val statementTerminalReconciliationOk =
+            shouldReconcileInformationalMachineError(
+                originalCommand =
+                    "ты все время говоришь об ограничении гитхаб",
+                response = informationalErrorEnvelope,
+                reply =
+                    "Да, это повторение не относится к текущей теме. В обычном разговоре ограничения конкретного инструмента не должны подменять обсуждение основных автономных возможностей и текущей задачи пользователя."
+            )
+
+        val modalActionTerminalStillFailClosed =
+            !shouldReconcileInformationalMachineError(
+                originalCommand =
+                    "можешь открыть YouTube",
+                response = informationalErrorEnvelope,
+                reply =
+                    "YouTube не удалось открыть и подтвердить на переднем плане; действие не выполнено. Это реальная action-команда и она должна остаться fail-closed."
+            )
+
+        val desiredActionTerminalStillFailClosed =
+            !shouldReconcileInformationalMachineError(
+                originalCommand =
+                    "я хочу чтобы ты открыл YouTube",
+                response = informationalErrorEnvelope,
+                reply =
+                    "YouTube не удалось открыть и подтвердить на переднем плане; действие не выполнено. Это реальная action-команда и она должна остаться fail-closed."
+            )
+
+        val broadCapabilityGuidanceOk =
+            agentConversationGuidance(
+                "что ты умеешь как автономный ии агент"
+            )
+                .contains(
+                    "Do not volunteer GitHub/commit/push/APK limitations"
+                )
+
         val artifactCommand =
             "проверь свободное место в хранилище и создай TXT-файл с этим результатом"
 
@@ -26351,7 +26597,10 @@ plan.optInt(
 
         val unsupportedTerminalOk =
             !unsupportedDevelopmentAction.isNullOrBlank() &&
-                informationalDevelopmentQuestion == null
+                informationalDevelopmentQuestion == null &&
+                githubDiscussionNotExecution &&
+                githubCriticismNotExecution &&
+                explicitGithubCommitStillUnsupported
 
         val clipboardRoutingOk =
             clipboardRoutePrefix == "AYANA-R78-CLIPBOARD-001" &&
@@ -26368,6 +26617,11 @@ plan.optInt(
                 refusalFailClosed &&
                 informationalTerminalReconciliationOk &&
                 actionTerminalStillFailClosed &&
+                criticismTerminalReconciliationOk &&
+                statementTerminalReconciliationOk &&
+                modalActionTerminalStillFailClosed &&
+                desiredActionTerminalStillFailClosed &&
+                broadCapabilityGuidanceOk &&
                 artifact &&
                 artifactSemanticContentOk &&
                 artifactFollowUpContractOk &&
@@ -26387,9 +26641,9 @@ plan.optInt(
                 },
             message =
                 if (ok) {
-                    "Whole-goal routing guard распознал lifecycle verification, App Detail final target, clipboard local route, Personal Global Search local route, semantic-object lifecycle guard, fail-closed action truth, verified informational-terminal reconciliation, artifact semantic-content gate + follow-up payload contract, pure multi-metric fast path, verified-facts reasoning handoff и artifact deliverable без greedy interception."
+                    "Whole-goal routing guard распознал lifecycle verification, App Detail final target, clipboard/Personal Search routes, semantic-object lifecycle guard, conversation-vs-execution truth для GitHub/commit discussion, conversational terminal reconciliation, fail-closed реальные action-команды, capability-summary guidance, artifact semantic-content/follow-up contract, pure multi-metric fast path и verified-facts reasoning handoff."
                 } else {
-                    "Whole-goal routing regression: lifecycle=$lifecycleOk, app_detail=$appDetailOk, metrics=$metricsOk, volume_target=$volumeTargetOk, unsupported_terminal=$unsupportedTerminalOk, clipboard_route=$clipboardRoutingOk, lifecycle_semantic_guard=$lifecycleSemanticObjectRejected, refusal_fail_closed=$refusalFailClosed, informational_terminal=$informationalTerminalReconciliationOk, action_terminal_fail_closed=$actionTerminalStillFailClosed, artifact=$artifact, artifact_semantic_content=$artifactSemanticContentOk, artifact_follow_up=$artifactFollowUpContractOk, personal_search_route=$personalSearchRoutingOk, artifact_metric_guard=$artifactMetricsSuppressed, mixed_metric_guard=$mixedSideEffectMetricsSuppressed, pure_metric_local=$pureMetricGoalTerminalLocal, analytical_handoff=$analyticalMetricGoalRequiresHandoff, conditional_handoff=$conditionalMetricGoalRequiresHandoff."
+                    "Whole-goal routing regression: lifecycle=$lifecycleOk, app_detail=$appDetailOk, metrics=$metricsOk, volume_target=$volumeTargetOk, unsupported_terminal=$unsupportedTerminalOk, github_discussion_route=$githubDiscussionNotExecution, github_criticism_route=$githubCriticismNotExecution, explicit_github_action=$explicitGithubCommitStillUnsupported, clipboard_route=$clipboardRoutingOk, lifecycle_semantic_guard=$lifecycleSemanticObjectRejected, refusal_fail_closed=$refusalFailClosed, informational_terminal=$informationalTerminalReconciliationOk, criticism_terminal=$criticismTerminalReconciliationOk, statement_terminal=$statementTerminalReconciliationOk, modal_action_fail_closed=$modalActionTerminalStillFailClosed, desired_action_fail_closed=$desiredActionTerminalStillFailClosed, capability_guidance=$broadCapabilityGuidanceOk, action_terminal_fail_closed=$actionTerminalStillFailClosed, artifact=$artifact, artifact_semantic_content=$artifactSemanticContentOk, artifact_follow_up=$artifactFollowUpContractOk, personal_search_route=$personalSearchRoutingOk, artifact_metric_guard=$artifactMetricsSuppressed, mixed_metric_guard=$mixedSideEffectMetricsSuppressed, pure_metric_local=$pureMetricGoalTerminalLocal, analytical_handoff=$analyticalMetricGoalRequiresHandoff, conditional_handoff=$conditionalMetricGoalRequiresHandoff."
                 },
             evidenceScope = "live_pure_contract",
             verified = ok,
@@ -26404,6 +26658,14 @@ plan.optInt(
                     .put("lifecycle_semantic_object_guard_ok", lifecycleSemanticObjectRejected)
                     .put("agent_refusal_fail_closed_ok", refusalFailClosed)
                     .put("informational_terminal_reconciliation_ok", informationalTerminalReconciliationOk)
+                    .put("github_discussion_not_execution", githubDiscussionNotExecution)
+                    .put("github_criticism_not_execution", githubCriticismNotExecution)
+                    .put("explicit_github_commit_still_unsupported", explicitGithubCommitStillUnsupported)
+                    .put("criticism_terminal_reconciliation_ok", criticismTerminalReconciliationOk)
+                    .put("statement_terminal_reconciliation_ok", statementTerminalReconciliationOk)
+                    .put("modal_action_terminal_still_fail_closed", modalActionTerminalStillFailClosed)
+                    .put("desired_action_terminal_still_fail_closed", desiredActionTerminalStillFailClosed)
+                    .put("broad_capability_guidance_ok", broadCapabilityGuidanceOk)
                     .put("action_terminal_still_fail_closed", actionTerminalStillFailClosed)
                     .put("artifact_ok", artifact)
                     .put("artifact_semantic_content_ok", artifactSemanticContentOk)
@@ -31271,6 +31533,16 @@ val activeNetwork =
                                 .contextForAgent(
                                     8
                                 )
+                        )
+
+                        append(
+                            "\n"
+                        )
+
+                        append(
+                            agentConversationGuidance(
+                                message
+                            )
                         )
 
                         append(
@@ -45839,9 +46111,9 @@ state
 
     companion object {
 
-        // R9.7 RELEASE / FEATURE LINEAGE TRUTH.
+        // R9.7.1 RELEASE / FEATURE LINEAGE TRUTH.
         private const val AYANA_VOICE_SERVICE_RELEASE =
-            "v12.29.0 / R9.7 STRUCTURED SCREEN READING"
+            "v12.29.1 / R9.7.1 CONVERSATION ROUTING + TERMINAL TRUTH"
 
         private const val AYANA_PERSONAL_SEARCH_ENGINE_RELEASE =
             "v1.5.1 IMAGE COVERAGE TRUTH"
@@ -45853,13 +46125,13 @@ state
             "v11.1.10 Multi-Attachment"
 
         private const val AYANA_ACCEPTED_FEATURE_CHECKPOINT =
-            "R9.6.1 Visual Fallback Acceptance Truth — DEVICE-CONFIRMED ACCEPTED"
+            "R9.7 Structured Screen Reading — DEVICE-CONFIRMED ACCEPTED"
 
         private const val AYANA_CURRENT_FEATURE_RELEASE =
-            "R9.7 STRUCTURED SCREEN READING"
+            "R9.7.1 CONVERSATION ROUTING + TERMINAL TRUTH"
 
         private const val AYANA_RELEASE_LINEAGE =
-            "Android v12.21.0 / R7.9 truth-hardening + R8.0 multi-attachment + R8.1–R8.4 accepted Personal Global Search stack + R8.5–R8.5.4 capability/evidence truth + R9.0 autonomous agent foundation + R9.0.1 history live-refresh proof fix + R9.0.2 diagnostic reconciliation/history refresh fix + R9.0.3 TTS health reconciliation + R9.1 IME perception/active telemetry truth + R9.2 autonomous recovery/long-task reconciliation + R9.2.1 adaptive hypothesis reconciliation + R9.3 app integration framework + R9.3.1 screen health reconciliation + R9.3.2 history latency recovery reconciliation + R9.3.3 informational terminal reconciliation + R9.3.4 app integration device acceptance + R9.4 multi-app task orchestration + R9.4.1 screen ownership union reconciliation + R9.5 verified result transfer between app steps + R9.5.1 partial marker provenance reconciliation + R9.5.2 bounded marker observation + R9.5.3 verified action result transfer + R9.6 verified semantic observation fallback + R9.6.1 visual fallback acceptance truth + R9.7 structured screen reading"
+            "Android v12.21.0 / R7.9 truth-hardening + R8.0 multi-attachment + R8.1–R8.4 accepted Personal Global Search stack + R8.5–R8.5.4 capability/evidence truth + R9.0 autonomous agent foundation + R9.0.1 history live-refresh proof fix + R9.0.2 diagnostic reconciliation/history refresh fix + R9.0.3 TTS health reconciliation + R9.1 IME perception/active telemetry truth + R9.2 autonomous recovery/long-task reconciliation + R9.2.1 adaptive hypothesis reconciliation + R9.3 app integration framework + R9.3.1 screen health reconciliation + R9.3.2 history latency recovery reconciliation + R9.3.3 informational terminal reconciliation + R9.3.4 app integration device acceptance + R9.4 multi-app task orchestration + R9.4.1 screen ownership union reconciliation + R9.5 verified result transfer between app steps + R9.5.1 partial marker provenance reconciliation + R9.5.2 bounded marker observation + R9.5.3 verified action result transfer + R9.6 verified semantic observation fallback + R9.6.1 visual fallback acceptance truth + R9.7 structured screen reading + R9.7.1 conversation routing/terminal truth"
 
         // AyanaCommandHistoryStore v2.8 keeps up to 4k chars inline and stores longer
         // results out-of-line. Self-review intentionally remains inline so copied History
