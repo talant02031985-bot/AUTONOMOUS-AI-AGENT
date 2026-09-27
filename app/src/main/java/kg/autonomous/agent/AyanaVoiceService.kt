@@ -61,7 +61,7 @@ import kotlin.math.abs
 
 class AyanaVoiceService : Service() {
 
-    // AYANA v12.29.2 / R9.7.2 STRUCTURED ROUTER CONVERSATION PRECEDENCE.
+    // AYANA v12.29.3 / R9.7.3 ACTION MORPHOLOGY + TERMINAL TRUTH.
     // Builds on DEVICE-CONFIRMED R9.7 STRUCTURED SCREEN READING.
     // - Accessibility remains the primary low-latency semantic source for external screens;
     // - when Accessibility is partial/unreadable, the proven package-bound screenshot path may
@@ -7800,7 +7800,7 @@ if (
 
         val directImperative =
             Regex(
-                "^(?:измени|запиши|обнови|загрузи|удали|сделай|выполни|запусти|отправь|собери|подпиши|дай|передай|закоммить|запушь|commit|push|коммит|пуш)(?:\\s|$)"
+                "^(?:измени|запиши|обнови|загрузи|удали|сделай|сделайте|делай|делайте|выполни|выполните|выполняй|выполняйте|запусти|отправь|собери|подпиши|дай|передай|закоммить|закоммитьте|коммить|коммитьте|запушь|запушьте|пушь|пушьте|commit|push|коммит|пуш)(?:\\s|$)"
             )
                 .containsMatchIn(
                     c
@@ -7968,16 +7968,28 @@ if (
                 ) &&
                 listOf(
                     "сделай",
+                    "сделайте",
+                    "делай",
+                    "делайте",
                     "сделать",
                     "выполни",
+                    "выполните",
+                    "выполняй",
+                    "выполняйте",
                     "выполнить",
                     "запусти",
                     "запустить",
                     "отправь",
                     "отправить",
                     "закоммить",
+                    "закоммитьте",
+                    "коммить",
+                    "коммитьте",
                     "закоммитить",
                     "запушь",
+                    "запушьте",
+                    "пушь",
+                    "пушьте",
                     "запушить"
                 ).any { c.contains(it) }
 
@@ -15065,7 +15077,7 @@ respondAndResume(
     }
 
     /**
-     * R9.7.2 router-precedence truth.
+     * R9.7.3 router-precedence + action-morphology truth.
      *
      * StructuredLocalCommandRouter may conservatively label a long sentence as
      * UnknownCapability when it sees several verbs/conjunctions. That result is not
@@ -26446,6 +26458,35 @@ plan.optInt(
                 "сделай commit в GitHub"
             ).isNullOrBlank()
 
+        // R9.7.3: real device failure — continuous imperative "делай" must be
+        // treated as execution intent, not as conversational text.
+        val continuousGithubCommitStillUnsupported =
+            !unsupportedExecutionCapabilityReason(
+                "делай commit в GitHub"
+            ).isNullOrBlank()
+
+        val continuousGithubCommitFailClosed =
+            shouldFailClosedAgentFinalWithoutMachineTerminal(
+                originalCommand =
+                    "делай commit в GitHub",
+                reply =
+                    "Я не могу напрямую сделать commit или push в GitHub: доступ к записи в репозиторий отсутствует."
+            )
+
+        val continuousGithubStructuredIntent =
+            AyanaStructuredLocalCommandRouter
+                .parse(
+                    "делай commit в GitHub"
+                )
+
+        val continuousGithubNoConversationBypass =
+            continuousGithubStructuredIntent == null ||
+                !shouldDeferStructuredUnknownCapabilityToConversation(
+                    command =
+                        "делай commit в GitHub",
+                    intent = continuousGithubStructuredIntent
+                )
+
         val criticismTerminalReconciliationOk =
             shouldReconcileInformationalMachineError(
                 originalCommand =
@@ -26667,7 +26708,10 @@ plan.optInt(
                 githubCriticismNotExecution &&
                 githubDiscussionStructuredBypassOk &&
                 explicitUnknownActionStillFailClosed &&
-                explicitGithubCommitStillUnsupported
+                explicitGithubCommitStillUnsupported &&
+                continuousGithubCommitStillUnsupported &&
+                continuousGithubCommitFailClosed &&
+                continuousGithubNoConversationBypass
 
         val clipboardRoutingOk =
             clipboardRoutePrefix == "AYANA-R78-CLIPBOARD-001" &&
@@ -26710,7 +26754,7 @@ plan.optInt(
                 if (ok) {
                     "Whole-goal routing guard распознал lifecycle verification, App Detail final target, clipboard/Personal Search routes, semantic-object lifecycle guard, conversation-vs-execution truth для GitHub/commit discussion, conversational terminal reconciliation, fail-closed реальные action-команды, capability-summary guidance, artifact semantic-content/follow-up contract, pure multi-metric fast path и verified-facts reasoning handoff."
                 } else {
-                    "Whole-goal routing regression: lifecycle=$lifecycleOk, app_detail=$appDetailOk, metrics=$metricsOk, volume_target=$volumeTargetOk, unsupported_terminal=$unsupportedTerminalOk, github_discussion_route=$githubDiscussionNotExecution, github_criticism_route=$githubCriticismNotExecution, structured_unknown_conversation_bypass=$githubDiscussionStructuredBypassOk, explicit_unknown_action_fail_closed=$explicitUnknownActionStillFailClosed, explicit_github_action=$explicitGithubCommitStillUnsupported, clipboard_route=$clipboardRoutingOk, lifecycle_semantic_guard=$lifecycleSemanticObjectRejected, refusal_fail_closed=$refusalFailClosed, informational_terminal=$informationalTerminalReconciliationOk, criticism_terminal=$criticismTerminalReconciliationOk, statement_terminal=$statementTerminalReconciliationOk, modal_action_fail_closed=$modalActionTerminalStillFailClosed, desired_action_fail_closed=$desiredActionTerminalStillFailClosed, capability_guidance=$broadCapabilityGuidanceOk, action_terminal_fail_closed=$actionTerminalStillFailClosed, artifact=$artifact, artifact_semantic_content=$artifactSemanticContentOk, artifact_follow_up=$artifactFollowUpContractOk, personal_search_route=$personalSearchRoutingOk, artifact_metric_guard=$artifactMetricsSuppressed, mixed_metric_guard=$mixedSideEffectMetricsSuppressed, pure_metric_local=$pureMetricGoalTerminalLocal, analytical_handoff=$analyticalMetricGoalRequiresHandoff, conditional_handoff=$conditionalMetricGoalRequiresHandoff."
+                    "Whole-goal routing regression: lifecycle=$lifecycleOk, app_detail=$appDetailOk, metrics=$metricsOk, volume_target=$volumeTargetOk, unsupported_terminal=$unsupportedTerminalOk, github_discussion_route=$githubDiscussionNotExecution, github_criticism_route=$githubCriticismNotExecution, structured_unknown_conversation_bypass=$githubDiscussionStructuredBypassOk, explicit_unknown_action_fail_closed=$explicitUnknownActionStillFailClosed, explicit_github_action=$explicitGithubCommitStillUnsupported, continuous_github_action=$continuousGithubCommitStillUnsupported, continuous_github_fail_closed=$continuousGithubCommitFailClosed, continuous_github_no_bypass=$continuousGithubNoConversationBypass, clipboard_route=$clipboardRoutingOk, lifecycle_semantic_guard=$lifecycleSemanticObjectRejected, refusal_fail_closed=$refusalFailClosed, informational_terminal=$informationalTerminalReconciliationOk, criticism_terminal=$criticismTerminalReconciliationOk, statement_terminal=$statementTerminalReconciliationOk, modal_action_fail_closed=$modalActionTerminalStillFailClosed, desired_action_fail_closed=$desiredActionTerminalStillFailClosed, capability_guidance=$broadCapabilityGuidanceOk, action_terminal_fail_closed=$actionTerminalStillFailClosed, artifact=$artifact, artifact_semantic_content=$artifactSemanticContentOk, artifact_follow_up=$artifactFollowUpContractOk, personal_search_route=$personalSearchRoutingOk, artifact_metric_guard=$artifactMetricsSuppressed, mixed_metric_guard=$mixedSideEffectMetricsSuppressed, pure_metric_local=$pureMetricGoalTerminalLocal, analytical_handoff=$analyticalMetricGoalRequiresHandoff, conditional_handoff=$conditionalMetricGoalRequiresHandoff."
                 },
             evidenceScope = "live_pure_contract",
             verified = ok,
@@ -26730,6 +26774,9 @@ plan.optInt(
                     .put("structured_unknown_conversation_bypass_ok", githubDiscussionStructuredBypassOk)
                     .put("explicit_unknown_action_still_fail_closed", explicitUnknownActionStillFailClosed)
                     .put("explicit_github_commit_still_unsupported", explicitGithubCommitStillUnsupported)
+                    .put("continuous_github_commit_still_unsupported", continuousGithubCommitStillUnsupported)
+                    .put("continuous_github_commit_fail_closed", continuousGithubCommitFailClosed)
+                    .put("continuous_github_no_conversation_bypass", continuousGithubNoConversationBypass)
                     .put("criticism_terminal_reconciliation_ok", criticismTerminalReconciliationOk)
                     .put("statement_terminal_reconciliation_ok", statementTerminalReconciliationOk)
                     .put("modal_action_terminal_still_fail_closed", modalActionTerminalStillFailClosed)
@@ -32196,7 +32243,45 @@ val activeNetwork =
                                 }
                             }
 
+                            // R9.7.3 terminal truth backstop. The normal pre-Agent negative
+                            // capability guard should catch these requests first, but if a future
+                            // route reaches Agent Core anyway, a natural-language refusal still
+                            // cannot become SUCCESS. Known unavailable execution is UNSUPPORTED.
+                            val unavailableExecutionReasonAfterAgent =
+                                if (
+                                    finalSuccess &&
+                                    (
+                                        machineTerminalStatus.isBlank() ||
+                                        machineTerminalStatus == "SUCCESS"
+                                    )
+                                ) {
+                                    unsupportedExecutionCapabilityReason(
+                                        originalGoal
+                                    )
+                                } else {
+                                    null
+                                }
+
                             if (
+                                !unavailableExecutionReasonAfterAgent.isNullOrBlank()
+                            ) {
+                                finalSuccess =
+                                    false
+                                finalTerminalStatus =
+                                    AyanaCommandHistoryStore.STATUS_UNSUPPORTED
+
+                                commandHistoryStore.addEvent(
+                                    activeCommandHistoryId,
+                                    state = "agent_unavailable_execution_truth_guard",
+                                    message = "Agent Core final не может превратить отсутствующий execution capability в SUCCESS",
+                                    details =
+                                        (
+                                            "machine_terminal=${machineTerminalStatus.ifBlank { "missing" }}; " +
+                                                "reason=${unavailableExecutionReasonAfterAgent.take(500)}; " +
+                                                "reply=${finalAnswer?.take(300).orEmpty()}"
+                                            ).take(900)
+                                )
+                            } else if (
                                 finalSuccess &&
                                 (
                                     machineTerminalStatus.isBlank() ||
@@ -46180,9 +46265,9 @@ state
 
     companion object {
 
-        // R9.7.2 RELEASE / FEATURE LINEAGE TRUTH.
+        // R9.7.3 RELEASE / FEATURE LINEAGE TRUTH.
         private const val AYANA_VOICE_SERVICE_RELEASE =
-            "v12.29.2 / R9.7.2 STRUCTURED ROUTER CONVERSATION PRECEDENCE"
+            "v12.29.3 / R9.7.3 ACTION MORPHOLOGY + TERMINAL TRUTH"
 
         private const val AYANA_PERSONAL_SEARCH_ENGINE_RELEASE =
             "v1.5.1 IMAGE COVERAGE TRUTH"
@@ -46197,10 +46282,10 @@ state
             "R9.7 Structured Screen Reading — DEVICE-CONFIRMED ACCEPTED"
 
         private const val AYANA_CURRENT_FEATURE_RELEASE =
-            "R9.7.2 STRUCTURED ROUTER CONVERSATION PRECEDENCE"
+            "R9.7.3 ACTION MORPHOLOGY + TERMINAL TRUTH"
 
         private const val AYANA_RELEASE_LINEAGE =
-            "Android v12.21.0 / R7.9 truth-hardening + R8.0 multi-attachment + R8.1–R8.4 accepted Personal Global Search stack + R8.5–R8.5.4 capability/evidence truth + R9.0 autonomous agent foundation + R9.0.1 history live-refresh proof fix + R9.0.2 diagnostic reconciliation/history refresh fix + R9.0.3 TTS health reconciliation + R9.1 IME perception/active telemetry truth + R9.2 autonomous recovery/long-task reconciliation + R9.2.1 adaptive hypothesis reconciliation + R9.3 app integration framework + R9.3.1 screen health reconciliation + R9.3.2 history latency recovery reconciliation + R9.3.3 informational terminal reconciliation + R9.3.4 app integration device acceptance + R9.4 multi-app task orchestration + R9.4.1 screen ownership union reconciliation + R9.5 verified result transfer between app steps + R9.5.1 partial marker provenance reconciliation + R9.5.2 bounded marker observation + R9.5.3 verified action result transfer + R9.6 verified semantic observation fallback + R9.6.1 visual fallback acceptance truth + R9.7 structured screen reading + R9.7.1 conversation routing/terminal truth + R9.7.2 structured router conversation precedence"
+            "Android v12.21.0 / R7.9 truth-hardening + R8.0 multi-attachment + R8.1–R8.4 accepted Personal Global Search stack + R8.5–R8.5.4 capability/evidence truth + R9.0 autonomous agent foundation + R9.0.1 history live-refresh proof fix + R9.0.2 diagnostic reconciliation/history refresh fix + R9.0.3 TTS health reconciliation + R9.1 IME perception/active telemetry truth + R9.2 autonomous recovery/long-task reconciliation + R9.2.1 adaptive hypothesis reconciliation + R9.3 app integration framework + R9.3.1 screen health reconciliation + R9.3.2 history latency recovery reconciliation + R9.3.3 informational terminal reconciliation + R9.3.4 app integration device acceptance + R9.4 multi-app task orchestration + R9.4.1 screen ownership union reconciliation + R9.5 verified result transfer between app steps + R9.5.1 partial marker provenance reconciliation + R9.5.2 bounded marker observation + R9.5.3 verified action result transfer + R9.6 verified semantic observation fallback + R9.6.1 visual fallback acceptance truth + R9.7 structured screen reading + R9.7.1 conversation routing/terminal truth + R9.7.2 structured router conversation precedence + R9.7.3 action morphology/terminal truth"
 
         // AyanaCommandHistoryStore v2.8 keeps up to 4k chars inline and stores longer
         // results out-of-line. Self-review intentionally remains inline so copied History
@@ -46762,7 +46847,22 @@ state
                 "перейди ",
                 "зайди ",
                 "проверь ",
+                "сделай ",
+                "сделайте ",
+                "делай ",
+                "делайте ",
                 "выполни ",
+                "выполните ",
+                "выполняй ",
+                "выполняйте ",
+                "закоммить ",
+                "закоммитьте ",
+                "коммить ",
+                "коммитьте ",
+                "запушь ",
+                "запушьте ",
+                "пушь ",
+                "пушьте ",
                 "напомни "
             )
 
