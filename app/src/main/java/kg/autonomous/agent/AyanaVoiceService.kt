@@ -61,18 +61,19 @@ import kotlin.math.abs
 
 class AyanaVoiceService : Service() {
 
-    // AYANA v12.27.3 / R9.5.3 VERIFIED ACTION RESULT TRANSFER.
-    // Builds only on DEVICE-CONFIRMED R9.4.1.
-    // - provenance-bound Result Transfer v1.2 can carry only verified allow-listed action fields or verified screen content;
-    // - exact SCREEN_MARKER transfer may use package-matched partial content only when the marker itself is observed;
-    // - SCREEN_TITLE still requires readable content; structure_only/unavailable remain blocked;
-    // - Multi-App Task Orchestrator v1.3 binds consumer payloads only from verified records;
-    // - capture/binding failure stops before the next app action; no guessed/stale payload is used;
-    // - dedicated device acceptance transfers Browser requested_url only after the open_url action itself is verified
-    //   and then reuses that provenance-bound value in YouTube search and an unsaved Calendar draft;
-    // - Task Graph/Durable Goal checkpoints persist transfer evidence and fingerprint;
-    // - no mutation/replay/auto-resume authority is added.
-    // ORB, visualizer, Worker, MainActivity, Personal Search and Accessibility untouched.
+    // AYANA v12.28.0 / R9.6 VERIFIED SEMANTIC OBSERVATION FALLBACK.
+    // Builds on DEVICE-CONFIRMED R9.5.3.
+    // - Accessibility remains the primary semantic source for external screens;
+    // - when an exact SCREEN_MARKER cannot be observed through Accessibility, one bounded read-only
+    //   visual fallback may capture the already-verified external app window and ask the existing
+    //   multimodal Worker to verify only that exact marker;
+    // - API 34+ window screenshot is preferred so AYANA overlay/ORB is not source-app evidence;
+    // - screenshot provenance requires stable package ownership and SHA-256 fingerprint;
+    // - model prose is never promoted: only strict JSON observed=true + exact marker + confidence=high passes;
+    // - verified visual evidence is converted into the same Result Transfer v1.2 provenance path;
+    // - SCREEN_TITLE/free-form semantic extraction is not broadened in R9.6;
+    // - R9.5 action-result transfer, R9.4 orchestration and mutation/replay guards remain unchanged.
+    // ORB, visualizer, Worker, MainActivity, Personal Search and AgentAccessibilityService source untouched.
     //
     // AYANA v12.26.1 / R9.4.1 SCREEN OWNERSHIP UNION RECONCILIATION.
     // Builds only on R9.4 candidate over DEVICE-CONFIRMED R9.3.4.
@@ -627,7 +628,17 @@ class AyanaVoiceService : Service() {
         AyanaVerifiedResultTransfer()
     }
 
-    // R9.5 / R9.4 MULTI-APP TASK ORCHESTRATION. Android dispatch stays in
+    // R9.6 read-only visual evidence bridge. Android Accessibility owns capture
+    // provenance; the verifier below owns semantic truth. Neither can dispatch actions.
+    private val visualScreenEvidence by lazy {
+        AyanaVisualScreenEvidence(applicationContext)
+    }
+
+    private val verifiedSemanticObservation by lazy {
+        AyanaVerifiedSemanticObservation()
+    }
+
+    // R9.6 / R9.5 / R9.4 MULTI-APP TASK ORCHESTRATION. Android dispatch stays in
     // VoiceService and every action reuses the R9.3 registry.
     private val multiAppTaskOrchestrator by lazy {
         AyanaMultiAppTaskOrchestrator(
@@ -11993,6 +12004,235 @@ respondAndResume(
             )
     }
 
+    private fun attemptVerifiedSemanticScreenMarkerFallback(
+        step: AyanaMultiAppTaskOrchestrator.TaskStep,
+        actionResult: JSONObject,
+        expectedPackage: String,
+        commandToken: Long
+    ): JSONObject {
+        val captureSpec =
+            step.captureSpec
+                ?: return JSONObject()
+                    .put("success", false)
+                    .put("verified", false)
+                    .put("reason", "semantic_fallback_capture_spec_missing")
+
+        if (
+            captureSpec.kind !=
+            AyanaVerifiedResultTransfer.CaptureKind.SCREEN_MARKER
+        ) {
+            return JSONObject()
+                .put("success", false)
+                .put("verified", false)
+                .put("reason", "semantic_fallback_kind_not_supported")
+                .put("semantic_visual_fallback_attempted", false)
+        }
+
+        val marker =
+            captureSpec.marker.trim()
+
+        if (marker.isBlank()) {
+            return JSONObject()
+                .put("success", false)
+                .put("verified", false)
+                .put("reason", "semantic_fallback_marker_missing")
+        }
+
+        if (
+            !actionResult.optBoolean("success", false) ||
+            !actionResult.optBoolean("verified", false) ||
+            expectedPackage.isBlank() ||
+            expectedPackage == packageName
+        ) {
+            return JSONObject()
+                .put("success", false)
+                .put("verified", false)
+                .put("reason", "semantic_fallback_source_not_verified_external_app")
+        }
+
+        if (
+            isCommandCancelled(commandToken) ||
+            commandToken != activeCommandToken ||
+            Thread.currentThread().isInterrupted ||
+            shuttingDown
+        ) {
+            return JSONObject()
+                .put("success", false)
+                .put("verified", false)
+                .put("reason", "semantic_fallback_cancelled")
+                .put("semantic_visual_fallback_attempted", false)
+        }
+
+        commandHistoryStore.addEvent(
+            activeCommandHistoryId,
+            state = "semantic_visual_fallback_started",
+            message = "R9.6: Accessibility не дал exact-marker; проверяю package-bound screenshot",
+            details =
+                "step=${step.key}; package=$expectedPackage; marker=${marker.take(180)}"
+        )
+
+        val screenshot =
+            try {
+                visualScreenEvidence.captureVerifiedExternalWindow(
+                    expectedPackage = expectedPackage
+                )
+            } catch (error: Exception) {
+                JSONObject()
+                    .put("success", false)
+                    .put("verified", false)
+                    .put("reason", "semantic_fallback_screenshot_exception")
+                    .put(
+                        "detail",
+                        (error.message ?: error.javaClass.simpleName).take(240)
+                    )
+            }
+
+        if (
+            !screenshot.optBoolean("success", false) ||
+            !screenshot.optBoolean("verified", false)
+        ) {
+            val result =
+                JSONObject(screenshot.toString())
+                    .put("success", false)
+                    .put("verified", false)
+                    .put("semantic_visual_fallback_attempted", true)
+                    .put("semantic_visual_fallback_stage", "screenshot")
+
+            commandHistoryStore.addEvent(
+                activeCommandHistoryId,
+                state = "semantic_visual_fallback_failed",
+                message = "R9.6 screenshot evidence не подтверждено",
+                details =
+                    "step=${step.key}; reason=${result.optString("reason").take(180)}; " +
+                        "capture_mode=${result.optString("capture_mode")}; " +
+                        "screenshot_error=${result.optString("screenshot_error")}"
+            )
+
+            return result
+        }
+
+        try {
+            if (
+                isCommandCancelled(commandToken) ||
+                commandToken != activeCommandToken ||
+                Thread.currentThread().isInterrupted ||
+                shuttingDown
+            ) {
+                return JSONObject()
+                    .put("success", false)
+                    .put("verified", false)
+                    .put("reason", "semantic_fallback_cancelled_after_screenshot")
+                    .put("semantic_visual_fallback_attempted", true)
+            }
+
+            val manifest =
+                JSONObject()
+                    .put(
+                        "kind",
+                        AyanaMultimodalAttachmentManager.KIND_IMAGE
+                    )
+                    .put(
+                        "display_name",
+                        "ayana_verified_screen_fallback.jpg"
+                    )
+                    .put("mime_type", "image/jpeg")
+                    .put("path", screenshot.optString("path"))
+
+            val model =
+                try {
+                    callMultimodalCore(
+                        prompt =
+                            verifiedSemanticObservation
+                                .promptForExactMarker(marker),
+                        manifest = manifest
+                    )
+                } catch (error: Exception) {
+                    JSONObject()
+                        .put("success", false)
+                        .put("reply", "")
+                        .put(
+                            "technical",
+                            "semantic_fallback_multimodal_exception=" +
+                                (error.message ?: error.javaClass.simpleName).take(240)
+                        )
+                }
+
+            if (
+                isCommandCancelled(commandToken) ||
+                commandToken != activeCommandToken ||
+                Thread.currentThread().isInterrupted ||
+                shuttingDown
+            ) {
+                return JSONObject()
+                    .put("success", false)
+                    .put("verified", false)
+                    .put("reason", "semantic_fallback_cancelled_after_model")
+                    .put("semantic_visual_fallback_attempted", true)
+            }
+
+            if (!model.optBoolean("success", false)) {
+                val result =
+                    JSONObject()
+                        .put("success", false)
+                        .put("verified", false)
+                        .put("reason", "semantic_fallback_multimodal_failed")
+                        .put("semantic_visual_fallback_attempted", true)
+                        .put("semantic_visual_fallback_stage", "multimodal")
+                        .put(
+                            "semantic_model_technical",
+                            model.optString("technical").take(500)
+                        )
+
+                commandHistoryStore.addEvent(
+                    activeCommandHistoryId,
+                    state = "semantic_visual_fallback_failed",
+                    message = "R9.6 multimodal marker verification не выполнена",
+                    details = result.toString().take(1200)
+                )
+
+                return result
+            }
+
+            val verified =
+                verifiedSemanticObservation.verifyExactMarker(
+                    expectedPackage = expectedPackage,
+                    marker = marker,
+                    screenshotEvidence = screenshot,
+                    modelReply = model.optString("reply")
+                )
+                    .put("semantic_visual_fallback_attempted", true)
+                    .put("semantic_visual_fallback_stage", "verified_semantic_observation")
+                    .put(
+                        "semantic_model_technical",
+                        model.optString("technical").take(500)
+                    )
+
+            commandHistoryStore.addEvent(
+                activeCommandHistoryId,
+                state =
+                    if (verified.optBoolean("verified", false)) {
+                        "semantic_visual_fallback_verified"
+                    } else {
+                        "semantic_visual_fallback_failed"
+                    },
+                message =
+                    if (verified.optBoolean("verified", false)) {
+                        "R9.6 exact-marker подтверждён visual fallback"
+                    } else {
+                        "R9.6 visual fallback не подтвердил exact-marker"
+                    },
+                details =
+                    "step=${step.key}; package=$expectedPackage; marker=${marker.take(180)}; " +
+                        "reason=${verified.optString("reason")}; capture_mode=${screenshot.optString("capture_mode")}; " +
+                        "sha=${screenshot.optString("screenshot_sha256").take(16)}..."
+            )
+
+            return verified
+        } finally {
+            visualScreenEvidence.deleteEvidenceFile(screenshot)
+        }
+    }
+
     private fun observeVerifiedResultTransferScreen(
         step: AyanaMultiAppTaskOrchestrator.TaskStep,
         actionResult: JSONObject,
@@ -12229,46 +12469,117 @@ respondAndResume(
             !shuttingDown
         )
 
-        return JSONObject(best.toString())
-            .put("verified", false)
-            .put("expected_package", expectedPackage)
-            .put("transfer_observation_attempts", attempts)
-            .put(
-                "transfer_observation_elapsed_ms",
-                (
-                    SystemClock.elapsedRealtime() -
-                        startedAt
+        val accessibilityTimeout =
+            JSONObject(best.toString())
+                .put("verified", false)
+                .put("expected_package", expectedPackage)
+                .put("transfer_observation_attempts", attempts)
+                .put(
+                    "transfer_observation_elapsed_ms",
+                    (
+                        SystemClock.elapsedRealtime() -
+                            startedAt
+                        )
+                        .coerceAtLeast(0L)
+                )
+                .put("transfer_observation_timeout", true)
+                .put(
+                    "transfer_expected_marker",
+                    step.captureSpec
+                        ?.takeIf {
+                            it.kind ==
+                                AyanaVerifiedResultTransfer.CaptureKind.SCREEN_MARKER
+                        }
+                        ?.marker
+                        .orEmpty()
+                        .take(240)
+                )
+                .put(
+                    "transfer_marker_observed",
+                    step.captureSpec
+                        ?.takeIf {
+                            it.kind ==
+                                AyanaVerifiedResultTransfer.CaptureKind.SCREEN_MARKER
+                        }
+                        ?.let { spec ->
+                            verifiedResultTransfer
+                                .isMarkerObserved(
+                                    observation = best,
+                                    marker = spec.marker
+                                )
+                        }
+                        ?: false
+                )
+
+        val shouldTryVisualFallback =
+            step.captureSpec?.kind ==
+                AyanaVerifiedResultTransfer.CaptureKind.SCREEN_MARKER &&
+                !accessibilityTimeout.optBoolean("transfer_marker_observed", false)
+
+        if (shouldTryVisualFallback) {
+            val visual =
+                attemptVerifiedSemanticScreenMarkerFallback(
+                    step = step,
+                    actionResult = actionResult,
+                    expectedPackage = expectedPackage,
+                    commandToken = commandToken
+                )
+
+            if (
+                visual.optBoolean("success", false) &&
+                visual.optBoolean("verified", false)
+            ) {
+                return JSONObject(visual.toString())
+                    .put("accessibility_first", true)
+                    .put("accessibility_marker_observed", false)
+                    .put("accessibility_observation_timeout", true)
+                    .put("accessibility_observation_attempts", attempts)
+                    .put(
+                        "accessibility_observation_elapsed_ms",
+                        accessibilityTimeout.optLong(
+                            "transfer_observation_elapsed_ms",
+                            0L
+                        )
                     )
-                    .coerceAtLeast(0L)
-            )
-            .put("transfer_observation_timeout", true)
-            .put(
-                "transfer_expected_marker",
-                step.captureSpec
-                    ?.takeIf {
-                        it.kind ==
-                            AyanaVerifiedResultTransfer.CaptureKind.SCREEN_MARKER
-                    }
-                    ?.marker
-                    .orEmpty()
-                    .take(240)
-            )
-            .put(
-                "transfer_marker_observed",
-                step.captureSpec
-                    ?.takeIf {
-                        it.kind ==
-                            AyanaVerifiedResultTransfer.CaptureKind.SCREEN_MARKER
-                    }
-                    ?.let { spec ->
-                        verifiedResultTransfer
-                            .isMarkerObserved(
-                                observation = best,
-                                marker = spec.marker
-                            )
-                    }
-                    ?: false
-            )
+                    .put("expected_package", expectedPackage)
+                    .put("observed_package_for_transfer", expectedPackage)
+                    .put("transfer_package_match", true)
+                    .put("transfer_content_state", "readable")
+                    .put("transfer_capture_kind", "SCREEN_MARKER")
+                    .put("transfer_content_eligible", true)
+                    .put("transfer_observation_timeout", false)
+            }
+
+            return JSONObject(accessibilityTimeout.toString())
+                .put(
+                    "reason",
+                    "semantic_visual_fallback_failed:" +
+                        visual.optString("reason").ifBlank { "not_verified" }.take(220)
+                )
+                .put("semantic_visual_fallback_attempted", true)
+                .put(
+                    "semantic_visual_fallback_verified",
+                    visual.optBoolean("verified", false)
+                )
+                .put(
+                    "semantic_visual_fallback_reason",
+                    visual.optString("reason").take(260)
+                )
+                .put(
+                    "semantic_visual_fallback_stage",
+                    visual.optString("semantic_visual_fallback_stage")
+                )
+                .put(
+                    "semantic_visual_capture_mode",
+                    visual.optString("capture_mode")
+                )
+                .put(
+                    "semantic_visual_screenshot_error",
+                    visual.optString("screenshot_error")
+                )
+        }
+
+        return accessibilityTimeout
     }
 
     private fun renderAppIntegrationDeviceProbeSummary(
@@ -12414,7 +12725,7 @@ respondAndResume(
                         activeCommandHistoryId,
                         state = "multi_app_task_started",
                         message =
-                            "R9.5 Multi-App Task Orchestrator v${AyanaMultiAppTaskOrchestrator.VERSION} запущен: ${plan.steps.size} шага",
+                            "R9.6 Multi-App Task Orchestrator v${AyanaMultiAppTaskOrchestrator.VERSION} запущен: ${plan.steps.size} шага",
                         details =
                             "goal_id=${goalId.orEmpty()}; plan=${plan.key}; " +
                                 "source=${plan.source}; graph=${taskGraph.compactSummary()}"
@@ -12478,7 +12789,7 @@ respondAndResume(
                                         .put("safe_auto_resume", false)
                                         .put(
                                             "last_checkpoint",
-                                            "r9_5_${phase.take(60)}"
+                                            "r9_6_${phase.take(60)}"
                                         )
                                         .put(
                                             "last_tool_name",
@@ -12500,7 +12811,7 @@ respondAndResume(
                                     activeCommandHistoryId,
                                     state = "multi_app_task_checkpoint",
                                     message =
-                                        "R9.5 checkpoint: $phase",
+                                        "R9.6 checkpoint: $phase",
                                     details =
                                         "goal_id=${goalId.orEmpty()}; index=$index; " +
                                             "step=${step?.key.orEmpty()}"
@@ -12527,26 +12838,26 @@ respondAndResume(
                         cancelled ->
                             durableGoalStore.markCancelled(
                                 goalId,
-                                "R9.5 multi-app task cancelled"
+                                "R9.6 multi-app task cancelled"
                             )
 
                         success ->
                             durableGoalStore.markCompleted(
                                 goalId,
-                                "R9.5 verified multi-app task ${report.optInt("passed", 0)}/${report.optInt("steps_total", 0)}"
+                                "R9.6 verified multi-app task ${report.optInt("passed", 0)}/${report.optInt("steps_total", 0)}"
                             )
 
                         report.optBoolean("mutation_committed_detected", false) ||
                             report.optString("terminal_status") == "PAUSED" ->
                             durableGoalStore.markPaused(
                                 goalId,
-                                "R9.5 stopped on uncertain/unexpected side effect; blind replay blocked"
+                                "R9.6 stopped on uncertain/unexpected side effect; blind replay blocked"
                             )
 
                         else ->
                             durableGoalStore.markFailed(
                                 goalId,
-                                "R9.5 multi-app step/result transfer failed verification"
+                                "R9.6 multi-app step/result transfer failed verification"
                             )
                     }
 
@@ -12595,9 +12906,9 @@ respondAndResume(
                         state = "multi_app_task_complete",
                         message =
                             if (success) {
-                                "R9.5 multi-app task подтверждена"
+                                "R9.6 multi-app task подтверждена"
                             } else {
-                                "R9.5 multi-app task остановлена fail-closed"
+                                "R9.6 multi-app task остановлена fail-closed"
                             },
                         details = technical.take(4600)
                     )
@@ -12621,7 +12932,7 @@ respondAndResume(
                     try {
                         durableGoalStore.markFailed(
                             goalId,
-                            "R9.5 orchestrator exception: ${error.message ?: error.javaClass.simpleName}"
+                            "R9.6 orchestrator exception: ${error.message ?: error.javaClass.simpleName}"
                         )
                     } catch (_: Exception) {
                     }
@@ -12684,6 +12995,30 @@ respondAndResume(
             report.optBoolean("verified", false)
         ) {
             when {
+                planKey ==
+                    "r9.6-semantic-fallback-device-acceptance" -> {
+                    val ledger =
+                        report.optJSONObject("transfer_ledger")
+                            ?: JSONObject()
+
+                    val record =
+                        ledger.optJSONObject(
+                            AyanaMultiAppTaskOrchestrator
+                                .SEMANTIC_FALLBACK_ACCEPTANCE_KEY
+                        )
+
+                    val value =
+                        record
+                            ?.optString("value")
+                            .orEmpty()
+                            .ifBlank { "подтверждённый маркер" }
+
+                    "Семантический visual fallback подтверждён: $passed/$total PASS. " +
+                        "Accessibility не раскрыл маркер, поэтому AYANA проверила exact-marker «${value.take(100)}» " +
+                        "по package-bound screenshot с visual provenance и только после подтверждения передала его " +
+                        "в YouTube и несохранённый черновик Календаря. Постоянных изменений нет."
+                }
+
                 planKey ==
                     "r9.5-result-transfer-device-acceptance" -> {
                     val ledger =
@@ -22785,6 +23120,48 @@ append(index + 1)
                     .put("structure_only_transfer_rejected", true)
                     .put("verified_record_required_for_binding", true)
                     .put("committed_source_rejected", true)
+                    .put("blind_replay_allowed", false)
+                    .put("persistent_mutation_authority", false)
+        )
+
+        val semanticObservationFallbackOk =
+            try {
+                verifiedSemanticObservation.selfTest() &&
+                    visualScreenEvidence.selfTestPolicy() &&
+                    multiAppTaskOrchestrator.selfTest()
+            } catch (_: Exception) {
+                false
+            }
+
+        add(
+            id = "R9-FOUND-011",
+            title = "Verified semantic screenshot fallback provenance contract",
+            critical = true,
+            ok = semanticObservationFallbackOk,
+            message =
+                if (semanticObservationFallbackOk) {
+                    "R9.6 keeps Accessibility first, allows one read-only package-bound screenshot fallback for exact markers, requires high-confidence exact visual evidence and never promotes arbitrary model prose."
+                } else {
+                    "R9.6 verified semantic observation fallback self-test failed."
+                },
+            evidence =
+                JSONObject()
+                    .put("semantic_observation_version", AyanaVerifiedSemanticObservation.VERSION)
+                    .put("visual_screen_evidence_version", AyanaVisualScreenEvidence.VERSION)
+                    .put("orchestrator_version", AyanaMultiAppTaskOrchestrator.VERSION)
+                    .put(
+                        "semantic_fallback_acceptance_steps",
+                        AyanaMultiAppTaskOrchestrator.SEMANTIC_FALLBACK_ACCEPTANCE_STEP_COUNT
+                    )
+                    .put("accessibility_first", true)
+                    .put("screenshot_metadata_capability_required", true)
+                    .put("api_34_window_screenshot_preferred", true)
+                    .put("exact_screen_marker_only", true)
+                    .put("high_confidence_required", true)
+                    .put("source_package_match_required", true)
+                    .put("screenshot_sha256_required", true)
+                    .put("arbitrary_model_text_promoted", false)
+                    .put("screen_title_fallback_enabled", false)
                     .put("blind_replay_allowed", false)
                     .put("persistent_mutation_authority", false)
         )
@@ -44867,9 +45244,9 @@ state
 
     companion object {
 
-        // R9.5.1 RELEASE / FEATURE LINEAGE TRUTH.
+        // R9.6 RELEASE / FEATURE LINEAGE TRUTH.
         private const val AYANA_VOICE_SERVICE_RELEASE =
-            "v12.27.3 / R9.5.3 VERIFIED ACTION RESULT TRANSFER"
+            "v12.28.0 / R9.6 VERIFIED SEMANTIC OBSERVATION FALLBACK"
 
         private const val AYANA_PERSONAL_SEARCH_ENGINE_RELEASE =
             "v1.5.1 IMAGE COVERAGE TRUTH"
@@ -44881,13 +45258,13 @@ state
             "v11.1.10 Multi-Attachment"
 
         private const val AYANA_ACCEPTED_FEATURE_CHECKPOINT =
-            "R9.4.1 Screen Ownership Union Reconciliation — DEVICE-CONFIRMED ACCEPTED"
+            "R9.5.3 Verified Action Result Transfer — DEVICE-CONFIRMED ACCEPTED"
 
         private const val AYANA_CURRENT_FEATURE_RELEASE =
-            "R9.5.3 VERIFIED ACTION RESULT TRANSFER"
+            "R9.6 VERIFIED SEMANTIC OBSERVATION FALLBACK"
 
         private const val AYANA_RELEASE_LINEAGE =
-            "Android v12.21.0 / R7.9 truth-hardening + R8.0 multi-attachment + R8.1–R8.4 accepted Personal Global Search stack + R8.5–R8.5.4 capability/evidence truth + R9.0 autonomous agent foundation + R9.0.1 history live-refresh proof fix + R9.0.2 diagnostic reconciliation/history refresh fix + R9.0.3 TTS health reconciliation + R9.1 IME perception/active telemetry truth + R9.2 autonomous recovery/long-task reconciliation + R9.2.1 adaptive hypothesis reconciliation + R9.3 app integration framework + R9.3.1 screen health reconciliation + R9.3.2 history latency recovery reconciliation + R9.3.3 informational terminal reconciliation + R9.3.4 app integration device acceptance + R9.4 multi-app task orchestration + R9.4.1 screen ownership union reconciliation + R9.5 verified result transfer between app steps + R9.5.1 partial marker provenance reconciliation + R9.5.2 bounded marker observation + R9.5.3 verified action result transfer"
+            "Android v12.21.0 / R7.9 truth-hardening + R8.0 multi-attachment + R8.1–R8.4 accepted Personal Global Search stack + R8.5–R8.5.4 capability/evidence truth + R9.0 autonomous agent foundation + R9.0.1 history live-refresh proof fix + R9.0.2 diagnostic reconciliation/history refresh fix + R9.0.3 TTS health reconciliation + R9.1 IME perception/active telemetry truth + R9.2 autonomous recovery/long-task reconciliation + R9.2.1 adaptive hypothesis reconciliation + R9.3 app integration framework + R9.3.1 screen health reconciliation + R9.3.2 history latency recovery reconciliation + R9.3.3 informational terminal reconciliation + R9.3.4 app integration device acceptance + R9.4 multi-app task orchestration + R9.4.1 screen ownership union reconciliation + R9.5 verified result transfer between app steps + R9.5.1 partial marker provenance reconciliation + R9.5.2 bounded marker observation + R9.5.3 verified action result transfer + R9.6 verified semantic observation fallback"
 
         // AyanaCommandHistoryStore v2.8 keeps up to 4k chars inline and stores longer
         // results out-of-line. Self-review intentionally remains inline so copied History
