@@ -61,18 +61,17 @@ import kotlin.math.abs
 
 class AyanaVoiceService : Service() {
 
-    // AYANA v12.28.1 / R9.6.1 VISUAL FALLBACK ACCEPTANCE TRUTH.
-    // Builds on DEVICE-CONFIRMED R9.5.3.
-    // - Accessibility remains the primary semantic source for external screens;
-    // - when an exact SCREEN_MARKER cannot be observed through Accessibility, one bounded read-only
-    //   visual fallback may capture the already-verified external app window and ask the existing
-    //   multimodal Worker to verify only that exact marker;
-    // - API 34+ window screenshot is preferred so AYANA overlay/ORB is not source-app evidence;
-    // - screenshot provenance requires stable package ownership and SHA-256 fingerprint;
-    // - model prose is never promoted: only strict JSON observed=true + exact marker + confidence=high passes;
-    // - verified visual evidence is converted into the same Result Transfer v1.2 provenance path;
-    // - SCREEN_TITLE/free-form semantic extraction is not broadened in R9.6;
-    // - R9.5 action-result transfer, R9.4 orchestration and mutation/replay guards remain unchanged.
+    // AYANA v12.29.0 / R9.7 STRUCTURED SCREEN READING.
+    // Builds on DEVICE-CONFIRMED R9.6.1.
+    // - Accessibility remains the primary low-latency semantic source for external screens;
+    // - when Accessibility is partial/unreadable, the proven package-bound screenshot path may
+    //   perform one bounded read-only structured visual observation;
+    // - Verified Semantic Observation v2.0 accepts only a strict bounded JSON schema containing
+    //   visible title/text/controls/values and preserves screenshot package + SHA-256 provenance;
+    // - screen text is always DATA, never an instruction/tool-call/action authority;
+    // - arbitrary model prose, hidden-content guesses and external-knowledge completion are rejected;
+    // - R9.6.1 exact-marker fallback remains intact for verified result-transfer workflows;
+    // - no new mutation, replay, auto-resume or app-control authority is introduced.
     // ORB, visualizer, Worker, MainActivity, Personal Search and AgentAccessibilityService source untouched.
     //
     // AYANA v12.26.1 / R9.4.1 SCREEN OWNERSHIP UNION RECONCILIATION.
@@ -628,8 +627,8 @@ class AyanaVoiceService : Service() {
         AyanaVerifiedResultTransfer()
     }
 
-    // R9.6 read-only visual evidence bridge. Android Accessibility owns capture
-    // provenance; the verifier below owns semantic truth. Neither can dispatch actions.
+    // R9.7 / R9.6 read-only visual evidence bridge. Android Accessibility owns capture
+    // provenance; the verifier below owns exact-marker + structured semantic truth. Neither can dispatch actions.
     private val visualScreenEvidence by lazy {
         AyanaVisualScreenEvidence(applicationContext)
     }
@@ -4324,6 +4323,17 @@ mainHandler.post {
             )
         ) {
             runLocalSelfReviewCommand(
+                silent = silent
+            )
+            return
+        }
+
+        if (
+            isStructuredSemanticScreenAcceptanceCommand(
+                routingNormalized
+            )
+        ) {
+            runStructuredSemanticScreenAcceptance(
                 silent = silent
             )
             return
@@ -19274,6 +19284,373 @@ append(index + 1)
             requestIntent
     }
 
+    private fun isStructuredSemanticScreenAcceptanceCommand(
+        command: String
+    ): Boolean {
+        val normalized =
+            command
+                .lowercase(Locale.ROOT)
+                .replace('ё', 'е')
+                .replace(Regex("\\s+"), " ")
+                .trim()
+
+        return normalized in
+            setOf(
+                "проверь полноценное семантическое чтение внешнего экрана",
+                "проверь структурированное чтение внешнего экрана",
+                "проверь r9.7 чтение внешнего экрана"
+            )
+    }
+
+    private fun attemptVerifiedStructuredSemanticScreenRead(
+        expectedPackage: String,
+        commandToken: Long
+    ): JSONObject {
+        val cleanPackage = expectedPackage.trim()
+
+        if (
+            cleanPackage.isBlank() ||
+            cleanPackage == packageName
+        ) {
+            return JSONObject()
+                .put("success", false)
+                .put("verified", false)
+                .put("reason", "structured_semantic_external_package_required")
+        }
+
+        if (
+            isCommandCancelled(commandToken) ||
+            commandToken != activeCommandToken ||
+            Thread.currentThread().isInterrupted ||
+            shuttingDown
+        ) {
+            return JSONObject()
+                .put("success", false)
+                .put("verified", false)
+                .put("reason", "structured_semantic_cancelled")
+        }
+
+        commandHistoryStore.addEvent(
+            activeCommandHistoryId,
+            state = "semantic_structured_visual_fallback_started",
+            message = "R9.7: запускаю package-bound structured screen read",
+            details = "package=$cleanPackage"
+        )
+
+        val screenshot =
+            try {
+                visualScreenEvidence.captureVerifiedExternalWindow(
+                    expectedPackage = cleanPackage
+                )
+            } catch (error: Exception) {
+                JSONObject()
+                    .put("success", false)
+                    .put("verified", false)
+                    .put("reason", "structured_semantic_screenshot_exception")
+                    .put(
+                        "detail",
+                        (error.message ?: error.javaClass.simpleName).take(240)
+                    )
+            }
+
+        if (
+            !screenshot.optBoolean("success", false) ||
+            !screenshot.optBoolean("verified", false)
+        ) {
+            val result =
+                JSONObject(screenshot.toString())
+                    .put("success", false)
+                    .put("verified", false)
+                    .put("semantic_structured_visual_attempted", true)
+                    .put("semantic_structured_visual_stage", "screenshot")
+
+            commandHistoryStore.addEvent(
+                activeCommandHistoryId,
+                state = "semantic_structured_visual_fallback_failed",
+                message = "R9.7 screenshot evidence не подтверждено",
+                details =
+                    "package=$cleanPackage; reason=${result.optString("reason").take(180)}; " +
+                        "capture_mode=${result.optString("capture_mode")}; " +
+                        "screenshot_error=${result.optString("screenshot_error")}"
+            )
+
+            return result
+        }
+
+        try {
+            if (
+                isCommandCancelled(commandToken) ||
+                commandToken != activeCommandToken ||
+                Thread.currentThread().isInterrupted ||
+                shuttingDown
+            ) {
+                return JSONObject()
+                    .put("success", false)
+                    .put("verified", false)
+                    .put("reason", "structured_semantic_cancelled_after_screenshot")
+                    .put("semantic_structured_visual_attempted", true)
+            }
+
+            val manifest =
+                JSONObject()
+                    .put(
+                        "kind",
+                        AyanaMultimodalAttachmentManager.KIND_IMAGE
+                    )
+                    .put(
+                        "display_name",
+                        "ayana_structured_screen_read.jpg"
+                    )
+                    .put("mime_type", "image/jpeg")
+                    .put("path", screenshot.optString("path"))
+
+            val model =
+                try {
+                    callMultimodalCore(
+                        prompt =
+                            verifiedSemanticObservation
+                                .promptForStructuredScreenRead(),
+                        manifest = manifest
+                    )
+                } catch (error: Exception) {
+                    JSONObject()
+                        .put("success", false)
+                        .put("reply", "")
+                        .put(
+                            "technical",
+                            "structured_semantic_multimodal_exception=" +
+                                (error.message ?: error.javaClass.simpleName).take(240)
+                        )
+                }
+
+            if (
+                isCommandCancelled(commandToken) ||
+                commandToken != activeCommandToken ||
+                Thread.currentThread().isInterrupted ||
+                shuttingDown
+            ) {
+                return JSONObject()
+                    .put("success", false)
+                    .put("verified", false)
+                    .put("reason", "structured_semantic_cancelled_after_model")
+                    .put("semantic_structured_visual_attempted", true)
+            }
+
+            if (!model.optBoolean("success", false)) {
+                val result =
+                    JSONObject()
+                        .put("success", false)
+                        .put("verified", false)
+                        .put("reason", "structured_semantic_multimodal_failed")
+                        .put("semantic_structured_visual_attempted", true)
+                        .put("semantic_structured_visual_stage", "multimodal")
+                        .put(
+                            "semantic_model_technical",
+                            model.optString("technical").take(500)
+                        )
+
+                commandHistoryStore.addEvent(
+                    activeCommandHistoryId,
+                    state = "semantic_structured_visual_fallback_failed",
+                    message = "R9.7 multimodal structured read не выполнен",
+                    details = result.toString().take(1200)
+                )
+
+                return result
+            }
+
+            val verified =
+                verifiedSemanticObservation
+                    .verifyStructuredScreenRead(
+                        expectedPackage = cleanPackage,
+                        screenshotEvidence = screenshot,
+                        modelReply = model.optString("reply")
+                    )
+                    .put("semantic_structured_visual_attempted", true)
+                    .put("semantic_structured_visual_stage", "verified_semantic_observation")
+                    .put(
+                        "semantic_model_technical",
+                        model.optString("technical").take(500)
+                    )
+
+            commandHistoryStore.addEvent(
+                activeCommandHistoryId,
+                state =
+                    if (verified.optBoolean("verified", false)) {
+                        "semantic_structured_visual_fallback_verified"
+                    } else {
+                        "semantic_structured_visual_fallback_failed"
+                    },
+                message =
+                    if (verified.optBoolean("verified", false)) {
+                        "R9.7 structured screen read подтверждён visual provenance"
+                    } else {
+                        "R9.7 structured screen read не прошёл fail-closed verifier"
+                    },
+                details =
+                    "package=$cleanPackage; title=${verified.optString("semantic_title").take(180)}; " +
+                        "text_count=${verified.optJSONArray("semantic_primary_text")?.length() ?: 0}; " +
+                        "controls=${verified.optJSONArray("semantic_controls")?.length() ?: 0}; " +
+                        "values=${verified.optJSONArray("semantic_values")?.length() ?: 0}; " +
+                        "reason=${verified.optString("reason")}; capture_mode=${screenshot.optString("capture_mode")}; " +
+                        "sha=${screenshot.optString("screenshot_sha256").take(16)}..."
+            )
+
+            return verified
+        } finally {
+            visualScreenEvidence.deleteEvidenceFile(screenshot)
+        }
+    }
+
+    private fun runStructuredSemanticScreenAcceptance(
+        silent: Boolean
+    ) {
+        executionPhase(
+            phase = "r9_7_structured_screen_read_acceptance",
+            executor = "verified_semantic_observation_v2"
+        )
+
+        val pageKey = currentAyanaPageKeyForAppIntegrationProbe()
+
+        val action =
+            executeAppIntegrationAction(
+                appKey = AyanaAppIntegrationRegistry.APP_BROWSER,
+                actionKey = AyanaAppIntegrationRegistry.ACTION_OPEN_URL,
+                payload = R9_7_STRUCTURED_ACCEPTANCE_URL
+            )
+
+        if (
+            !action.optBoolean("success", false) ||
+            !action.optBoolean("verified", false)
+        ) {
+            restoreAyanaAfterAppIntegrationProbe(
+                pageKey = pageKey,
+                stepKey = "r9.7-structured-screen-read"
+            )
+
+            respondAndResume(
+                text = "R9.7 structured screen read не подтверждён: Browser acceptance source не открыт.",
+                silent = silent,
+                success = false,
+                technical =
+                    "r9_7_structured_acceptance=false; stage=browser_open; " +
+                        "reason=${action.optString("message").take(240)}"
+            )
+            return
+        }
+
+        val expectedPackage =
+            action
+                .optString("observed_package")
+                .trim()
+                .ifBlank {
+                    action.optString("target_package").trim()
+                }
+
+        val visual =
+            attemptVerifiedStructuredSemanticScreenRead(
+                expectedPackage = expectedPackage,
+                commandToken = activeCommandToken
+            )
+
+        val restore =
+            restoreAyanaAfterAppIntegrationProbe(
+                pageKey = pageKey,
+                stepKey = "r9.7-structured-screen-read"
+            )
+
+        val title =
+            visual
+                .optString("semantic_title")
+                .trim()
+
+        val textCount =
+            visual
+                .optJSONArray("semantic_primary_text")
+                ?.length()
+                ?: 0
+
+        val controlsCount =
+            visual
+                .optJSONArray("semantic_controls")
+                ?.length()
+                ?: 0
+
+        val valuesCount =
+            visual
+                .optJSONArray("semantic_values")
+                ?.length()
+                ?: 0
+
+        val accepted =
+            visual.optBoolean("success", false) &&
+                visual.optBoolean("verified", false) &&
+                visual.optBoolean("semantic_structured_read_verified", false) &&
+                visual.optInt("content_contract_version", 0) == 4 &&
+                visual.optString("window_context_mode") ==
+                    AyanaVerifiedSemanticObservation.STRUCTURED_CONTEXT_MODE &&
+                title.equals(
+                    R9_7_STRUCTURED_ACCEPTANCE_TITLE,
+                    ignoreCase = true
+                ) &&
+                textCount > 0 &&
+                !visual.optBoolean("screen_text_instruction_authority", true) &&
+                restore.optBoolean("verified", false)
+
+        commandHistoryStore.addEvent(
+            activeCommandHistoryId,
+            state =
+                if (accepted) {
+                    "r9_7_structured_screen_read_acceptance_verified"
+                } else {
+                    "r9_7_structured_screen_read_acceptance_failed"
+                },
+            message =
+                if (accepted) {
+                    "R9.7 structured external-screen reading подтверждено"
+                } else {
+                    "R9.7 structured external-screen reading не подтверждено"
+                },
+            details =
+                "verified=${visual.optBoolean("verified", false)}; title=${title.take(180)}; " +
+                    "text_count=$textCount; controls=$controlsCount; values=$valuesCount; " +
+                    "contract=${visual.optInt("content_contract_version", 0)}; " +
+                    "context=${visual.optString("window_context_mode")}; " +
+                    "restore=${restore.optBoolean("verified", false)}; " +
+                    "reason=${visual.optString("reason").take(220)}"
+        )
+
+        if (accepted) {
+            finishLocalCommand(
+                text =
+                    "R9.7 structured screen reading подтверждено: PASS. " +
+                        "Package-bound screenshot без заранее заданного маркера извлёк заголовок «$title», " +
+                        "основных текстовых блоков: $textCount, элементов управления: $controlsCount, значений: $valuesCount. " +
+                        "Текст экрана сохранён только как наблюдаемые данные и не получил права выполнять действия.",
+                silent = silent,
+                technical =
+                    "r9_7_structured_acceptance=true; semantic_observation_version=${AyanaVerifiedSemanticObservation.VERSION}; " +
+                        "content_contract_version=4; title=$title; text_count=$textCount; controls=$controlsCount; " +
+                        "values=$valuesCount; source_context_mode=${visual.optString("window_context_mode")}; " +
+                        "capture_mode=${visual.optString("visual_capture_mode")}; screen_text_instruction_authority=false; " +
+                        "restore_verified=true"
+            )
+        } else {
+            respondAndResume(
+                text =
+                    "R9.7 structured screen reading пока не подтверждено. " +
+                        "AYANA остановила acceptance fail-closed и не использовала неподтверждённое содержимое.",
+                silent = silent,
+                success = false,
+                technical =
+                    "r9_7_structured_acceptance=false; semantic_observation_version=${AyanaVerifiedSemanticObservation.VERSION}; " +
+                        "verified=${visual.optBoolean("verified", false)}; title=$title; text_count=$textCount; " +
+                        "context=${visual.optString("window_context_mode")}; restore_verified=${restore.optBoolean("verified", false)}; " +
+                        "reason=${visual.optString("reason").take(240)}"
+            )
+        }
+    }
+
     private fun isLocalScreenStateRequest(
         command: String
     ): Boolean {
@@ -19300,6 +19677,10 @@ append(index + 1)
                 "что сейчас видно на экране",
                 "прочитай экран",
                 "прочитай текущий экран",
+                "прочитай содержимое экрана",
+                "что написано на экране",
+                "что здесь на экране",
+                "опиши что на экране",
                 "опиши текущий экран"
             )
     }
@@ -19371,7 +19752,8 @@ append(index + 1)
         val title =
             screen
                 .optString(
-                    "primary_window_title"
+                    "primary_window_title",
+                    screen.optString("semantic_title")
                 )
                 .trim()
 
@@ -19395,72 +19777,132 @@ append(index + 1)
                 )
                 .trim()
 
-        val visible =
-            screen
-                .optJSONArray(
-                    "visible_text"
-                )
+        val structured =
+            screen.optBoolean(
+                "semantic_structured_read_verified",
+                false
+            )
 
-        val texts =
-            mutableListOf<String>()
+        if (structured) {
+            val primary =
+                screen.optJSONArray("semantic_primary_text")
+            val controls =
+                screen.optJSONArray("semantic_controls")
+            val values =
+                screen.optJSONArray("semantic_values")
+
+            val textItems = mutableListOf<String>()
+            if (primary != null) {
+                for (index in 0 until minOf(primary.length(), 10)) {
+                    val value =
+                        primary
+                            .optString(index)
+                            .replace(Regex("\\s+"), " ")
+                            .trim()
+                            .take(240)
+                    if (value.isNotBlank() && value !in textItems) {
+                        textItems.add(value)
+                    }
+                }
+            }
+
+            val controlItems = mutableListOf<String>()
+            if (controls != null) {
+                for (index in 0 until minOf(controls.length(), 8)) {
+                    val item = controls.optJSONObject(index) ?: continue
+                    val role = item.optString("role").trim()
+                    val text =
+                        item
+                            .optString("text")
+                            .replace(Regex("\\s+"), " ")
+                            .trim()
+                            .take(160)
+                    if (text.isNotBlank()) {
+                        controlItems.add(
+                            if (role.isBlank()) text else "$role: $text"
+                        )
+                    }
+                }
+            }
+
+            val valueItems = mutableListOf<String>()
+            if (values != null) {
+                for (index in 0 until minOf(values.length(), 8)) {
+                    val item = values.optJSONObject(index) ?: continue
+                    val label = item.optString("label").trim().take(120)
+                    val value = item.optString("value").trim().take(180)
+                    val rendered =
+                        when {
+                            label.isNotBlank() && value.isNotBlank() -> "$label: $value"
+                            label.isNotBlank() -> label
+                            else -> value
+                        }
+                    if (rendered.isNotBlank()) valueItems.add(rendered)
+                }
+            }
+
+            return buildString {
+                append("Текущий экран")
+                if (title.isNotBlank()) {
+                    append(": ")
+                    append(title)
+                } else if (packageName.isNotBlank()) {
+                    append(": ")
+                    append(packageName)
+                }
+                append(".")
+
+                if (textItems.isNotEmpty()) {
+                    append(" Видимый текст: ")
+                    append(textItems.joinToString(" • "))
+                }
+
+                if (controlItems.isNotEmpty()) {
+                    append(" Элементы: ")
+                    append(controlItems.joinToString(" • "))
+                }
+
+                if (valueItems.isNotEmpty()) {
+                    append(" Значения: ")
+                    append(valueItems.joinToString(" • "))
+                }
+
+                append(" Источник: проверенный снимок окна приложения.")
+            }.take(2400)
+        }
+
+        val visible =
+            screen.optJSONArray("visible_text")
+
+        val texts = mutableListOf<String>()
 
         if (visible != null) {
-            for (
-                index in
-                0 until minOf(
-                    visible.length(),
-                    12
-                )
-            ) {
+            for (index in 0 until minOf(visible.length(), 12)) {
                 val value =
                     visible
-                        .optString(
-                            index
-                        )
-                        .replace(
-                            Regex("\\s+"),
-                            " "
-                        )
+                        .optString(index)
+                        .replace(Regex("\\s+"), " ")
                         .trim()
-                        .take(
-                            180
-                        )
+                        .take(180)
 
-                if (
-                    value.isNotBlank() &&
-                    value !in texts
-                ) {
-                    texts.add(
-                        value
-                    )
+                if (value.isNotBlank() && value !in texts) {
+                    texts.add(value)
                 }
             }
         }
 
         return buildString {
-            append(
-                "Текущий экран"
-            )
+            append("Текущий экран")
 
             if (title.isNotBlank()) {
-                append(
-                    ": "
-                )
-                append(
-                    title
-                )
+                append(": ")
+                append(title)
             } else if (packageName.isNotBlank()) {
-                append(
-                    ": "
-                )
-                append(
-                    packageName
-                )
+                append(": ")
+                append(packageName)
             }
 
-            append(
-                "."
-)
+            append(".")
 
             if (
                 contentState in
@@ -19471,23 +19913,12 @@ append(index + 1)
                 ) ||
                 texts.isEmpty()
             ) {
-                append(
-                    " Содержимое читается только частично или недоступно через текущий Accessibility snapshot."
-                )
+                append(" Содержимое читается только частично или недоступно через текущий Accessibility snapshot.")
             } else {
-                append(
-                    " Доступный текст: "
-                )
-                append(
-                    texts.joinToString(
-                        " • "
-                    )
-                )
+                append(" Доступный текст: ")
+                append(texts.joinToString(" • "))
             }
-        }
-            .take(
-                1800
-            )
+        }.take(1800)
     }
 
     private fun runLocalDeviceStateCommand(
@@ -19654,7 +20085,7 @@ append(index + 1)
             executor = "screen_state_executor"
         )
 
-        val screen =
+        val accessibilityScreen =
             try {
                 screenIntelligence
                     .getScreenState()
@@ -19672,8 +20103,76 @@ append(index + 1)
 
         capabilityRegistry
             .recordScreenObservation(
-                screen
+                accessibilityScreen
             )
+
+        val snapshotSuccess =
+            accessibilityScreen.optBoolean(
+                "snapshot_success",
+                accessibilityScreen.optBoolean(
+                    "success",
+                    false
+                )
+            )
+
+        val observedPackage =
+            accessibilityScreen
+                .optString(
+                    "effective_foreground_package",
+                    accessibilityScreen.optString(
+                        "interaction_package",
+                        accessibilityScreen.optString("package")
+                    )
+                )
+                .trim()
+
+        val contentState =
+            accessibilityScreen
+                .optString(
+                    "primary_content_state",
+                    accessibilityScreen.optString("content_status")
+                )
+                .trim()
+
+        val visibleCount =
+            accessibilityScreen
+                .optJSONArray("visible_text")
+                ?.length()
+                ?: 0
+
+        val shouldTryStructuredVisual =
+            snapshotSuccess &&
+                observedPackage.isNotBlank() &&
+                observedPackage != packageName &&
+                (
+                    contentState != "readable" ||
+                        visibleCount == 0
+                    )
+
+        val structuredVisual =
+            if (shouldTryStructuredVisual) {
+                attemptVerifiedStructuredSemanticScreenRead(
+                    expectedPackage = observedPackage,
+                    commandToken = activeCommandToken
+                )
+            } else {
+                null
+            }
+
+        val screen =
+            if (
+                structuredVisual != null &&
+                structuredVisual.optBoolean("success", false) &&
+                structuredVisual.optBoolean("verified", false)
+            ) {
+                capabilityRegistry
+                    .recordScreenObservation(
+                        structuredVisual
+                    )
+                structuredVisual
+            } else {
+                accessibilityScreen
+            }
 
         val success =
             screen.optBoolean(
@@ -19689,21 +20188,27 @@ append(index + 1)
             state = "local_screen_state",
             message =
                 if (success) {
-                    "Текущий экран прочитан локально"
+                    if (screen.optBoolean("semantic_structured_read_verified", false)) {
+                        "Текущий экран прочитан через R9.7 structured visual fallback"
+                    } else {
+                        "Текущий экран прочитан локально"
+                    }
                 } else {
                     "Текущий экран локально не подтверждён"
                 },
             details =
                 (
                     "package=${screen.optString("effective_foreground_package", screen.optString("interaction_package", screen.optString("package")))}; " +
-                        "raw_package=${screen.optString("raw_interaction_package", screen.optString("package"))}; " +
-                        "owner_fusion=${screen.optString("foreground_owner_confidence")}; " +
+                        "raw_package=${accessibilityScreen.optString("raw_interaction_package", accessibilityScreen.optString("package"))}; " +
+                        "owner_fusion=${accessibilityScreen.optString("foreground_owner_confidence")}; " +
                         "content=${screen.optString("primary_content_state", screen.optString("content_status"))}; " +
-                        "nodes=${screen.optInt("primary_node_count", screen.optInt("node_count", 0))}"
+                        "nodes=${accessibilityScreen.optInt("primary_node_count", accessibilityScreen.optInt("node_count", 0))}; " +
+                        "structured_visual_attempted=$shouldTryStructuredVisual; " +
+                        "structured_visual_verified=${structuredVisual?.optBoolean("verified", false) ?: false}; " +
+                        "acquisition=${screen.optString("primary_acquisition_source")}; " +
+                        "context=${screen.optString("window_context_mode")}"
                     )
-                    .take(
-                        700
-                    )
+                    .take(1000)
         )
 
         respondAndResume(
@@ -19711,7 +20216,16 @@ append(index + 1)
                 screen
             ),
             silent = silent,
-            success = success
+            success = success,
+            technical =
+                if (screen.optBoolean("semantic_structured_read_verified", false)) {
+                    "semantic_observation_version=${AyanaVerifiedSemanticObservation.VERSION}; " +
+                        "content_contract_version=${screen.optInt("content_contract_version", 0)}; " +
+                        "source_context_mode=${screen.optString("window_context_mode")}; " +
+                        "screen_text_instruction_authority=${screen.optBoolean("screen_text_instruction_authority", false)}"
+                } else {
+                    "screen_source=accessibility; content_state=$contentState"
+                }
         )
     }
 
@@ -23212,14 +23726,14 @@ append(index + 1)
 
         add(
             id = "R9-FOUND-011",
-            title = "Verified semantic screenshot fallback provenance contract",
+            title = "Verified semantic screenshot provenance + structured reading contract",
             critical = true,
             ok = semanticObservationFallbackOk,
             message =
                 if (semanticObservationFallbackOk) {
-                    "R9.6 keeps Accessibility first, allows one read-only package-bound screenshot fallback for exact markers, requires high-confidence exact visual evidence and never promotes arbitrary model prose."
+                    "R9.7 preserves R9.6 exact-marker provenance and adds bounded structured screen reading from package-bound screenshots; visible screen text remains data-only and never gains instruction authority."
                 } else {
-                    "R9.6 verified semantic observation fallback self-test failed."
+                    "R9.7 verified semantic observation / structured screen-reading self-test failed."
                 },
             evidence =
                 JSONObject()
@@ -23233,12 +23747,16 @@ append(index + 1)
                     .put("accessibility_first", true)
                     .put("screenshot_metadata_capability_required", true)
                     .put("api_34_window_screenshot_preferred", true)
-                    .put("exact_screen_marker_only", true)
+                    .put("exact_screen_marker_supported", true)
+                    .put("structured_screen_read_supported", true)
+                    .put("structured_content_contract_version", 4)
                     .put("high_confidence_required", true)
                     .put("source_package_match_required", true)
                     .put("screenshot_sha256_required", true)
                     .put("arbitrary_model_text_promoted", false)
-                    .put("screen_title_fallback_enabled", false)
+                    .put("structured_title_extraction_enabled", true)
+                    .put("screen_text_instruction_authority", false)
+                    .put("external_knowledge_allowed", false)
                     .put("blind_replay_allowed", false)
                     .put("persistent_mutation_authority", false)
         )
@@ -45321,9 +45839,9 @@ state
 
     companion object {
 
-        // R9.6.1 RELEASE / FEATURE LINEAGE TRUTH.
+        // R9.7 RELEASE / FEATURE LINEAGE TRUTH.
         private const val AYANA_VOICE_SERVICE_RELEASE =
-            "v12.28.1 / R9.6.1 VISUAL FALLBACK ACCEPTANCE TRUTH"
+            "v12.29.0 / R9.7 STRUCTURED SCREEN READING"
 
         private const val AYANA_PERSONAL_SEARCH_ENGINE_RELEASE =
             "v1.5.1 IMAGE COVERAGE TRUTH"
@@ -45335,17 +45853,23 @@ state
             "v11.1.10 Multi-Attachment"
 
         private const val AYANA_ACCEPTED_FEATURE_CHECKPOINT =
-            "R9.5.3 Verified Action Result Transfer — DEVICE-CONFIRMED ACCEPTED"
+            "R9.6.1 Visual Fallback Acceptance Truth — DEVICE-CONFIRMED ACCEPTED"
 
         private const val AYANA_CURRENT_FEATURE_RELEASE =
-            "R9.6.1 VISUAL FALLBACK ACCEPTANCE TRUTH"
+            "R9.7 STRUCTURED SCREEN READING"
 
         private const val AYANA_RELEASE_LINEAGE =
-            "Android v12.21.0 / R7.9 truth-hardening + R8.0 multi-attachment + R8.1–R8.4 accepted Personal Global Search stack + R8.5–R8.5.4 capability/evidence truth + R9.0 autonomous agent foundation + R9.0.1 history live-refresh proof fix + R9.0.2 diagnostic reconciliation/history refresh fix + R9.0.3 TTS health reconciliation + R9.1 IME perception/active telemetry truth + R9.2 autonomous recovery/long-task reconciliation + R9.2.1 adaptive hypothesis reconciliation + R9.3 app integration framework + R9.3.1 screen health reconciliation + R9.3.2 history latency recovery reconciliation + R9.3.3 informational terminal reconciliation + R9.3.4 app integration device acceptance + R9.4 multi-app task orchestration + R9.4.1 screen ownership union reconciliation + R9.5 verified result transfer between app steps + R9.5.1 partial marker provenance reconciliation + R9.5.2 bounded marker observation + R9.5.3 verified action result transfer + R9.6 verified semantic observation fallback + R9.6.1 visual fallback acceptance truth"
+            "Android v12.21.0 / R7.9 truth-hardening + R8.0 multi-attachment + R8.1–R8.4 accepted Personal Global Search stack + R8.5–R8.5.4 capability/evidence truth + R9.0 autonomous agent foundation + R9.0.1 history live-refresh proof fix + R9.0.2 diagnostic reconciliation/history refresh fix + R9.0.3 TTS health reconciliation + R9.1 IME perception/active telemetry truth + R9.2 autonomous recovery/long-task reconciliation + R9.2.1 adaptive hypothesis reconciliation + R9.3 app integration framework + R9.3.1 screen health reconciliation + R9.3.2 history latency recovery reconciliation + R9.3.3 informational terminal reconciliation + R9.3.4 app integration device acceptance + R9.4 multi-app task orchestration + R9.4.1 screen ownership union reconciliation + R9.5 verified result transfer between app steps + R9.5.1 partial marker provenance reconciliation + R9.5.2 bounded marker observation + R9.5.3 verified action result transfer + R9.6 verified semantic observation fallback + R9.6.1 visual fallback acceptance truth + R9.7 structured screen reading"
 
         // AyanaCommandHistoryStore v2.8 keeps up to 4k chars inline and stores longer
         // results out-of-line. Self-review intentionally remains inline so copied History
         // cannot degrade to a 4k preview if a sidecar result file is unavailable.
+        private const val R9_7_STRUCTURED_ACCEPTANCE_URL =
+            "https://example.com/"
+
+        private const val R9_7_STRUCTURED_ACCEPTANCE_TITLE =
+            "Example Domain"
+
         private const val SELF_REVIEW_INLINE_SAFE_CHARS =
             3_900
 
