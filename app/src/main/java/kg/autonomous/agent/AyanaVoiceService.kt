@@ -61,7 +61,7 @@ import kotlin.math.abs
 
 class AyanaVoiceService : Service() {
 
-    // AYANA v12.28.0 / R9.6 VERIFIED SEMANTIC OBSERVATION FALLBACK.
+    // AYANA v12.28.1 / R9.6.1 VISUAL FALLBACK ACCEPTANCE TRUTH.
     // Builds on DEVICE-CONFIRMED R9.5.3.
     // - Accessibility remains the primary semantic source for external screens;
     // - when an exact SCREEN_MARKER cannot be observed through Accessibility, one bounded read-only
@@ -12004,6 +12004,23 @@ respondAndResume(
             )
     }
 
+    private fun isSemanticVisualAcceptanceProbe(
+        step: AyanaMultiAppTaskOrchestrator.TaskStep
+    ): Boolean {
+        val captureSpec =
+            step.captureSpec
+                ?: return false
+
+        return step.key == "browser-visual-semantic-marker" &&
+            step.appKey == "browser" &&
+            step.actionKey == AyanaAppIntegrationRegistry.ACTION_OPEN_URL &&
+            step.payload == AyanaMultiAppTaskOrchestrator.SEMANTIC_FALLBACK_ACCEPTANCE_URL &&
+            captureSpec.kind ==
+                AyanaVerifiedResultTransfer.CaptureKind.SCREEN_MARKER &&
+            captureSpec.marker ==
+                AyanaMultiAppTaskOrchestrator.SEMANTIC_FALLBACK_ACCEPTANCE_MARKER
+    }
+
     private fun attemptVerifiedSemanticScreenMarkerFallback(
         step: AyanaMultiAppTaskOrchestrator.TaskStep,
         actionResult: JSONObject,
@@ -12038,6 +12055,9 @@ respondAndResume(
                 .put("reason", "semantic_fallback_marker_missing")
         }
 
+        val forcedAcceptanceProbe =
+            isSemanticVisualAcceptanceProbe(step)
+
         if (
             !actionResult.optBoolean("success", false) ||
             !actionResult.optBoolean("verified", false) ||
@@ -12066,9 +12086,15 @@ respondAndResume(
         commandHistoryStore.addEvent(
             activeCommandHistoryId,
             state = "semantic_visual_fallback_started",
-            message = "R9.6: Accessibility не дал exact-marker; проверяю package-bound screenshot",
+            message =
+                if (forcedAcceptanceProbe) {
+                    "R9.6.1 acceptance: Accessibility sample получен; принудительно проверяю package-bound screenshot"
+                } else {
+                    "R9.6: Accessibility не дал exact-marker; проверяю package-bound screenshot"
+                },
             details =
-                "step=${step.key}; package=$expectedPackage; marker=${marker.take(180)}"
+                "step=${step.key}; package=$expectedPackage; marker=${marker.take(180)}; " +
+                    "forced_acceptance_probe=$forcedAcceptanceProbe"
         )
 
         val screenshot =
@@ -12260,6 +12286,9 @@ respondAndResume(
                 .put("expected_package", expectedPackage)
         }
 
+        val forceVisualAcceptanceProbe =
+            isSemanticVisualAcceptanceProbe(step)
+
         val startedAt =
             SystemClock.elapsedRealtime()
 
@@ -12268,6 +12297,7 @@ respondAndResume(
                 RESULT_TRANSFER_OBSERVATION_TIMEOUT_MS
 
         var attempts = 0
+        var forcedVisualProbeAfterAccessibilitySample = false
         var bestRank = Int.MIN_VALUE
         var best =
             JSONObject()
@@ -12408,6 +12438,26 @@ respondAndResume(
                         )
 
             if (
+                forceVisualAcceptanceProbe &&
+                screen.optBoolean("success", false) &&
+                packageMatch
+            ) {
+                forcedVisualProbeAfterAccessibilitySample = true
+
+                commandHistoryStore.addEvent(
+                    activeCommandHistoryId,
+                    state = "semantic_visual_acceptance_accessibility_sampled",
+                    message =
+                        "R9.6.1 acceptance: Accessibility проверен; screenshot branch обязателен для device proof",
+                    details =
+                        "step=${step.key}; package=$observedPackage; content=$contentState; " +
+                            "marker_ready=$captureEvidenceReady; attempts=$attempts"
+                )
+
+                break
+            }
+
+            if (
                 screen.optBoolean("success", false) &&
                 packageMatch &&
                 contentTransferEligible &&
@@ -12482,7 +12532,14 @@ respondAndResume(
                         )
                         .coerceAtLeast(0L)
                 )
-                .put("transfer_observation_timeout", true)
+                .put(
+                    "transfer_observation_timeout",
+                    !forcedVisualProbeAfterAccessibilitySample
+                )
+                .put(
+                    "transfer_observation_forced_visual_probe",
+                    forcedVisualProbeAfterAccessibilitySample
+                )
                 .put(
                     "transfer_expected_marker",
                     step.captureSpec
@@ -12512,9 +12569,12 @@ respondAndResume(
                 )
 
         val shouldTryVisualFallback =
-            step.captureSpec?.kind ==
-                AyanaVerifiedResultTransfer.CaptureKind.SCREEN_MARKER &&
-                !accessibilityTimeout.optBoolean("transfer_marker_observed", false)
+            forceVisualAcceptanceProbe ||
+                (
+                    step.captureSpec?.kind ==
+                        AyanaVerifiedResultTransfer.CaptureKind.SCREEN_MARKER &&
+                        !accessibilityTimeout.optBoolean("transfer_marker_observed", false)
+                    )
 
         if (shouldTryVisualFallback) {
             val visual =
@@ -12531,8 +12591,24 @@ respondAndResume(
             ) {
                 return JSONObject(visual.toString())
                     .put("accessibility_first", true)
-                    .put("accessibility_marker_observed", false)
-                    .put("accessibility_observation_timeout", true)
+                    .put(
+                        "accessibility_marker_observed",
+                        accessibilityTimeout.optBoolean(
+                            "transfer_marker_observed",
+                            false
+                        )
+                    )
+                    .put(
+                        "accessibility_observation_timeout",
+                        accessibilityTimeout.optBoolean(
+                            "transfer_observation_timeout",
+                            true
+                        )
+                    )
+                    .put(
+                        "semantic_visual_acceptance_forced",
+                        forceVisualAcceptanceProbe
+                    )
                     .put("accessibility_observation_attempts", attempts)
                     .put(
                         "accessibility_observation_elapsed_ms",
@@ -13013,10 +13089,11 @@ respondAndResume(
                             .orEmpty()
                             .ifBlank { "подтверждённый маркер" }
 
-                    "Семантический visual fallback подтверждён: $passed/$total PASS. " +
-                        "Accessibility не раскрыл маркер, поэтому AYANA проверила exact-marker «${value.take(100)}» " +
-                        "по package-bound screenshot с visual provenance и только после подтверждения передала его " +
-                        "в YouTube и несохранённый черновик Календаря. Постоянных изменений нет."
+                    "R9.6.1 visual fallback acceptance подтверждён: $passed/$total PASS. " +
+                        "Диагностический маршрут сначала проверил Accessibility, затем намеренно потребовал " +
+                        "package-bound screenshot и exact-marker «${value.take(100)}» с visual provenance. " +
+                        "Только после screenshot-подтверждения значение передано в YouTube и несохранённый " +
+                        "черновик Календаря. Постоянных изменений нет."
                 }
 
                 planKey ==
@@ -45244,9 +45321,9 @@ state
 
     companion object {
 
-        // R9.6 RELEASE / FEATURE LINEAGE TRUTH.
+        // R9.6.1 RELEASE / FEATURE LINEAGE TRUTH.
         private const val AYANA_VOICE_SERVICE_RELEASE =
-            "v12.28.0 / R9.6 VERIFIED SEMANTIC OBSERVATION FALLBACK"
+            "v12.28.1 / R9.6.1 VISUAL FALLBACK ACCEPTANCE TRUTH"
 
         private const val AYANA_PERSONAL_SEARCH_ENGINE_RELEASE =
             "v1.5.1 IMAGE COVERAGE TRUTH"
@@ -45261,10 +45338,10 @@ state
             "R9.5.3 Verified Action Result Transfer — DEVICE-CONFIRMED ACCEPTED"
 
         private const val AYANA_CURRENT_FEATURE_RELEASE =
-            "R9.6 VERIFIED SEMANTIC OBSERVATION FALLBACK"
+            "R9.6.1 VISUAL FALLBACK ACCEPTANCE TRUTH"
 
         private const val AYANA_RELEASE_LINEAGE =
-            "Android v12.21.0 / R7.9 truth-hardening + R8.0 multi-attachment + R8.1–R8.4 accepted Personal Global Search stack + R8.5–R8.5.4 capability/evidence truth + R9.0 autonomous agent foundation + R9.0.1 history live-refresh proof fix + R9.0.2 diagnostic reconciliation/history refresh fix + R9.0.3 TTS health reconciliation + R9.1 IME perception/active telemetry truth + R9.2 autonomous recovery/long-task reconciliation + R9.2.1 adaptive hypothesis reconciliation + R9.3 app integration framework + R9.3.1 screen health reconciliation + R9.3.2 history latency recovery reconciliation + R9.3.3 informational terminal reconciliation + R9.3.4 app integration device acceptance + R9.4 multi-app task orchestration + R9.4.1 screen ownership union reconciliation + R9.5 verified result transfer between app steps + R9.5.1 partial marker provenance reconciliation + R9.5.2 bounded marker observation + R9.5.3 verified action result transfer + R9.6 verified semantic observation fallback"
+            "Android v12.21.0 / R7.9 truth-hardening + R8.0 multi-attachment + R8.1–R8.4 accepted Personal Global Search stack + R8.5–R8.5.4 capability/evidence truth + R9.0 autonomous agent foundation + R9.0.1 history live-refresh proof fix + R9.0.2 diagnostic reconciliation/history refresh fix + R9.0.3 TTS health reconciliation + R9.1 IME perception/active telemetry truth + R9.2 autonomous recovery/long-task reconciliation + R9.2.1 adaptive hypothesis reconciliation + R9.3 app integration framework + R9.3.1 screen health reconciliation + R9.3.2 history latency recovery reconciliation + R9.3.3 informational terminal reconciliation + R9.3.4 app integration device acceptance + R9.4 multi-app task orchestration + R9.4.1 screen ownership union reconciliation + R9.5 verified result transfer between app steps + R9.5.1 partial marker provenance reconciliation + R9.5.2 bounded marker observation + R9.5.3 verified action result transfer + R9.6 verified semantic observation fallback + R9.6.1 visual fallback acceptance truth"
 
         // AyanaCommandHistoryStore v2.8 keeps up to 4k chars inline and stores longer
         // results out-of-line. Self-review intentionally remains inline so copied History
