@@ -5,7 +5,7 @@ import org.json.JSONObject
 import java.util.Locale
 
 /**
- * AYANA R9.5.1 Multi-App Task Orchestrator v1.2 — VERIFIED RESULT TRANSFER + FAILURE DIAGNOSTICS.
+ * AYANA R9.6 Multi-App Task Orchestrator v1.4 — VERIFIED SEMANTIC FALLBACK ACCEPTANCE.
  *
  * Extends the device-confirmed R9.4 orchestrator without creating a second
  * execution stack. Android dispatch remains in AyanaVoiceService; this class
@@ -21,6 +21,7 @@ import java.util.Locale
  * - first failed stage/reason is surfaced at report top level for device debugging;
  * - AYANA restore evidence remains part of every dispatched step;
  * - Calendar remains DRAFT_ONLY and action_committed must remain false;
+ * - R9.6 adds a dedicated SCREEN_MARKER acceptance plan for verified visual fallback;
  * - no blind continuation, replay or automatic restart authority is granted.
  */
 class AyanaMultiAppTaskOrchestrator(
@@ -55,6 +56,10 @@ class AyanaMultiAppTaskOrchestrator(
                 .replace(Regex("\\s+"), " ")
 
         if (clean.isBlank()) return null
+
+        if (isSemanticFallbackAcceptanceCommand(clean)) {
+            return semanticFallbackAcceptancePlan(clean)
+        }
 
         if (isResultTransferAcceptanceCommand(clean)) {
             return resultTransferAcceptancePlan(clean)
@@ -244,6 +249,23 @@ class AyanaMultiAppTaskOrchestrator(
             return false
         }
         if (userTransfer.steps[1].bindingSpec == null) return false
+
+        val semanticProbe =
+            semanticFallbackAcceptancePlan(
+                "проверь семантическое чтение внешнего экрана"
+            )
+
+        if (semanticProbe.steps.size != SEMANTIC_FALLBACK_ACCEPTANCE_STEP_COUNT) return false
+        if (!semanticProbe.acceptanceProbe) return false
+        val semanticCapture = semanticProbe.steps.first().captureSpec ?: return false
+        if (semanticCapture.kind != AyanaVerifiedResultTransfer.CaptureKind.SCREEN_MARKER) return false
+        if (semanticCapture.marker != SEMANTIC_FALLBACK_ACCEPTANCE_MARKER) return false
+        if (semanticProbe.steps.drop(1).any { it.bindingSpec == null }) return false
+
+        val semanticEnvelope = plannerEnvelope(semanticProbe)
+        if (!semanticEnvelope.optBoolean("verified_result_transfer", false)) return false
+        if (semanticEnvelope.optInt("result_capture_count", 0) != 1) return false
+        if (semanticEnvelope.optInt("result_binding_count", 0) != 2) return false
 
         return resultTransfer.selfTest()
     }
@@ -990,6 +1012,63 @@ class AyanaMultiAppTaskOrchestrator(
                 )
         )
 
+    private fun semanticFallbackAcceptancePlan(
+        command: String
+    ): TaskPlan =
+        TaskPlan(
+            key = "r9.6-semantic-fallback-device-acceptance",
+            originalCommand = command.trim(),
+            source = "r9_6_semantic_fallback_acceptance_command",
+            acceptanceProbe = true,
+            steps =
+                listOf(
+                    TaskStep(
+                        key = "browser-visual-semantic-marker",
+                        label = "Browser exact marker via verified semantic observation",
+                        appKey = AyanaAppIntegrationRegistry.APP_BROWSER,
+                        actionKey = AyanaAppIntegrationRegistry.ACTION_OPEN_URL,
+                        payload = SEMANTIC_FALLBACK_ACCEPTANCE_URL,
+                        captureSpec =
+                            AyanaVerifiedResultTransfer.CaptureSpec(
+                                transferKey = SEMANTIC_FALLBACK_ACCEPTANCE_KEY,
+                                kind =
+                                    AyanaVerifiedResultTransfer
+                                        .CaptureKind
+                                        .SCREEN_MARKER,
+                                marker = SEMANTIC_FALLBACK_ACCEPTANCE_MARKER
+                            )
+                    ),
+                    TaskStep(
+                        key = "youtube-visual-semantic-result",
+                        label = "YouTube search from verified visual semantic marker",
+                        appKey = AyanaAppIntegrationRegistry.APP_YOUTUBE,
+                        actionKey = AyanaAppIntegrationRegistry.ACTION_SEARCH,
+                        bindingSpec =
+                            AyanaVerifiedResultTransfer.BindingSpec(
+                                transferKey = SEMANTIC_FALLBACK_ACCEPTANCE_KEY,
+                                template =
+                                    AyanaVerifiedResultTransfer.DEFAULT_PLACEHOLDER
+                            )
+                    ),
+                    TaskStep(
+                        key = "calendar-visual-semantic-result-draft",
+                        label = "Calendar draft from verified visual semantic marker",
+                        appKey = AyanaAppIntegrationRegistry.APP_CALENDAR,
+                        actionKey =
+                            AyanaAppIntegrationRegistry
+                                .ACTION_CREATE_EVENT_DRAFT,
+                        bindingSpec =
+                            AyanaVerifiedResultTransfer.BindingSpec(
+                                transferKey = SEMANTIC_FALLBACK_ACCEPTANCE_KEY,
+                                template =
+                                    "AYANA R9.6 — " +
+                                        AyanaVerifiedResultTransfer.DEFAULT_PLACEHOLDER +
+                                        " — не сохранять"
+                            )
+                    )
+                )
+        )
+
     private fun parseVerifiedTransferUserPlan(
         clean: String
     ): TaskPlan? {
@@ -1108,6 +1187,22 @@ class AyanaMultiAppTaskOrchestrator(
         )
     }
 
+    private fun isSemanticFallbackAcceptanceCommand(
+        value: String
+    ): Boolean {
+        val normalized = normalize(value)
+
+        return normalized in
+            setOf(
+                "проверь семантическое чтение внешнего экрана",
+                "протестируй семантическое чтение внешнего экрана",
+                "проверь визуальное семантическое чтение",
+                "протестируй визуальное семантическое чтение",
+                "проверь semantic screen fallback",
+                "протестируй semantic screen fallback"
+            )
+    }
+
     private fun isResultTransferAcceptanceCommand(
         value: String
     ): Boolean {
@@ -1206,10 +1301,11 @@ class AyanaMultiAppTaskOrchestrator(
             .replace(Regex("\\s+"), " ")
 
     companion object {
-        const val VERSION = "1.3"
+        const val VERSION = "1.4"
         const val MAX_STEPS = 5
         const val ACCEPTANCE_STEP_COUNT = 3
         const val RESULT_TRANSFER_ACCEPTANCE_STEP_COUNT = 3
+        const val SEMANTIC_FALLBACK_ACCEPTANCE_STEP_COUNT = 3
 
         const val ACCEPTANCE_QUERY =
             "AYANA R9.4 multi-app orchestration probe"
@@ -1222,5 +1318,14 @@ class AyanaMultiAppTaskOrchestrator(
 
         const val RESULT_TRANSFER_ACCEPTANCE_KEY =
             "browser_verified_url"
+
+        const val SEMANTIC_FALLBACK_ACCEPTANCE_URL =
+            "https://example.com/"
+
+        const val SEMANTIC_FALLBACK_ACCEPTANCE_MARKER =
+            "Example Domain"
+
+        const val SEMANTIC_FALLBACK_ACCEPTANCE_KEY =
+            "browser_visual_marker"
     }
 }
