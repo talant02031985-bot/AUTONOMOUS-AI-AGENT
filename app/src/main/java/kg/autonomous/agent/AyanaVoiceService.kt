@@ -61,7 +61,7 @@ import kotlin.math.abs
 
 class AyanaVoiceService : Service() {
 
-    // AYANA v12.29.1 / R9.7.1 CONVERSATION ROUTING + TERMINAL TRUTH.
+    // AYANA v12.29.2 / R9.7.2 STRUCTURED ROUTER CONVERSATION PRECEDENCE.
     // Builds on DEVICE-CONFIRMED R9.7 STRUCTURED SCREEN READING.
     // - Accessibility remains the primary low-latency semantic source for external screens;
     // - when Accessibility is partial/unreadable, the proven package-bound screenshot path may
@@ -4219,6 +4219,18 @@ mainHandler.post {
             )
             ?.let { structuredIntent ->
                 if (
+                    shouldDeferStructuredUnknownCapabilityToConversation(
+                        command = originalCommand,
+                        intent = structuredIntent
+                    )
+                ) {
+                    commandHistoryStore.addEvent(
+                        activeCommandHistoryId,
+                        state = "structured_unknown_capability_conversation_bypassed",
+                        message = "Structured UnknownCapability не получил приоритет над разговорным intent",
+                        details = originalCommand.take(600)
+                    )
+                } else if (
                     runStructuredLocalCommand(
                         intent = structuredIntent,
                         silent = silent
@@ -15050,6 +15062,31 @@ respondAndResume(
         currentAgentThread = worker
         executionKernel.bindThread(worker)
         worker.start()
+    }
+
+    /**
+     * R9.7.2 router-precedence truth.
+     *
+     * StructuredLocalCommandRouter may conservatively label a long sentence as
+     * UnknownCapability when it sees several verbs/conjunctions. That result is not
+     * allowed to pre-empt a read-only conversational turn. Only UnknownCapability
+     * is deferred; every typed supported local intent keeps its existing priority,
+     * and explicit side-effect requests remain executable/fail-closed.
+     */
+    private fun shouldDeferStructuredUnknownCapabilityToConversation(
+        command: String,
+        intent: AyanaStructuredLocalCommandRouter.Intent
+    ): Boolean {
+        if (
+            intent !is
+            AyanaStructuredLocalCommandRouter.Intent.UnknownCapability
+        ) {
+            return false
+        }
+
+        return isClearlyInformationalAgentRequest(
+            command
+        )
     }
 
     private fun runStructuredLocalCommand(
@@ -26376,6 +26413,34 @@ plan.optInt(
                 "ты все время говоришь об ограничении гитхаб"
             ) == null
 
+        val githubDiscussionStructuredIntent =
+            AyanaStructuredLocalCommandRouter
+                .parse(
+                    "а что ты зациклилась на GitHub как будто нет других приложений и задач и как будто если ты самостоятельно делать commit github ты станешь полноценным ии агентом"
+                )
+
+        val githubDiscussionStructuredBypassOk =
+            githubDiscussionStructuredIntent != null &&
+                shouldDeferStructuredUnknownCapabilityToConversation(
+                    command =
+                        "а что ты зациклилась на GitHub как будто нет других приложений и задач и как будто если ты самостоятельно делать commit github ты станешь полноценным ии агентом",
+                    intent = githubDiscussionStructuredIntent
+                )
+
+        val explicitUnknownActionIntent =
+            AyanaStructuredLocalCommandRouter
+                .parse(
+                    "включи несуществующую функцию AYANA TEST-R97-UNKNOWN-001"
+                )
+
+        val explicitUnknownActionStillFailClosed =
+            explicitUnknownActionIntent == null ||
+                !shouldDeferStructuredUnknownCapabilityToConversation(
+                    command =
+                        "включи несуществующую функцию AYANA TEST-R97-UNKNOWN-001",
+                    intent = explicitUnknownActionIntent
+                )
+
         val explicitGithubCommitStillUnsupported =
             !unsupportedExecutionCapabilityReason(
                 "сделай commit в GitHub"
@@ -26600,6 +26665,8 @@ plan.optInt(
                 informationalDevelopmentQuestion == null &&
                 githubDiscussionNotExecution &&
                 githubCriticismNotExecution &&
+                githubDiscussionStructuredBypassOk &&
+                explicitUnknownActionStillFailClosed &&
                 explicitGithubCommitStillUnsupported
 
         val clipboardRoutingOk =
@@ -26643,7 +26710,7 @@ plan.optInt(
                 if (ok) {
                     "Whole-goal routing guard распознал lifecycle verification, App Detail final target, clipboard/Personal Search routes, semantic-object lifecycle guard, conversation-vs-execution truth для GitHub/commit discussion, conversational terminal reconciliation, fail-closed реальные action-команды, capability-summary guidance, artifact semantic-content/follow-up contract, pure multi-metric fast path и verified-facts reasoning handoff."
                 } else {
-                    "Whole-goal routing regression: lifecycle=$lifecycleOk, app_detail=$appDetailOk, metrics=$metricsOk, volume_target=$volumeTargetOk, unsupported_terminal=$unsupportedTerminalOk, github_discussion_route=$githubDiscussionNotExecution, github_criticism_route=$githubCriticismNotExecution, explicit_github_action=$explicitGithubCommitStillUnsupported, clipboard_route=$clipboardRoutingOk, lifecycle_semantic_guard=$lifecycleSemanticObjectRejected, refusal_fail_closed=$refusalFailClosed, informational_terminal=$informationalTerminalReconciliationOk, criticism_terminal=$criticismTerminalReconciliationOk, statement_terminal=$statementTerminalReconciliationOk, modal_action_fail_closed=$modalActionTerminalStillFailClosed, desired_action_fail_closed=$desiredActionTerminalStillFailClosed, capability_guidance=$broadCapabilityGuidanceOk, action_terminal_fail_closed=$actionTerminalStillFailClosed, artifact=$artifact, artifact_semantic_content=$artifactSemanticContentOk, artifact_follow_up=$artifactFollowUpContractOk, personal_search_route=$personalSearchRoutingOk, artifact_metric_guard=$artifactMetricsSuppressed, mixed_metric_guard=$mixedSideEffectMetricsSuppressed, pure_metric_local=$pureMetricGoalTerminalLocal, analytical_handoff=$analyticalMetricGoalRequiresHandoff, conditional_handoff=$conditionalMetricGoalRequiresHandoff."
+                    "Whole-goal routing regression: lifecycle=$lifecycleOk, app_detail=$appDetailOk, metrics=$metricsOk, volume_target=$volumeTargetOk, unsupported_terminal=$unsupportedTerminalOk, github_discussion_route=$githubDiscussionNotExecution, github_criticism_route=$githubCriticismNotExecution, structured_unknown_conversation_bypass=$githubDiscussionStructuredBypassOk, explicit_unknown_action_fail_closed=$explicitUnknownActionStillFailClosed, explicit_github_action=$explicitGithubCommitStillUnsupported, clipboard_route=$clipboardRoutingOk, lifecycle_semantic_guard=$lifecycleSemanticObjectRejected, refusal_fail_closed=$refusalFailClosed, informational_terminal=$informationalTerminalReconciliationOk, criticism_terminal=$criticismTerminalReconciliationOk, statement_terminal=$statementTerminalReconciliationOk, modal_action_fail_closed=$modalActionTerminalStillFailClosed, desired_action_fail_closed=$desiredActionTerminalStillFailClosed, capability_guidance=$broadCapabilityGuidanceOk, action_terminal_fail_closed=$actionTerminalStillFailClosed, artifact=$artifact, artifact_semantic_content=$artifactSemanticContentOk, artifact_follow_up=$artifactFollowUpContractOk, personal_search_route=$personalSearchRoutingOk, artifact_metric_guard=$artifactMetricsSuppressed, mixed_metric_guard=$mixedSideEffectMetricsSuppressed, pure_metric_local=$pureMetricGoalTerminalLocal, analytical_handoff=$analyticalMetricGoalRequiresHandoff, conditional_handoff=$conditionalMetricGoalRequiresHandoff."
                 },
             evidenceScope = "live_pure_contract",
             verified = ok,
@@ -26660,6 +26727,8 @@ plan.optInt(
                     .put("informational_terminal_reconciliation_ok", informationalTerminalReconciliationOk)
                     .put("github_discussion_not_execution", githubDiscussionNotExecution)
                     .put("github_criticism_not_execution", githubCriticismNotExecution)
+                    .put("structured_unknown_conversation_bypass_ok", githubDiscussionStructuredBypassOk)
+                    .put("explicit_unknown_action_still_fail_closed", explicitUnknownActionStillFailClosed)
                     .put("explicit_github_commit_still_unsupported", explicitGithubCommitStillUnsupported)
                     .put("criticism_terminal_reconciliation_ok", criticismTerminalReconciliationOk)
                     .put("statement_terminal_reconciliation_ok", statementTerminalReconciliationOk)
@@ -46111,9 +46180,9 @@ state
 
     companion object {
 
-        // R9.7.1 RELEASE / FEATURE LINEAGE TRUTH.
+        // R9.7.2 RELEASE / FEATURE LINEAGE TRUTH.
         private const val AYANA_VOICE_SERVICE_RELEASE =
-            "v12.29.1 / R9.7.1 CONVERSATION ROUTING + TERMINAL TRUTH"
+            "v12.29.2 / R9.7.2 STRUCTURED ROUTER CONVERSATION PRECEDENCE"
 
         private const val AYANA_PERSONAL_SEARCH_ENGINE_RELEASE =
             "v1.5.1 IMAGE COVERAGE TRUTH"
@@ -46128,10 +46197,10 @@ state
             "R9.7 Structured Screen Reading — DEVICE-CONFIRMED ACCEPTED"
 
         private const val AYANA_CURRENT_FEATURE_RELEASE =
-            "R9.7.1 CONVERSATION ROUTING + TERMINAL TRUTH"
+            "R9.7.2 STRUCTURED ROUTER CONVERSATION PRECEDENCE"
 
         private const val AYANA_RELEASE_LINEAGE =
-            "Android v12.21.0 / R7.9 truth-hardening + R8.0 multi-attachment + R8.1–R8.4 accepted Personal Global Search stack + R8.5–R8.5.4 capability/evidence truth + R9.0 autonomous agent foundation + R9.0.1 history live-refresh proof fix + R9.0.2 diagnostic reconciliation/history refresh fix + R9.0.3 TTS health reconciliation + R9.1 IME perception/active telemetry truth + R9.2 autonomous recovery/long-task reconciliation + R9.2.1 adaptive hypothesis reconciliation + R9.3 app integration framework + R9.3.1 screen health reconciliation + R9.3.2 history latency recovery reconciliation + R9.3.3 informational terminal reconciliation + R9.3.4 app integration device acceptance + R9.4 multi-app task orchestration + R9.4.1 screen ownership union reconciliation + R9.5 verified result transfer between app steps + R9.5.1 partial marker provenance reconciliation + R9.5.2 bounded marker observation + R9.5.3 verified action result transfer + R9.6 verified semantic observation fallback + R9.6.1 visual fallback acceptance truth + R9.7 structured screen reading + R9.7.1 conversation routing/terminal truth"
+            "Android v12.21.0 / R7.9 truth-hardening + R8.0 multi-attachment + R8.1–R8.4 accepted Personal Global Search stack + R8.5–R8.5.4 capability/evidence truth + R9.0 autonomous agent foundation + R9.0.1 history live-refresh proof fix + R9.0.2 diagnostic reconciliation/history refresh fix + R9.0.3 TTS health reconciliation + R9.1 IME perception/active telemetry truth + R9.2 autonomous recovery/long-task reconciliation + R9.2.1 adaptive hypothesis reconciliation + R9.3 app integration framework + R9.3.1 screen health reconciliation + R9.3.2 history latency recovery reconciliation + R9.3.3 informational terminal reconciliation + R9.3.4 app integration device acceptance + R9.4 multi-app task orchestration + R9.4.1 screen ownership union reconciliation + R9.5 verified result transfer between app steps + R9.5.1 partial marker provenance reconciliation + R9.5.2 bounded marker observation + R9.5.3 verified action result transfer + R9.6 verified semantic observation fallback + R9.6.1 visual fallback acceptance truth + R9.7 structured screen reading + R9.7.1 conversation routing/terminal truth + R9.7.2 structured router conversation precedence"
 
         // AyanaCommandHistoryStore v2.8 keeps up to 4k chars inline and stores longer
         // results out-of-line. Self-review intentionally remains inline so copied History
