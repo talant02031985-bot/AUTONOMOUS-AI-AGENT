@@ -62,7 +62,7 @@ import kotlin.math.abs
 
 class AyanaVoiceService : Service() {
 
-    // AYANA v12.35.0 / R10.2 PERSONAL SEARCH EXPANSION.
+    // AYANA v12.36.0 / R10.3 LONG AUTONOMOUS TASKS + RECOVERY.
     // Builds on DEVICE-CONFIRMED R10.1 local self-audit and R10.0 Unified Screen Intelligence.
     // - one local Personal Search surface is explicitly audited across History, Notifications,
     //   file metadata, document-content index and photo metadata/OCR/visual labels/timestamps;
@@ -1147,6 +1147,15 @@ class AyanaVoiceService : Service() {
     // authorizes blind replay of a possible side effect.
     private val autonomousRecoveryCoordinator by lazy {
         AyanaAutonomousRecoveryCoordinator()
+    }
+
+    // R10.3 LONG AUTONOMOUS TASKS + RECOVERY.
+    // Pure recovery-policy layer: it never dispatches Android actions. It decides
+    // whether persisted work may continue, requires fresh reconciliation, or must
+    // pause. Verified completed steps are never replayed merely because AYANA
+    // restarted.
+    private val longTaskRecoveryCoordinator by lazy {
+        AyanaLongTaskRecoveryCoordinator()
     }
 
     // v12.19.3: Goal Compiler runtime truth is feature/contract-based, not pinned to compiler_version=2.0.
@@ -4573,6 +4582,21 @@ mainHandler.post {
                 )
                 return
             }
+
+        // R10.3 LONG TASK RECOVERY ACCEPTANCE. This is a bounded local persistent
+        // round-trip: it uses a dedicated test Durable Goal file, simulates service
+        // interruption/re-instantiation, proves resume-from-next-verified-step and
+        // proves that an in-flight step is reconciled instead of blindly replayed.
+        if (
+            isR10_3LongTaskRecoveryAcceptanceCommand(
+                routingNormalized
+            )
+        ) {
+            runR10_3LongTaskRecoveryAcceptance(
+                silent = silent
+            )
+            return
+        }
 
         // R10.2 UNIFIED PERSONAL SEARCH ACCEPTANCE. This dedicated gate runs a
         // bounded local search across every registered Personal Search source and
@@ -28721,6 +28745,61 @@ append(index + 1)
                     .put("persistent_user_data_mutation", false)
         )
 
+        val r10LongTaskRecoveryOk =
+            try {
+                longTaskRecoveryCoordinator.selfTest() &&
+                    AyanaDurableGoalStore.VERSION == "2.1"
+            } catch (_: Exception) {
+                false
+            }
+
+        add(
+            id = "R10-FOUND-019",
+            title = "R10.3 durable long-task continuation / no-replay recovery contract",
+            critical = true,
+            ok = r10LongTaskRecoveryOk,
+            message =
+                if (r10LongTaskRecoveryOk) {
+                    "R10.3 preserves the pre-interruption checkpoint, skips verified completed steps, reconciles uncertain in-flight work from fresh state and never replays a terminal step merely to prove completion."
+                } else {
+                    "R10.3 Long Task Recovery contract self-test failed."
+                },
+            evidence =
+                JSONObject()
+                    .put(
+                        "coordinator_version",
+                        AyanaLongTaskRecoveryCoordinator.VERSION
+                    )
+                    .put(
+                        "durable_goal_store_version",
+                        AyanaDurableGoalStore.VERSION
+                    )
+                    .put(
+                        "interrupted_checkpoint_provenance",
+                        true
+                    )
+                    .put(
+                        "verified_completed_steps_replayed",
+                        false
+                    )
+                    .put(
+                        "uncertain_inflight_requires_reconciliation",
+                        true
+                    )
+                    .put(
+                        "terminal_completion_replayed",
+                        false
+                    )
+                    .put(
+                        "automatic_unsafe_step_resume_allowed",
+                        false
+                    )
+                    .put(
+                        "blind_replay_allowed",
+                        false
+                    )
+        )
+
         return tests
     }
 
@@ -34593,6 +34672,781 @@ requestMethod = "GET"
 
 
 
+    private fun isR10_3LongTaskRecoveryAcceptanceCommand(
+        command: String
+    ): Boolean {
+        val normalized =
+            command
+                .lowercase(Locale.ROOT)
+                .replace('ё', 'е')
+                .replace(Regex("\\s+"), " ")
+                .trim()
+                .removePrefix("аяна ")
+                .trim()
+
+        return normalized in
+            setOf(
+                "проверь восстановление долгой задачи",
+                "проверь восстановление длинной задачи",
+                "проверь long task recovery",
+                "проверь long task recovery r10.3",
+                "проверь r10.3"
+            )
+    }
+
+    private fun runR10_3LongTaskRecoveryAcceptance(
+        silent: Boolean
+    ) {
+        executionPhase(
+            phase = "r10_3_long_task_recovery_acceptance",
+            executor = "long_task_recovery_coordinator_v1"
+        )
+
+        val commandToken =
+            activeCommandToken
+
+        val worker =
+            thread(
+                start = false,
+                name = "AyanaR10_3LongTaskRecovery"
+            ) {
+                val testFileName =
+                    "ayana_durable_goals_r10_3_acceptance.json"
+
+                var cleanupVerified =
+                    false
+
+                try {
+                    val coordinatorSelfTest =
+                        try {
+                            longTaskRecoveryCoordinator
+                                .selfTest()
+                        } catch (_: Exception) {
+                            false
+                        }
+
+                    if (!coordinatorSelfTest) {
+                        mainHandler.post {
+                            if (
+                                !isCommandCancelled(commandToken) &&
+                                commandToken == activeCommandToken
+                            ) {
+                                respondAndResume(
+                                    text = "R10.3 Long Task Recovery не прошёл внутренний recovery self-test.",
+                                    silent = silent,
+                                    success = false,
+                                    technical =
+                                        JSONObject()
+                                            .put(
+                                                "coordinator_version",
+                                                AyanaLongTaskRecoveryCoordinator.VERSION
+                                            )
+                                            .put(
+                                                "coordinator_self_test",
+                                                false
+                                            )
+                                            .toString()
+                                )
+                            }
+                        }
+                        return@thread
+                    }
+
+                    val firstStore =
+                        AyanaDurableGoalStore(
+                            context = applicationContext,
+                            storageFileName = testFileName
+                        )
+
+                    firstStore.clearAcceptanceStorage()
+
+                    val plan =
+                        JSONObject()
+                            .put(
+                                "goal",
+                                "R10.3 acceptance durable continuation"
+                            )
+                            .put(
+                                "steps",
+                                JSONArray()
+                                    .put(
+                                        JSONObject()
+                                            .put(
+                                                "id",
+                                                "step_1"
+                                            )
+                                            .put(
+                                                "action",
+                                                "open_app"
+                                            )
+                                            .put(
+                                                "name",
+                                                "Camera"
+                                            )
+                                            .put(
+                                                "expect_package",
+                                                "com.sec.android.app.camera"
+                                            )
+                                    )
+                                    .put(
+                                        JSONObject()
+                                            .put(
+                                                "id",
+                                                "step_2"
+                                            )
+                                            .put(
+                                                "action",
+                                                "open_settings"
+                                            )
+                                            .put(
+                                                "section",
+                                                "general"
+                                            )
+                                            .put(
+                                                "expect_package",
+                                                "com.android.settings"
+                                            )
+                                    )
+                                    .put(
+                                        JSONObject()
+                                            .put(
+                                                "id",
+                                                "step_3"
+                                            )
+                                            .put(
+                                                "action",
+                                                "open_app"
+                                            )
+                                            .put(
+                                                "name",
+                                                "AYANA AI"
+                                            )
+                                            .put(
+                                                "expect_package",
+                                                packageName
+                                            )
+                                            .put(
+                                                "terminal",
+                                                true
+                                            )
+                                    )
+                            )
+
+                    val started =
+                        firstStore.startGoal(
+                            command = "R10.3 acceptance durable continuation",
+                            source = "r10_3_acceptance",
+                            mode = AyanaDurableGoalStore.MODE_ANDROID_GOAL,
+                            safeAutoResume = true
+                        )
+
+                    val goalId =
+                        started.optString(
+                            "id"
+                        )
+
+                    val planSaved =
+                        firstStore
+                            .attachAndroidPlan(
+                                id = goalId,
+                                arguments = JSONObject(),
+                                plan = plan
+                            ) !=
+                            null
+
+                    val stepOneSaved =
+                        firstStore
+                            .checkpointAndroidStep(
+                                id = goalId,
+                                checkpoint =
+                                    JSONObject()
+                                        .put(
+                                            "checkpoint",
+                                            "step_completed"
+                                        )
+                                        .put(
+                                            "next_step_index",
+                                            1
+                                        )
+                                        .put(
+                                            "actions_used",
+                                            1
+                                        )
+                                        .put(
+                                            "step_id",
+                                            "step_1"
+                                        )
+                                        .put(
+                                            "step_action",
+                                            "open_app"
+                                        )
+                                        .put(
+                                            "step_success",
+                                            true
+                                        )
+                                        .put(
+                                            "in_flight",
+                                            false
+                                        )
+                                        .put(
+                                            "screen_package",
+                                            "com.sec.android.app.camera"
+                                        )
+                                        .put(
+                                            "screen_fingerprint",
+                                            "camera_verified_checkpoint"
+                                        )
+                            ) !=
+                            null
+
+                    val interruptedCount =
+                        firstStore
+                            .markInterruptedGoals(
+                                "service_destroyed"
+                            )
+
+                    val restartedStore =
+                        AyanaDurableGoalStore(
+                            context = applicationContext,
+                            storageFileName = testFileName
+                        )
+
+                    val restored =
+                        restartedStore
+                            .getRecoverable()
+
+                    val resumeDecision =
+                        longTaskRecoveryCoordinator
+                            .evaluate(
+                                goal = restored,
+                                automatic = true
+                            )
+
+                    val verifiedStepPreserved =
+                        planSaved &&
+                            stepOneSaved &&
+                            interruptedCount ==
+                            1 &&
+                            restored !=
+                            null &&
+                            restored
+                                .optString(
+                                    "interrupted_from_checkpoint"
+                                ) ==
+                            "step_completed" &&
+                            resumeDecision
+                                .optString(
+                                    "strategy"
+                                ) ==
+                            AyanaLongTaskRecoveryCoordinator
+                                .Strategy
+                                .CONTINUE_FROM_CHECKPOINT
+                                .name &&
+                            resumeDecision
+                                .optInt(
+                                    "resume_index",
+                                    -1
+                                ) ==
+                            1 &&
+                            !resumeDecision
+                                .optBoolean(
+                                    "blind_replay_allowed",
+                                    true
+                                )
+
+                    val inflightPrepared =
+                        restartedStore
+                            .checkpoint(
+                                goalId,
+                                JSONObject()
+                                    .put(
+                                        "status",
+                                        AyanaDurableGoalStore.STATUS_ACTIVE
+                                    )
+                                    .put(
+                                        "next_plan_step",
+                                        1
+                                    )
+                                    .put(
+                                        "last_checkpoint",
+                                        "before_step"
+                                    )
+                                    .put(
+                                        "step_in_flight",
+                                        true
+                                    )
+                                    .put(
+                                        "last_step_id",
+                                        "step_2"
+                                    )
+                                    .put(
+                                        "last_step_action",
+                                        "open_settings"
+                                    )
+                                    .put(
+                                        "last_result",
+                                        ""
+                                    )
+                            ) !=
+                            null
+
+                    val secondInterrupted =
+                        restartedStore
+                            .markInterruptedGoals(
+                                "service_destroyed"
+                            )
+
+                    val secondRestartStore =
+                        AyanaDurableGoalStore(
+                            context = applicationContext,
+                            storageFileName = testFileName
+                        )
+
+                    val uncertainRestored =
+                        secondRestartStore
+                            .getRecoverable()
+
+                    val uncertainDecision =
+                        longTaskRecoveryCoordinator
+                            .evaluate(
+                                goal = uncertainRestored,
+                                automatic = true
+                            )
+
+                    val reconciliation =
+                        longTaskRecoveryCoordinator
+                            .reconcileAndroidInFlight(
+                                goal = uncertainRestored,
+                                freshScreen =
+                                    JSONObject()
+                                        .put(
+                                            "success",
+                                            true
+                                        )
+                                        .put(
+                                            "snapshot_success",
+                                            true
+                                        )
+                                        .put(
+                                            "effective_foreground_package",
+                                            "com.android.settings"
+                                        )
+                                        .put(
+                                            "package",
+                                            "com.android.settings"
+                                        )
+                            )
+
+                    val uncertainReplayBlocked =
+                        inflightPrepared &&
+                            secondInterrupted ==
+                            1 &&
+                            uncertainDecision
+                                .optString(
+                                    "strategy"
+                                ) ==
+                            AyanaLongTaskRecoveryCoordinator
+                                .Strategy
+                                .RECONCILE_IN_FLIGHT
+                                .name &&
+                            !uncertainDecision
+                                .optBoolean(
+                                    "blind_replay_allowed",
+                                    true
+                                ) &&
+                            reconciliation
+                                .optBoolean(
+                                    "verified",
+                                    false
+                                ) &&
+                            reconciliation
+                                .optInt(
+                                    "next_plan_step",
+                                    -1
+                                ) ==
+                            2 &&
+                            !reconciliation
+                                .optBoolean(
+                                    "replay_performed",
+                                    true
+                                )
+
+                    val terminalPrepared =
+                        secondRestartStore
+                            .checkpoint(
+                                goalId,
+                                JSONObject()
+                                    .put(
+                                        "status",
+                                        AyanaDurableGoalStore.STATUS_ACTIVE
+                                    )
+                                    .put(
+                                        "next_plan_step",
+                                        3
+                                    )
+                                    .put(
+                                        "last_checkpoint",
+                                        "step_completed"
+                                    )
+                                    .put(
+                                        "step_in_flight",
+                                        false
+                                    )
+                                    .put(
+                                        "last_step_id",
+                                        "step_3"
+                                    )
+                                    .put(
+                                        "last_step_action",
+                                        "open_app"
+                                    )
+                                    .put(
+                                        "last_step_success",
+                                        true
+                                    )
+                            ) !=
+                            null
+
+                    val thirdInterrupted =
+                        secondRestartStore
+                            .markInterruptedGoals(
+                                "service_destroyed"
+                            )
+
+                    val thirdRestartStore =
+                        AyanaDurableGoalStore(
+                            context = applicationContext,
+                            storageFileName = testFileName
+                        )
+
+                    val terminalRestored =
+                        thirdRestartStore
+                            .getRecoverable()
+
+                    val terminalDecision =
+                        longTaskRecoveryCoordinator
+                            .evaluate(
+                                goal = terminalRestored,
+                                automatic = true
+                            )
+
+                    val completion =
+                        longTaskRecoveryCoordinator
+                            .verifyAndroidCompletion(
+                                goal = terminalRestored,
+                                freshScreen =
+                                    JSONObject()
+                                        .put(
+                                            "success",
+                                            true
+                                        )
+                                        .put(
+                                            "snapshot_success",
+                                            true
+                                        )
+                                        .put(
+                                            "effective_foreground_package",
+                                            packageName
+                                        )
+                                        .put(
+                                            "package",
+                                            packageName
+                                        )
+                            )
+
+                    val completionWithoutReplay =
+                        terminalPrepared &&
+                            thirdInterrupted ==
+                            1 &&
+                            terminalDecision
+                                .optString(
+                                    "strategy"
+                                ) ==
+                            AyanaLongTaskRecoveryCoordinator
+                                .Strategy
+                                .VERIFY_COMPLETION_ONLY
+                                .name &&
+                            completion
+                                .optBoolean(
+                                    "verified",
+                                    false
+                                ) &&
+                            !completion
+                                .optBoolean(
+                                    "replay_performed",
+                                    true
+                                )
+
+                    val networkPaused =
+                        thirdRestartStore
+                            .checkpoint(
+                                goalId,
+                                JSONObject()
+                                    .put(
+                                        "status",
+                                        AyanaDurableGoalStore.STATUS_PAUSED
+                                    )
+                                    .put(
+                                        "recovery_reason",
+                                        "network_unavailable"
+                                    )
+                                    .put(
+                                        "safe_auto_resume",
+                                        true
+                                    )
+                                    .put(
+                                        "last_checkpoint",
+                                        "network_wait"
+                                    )
+                            )
+
+                    val networkDecision =
+                        longTaskRecoveryCoordinator
+                            .evaluate(
+                                goal = networkPaused,
+                                automatic = true
+                            )
+
+                    val networkRequiresExplicitResume =
+                        networkDecision
+                            .optString(
+                                "strategy"
+                            ) ==
+                            AyanaLongTaskRecoveryCoordinator
+                                .Strategy
+                                .MANUAL_RESUME_ONLY
+                                .name &&
+                            !networkDecision
+                                .optBoolean(
+                                    "automatic_resume_allowed",
+                                    true
+                                )
+
+                    cleanupVerified =
+                        thirdRestartStore
+                            .clearAcceptanceStorage()
+
+                    val accepted =
+                        coordinatorSelfTest &&
+                            verifiedStepPreserved &&
+                            uncertainReplayBlocked &&
+                            completionWithoutReplay &&
+                            networkRequiresExplicitResume &&
+                            cleanupVerified
+
+                    val evidence =
+                        JSONObject()
+                            .put(
+                                "coordinator_version",
+                                AyanaLongTaskRecoveryCoordinator.VERSION
+                            )
+                            .put(
+                                "durable_goal_store_version",
+                                AyanaDurableGoalStore.VERSION
+                            )
+                            .put(
+                                "coordinator_self_test",
+                                coordinatorSelfTest
+                            )
+                            .put(
+                                "disk_roundtrip",
+                                restored != null &&
+                                    uncertainRestored != null &&
+                                    terminalRestored != null
+                            )
+                            .put(
+                                "new_store_instance_restore",
+                                restored != null
+                            )
+                            .put(
+                                "service_interruption_marker_preserved",
+                                restored
+                                    ?.optString(
+                                        "interrupted_from_checkpoint"
+                                    ) ==
+                                    "step_completed"
+                            )
+                            .put(
+                                "verified_step_preserved",
+                                verifiedStepPreserved
+                            )
+                            .put(
+                                "resume_index_after_verified_step",
+                                resumeDecision.optInt(
+                                    "resume_index",
+                                    -1
+                                )
+                            )
+                            .put(
+                                "completed_step_replayed",
+                                false
+                            )
+                            .put(
+                                "uncertain_inflight_detected",
+                                uncertainDecision
+                                    .optString(
+                                        "strategy"
+                                    ) ==
+                                    AyanaLongTaskRecoveryCoordinator
+                                        .Strategy
+                                        .RECONCILE_IN_FLIGHT
+                                        .name
+                            )
+                            .put(
+                                "inflight_reconciled_from_fresh_state",
+                                reconciliation
+                                    .optBoolean(
+                                        "verified",
+                                        false
+                                    )
+                            )
+                            .put(
+                                "inflight_replay_performed",
+                                reconciliation
+                                    .optBoolean(
+                                        "replay_performed",
+                                        true
+                                    )
+                            )
+                            .put(
+                                "terminal_verify_only",
+                                terminalDecision
+                                    .optString(
+                                        "strategy"
+                                    ) ==
+                                    AyanaLongTaskRecoveryCoordinator
+                                        .Strategy
+                                        .VERIFY_COMPLETION_ONLY
+                                        .name
+                            )
+                            .put(
+                                "terminal_reverified",
+                                completion
+                                    .optBoolean(
+                                        "verified",
+                                        false
+                                    )
+                            )
+                            .put(
+                                "terminal_step_replayed",
+                                completion
+                                    .optBoolean(
+                                        "replay_performed",
+                                        true
+                                    )
+                            )
+                            .put(
+                                "network_pause_requires_explicit_resume",
+                                networkRequiresExplicitResume
+                            )
+                            .put(
+                                "blind_replay_allowed",
+                                false
+                            )
+                            .put(
+                                "cleanup_verified",
+                                cleanupVerified
+                            )
+                            .put(
+                                "persistent_user_data_mutation",
+                                false
+                            )
+                            .put(
+                                "test_storage_isolated",
+                                true
+                            )
+                            .put(
+                                "service_restart_hook_present",
+                                true
+                            )
+                            .put(
+                                "automatic_resume_guard_present",
+                                true
+                            )
+                            .put(
+                                "acceptance_ok",
+                                accepted
+                            )
+                            .put(
+                                "voice_service_release",
+                                AYANA_VOICE_SERVICE_RELEASE
+                            )
+                            .put(
+                                "accepted_checkpoint",
+                                AYANA_ACCEPTED_FEATURE_CHECKPOINT
+                            )
+                            .put(
+                                "current_release",
+                                AYANA_CURRENT_FEATURE_RELEASE
+                            )
+
+                    mainHandler.post {
+                        if (
+                            isCommandCancelled(commandToken) ||
+                            commandToken != activeCommandToken
+                        ) {
+                            return@post
+                        }
+
+                        if (!accepted) {
+                            commandHistoryStore.addEvent(
+                                activeCommandHistoryId,
+                                state = "r10_3_long_task_recovery_not_verified",
+                                message = "R10.3 Long Task Recovery не прошёл все persistence/reconciliation gates",
+                                details = evidence.toString().take(3900)
+                            )
+
+                            respondAndResume(
+                                text = "R10.3 Long Task Recovery выполнен fail-closed: один или несколько persistence/reconciliation gates не подтверждены.",
+                                silent = silent,
+                                success = false,
+                                technical = evidence.toString()
+                            )
+                            return@post
+                        }
+
+                        commandHistoryStore.addEvent(
+                            activeCommandHistoryId,
+                            state = "r10_3_long_task_recovery_verified",
+                            message =
+                                "R10.3 подтверждён: verified progress survives restart boundary, uncertain step reconciles without replay, terminal state re-verifies without repeating final action",
+                            details = evidence.toString().take(3900)
+                        )
+
+                        respondAndResume(
+                            text =
+                                "R10.3 Long Task Recovery подтверждён: сохранённый verified progress восстановлен с нужного шага, " +
+                                    "неопределённый in-flight шаг не повторяется вслепую, terminal state подтверждается без replay, " +
+                                    "сетевой pause требует явного продолжения.",
+                            silent = silent,
+                            success = true,
+                            technical = evidence.toString()
+                        )
+                    }
+                } finally {
+                    if (!cleanupVerified) {
+                        try {
+                            AyanaDurableGoalStore(
+                                context = applicationContext,
+                                storageFileName = testFileName
+                            )
+                                .clearAcceptanceStorage()
+                        } catch (_: Exception) {
+                        }
+                    }
+
+                    if (Thread.currentThread() === currentAgentThread) {
+                        currentAgentThread = null
+                    }
+                }
+            }
+
+        currentAgentThread = worker
+        executionKernel.bindThread(worker)
+        worker.start()
+    }
+
+
     private fun isR10_2UnifiedPersonalSearchAcceptanceCommand(
         command: String
     ): Boolean {
@@ -40359,10 +41213,30 @@ STATE_SUCCESS
             }
                 ?: return
 
+        val r10RecoveryDecision =
+            try {
+                longTaskRecoveryCoordinator
+                    .evaluate(
+                        goal = goal,
+                        automatic = true
+                    )
+            } catch (_: Exception) {
+                JSONObject()
+                    .put(
+                        "automatic_resume_allowed",
+                        false
+                    )
+            }
+
         if (
             !durableGoalStore
                 .canAutoResume(
                     goal
+                ) ||
+            !r10RecoveryDecision
+                .optBoolean(
+                    "automatic_resume_allowed",
+                    false
                 )
         ) {
             return
@@ -40542,11 +41416,40 @@ STATE_SUCCESS
                 "status"
             )
 
+        val r10RecoveryDecision =
+            try {
+                longTaskRecoveryCoordinator
+                    .evaluate(
+                        goal = goal,
+                        automatic = allowAutoResume
+                    )
+            } catch (_: Exception) {
+                JSONObject()
+                    .put(
+                        "strategy",
+                        AyanaLongTaskRecoveryCoordinator
+                            .Strategy
+                            .NO_RECOVERY
+                            .name
+                    )
+                    .put(
+                        "automatic_resume_allowed",
+                        false
+                    )
+            }
+
         if (
             allowAutoResume &&
-            !durableGoalStore
-                .canAutoResume(
-                    goal
+            (
+                !durableGoalStore
+                    .canAutoResume(
+                        goal
+                    ) ||
+                !r10RecoveryDecision
+                    .optBoolean(
+                        "automatic_resume_allowed",
+                        false
+                    )
                 )
         ) {
             return
@@ -40559,6 +41462,18 @@ STATE_SUCCESS
                 "Продолжаю активную цель"
             },
             silent
+        )
+
+        commandHistoryStore.addEvent(
+            activeCommandHistoryId,
+            state = "r10_3_long_task_recovery_decision",
+            message = "R10.3 определил безопасную точку продолжения",
+            details =
+                r10RecoveryDecision
+                    .toString()
+                    .take(
+                        2200
+                    )
         )
 
         if (
@@ -41117,11 +42032,28 @@ details = error.message.orEmpty().take(220)
             return
         }
 
-        val storedStartIndex =
-            goal.optInt(
+        var recoveryGoalSnapshot =
+            JSONObject(
+                goal.toString()
+            )
+
+        var storedStartIndex =
+            recoveryGoalSnapshot.optInt(
                 "next_plan_step",
                 0
             )
+                .coerceAtLeast(
+                    0
+                )
+
+        var initialActions =
+            recoveryGoalSnapshot.optInt(
+                "actions_used",
+                0
+            )
+                .coerceAtLeast(
+                    0
+                )
 
         val planSize =
             plan.optJSONArray(
@@ -41130,25 +42062,320 @@ details = error.message.orEmpty().take(220)
                 ?.length()
                 ?: 0
 
-        val startIndex =
-            if (
-                planSize > 0 &&
-                storedStartIndex >=
-                planSize
-            ) {
-                // Crash may happen after the last checkpoint but before the
-                // terminal result is persisted. Re-run only the final safe
-                // navigation step so Task Engine can verify the final screen.
-                planSize - 1
-            } else {
-                storedStartIndex
+        val r10Decision =
+            try {
+                longTaskRecoveryCoordinator
+                    .evaluate(
+                        goal = recoveryGoalSnapshot,
+                        automatic = automaticRecovery
+                    )
+            } catch (_: Exception) {
+                JSONObject()
             }
 
-        val initialActions =
-            goal.optInt(
-                "actions_used",
-                0
+        if (
+            r10Decision
+                .optString(
+                    "strategy"
+                ) ==
+            AyanaLongTaskRecoveryCoordinator
+                .Strategy
+                .RECONCILE_IN_FLIGHT
+                .name
+        ) {
+            val freshScreen =
+                try {
+                    screenIntelligence
+                        .getScreenState()
+                } catch (_: Exception) {
+                    JSONObject()
+                }
+
+            val reconciliation =
+                longTaskRecoveryCoordinator
+                    .reconcileAndroidInFlight(
+                        goal = recoveryGoalSnapshot,
+                        freshScreen = freshScreen
+                    )
+
+            if (
+                !reconciliation
+                    .optBoolean(
+                        "verified",
+                        false
+                    )
+            ) {
+                val reason =
+                    "R10.3 остановил восстановление: исход прерванного Android-шагa нельзя доказать по свежему экрану; blind replay запрещён."
+
+                durableGoalStore
+                    .markPaused(
+                        goalId,
+                        reason
+                    )
+
+                commandHistoryStore.addEvent(
+                    activeCommandHistoryId,
+                    state = "r10_3_inflight_reconciliation_paused",
+                    message = "Прерванный шаг не повторён без доказательства",
+                    details =
+                        reconciliation
+                            .toString()
+                            .take(
+                                2200
+                            )
+                )
+
+                currentDurableGoalId =
+                    null
+
+                respondAndResume(
+                    reason,
+                    silent,
+                    success = false
+                )
+                return
+            }
+
+            val reconciledNextStep =
+                reconciliation
+                    .optInt(
+                        "next_plan_step",
+                        storedStartIndex
+                    )
+                    .coerceAtLeast(
+                        storedStartIndex
+                    )
+
+            val reconciledSnapshot =
+                try {
+                    durableGoalStore
+                        .checkpoint(
+                            goalId,
+                            JSONObject()
+                                .put(
+                                    "status",
+                                    AyanaDurableGoalStore.STATUS_ACTIVE
+                                )
+                                .put(
+                                    "next_plan_step",
+                                    reconciledNextStep
+                                )
+                                .put(
+                                    "actions_used",
+                                    initialActions + 1
+                                )
+                                .put(
+                                    "total_actions",
+                                    maxOf(
+                                        recoveryGoalSnapshot.optInt(
+                                            "total_actions",
+                                            0
+                                        ),
+                                        initialActions + 1
+                                    )
+                                )
+                                .put(
+                                    "step_in_flight",
+                                    false
+                                )
+                                .put(
+                                    "interrupted_from_in_flight",
+                                    false
+                                )
+                                .put(
+                                    "last_step_success",
+                                    true
+                                )
+                                .put(
+                                    "screen_fingerprint",
+                                    reconciliation.optString(
+                                        "fresh_screen_fingerprint"
+                                    )
+                                )
+                                .put(
+                                    "last_result",
+                                    reconciliation
+                                        .toString()
+                                        .take(
+                                            1800
+                                        )
+                                )
+                                .put(
+                                    "last_checkpoint",
+                                    "r10_3_reconciled_step_completed"
+                                )
+                        )
+                } catch (_: Exception) {
+                    null
+                }
+
+            if (reconciledSnapshot == null) {
+                currentDurableGoalId =
+                    null
+
+                respondAndResume(
+                    "Прерванный шаг подтверждён по свежему экрану, но новый checkpoint не сохранился. Я не продолжаю следующие действия.",
+                    silent,
+                    success = false
+                )
+                return
+            }
+
+            recoveryGoalSnapshot =
+                reconciledSnapshot
+
+            storedStartIndex =
+                reconciledNextStep
+
+            initialActions =
+                reconciledSnapshot.optInt(
+                    "actions_used",
+                    initialActions + 1
+                )
+
+            commandHistoryStore.addEvent(
+                activeCommandHistoryId,
+                state = "r10_3_inflight_reconciled",
+                message = "Прерванный Android-шаг подтверждён без повторного dispatch",
+                details =
+                    reconciliation
+                        .toString()
+                        .take(
+                            2200
+                        )
             )
+        }
+
+        if (
+            planSize >
+            0 &&
+            storedStartIndex >=
+            planSize
+        ) {
+            val freshScreen =
+                try {
+                    screenIntelligence
+                        .getScreenState()
+                } catch (_: Exception) {
+                    JSONObject()
+                }
+
+            val completion =
+                longTaskRecoveryCoordinator
+                    .verifyAndroidCompletion(
+                        goal = recoveryGoalSnapshot,
+                        freshScreen = freshScreen
+                    )
+
+            if (
+                completion.optBoolean(
+                    "verified",
+                    false
+                )
+            ) {
+                val reply =
+                    "Задача была завершена до прерывания. R10.3 повторно подтвердил конечное состояние без повторного выполнения последнего шага."
+
+                durableGoalStore
+                    .markCompleted(
+                        goalId,
+                        reply
+                    )
+
+                commandHistoryStore.addEvent(
+                    activeCommandHistoryId,
+                    state = "r10_3_terminal_reverified_without_replay",
+                    message = "Конечное состояние подтверждено без повторного dispatch",
+                    details =
+                        completion
+                            .toString()
+                            .take(
+                                2200
+                            )
+                )
+
+                currentDurableGoalId =
+                    null
+
+                respondAndResume(
+                    reply,
+                    silent,
+                    success = true
+                )
+                return
+            }
+
+            val reason =
+                "Все шаги были checkpointed до прерывания, но текущее конечное состояние нельзя повторно подтвердить. Последний шаг не повторяется автоматически."
+
+            durableGoalStore
+                .markPaused(
+                    goalId,
+                    reason
+                )
+
+            commandHistoryStore.addEvent(
+                activeCommandHistoryId,
+                state = "r10_3_terminal_reverification_paused",
+                message = "Последний шаг не повторён без конечного доказательства",
+                details =
+                    completion
+                        .toString()
+                        .take(
+                            2200
+                        )
+            )
+
+            currentDurableGoalId =
+                null
+
+            respondAndResume(
+                reason,
+                silent,
+                success = false
+            )
+            return
+        }
+
+        if (
+            automaticRecovery &&
+            !longTaskRecoveryCoordinator
+                .isAutomaticAndroidStepSafe(
+                    goal = recoveryGoalSnapshot,
+                    stepIndex = storedStartIndex
+                )
+        ) {
+            val reason =
+                "R10.3 сохранил прогресс, но следующий шаг не разрешён для автоматического replay. Нажмите «Продолжить», чтобы выполнить оставшуюся часть явно."
+
+            durableGoalStore
+                .markPaused(
+                    goalId,
+                    reason
+                )
+
+            commandHistoryStore.addEvent(
+                activeCommandHistoryId,
+                state = "r10_3_auto_resume_paused_before_unsafe_step",
+                message = "Автоматическое продолжение остановлено перед неидемпотентным шагом",
+                details =
+                    "next_plan_step=$storedStartIndex; plan_size=$planSize"
+            )
+
+            currentDurableGoalId =
+                null
+
+            respondAndResume(
+                reason,
+                silent,
+                success = false
+            )
+            return
+        }
+
+        val startIndex =
+            storedStartIndex
 
         broadcastStatus(
             "Восстанавливаю Android-задачу…",
@@ -41879,10 +43106,31 @@ details = error.message.orEmpty().take(220)
                 ""
             }
 
-        val lastCheckpoint =
+        val rawLastCheckpoint =
             goal.optString(
                 "last_checkpoint"
             )
+
+        val recoveryDecision =
+            try {
+                longTaskRecoveryCoordinator
+                    .evaluate(
+                        goal = goal,
+                        automatic = automaticRecovery
+                    )
+            } catch (_: Exception) {
+                JSONObject()
+            }
+
+        val lastCheckpoint =
+            recoveryDecision
+                .optString(
+                    "effective_checkpoint",
+                    rawLastCheckpoint
+                )
+                .ifBlank {
+                    rawLastCheckpoint
+                }
 
         val lastToolName =
             goal.optString(
@@ -41895,10 +43143,14 @@ details = error.message.orEmpty().take(220)
             )
 
         val uncertainOutcome =
-            lastCheckpoint ==
-                "tool_started" &&
-                lastToolName.isNotBlank() &&
-                lastToolResult.isBlank()
+            recoveryDecision
+                .optString(
+                    "strategy"
+                ) ==
+                AyanaLongTaskRecoveryCoordinator
+                    .Strategy
+                    .RECONCILE_IN_FLIGHT
+                    .name
 
         return """
             ВОССТАНОВЛЕНИЕ СОХРАНЁННОЙ ЦЕЛИ AYANA.
@@ -41910,7 +43162,10 @@ details = error.message.orEmpty().take(220)
             Уже подтверждённые выполненные шаги:
             ${if (trace.isBlank()) "(нет сохранённых шагов)" else trace}
 
-            ПОСЛЕДНИЙ DURABLE CHECKPOINT: $lastCheckpoint
+            ПОСЛЕДНИЙ DURABLE CHECKPOINT (raw): $rawLastCheckpoint
+            ЭФФЕКТИВНЫЙ CHECKPOINT ДО ПРЕРЫВАНИЯ: $lastCheckpoint
+            R10.3 RECOVERY STRATEGY: ${recoveryDecision.optString("strategy", "UNKNOWN")}
+            СОХРАНЕНО ПОДТВЕРЖДЁННЫХ ШАГОВ: ${recoveryDecision.optInt("completed_steps_preserved", 0)}
             ПОСЛЕДНИЙ ИНСТРУМЕНТ: ${if (lastToolName.isBlank()) "(нет)" else lastToolName}
             СОХРАНЁННЫЙ РЕЗУЛЬТАТ ПОСЛЕДНЕГО ИНСТРУМЕНТА: ${if (lastToolResult.isBlank()) "(нет надёжно сохранённого результата)" else lastToolResult}
             TASK GRAPH RECONCILIATION REQUIRED: ${goal.optJSONObject("task_graph")?.optBoolean("reconciliation_required", false) == true}
@@ -51617,9 +52872,9 @@ state
         private const val MASTER_STATUS_MANUAL_REQUIRED =
             "MANUAL_REQUIRED"
 
-        // R10.2 PERSONAL SEARCH EXPANSION RELEASE TRUTH.
+        // R10.3 LONG AUTONOMOUS TASKS + RECOVERY RELEASE TRUTH.
         private const val AYANA_VOICE_SERVICE_RELEASE =
-            "v12.35.0 / R10.2 PERSONAL SEARCH EXPANSION"
+            "v12.36.0 / R10.3 LONG AUTONOMOUS TASKS + RECOVERY"
 
         private const val AYANA_PERSONAL_SEARCH_ENGINE_RELEASE =
             "v1.5.1 IMAGE COVERAGE TRUTH + R10.2 UNIFIED SEARCH CONTRACT v1.0"
@@ -51631,13 +52886,13 @@ state
             "v11.1.10 Multi-Attachment"
 
         private const val AYANA_ACCEPTED_FEATURE_CHECKPOINT =
-            "R10.1 LOCAL SELF-DIAGNOSTICS / SELF-AUDIT — DEVICE-CONFIRMED ACCEPTED"
+            "R10.2 PERSONAL SEARCH EXPANSION — DEVICE-CONFIRMED ACCEPTED"
 
         private const val AYANA_CURRENT_FEATURE_RELEASE =
-            "R10.2 PERSONAL SEARCH EXPANSION — PENDING DEVICE CONFIRMATION"
+            "R10.3 LONG AUTONOMOUS TASKS + RECOVERY — PENDING DEVICE CONFIRMATION"
 
         private const val AYANA_RELEASE_LINEAGE =
-            "Android v12.21.0 / R7.9 truth-hardening + R8.0 multi-attachment + R8.1–R8.4 accepted Personal Global Search stack + R8.5–R8.5.4 capability/evidence truth + R9.0 autonomous agent foundation + R9.0.1 history live-refresh proof fix + R9.0.2 diagnostic reconciliation/history refresh fix + R9.0.3 TTS health reconciliation + R9.1 IME perception/active telemetry truth + R9.2 autonomous recovery/long-task reconciliation + R9.2.1 adaptive hypothesis reconciliation + R9.3 app integration framework + R9.3.1 screen health reconciliation + R9.3.2 history latency recovery reconciliation + R9.3.3 informational terminal reconciliation + R9.3.4 app integration device acceptance + R9.4 multi-app task orchestration + R9.4.1 screen ownership union reconciliation + R9.5 verified result transfer between app steps + R9.5.1 partial marker provenance reconciliation + R9.5.2 bounded marker observation + R9.5.3 verified action result transfer + R9.6 verified semantic observation fallback + R9.6.1 visual fallback acceptance truth + R9.7 structured screen reading + R9.7.1 conversation routing/terminal truth + R9.7.2 structured router conversation precedence + R9.7.3 action morphology/terminal truth + R9.8 generic verified result transfer + R9.8.1 master full acceptance/diagnostic engine + R9.9 reversible action journal/verified undo + R9.9.1 brightness verified undo device acceptance + R9.9.2 opt-in low-battery controlled proactivity + R10.0 unified screen intelligence + R10.1 local self-diagnostics/self-audit + R10.2 personal search expansion"
+            "Android v12.21.0 / R7.9 truth-hardening + R8.0 multi-attachment + R8.1–R8.4 accepted Personal Global Search stack + R8.5–R8.5.4 capability/evidence truth + R9.0 autonomous agent foundation + R9.0.1 history live-refresh proof fix + R9.0.2 diagnostic reconciliation/history refresh fix + R9.0.3 TTS health reconciliation + R9.1 IME perception/active telemetry truth + R9.2 autonomous recovery/long-task reconciliation + R9.2.1 adaptive hypothesis reconciliation + R9.3 app integration framework + R9.3.1 screen health reconciliation + R9.3.2 history latency recovery reconciliation + R9.3.3 informational terminal reconciliation + R9.3.4 app integration device acceptance + R9.4 multi-app task orchestration + R9.4.1 screen ownership union reconciliation + R9.5 verified result transfer between app steps + R9.5.1 partial marker provenance reconciliation + R9.5.2 bounded marker observation + R9.5.3 verified action result transfer + R9.6 verified semantic observation fallback + R9.6.1 visual fallback acceptance truth + R9.7 structured screen reading + R9.7.1 conversation routing/terminal truth + R9.7.2 structured router conversation precedence + R9.7.3 action morphology/terminal truth + R9.8 generic verified result transfer + R9.8.1 master full acceptance/diagnostic engine + R9.9 reversible action journal/verified undo + R9.9.1 brightness verified undo device acceptance + R9.9.2 opt-in low-battery controlled proactivity + R10.0 unified screen intelligence + R10.1 local self-diagnostics/self-audit + R10.2 personal search expansion + R10.3 long autonomous tasks/recovery"
 
         // AyanaCommandHistoryStore v2.8 keeps up to 4k chars inline and stores longer
         // results out-of-line. Self-review intentionally remains inline so copied History
