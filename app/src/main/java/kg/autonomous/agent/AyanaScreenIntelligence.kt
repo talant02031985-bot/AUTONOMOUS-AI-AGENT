@@ -6,12 +6,18 @@ import org.json.JSONObject
 import java.util.Locale
 
 /**
- * AYANA Screen Intelligence v4.6 — VERIFIED FOREGROUND FUSION + EXTENDED SEMANTIC CONTENT.
- * v4.6 consumes Accessibility v7.2 extended same-window semantics (hint/state/pane/tooltip)
- * while preserving the fail-closed content contract: if no readable Accessibility content
- * exists, AYANA still reports structure_only/unavailable instead of inventing screen text.
+ * AYANA Screen Intelligence v5.0 — UNIFIED SCREEN TRUTH.
  *
- * AYANA Screen Intelligence v4.5 — VERIFIED FOREGROUND FUSION + Settings sparse-content recovery.
+ * R10.0 turns Screen Intelligence into the single consumer-facing source of truth
+ * for current-screen state. Accessibility remains the raw Android evidence provider;
+ * this class owns fusion of raw interaction window/package, verified foreground-owner
+ * handoff, AYANA-overlay suppression and fresh package-bound visual/semantic evidence.
+ * Upper layers must consume effective_foreground_package / foreground_truth_verified /
+ * execution_evidence_usable from this object instead of independently interpreting
+ * Accessibility package fields. Visual evidence is read-only corroboration: it never
+ * becomes foreground ownership by itself and never grants action authority. Conflicts
+ * fail closed.
+ *
  *
  * v4.4 preserves v4.3/v4.2 truth and extends the same fail-closed recovery
  * path for sparse Samsung Settings snapshots: if the normal semantic resolver reports
@@ -38,6 +44,59 @@ class AyanaScreenIntelligence(
 
     private val targetResolver =
         AyanaSemanticTargetResolver()
+
+    @Volatile
+    private var lastVerifiedVisualObservationJson: String = ""
+
+    @Volatile
+    private var lastVerifiedVisualObservationAtMs: Long = 0L
+
+    /**
+     * Records only already-verified package-bound visual/semantic evidence.
+     * The image itself is never retained here; only compact provenance is cached.
+     * This method grants no execution authority.
+     */
+    fun recordVerifiedVisualObservation(
+        observation: JSONObject
+    ): Boolean {
+        if (!observation.optBoolean("verified", false)) return false
+
+        val packageName =
+            observation.optString("captured_package").trim()
+                .ifBlank { observation.optString("expected_package").trim() }
+                .ifBlank { observation.optString("source_package").trim() }
+                .ifBlank { observation.optString("observed_package").trim() }
+
+        val sha256 = observation.optString("screenshot_sha256").trim()
+        if (packageName.isBlank() || sha256.isBlank()) return false
+
+        val now = System.currentTimeMillis()
+        val compact =
+            JSONObject()
+                .put("verified", true)
+                .put("package", packageName)
+                .put("screenshot_sha256", sha256)
+                .put("capture_mode", observation.optString("capture_mode"))
+                .put("source_context_mode", observation.optString("source_context_mode"))
+                .put("semantic_title", observation.optString("semantic_title").take(240))
+                .put("semantic_observation_version", observation.optString("semantic_observation_version"))
+                .put("screen_text_instruction_authority", false)
+                .put("recorded_at_ms", now)
+
+        lastVerifiedVisualObservationJson = compact.toString()
+        lastVerifiedVisualObservationAtMs = now
+        return true
+    }
+
+    fun clearVerifiedVisualObservation() {
+        lastVerifiedVisualObservationJson = ""
+        lastVerifiedVisualObservationAtMs = 0L
+    }
+
+    fun effectiveForegroundPackage(): String =
+        getScreenState()
+            .optString("effective_foreground_package")
+            .trim()
 
     fun getScreenState(): JSONObject {
         val service =
@@ -1082,7 +1141,9 @@ class AyanaScreenIntelligence(
         currentSnapshot(service)
 
     private fun annotateSnapshot(
-        snapshot: JSONObject
+        snapshot: JSONObject,
+        visualOverride: JSONObject? = null,
+        nowMs: Long = System.currentTimeMillis()
     ): JSONObject {
 
         val snapshotSuccess =
@@ -1096,25 +1157,77 @@ class AyanaScreenIntelligence(
                 )
                 .trim()
 
-        val foregroundOwnerPackage =
+        val accessibilityProviderEffectivePackage =
             snapshot
-                .optString(
-                    "foreground_owner_package"
-                )
+                .optString("effective_foreground_package")
                 .trim()
 
-        // v4.5: AYANA's floating overlay belongs to the same package as the main
-        // app and must never mask a separately verified external foreground owner.
-        // Only override an own-app raw interaction package; never let a stale owner
-        // replace one external application with another.
+        val foregroundOwnerPackage =
+            snapshot
+                .optString("foreground_owner_package")
+                .trim()
+
+        val ownerAgeMs =
+            snapshot.optLong("foreground_owner_age_ms", -1L)
+
+        val visual =
+            visualOverride ?: latestVerifiedVisualObservation(nowMs)
+
+        val visualPackage =
+            visual
+                ?.optString("package")
+                .orEmpty()
+                .trim()
+
+        val visualAgeMs =
+            visual
+                ?.optLong("visual_age_ms", -1L)
+                ?: -1L
+
+        val visualFresh =
+            visual != null &&
+                visual.optBoolean("verified", false) &&
+                visualPackage.isNotBlank() &&
+                visualAgeMs in 0L..VISUAL_EVIDENCE_TTL_MS
+
+        val rawExternal =
+            rawInteractionPackage.isNotBlank() &&
+                rawInteractionPackage != appContext.packageName
+
+        val ownerExternal =
+            foregroundOwnerPackage.isNotBlank() &&
+                foregroundOwnerPackage != appContext.packageName
+
+        // A live external Accessibility primary always wins over older owner/visual
+        // evidence. This prevents a fresh switch from app A to app B from becoming
+        // a false conflict merely because cached visual evidence from A is still inside
+        // its TTL. Visual evidence may corroborate, but never replace a contradictory
+        // live external primary window.
+        val visualSupersededByLiveExternal =
+            rawExternal &&
+                visualFresh &&
+                visualPackage != rawInteractionPackage
+
+        val visualSupersededByNewerOwner =
+            !rawExternal &&
+                ownerExternal &&
+                visualFresh &&
+                visualPackage != foregroundOwnerPackage &&
+                ownerAgeMs >= 0L &&
+                visualAgeMs >= 0L &&
+                ownerAgeMs < visualAgeMs
+
+        val usableVisual =
+            visualFresh &&
+                !visualSupersededByLiveExternal &&
+                !visualSupersededByNewerOwner
+
         val effectiveForegroundPackage =
             when {
-                rawInteractionPackage.isNotBlank() &&
-                    rawInteractionPackage != appContext.packageName ->
+                rawExternal ->
                     rawInteractionPackage
 
-                foregroundOwnerPackage.isNotBlank() &&
-                    foregroundOwnerPackage != appContext.packageName ->
+                ownerExternal ->
                     foregroundOwnerPackage
 
                 rawInteractionPackage.isNotBlank() ->
@@ -1128,6 +1241,61 @@ class AyanaScreenIntelligence(
             rawInteractionPackage == appContext.packageName &&
                 effectiveForegroundPackage.isNotBlank() &&
                 effectiveForegroundPackage != appContext.packageName
+
+        // Conflict is only material when there is no stronger live external primary
+        // and two fresh external truth sources disagree. Material conflicts are exposed
+        // and cannot be used as execution evidence.
+        val ownerVisualConflict =
+            !rawExternal &&
+                ownerExternal &&
+                usableVisual &&
+                visualPackage != foregroundOwnerPackage
+
+        val foregroundConflict = ownerVisualConflict
+
+        val visualMatchesEffective =
+            usableVisual &&
+                effectiveForegroundPackage.isNotBlank() &&
+                visualPackage == effectiveForegroundPackage
+
+        val foregroundTruthSource =
+            when {
+                foregroundConflict ->
+                    "conflict_fail_closed"
+
+                rawExternal && visualMatchesEffective ->
+                    "accessibility_primary_plus_visual"
+
+                rawExternal ->
+                    "accessibility_external_primary"
+
+                ownerExternal && visualMatchesEffective && ayanaOverlayOwnershipSuppressed ->
+                    "verified_owner_plus_visual_over_ayana_overlay"
+
+                ownerExternal && ayanaOverlayOwnershipSuppressed ->
+                    "verified_owner_over_ayana_overlay"
+
+                ownerExternal && visualMatchesEffective ->
+                    "verified_owner_plus_visual"
+
+                ownerExternal ->
+                    "verified_foreground_owner"
+
+                rawInteractionPackage == appContext.packageName ->
+                    "ayana_primary_window"
+
+                else ->
+                    "unknown"
+            }
+
+        val foregroundTruthVerified =
+            snapshotSuccess &&
+                effectiveForegroundPackage.isNotBlank() &&
+                !foregroundConflict
+
+        val executionEvidenceUsable =
+            foregroundTruthVerified &&
+                foregroundTruthSource != "unknown"
 
         val contentState =
             snapshot
@@ -1149,6 +1317,9 @@ class AyanaScreenIntelligence(
                 !snapshotSuccess ->
                     "Снимок Accessibility получить не удалось"
 
+                foregroundConflict ->
+                    "Источники foreground truth конфликтуют; execution evidence заблокирован"
+
                 contentState == "readable" ->
                     "Основное окно и его содержимое доступны для чтения"
 
@@ -1165,31 +1336,76 @@ class AyanaScreenIntelligence(
                     "Состояние содержимого экрана не удалось подтвердить"
             }
 
+        val visualJson =
+            if (visual != null) {
+                JSONObject(visual.toString())
+                    .put("fresh", visualFresh)
+                    .put("used", visualMatchesEffective)
+                    .put("superseded_by_live_external", visualSupersededByLiveExternal)
+                    .put("superseded_by_newer_owner", visualSupersededByNewerOwner)
+            } else {
+                JSONObject()
+                    .put("verified", false)
+                    .put("fresh", false)
+                    .put("used", false)
+            }
+
         return snapshot
-            .put("source", "android_accessibility")
+            .put("source", "ayana_unified_screen_intelligence")
+            .put("screen_intelligence_version", VERSION)
+            .put("unified_screen_truth_version", UNIFIED_TRUTH_VERSION)
             .put("perception_fusion_version", 2)
+            .put("raw_primary_package", snapshot.optString("package").trim())
             .put("raw_interaction_package", rawInteractionPackage)
-            .put("effective_foreground_package", effectiveForegroundPackage)
-            .put("interaction_package", effectiveForegroundPackage)
             .put(
-                "ayana_overlay_ownership_suppressed",
-                ayanaOverlayOwnershipSuppressed
+                "accessibility_provider_effective_foreground_package",
+                accessibilityProviderEffectivePackage
             )
+            .put("foreground_owner_package", foregroundOwnerPackage)
+            .put("foreground_owner_age_ms", ownerAgeMs)
+            .put("effective_foreground_package", effectiveForegroundPackage)
+            // Preserve compatibility: interaction_package remains the effective
+            // package for upper layers; raw_interaction_package carries raw truth.
+            .put("interaction_package", effectiveForegroundPackage)
+            .put("ayana_overlay_ownership_suppressed", ayanaOverlayOwnershipSuppressed)
+            .put("foreground_truth_verified", foregroundTruthVerified)
+            .put("foreground_truth_conflict", foregroundConflict)
+            .put("foreground_truth_source", foregroundTruthSource)
+            .put("execution_evidence_usable", executionEvidenceUsable)
+            .put("visual_observation_available", visual != null)
+            .put("visual_observation_fresh", visualFresh)
+            .put("visual_observation_used", visualMatchesEffective)
+            .put("visual_observation", visualJson)
+            .put(
+                "foreground_truth_components",
+                JSONObject()
+                    .put("raw_primary_package", snapshot.optString("package").trim())
+                    .put("raw_interaction_package", rawInteractionPackage)
+                    .put("provider_effective_package", accessibilityProviderEffectivePackage)
+                    .put("foreground_owner_package", foregroundOwnerPackage)
+                    .put("foreground_owner_source", snapshot.optString("foreground_owner_source"))
+                    .put("foreground_owner_window_id", snapshot.optInt("foreground_owner_window_id", -1))
+                    .put("foreground_owner_age_ms", ownerAgeMs)
+                    .put("visual_package", visualPackage)
+                    .put("visual_age_ms", visualAgeMs)
+                    .put("visual_fresh", visualFresh)
+                    .put("visual_used", visualMatchesEffective)
+                    .put("visual_superseded_by_live_external", visualSupersededByLiveExternal)
+                    .put("visual_superseded_by_newer_owner", visualSupersededByNewerOwner)
+            )
+            .put("truth_generated_at_ms", nowMs)
             .put(
                 "foreground_owner_confidence",
                 when {
-                    effectiveForegroundPackage.isBlank() ->
-                        "unknown"
-
-                    ayanaOverlayOwnershipSuppressed ->
-                        "verified_external_owner_over_own_overlay"
-
-                    effectiveForegroundPackage ==
-                        rawInteractionPackage ->
-                        "primary_accessibility_window"
-
-                    else ->
-                        "foreground_owner_fallback"
+                    foregroundConflict -> "conflict"
+                    !foregroundTruthVerified -> "unknown"
+                    rawExternal && visualMatchesEffective -> "verified_accessibility_plus_visual"
+                    rawExternal -> "verified_accessibility_primary"
+                    ayanaOverlayOwnershipSuppressed && visualMatchesEffective -> "verified_external_owner_plus_visual_over_own_overlay"
+                    ayanaOverlayOwnershipSuppressed -> "verified_external_owner_over_own_overlay"
+                    visualMatchesEffective -> "verified_visual_corroborated"
+                    effectiveForegroundPackage == rawInteractionPackage -> "primary_accessibility_window"
+                    else -> "verified_foreground_owner"
                 }
             )
             .put(
@@ -1206,6 +1422,111 @@ class AyanaScreenIntelligence(
             .put("content_message", message)
     }
 
+    private fun latestVerifiedVisualObservation(
+        nowMs: Long
+    ): JSONObject? {
+        val raw = lastVerifiedVisualObservationJson
+        val recordedAt = lastVerifiedVisualObservationAtMs
+        if (raw.isBlank() || recordedAt <= 0L) return null
+
+        val age = (nowMs - recordedAt).coerceAtLeast(0L)
+        if (age > VISUAL_EVIDENCE_HARD_EXPIRY_MS) {
+            clearVerifiedVisualObservation()
+            return null
+        }
+
+        return try {
+            JSONObject(raw)
+                .put("visual_age_ms", age)
+        } catch (_: Exception) {
+            clearVerifiedVisualObservation()
+            null
+        }
+    }
+
+    /** Pure regression contract for the R10.0 fusion rules. */
+    fun selfTestUnifiedTruth(): Boolean {
+        val now = 1_000_000L
+
+        val overlayCase =
+            JSONObject()
+                .put("success", true)
+                .put("package", appContext.packageName)
+                .put("interaction_package", appContext.packageName)
+                .put("foreground_owner_package", "com.sec.android.app.camera")
+                .put("foreground_owner_age_ms", 25L)
+                .put("primary_content_state", "structure_only")
+                .put("primary_content_available", false)
+
+        val matchingVisual =
+            JSONObject()
+                .put("verified", true)
+                .put("package", "com.sec.android.app.camera")
+                .put("screenshot_sha256", "abc")
+                .put("recorded_at_ms", now - 10L)
+                .put("visual_age_ms", 10L)
+
+        val fusedOverlay = annotateSnapshot(overlayCase, matchingVisual, now)
+
+        val switchedApp =
+            JSONObject()
+                .put("success", true)
+                .put("package", "com.android.settings")
+                .put("interaction_package", "com.android.settings")
+                .put("foreground_owner_package", "com.sec.android.app.camera")
+                .put("foreground_owner_age_ms", 20L)
+                .put("primary_content_state", "readable")
+                .put("primary_content_available", true)
+
+        val fusedSwitch = annotateSnapshot(switchedApp, matchingVisual, now)
+
+        val conflictingOwnerVisual =
+            JSONObject()
+                .put("success", true)
+                .put("package", appContext.packageName)
+                .put("interaction_package", appContext.packageName)
+                .put("foreground_owner_package", "com.android.settings")
+                .put("foreground_owner_age_ms", 10L)
+                .put("primary_content_state", "structure_only")
+                .put("primary_content_available", false)
+
+        val fusedConflict = annotateSnapshot(conflictingOwnerVisual, matchingVisual, now)
+
+        val newerOwner =
+            JSONObject()
+                .put("success", true)
+                .put("package", appContext.packageName)
+                .put("interaction_package", appContext.packageName)
+                .put("foreground_owner_package", "com.android.settings")
+                .put("foreground_owner_age_ms", 5L)
+                .put("primary_content_state", "structure_only")
+                .put("primary_content_available", false)
+
+        val olderVisual =
+            JSONObject()
+                .put("verified", true)
+                .put("package", "com.sec.android.app.camera")
+                .put("screenshot_sha256", "abc")
+                .put("recorded_at_ms", now - 20L)
+                .put("visual_age_ms", 20L)
+
+        val fusedNewerOwner = annotateSnapshot(newerOwner, olderVisual, now)
+
+        return fusedOverlay.optString("effective_foreground_package") == "com.sec.android.app.camera" &&
+            fusedOverlay.optBoolean("ayana_overlay_ownership_suppressed", false) &&
+            fusedOverlay.optBoolean("foreground_truth_verified", false) &&
+            fusedOverlay.optBoolean("execution_evidence_usable", false) &&
+            fusedOverlay.optBoolean("visual_observation_used", false) &&
+            fusedSwitch.optString("effective_foreground_package") == "com.android.settings" &&
+            !fusedSwitch.optBoolean("foreground_truth_conflict", true) &&
+            !fusedSwitch.optBoolean("visual_observation_used", true) &&
+            fusedConflict.optBoolean("foreground_truth_conflict", false) &&
+            !fusedConflict.optBoolean("execution_evidence_usable", true) &&
+            fusedNewerOwner.optString("effective_foreground_package") == "com.android.settings" &&
+            !fusedNewerOwner.optBoolean("foreground_truth_conflict", true) &&
+            !fusedNewerOwner.optBoolean("visual_observation_used", true)
+    }
+
     private fun unavailable(): JSONObject =
         JSONObject()
             .put("success", false)
@@ -1216,6 +1537,14 @@ class AyanaScreenIntelligence(
             .put("reason", "accessibility_unavailable")
             .put("snapshot_success", false)
             .put("understanding_success", false)
+            .put("screen_intelligence_version", VERSION)
+            .put("unified_screen_truth_version", UNIFIED_TRUTH_VERSION)
+            .put("perception_fusion_version", 2)
+            .put("foreground_truth_verified", false)
+            .put("foreground_truth_conflict", false)
+            .put("foreground_truth_source", "unavailable")
+            .put("execution_evidence_usable", false)
+            .put("effective_foreground_package", "")
             .put("content_contract_version", 2)
             .put("content_status", "unknown")
             .put("primary_content_state", "unknown")
@@ -1317,6 +1646,10 @@ class AyanaScreenIntelligence(
     }
 
     companion object {
+        const val VERSION = "5.0"
+        const val UNIFIED_TRUTH_VERSION = "1.0"
         private const val ACTION_SETTLE_MS = 420L
+        private const val VISUAL_EVIDENCE_TTL_MS = 15_000L
+        private const val VISUAL_EVIDENCE_HARD_EXPIRY_MS = 60_000L
     }
 }
