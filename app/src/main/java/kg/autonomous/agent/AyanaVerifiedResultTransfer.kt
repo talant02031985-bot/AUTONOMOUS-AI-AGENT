@@ -6,7 +6,7 @@ import java.security.MessageDigest
 import java.util.Locale
 
 /**
- * AYANA R9.5.2 Verified Result Transfer v1.2.
+ * AYANA R9.8 Verified Result Transfer v2.0 — GENERIC TYPED TRANSFER.
  *
  * Pure provenance/evidence layer for transferring a verified result from one
  * application step into a later application step. It never performs Android
@@ -22,6 +22,9 @@ import java.util.Locale
  * - action-field capture is limited to an explicit allow-list;
  * - consumer payloads are rendered only from verified transfer records;
  * - transfer records carry source provenance and a deterministic evidence fingerprint;
+ * - R9.8 adds typed, app-agnostic producer/consumer contracts for generic transfer edges;
+ * - producer contracts are based on action semantics, not hard-coded app chains;
+ * - consumer compatibility is checked before payload rendering;
  * - no mutation authority, replay authority or Agent-Core truth inference exists here.
  */
 class AyanaVerifiedResultTransfer {
@@ -32,20 +35,150 @@ class AyanaVerifiedResultTransfer {
         ACTION_FIELD
     }
 
+    enum class ValueType {
+        AUTO,
+        TEXT,
+        URL,
+        QUERY,
+        TITLE,
+        PACKAGE
+    }
+
     data class CaptureSpec(
         val transferKey: String,
         val kind: CaptureKind,
         val marker: String = "",
         val actionField: String = "",
-        val maxChars: Int = MAX_VALUE_CHARS
+        val maxChars: Int = MAX_VALUE_CHARS,
+        val valueType: ValueType = ValueType.AUTO
     )
 
     data class BindingSpec(
         val transferKey: String,
         val template: String,
         val placeholder: String = DEFAULT_PLACEHOLDER,
-        val maxPayloadChars: Int = MAX_BOUND_PAYLOAD_CHARS
+        val maxPayloadChars: Int = MAX_BOUND_PAYLOAD_CHARS,
+        val consumerAppKey: String = "",
+        val consumerActionKey: String = "",
+        val acceptedValueTypes: Set<ValueType> = emptySet()
     )
+
+    /**
+     * Generic producer contract for the currently registered app-action surface.
+     * The contract depends on action semantics only; app order/chain is irrelevant.
+     */
+    fun captureSpecForAction(
+        transferKey: String,
+        appKey: String,
+        actionKey: String,
+        semanticHint: String = ""
+    ): CaptureSpec? {
+        if (appKey.trim().isBlank() || actionKey.trim().isBlank()) return null
+
+        val hint = semanticHint.trim().lowercase(Locale.ROOT)
+
+        if (hint == SEMANTIC_HINT_SCREEN_TITLE) {
+            return CaptureSpec(
+                transferKey = transferKey,
+                kind = CaptureKind.SCREEN_TITLE,
+                valueType = ValueType.TITLE
+            )
+        }
+
+        return when (actionKey.trim().lowercase(Locale.ROOT)) {
+            ACTION_OPEN_URL ->
+                CaptureSpec(
+                    transferKey = transferKey,
+                    kind = CaptureKind.ACTION_FIELD,
+                    actionField = "requested_url",
+                    valueType = ValueType.URL
+                )
+
+            ACTION_SEARCH ->
+                CaptureSpec(
+                    transferKey = transferKey,
+                    kind = CaptureKind.ACTION_FIELD,
+                    actionField = "requested_query",
+                    valueType = ValueType.QUERY
+                )
+
+            ACTION_CREATE_EVENT_DRAFT ->
+                CaptureSpec(
+                    transferKey = transferKey,
+                    kind = CaptureKind.ACTION_FIELD,
+                    actionField = "requested_title",
+                    valueType = ValueType.TITLE
+                )
+
+            ACTION_OPEN ->
+                CaptureSpec(
+                    transferKey = transferKey,
+                    kind = CaptureKind.ACTION_FIELD,
+                    actionField = "observed_package",
+                    valueType = ValueType.PACKAGE
+                )
+
+            else -> null
+        }
+    }
+
+    /**
+     * Generic consumer contract. The template is produced by the orchestrator by
+     * replacing an explicit previous-result reference in a normal registry payload.
+     */
+    fun bindingSpecForAction(
+        transferKey: String,
+        appKey: String,
+        actionKey: String,
+        template: String
+    ): BindingSpec? {
+        if (appKey.trim().isBlank() || actionKey.trim().isBlank()) return null
+
+        val accepted = acceptedValueTypesForAction(actionKey)
+        if (accepted.isEmpty()) return null
+        if (countOccurrences(template, DEFAULT_PLACEHOLDER) != 1) return null
+
+        return BindingSpec(
+            transferKey = transferKey,
+            template = template,
+            consumerAppKey = appKey.trim().take(80),
+            consumerActionKey = actionKey.trim().take(80),
+            acceptedValueTypes = accepted
+        )
+    }
+
+    fun acceptedValueTypesForAction(
+        actionKey: String
+    ): Set<ValueType> =
+        when (actionKey.trim().lowercase(Locale.ROOT)) {
+            ACTION_SEARCH,
+            ACTION_CREATE_EVENT_DRAFT ->
+                TEXTUAL_INPUT_TYPES
+
+            ACTION_OPEN_URL ->
+                setOf(ValueType.URL)
+
+            else ->
+                emptySet()
+        }
+
+    fun areCompatible(
+        captureSpec: CaptureSpec,
+        bindingSpec: BindingSpec
+    ): Boolean {
+        val sourceType = resolvedValueType(captureSpec)
+        val accepted =
+            bindingSpec.acceptedValueTypes
+                .ifEmpty {
+                    acceptedValueTypesForAction(
+                        bindingSpec.consumerActionKey
+                    )
+                }
+
+        return sourceType != ValueType.AUTO &&
+            accepted.isNotEmpty() &&
+            sourceType in accepted
+    }
 
     fun capture(
         spec: CaptureSpec,
@@ -129,6 +262,16 @@ class AyanaVerifiedResultTransfer {
 
         val sourceKind =
             spec.kind.name
+
+        val valueType =
+            resolvedValueType(spec)
+
+        if (valueType == ValueType.AUTO) {
+            return captureFailure(
+                key = key,
+                reason = "capture_value_type_unresolved"
+            )
+        }
 
         var value = ""
         var sourceContentState = ""
@@ -296,6 +439,7 @@ class AyanaVerifiedResultTransfer {
                 actionKey = boundedActionKey,
                 expectedPackage = expectedPackage,
                 sourceKind = sourceKind,
+                valueType = valueType.name,
                 value = value
             )
 
@@ -306,6 +450,7 @@ class AyanaVerifiedResultTransfer {
             .put("value", value)
             .put("value_chars", value.length)
             .put("capture_kind", sourceKind)
+            .put("value_type", valueType.name)
             .put("captured_at_ms", capturedAt)
             .put("source_step_key", boundedSourceStepKey)
             .put("source_app_key", boundedAppKey)
@@ -359,6 +504,41 @@ class AyanaVerifiedResultTransfer {
             return bindFailure(
                 key = key,
                 reason = "transfer_record_not_verified"
+            )
+        }
+
+        val recordType =
+            parseValueType(
+                record.optString("value_type")
+            )
+
+        if (recordType == null || recordType == ValueType.AUTO) {
+            return bindFailure(
+                key = key,
+                reason = "transfer_value_type_invalid"
+            )
+        }
+
+        val acceptedTypes =
+            spec.acceptedValueTypes
+                .ifEmpty {
+                    if (spec.consumerActionKey.isBlank()) {
+                        TEXTUAL_INPUT_TYPES
+                    } else {
+                        acceptedValueTypesForAction(
+                            spec.consumerActionKey
+                        )
+                    }
+                }
+
+        if (acceptedTypes.isEmpty() || recordType !in acceptedTypes) {
+            return bindFailure(
+                key = key,
+                reason =
+                    "transfer_type_incompatible:" +
+                        recordType.name +
+                        "->" +
+                        spec.consumerActionKey.ifBlank { "legacy_consumer" }
             )
         }
 
@@ -424,6 +604,9 @@ class AyanaVerifiedResultTransfer {
             .put("transfer_key", key)
             .put("payload", rendered)
             .put("value", value)
+            .put("value_type", recordType.name)
+            .put("consumer_app_key", spec.consumerAppKey)
+            .put("consumer_action_key", spec.consumerActionKey)
             .put(
                 "source_evidence_fingerprint",
                 record.optString("evidence_fingerprint")
@@ -456,6 +639,13 @@ class AyanaVerifiedResultTransfer {
 
         if (fingerprint.isBlank()) return false
 
+        val valueType =
+            parseValueType(
+                record.optString("value_type")
+            ) ?: return false
+
+        if (valueType == ValueType.AUTO) return false
+
         val expectedFingerprint =
             evidenceFingerprint(
                 key =
@@ -472,6 +662,7 @@ class AyanaVerifiedResultTransfer {
                     record.optString("source_expected_package"),
                 sourceKind =
                     record.optString("capture_kind"),
+                valueType = valueType.name,
                 value = value
             )
 
@@ -720,6 +911,73 @@ class AyanaVerifiedResultTransfer {
             )
 
         if (!isVerifiedRecord(fieldRecord)) return false
+        if (fieldRecord.optString("value_type") != ValueType.URL.name) return false
+
+        val genericQueryCapture =
+            captureSpecForAction(
+                transferKey = "generic_query",
+                appKey = "youtube",
+                actionKey = ACTION_SEARCH
+            ) ?: return false
+
+        if (resolvedValueType(genericQueryCapture) != ValueType.QUERY) return false
+
+        val queryAction =
+            JSONObject(action.toString())
+                .put("requested_query", "AYANA generic transfer")
+
+        val queryRecord =
+            capture(
+                spec = genericQueryCapture,
+                sourceStepKey = "youtube-search",
+                appKey = "youtube",
+                actionKey = ACTION_SEARCH,
+                actionResult = queryAction
+            )
+
+        if (!isVerifiedRecord(queryRecord)) return false
+
+        val typedLedger = JSONObject()
+        if (!store(typedLedger, queryRecord)) return false
+
+        val browserSearchBinding =
+            bindingSpecForAction(
+                transferKey = "generic_query",
+                appKey = "browser",
+                actionKey = ACTION_SEARCH,
+                template = DEFAULT_PLACEHOLDER
+            ) ?: return false
+
+        if (!areCompatible(genericQueryCapture, browserSearchBinding)) return false
+        if (!bind(browserSearchBinding, typedLedger).optBoolean("verified", false)) return false
+
+        val browserUrlBinding =
+            bindingSpecForAction(
+                transferKey = "generic_query",
+                appKey = "browser",
+                actionKey = ACTION_OPEN_URL,
+                template = DEFAULT_PLACEHOLDER
+            ) ?: return false
+
+        if (areCompatible(genericQueryCapture, browserUrlBinding)) return false
+        if (bind(browserUrlBinding, typedLedger).optBoolean("success", true)) return false
+
+        val tamperedTypeLedger =
+            JSONObject()
+                .put(
+                    "generic_query",
+                    JSONObject(queryRecord.toString())
+                        .put("value_type", ValueType.URL.name)
+                )
+
+        if (
+            bind(
+                browserSearchBinding,
+                tamperedTypeLedger
+            ).optBoolean("success", true)
+        ) {
+            return false
+        }
 
         val forgedLedger =
             JSONObject()
@@ -903,6 +1161,37 @@ class AyanaVerifiedResultTransfer {
             }
             .ifBlank { "unknown" }
 
+    private fun resolvedValueType(
+        spec: CaptureSpec
+    ): ValueType {
+        if (spec.valueType != ValueType.AUTO) return spec.valueType
+
+        return when (spec.kind) {
+            CaptureKind.SCREEN_MARKER -> ValueType.TEXT
+            CaptureKind.SCREEN_TITLE -> ValueType.TITLE
+            CaptureKind.ACTION_FIELD ->
+                when (spec.actionField.trim()) {
+                    "requested_url" -> ValueType.URL
+                    "requested_query" -> ValueType.QUERY
+                    "requested_title" -> ValueType.TITLE
+                    "observed_package",
+                    "target_package" -> ValueType.PACKAGE
+                    else -> ValueType.AUTO
+                }
+        }
+    }
+
+    private fun parseValueType(
+        raw: String
+    ): ValueType? =
+        try {
+            ValueType.valueOf(
+                raw.trim().uppercase(Locale.ROOT)
+            )
+        } catch (_: Exception) {
+            null
+        }
+
     private fun evidenceFingerprint(
         key: String,
         sourceStepKey: String,
@@ -910,6 +1199,7 @@ class AyanaVerifiedResultTransfer {
         actionKey: String,
         expectedPackage: String,
         sourceKind: String,
+        valueType: String,
         value: String
     ): String {
         val canonical =
@@ -921,6 +1211,7 @@ class AyanaVerifiedResultTransfer {
                 actionKey,
                 expectedPackage,
                 sourceKind,
+                valueType,
                 value
             )
                 .joinToString("\u001F")
@@ -1012,11 +1303,26 @@ class AyanaVerifiedResultTransfer {
             Regex("^[a-z0-9][a-z0-9_.-]*$").matches(key)
 
     companion object {
-        const val VERSION = "1.2"
+        const val VERSION = "2.0"
         const val DEFAULT_PLACEHOLDER = "{{value}}"
+        const val SEMANTIC_HINT_SCREEN_TITLE = "screen_title"
+
+        private const val ACTION_OPEN = "open"
+        private const val ACTION_SEARCH = "search"
+        private const val ACTION_OPEN_URL = "open_url"
+        private const val ACTION_CREATE_EVENT_DRAFT = "create_event_draft"
         const val MAX_VALUE_CHARS = 180
         const val MAX_BOUND_PAYLOAD_CHARS = 240
         const val MAX_KEY_CHARS = 64
+
+        val TEXTUAL_INPUT_TYPES: Set<ValueType> =
+            setOf(
+                ValueType.TEXT,
+                ValueType.URL,
+                ValueType.QUERY,
+                ValueType.TITLE,
+                ValueType.PACKAGE
+            )
 
         val ALLOWED_ACTION_FIELDS =
             setOf(
