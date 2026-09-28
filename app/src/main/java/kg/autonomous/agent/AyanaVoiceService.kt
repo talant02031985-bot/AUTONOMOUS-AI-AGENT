@@ -61,6 +61,16 @@ import kotlin.math.abs
 
 class AyanaVoiceService : Service() {
 
+    // AYANA v12.31.0 / R9.9 REVERSIBLE ACTION JOURNAL + VERIFIED UNDO.
+    // Builds on DEVICE-CONFIRMED R9.8.1 MASTER FULL ACCEPTANCE.
+    // - verified local media-volume and brightness changes write bounded BEFORE/AFTER state;
+    // - generic undo is allowed only for the newest still-undoable allow-listed action;
+    // - current Android state must still match the recorded AFTER state before rollback dispatch;
+    // - rollback is read-back verified and journalled as UNDONE/FAILED; no blind retry is allowed;
+    // - clipboard/screen text/credentials are never stored in the undo journal;
+    // - this is verified undo for supported reversible actions, not a universal-undo claim.
+    // R9.8.1 master acceptance, R9.8 generic transfer, R9.7 structured reading and ORB remain unchanged.
+    //
     // AYANA v12.30.1 / R9.8.1 MASTER FULL ACCEPTANCE & DIAGNOSTIC ENGINE.
     // Builds on the device-confirmed R9.8 generic transfer baseline.
     // The master command reuses the existing exhaustive acceptance engine, then
@@ -1034,6 +1044,14 @@ class AyanaVoiceService : Service() {
 
     private val controlledProactivityPolicy by lazy {
         AyanaControlledProactivityPolicy()
+    }
+
+    // R9.9 VERIFIED UNDO. Only bounded technical state for allow-listed reversible
+    // actions is persisted. The journal never stores arbitrary screen/clipboard text.
+    private val reversibleActionJournal by lazy {
+        AyanaReversibleActionJournal(
+            applicationContext
+        )
     }
 
     // R9.2: pure decision layer between an unverified tool outcome and the next
@@ -3805,6 +3823,43 @@ mainHandler.post {
             )
             confirmedPreExecutionOriginal =
                 ""
+        }
+
+        // R9.9 VERIFIED UNDO PRECEDENCE. Durable-goal cancel/resume phrases were
+        // resolved above. The undo executor has its own current-state guard and
+        // read-back verification, so generic multi-step/action classifiers cannot
+        // reinterpret a bounded rollback command before it reaches that contract.
+        if (
+            isUndoLastReversibleActionCommand(
+                originalCommand
+            )
+        ) {
+            runLocalUndoLastReversibleAction(
+                silent = silent
+            )
+            return
+        }
+
+        if (
+            isReversibleActionJournalStatusCommand(
+                originalCommand
+            )
+        ) {
+            runLocalReversibleActionJournalStatus(
+                silent = silent
+            )
+            return
+        }
+
+        if (
+            isReversibleActionJournalAcceptanceCommand(
+                originalCommand
+            )
+        ) {
+            runLocalReversibleActionJournalAcceptance(
+                silent = silent
+            )
+            return
         }
 
         // v12.11.2 UNIVERSAL PRE-EXECUTION GOAL GATE.
@@ -10444,6 +10499,923 @@ SystemClock.elapsedRealtime() +
         lifecycleWorker.start()
     }
 
+    private fun normalizeReversibleUndoCommand(
+        value: String
+    ): String =
+        value
+            .trim()
+            .lowercase(Locale.ROOT)
+            .replace('ё', 'е')
+            .replace(Regex("\\s+"), " ")
+
+    private fun isUndoLastReversibleActionCommand(
+        command: String
+    ): Boolean {
+        val normalized =
+            normalizeReversibleUndoCommand(command)
+
+        if (normalized.isBlank()) {
+            return false
+        }
+
+        // Durable-goal/task cancellation keeps its existing owner.
+        if (
+            normalized.contains("текущ") ||
+            normalized.contains("активн")
+        ) {
+            if (
+                normalized.contains("задач") ||
+                normalized.contains("цель") ||
+                normalized.contains("команд")
+            ) {
+                return false
+            }
+        }
+
+        return normalized in
+            setOf(
+                "отмени последнее действие",
+                "отмени последнее изменение",
+                "верни последнее действие",
+                "верни последнее изменение",
+                "откати последнее действие",
+                "откати последнее изменение",
+                "undo последнее действие",
+                "undo последнее изменение"
+            )
+    }
+
+    private fun isReversibleActionJournalStatusCommand(
+        command: String
+    ): Boolean {
+        val normalized =
+            normalizeReversibleUndoCommand(command)
+
+        return normalized in
+            setOf(
+                "что можно отменить",
+                "какое последнее действие можно отменить",
+                "покажи журнал отмены",
+                "покажи журнал отмены действий",
+                "покажи обратимые действия"
+            )
+    }
+
+    private fun isReversibleActionJournalAcceptanceCommand(
+        command: String
+    ): Boolean {
+        val normalized =
+            normalizeReversibleUndoCommand(command)
+
+        return normalized in
+            setOf(
+                "проверь журнал отмены действий",
+                "протестируй журнал отмены действий",
+                "проверь отмену последнего действия",
+                "протестируй отмену последнего действия",
+                "проверь verified undo",
+                "протестируй verified undo"
+            )
+    }
+
+    private fun recordVerifiedReversibleVolume(
+        beforeLevel: Int,
+        afterLevel: Int,
+        deviceMin: Int,
+        deviceMax: Int,
+        source: String
+    ): AyanaReversibleActionJournal.Entry? {
+        val entry =
+            try {
+                reversibleActionJournal.recordVolume(
+                    beforeLevel = beforeLevel,
+                    afterLevel = afterLevel,
+                    deviceMin = deviceMin,
+                    deviceMax = deviceMax,
+                    source = source
+                )
+            } catch (_: Exception) {
+                null
+            }
+
+        if (entry != null) {
+            commandHistoryStore.addEvent(
+                activeCommandHistoryId,
+                state = "reversible_action_recorded",
+                message = "Подтверждённое изменение громкости добавлено в R9.9 undo journal",
+                details =
+                    "id=${entry.id}; kind=${entry.kind.wireName}; before=$beforeLevel; after=$afterLevel; source=$source"
+            )
+        }
+
+        return entry
+    }
+
+    private fun recordVerifiedReversibleBrightness(
+        beforeMode: Int,
+        beforeRaw: Int,
+        afterMode: Int,
+        afterRaw: Int,
+        source: String
+    ): AyanaReversibleActionJournal.Entry? {
+        val entry =
+            try {
+                reversibleActionJournal.recordBrightness(
+                    beforeMode = beforeMode,
+                    beforeRaw = beforeRaw,
+                    afterMode = afterMode,
+                    afterRaw = afterRaw,
+                    source = source
+                )
+            } catch (_: Exception) {
+                null
+            }
+
+        if (entry != null) {
+            commandHistoryStore.addEvent(
+                activeCommandHistoryId,
+                state = "reversible_action_recorded",
+                message = "Подтверждённое изменение яркости добавлено в R9.9 undo journal",
+                details =
+                    "id=${entry.id}; kind=${entry.kind.wireName}; before_mode=$beforeMode; before_raw=$beforeRaw; after_mode=$afterMode; after_raw=$afterRaw; source=$source"
+            )
+        }
+
+        return entry
+    }
+
+    private fun runLocalReversibleActionJournalStatus(
+        silent: Boolean
+    ) {
+        executionPhase(
+            phase = "local_reversible_action_journal_status",
+            executor = "reversible_action_journal"
+        )
+
+        val latest =
+            try {
+                reversibleActionJournal.latestUndoable()
+            } catch (_: Exception) {
+                null
+            }
+
+        if (latest == null) {
+            finishLocalCommand(
+                "Сейчас нет подтверждённого обратимого действия, которое AYANA может безопасно отменить.",
+                silent
+            )
+            return
+        }
+
+        val label =
+            when (latest.kind) {
+                AyanaReversibleActionJournal.Kind.MEDIA_VOLUME ->
+                    "последнее изменение громкости"
+
+                AyanaReversibleActionJournal.Kind.SCREEN_BRIGHTNESS ->
+                    "последнее изменение яркости"
+            }
+
+        finishLocalCommand(
+            "Можно отменить $label. Перед откатом AYANA ещё раз проверит, что текущее состояние не изменилось после записанного действия.",
+            silent
+        )
+    }
+
+    private fun runLocalUndoLastReversibleAction(
+        silent: Boolean
+    ) {
+        executionPhase(
+            phase = "local_reversible_undo",
+            executor = "reversible_action_journal"
+        )
+
+        val entry =
+            try {
+                reversibleActionJournal.latestUndoable()
+            } catch (_: Exception) {
+                null
+            }
+
+        if (entry == null) {
+            respondUnsupportedAndResume(
+                text = "Нет подтверждённого обратимого действия для отмены. AYANA не заявляет универсальную отмену действий.",
+                silent = silent,
+                technical = "reversible_undo_no_undoable_entry"
+            )
+            return
+        }
+
+        val result =
+            performReversibleUndo(
+                entry = entry,
+                trackExecutionKernel = true
+            )
+
+        commandHistoryStore.addEvent(
+            activeCommandHistoryId,
+            state =
+                if (result.optBoolean("success", false)) {
+                    "reversible_undo_verified"
+                } else {
+                    "reversible_undo_rejected"
+                },
+            message =
+                result.optString("message")
+                    .ifBlank {
+                        "Verified undo завершён"
+                    },
+            details =
+                result
+                    .toString()
+                    .take(1800)
+        )
+
+        if (result.optBoolean("success", false)) {
+            finishLocalCommand(
+                result.optString("message"),
+                silent
+            )
+        } else {
+            val reason =
+                result.optString("reason")
+
+            if (
+                reason == "current_state_diverged" ||
+                reason == "write_settings_permission_required"
+            ) {
+                respondBlockedAndResume(
+                    text = result.optString("message"),
+                    silent = silent,
+                    technical = "reversible_undo:$reason"
+                )
+            } else {
+                respondAndResume(
+                    text = result.optString("message")
+                        .ifBlank {
+                            "Не удалось подтверждённо отменить последнее действие."
+                        },
+                    silent = silent,
+                    success = false,
+                    technical = "reversible_undo:${reason.ifBlank { "verification_failed" }}"
+                )
+            }
+        }
+    }
+
+    private fun performReversibleUndo(
+        entry: AyanaReversibleActionJournal.Entry,
+        trackExecutionKernel: Boolean
+    ): JSONObject {
+        return when (entry.kind) {
+            AyanaReversibleActionJournal.Kind.MEDIA_VOLUME ->
+                performVolumeUndo(
+                    entry = entry,
+                    trackExecutionKernel = trackExecutionKernel
+                )
+
+            AyanaReversibleActionJournal.Kind.SCREEN_BRIGHTNESS ->
+                performBrightnessUndo(
+                    entry = entry,
+                    trackExecutionKernel = trackExecutionKernel
+                )
+        }
+    }
+
+    private fun performVolumeUndo(
+        entry: AyanaReversibleActionJournal.Entry,
+        trackExecutionKernel: Boolean
+    ): JSONObject {
+        val beforeLevel =
+            entry.before.optInt("level", -1)
+
+        val afterLevel =
+            entry.after.optInt("level", -1)
+
+        val recordedMin =
+            entry.before.optInt("device_min", -1)
+
+        val recordedMax =
+            entry.before.optInt("device_max", -1)
+
+        val audioManager =
+            getSystemService(Context.AUDIO_SERVICE) as AudioManager
+
+        val liveMax =
+            try {
+                audioManager.getStreamMaxVolume(
+                    AudioManager.STREAM_MUSIC
+                )
+            } catch (_: Exception) {
+                -1
+            }
+
+        val liveMin =
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+                try {
+                    audioManager.getStreamMinVolume(
+                        AudioManager.STREAM_MUSIC
+                    )
+                } catch (_: Exception) {
+                    -1
+                }
+            } else {
+                0
+            }
+
+        val current =
+            try {
+                audioManager.getStreamVolume(
+                    AudioManager.STREAM_MUSIC
+                )
+            } catch (_: Exception) {
+                -1
+            }
+
+        val precondition =
+            reversibleActionJournal
+                .validateVolumeUndoPrecondition(
+                    entry = entry,
+                    currentLevel = current,
+                    deviceMin = liveMin,
+                    deviceMax = liveMax
+                )
+
+        if (
+            !precondition.optBoolean(
+                "allowed",
+                false
+            )
+        ) {
+            return JSONObject()
+                .put("success", false)
+                .put("verified", false)
+                .put(
+                    "reason",
+                    precondition.optString(
+                        "reason",
+                        "current_state_diverged"
+                    )
+                )
+                .put("kind", entry.kind.wireName)
+                .put("precondition", precondition)
+                .put(
+                    "message",
+                    "Отмена остановлена: текущая громкость уже отличается от состояния сразу после записанного действия. AYANA ничего не изменила."
+                )
+        }
+
+        if (
+            trackExecutionKernel &&
+            !beginLocalVerifiedSideEffect(
+                kind = "reversible_undo_media_volume",
+                detail = "journal=${entry.id}; current=$current; restore=$beforeLevel"
+            )
+        ) {
+            return JSONObject()
+                .put("success", false)
+                .put("verified", false)
+                .put("reason", "dispatch_cancelled")
+                .put("message", "Отмена остановлена до изменения громкости.")
+        }
+
+        val dispatched =
+            try {
+                audioManager.setStreamVolume(
+                    AudioManager.STREAM_MUSIC,
+                    beforeLevel,
+                    AudioManager.FLAG_SHOW_UI
+                )
+                true
+            } catch (_: Exception) {
+                false
+            }
+
+        if (trackExecutionKernel && dispatched) {
+            executionKernel.markIrreversibleDispatchAccepted(
+                "reversible_undo_media_volume:${entry.id}"
+            )
+            executionKernel.markSideEffectReconciliationStarted(
+                "verify_reversible_undo_media_volume"
+            )
+        }
+
+        try {
+            Thread.sleep(80L)
+        } catch (_: Exception) {
+        }
+
+        val actual =
+            try {
+                audioManager.getStreamVolume(
+                    AudioManager.STREAM_MUSIC
+                )
+            } catch (_: Exception) {
+                -1
+            }
+
+        val verified =
+            dispatched &&
+                actual == beforeLevel
+
+        if (trackExecutionKernel) {
+            if (!dispatched) {
+                markLocalSideEffectNotCommitted(
+                    "reversible_undo_media_volume_dispatch_failed"
+                )
+            } else {
+                executionKernel.markSideEffectReconciled(
+                    committed = verified,
+                    detail = "restore=$beforeLevel; actual=$actual"
+                )
+            }
+        }
+
+        try {
+            reversibleActionJournal.markUndoResult(
+                id = entry.id,
+                verified = verified,
+                reason =
+                    if (verified) {
+                        "verified_restore:$actual"
+                    } else {
+                        "restore_failed:$actual"
+                    }
+            )
+        } catch (_: Exception) {
+        }
+
+        return JSONObject()
+            .put("success", verified)
+            .put("verified", verified)
+            .put(
+                "reason",
+                if (verified) {
+                    "verified_undo"
+                } else {
+                    "verification_failed"
+                }
+            )
+            .put("kind", entry.kind.wireName)
+            .put("expected_current", afterLevel)
+            .put("actual_before_undo", current)
+            .put("restore_target", beforeLevel)
+            .put("actual_after_undo", actual)
+            .put(
+                "message",
+                if (verified) {
+                    "Последнее изменение громкости отменено и подтверждено: $afterLevel → $actual из $liveMax."
+                } else {
+                    "Не удалось подтвердить отмену изменения громкости: ожидалось $beforeLevel, фактически $actual."
+                }
+            )
+    }
+
+    private fun performBrightnessUndo(
+        entry: AyanaReversibleActionJournal.Entry,
+        trackExecutionKernel: Boolean
+    ): JSONObject {
+        if (
+            Build.VERSION.SDK_INT >= Build.VERSION_CODES.M &&
+            !Settings.System.canWrite(this)
+        ) {
+            return JSONObject()
+                .put("success", false)
+                .put("verified", false)
+                .put("reason", "write_settings_permission_required")
+                .put(
+                    "message",
+                    "Отмена яркости требует системный доступ «Изменение системных настроек». Состояние не изменено."
+                )
+        }
+
+        val beforeMode =
+            entry.before.optInt("mode", -1)
+        val beforeRaw =
+            entry.before.optInt("raw", -1)
+        val afterMode =
+            entry.after.optInt("mode", -1)
+        val afterRaw =
+            entry.after.optInt("raw", -1)
+
+        val currentMode =
+            try {
+                Settings.System.getInt(
+                    contentResolver,
+                    Settings.System.SCREEN_BRIGHTNESS_MODE,
+                    -1
+                )
+            } catch (_: Exception) {
+                -1
+            }
+
+        val currentRaw =
+            try {
+                Settings.System.getInt(
+                    contentResolver,
+                    Settings.System.SCREEN_BRIGHTNESS,
+                    -1
+                )
+            } catch (_: Exception) {
+                -1
+            }
+
+        val precondition =
+            reversibleActionJournal
+                .validateBrightnessUndoPrecondition(
+                    entry = entry,
+                    currentMode = currentMode,
+                    currentRaw = currentRaw
+                )
+
+        if (
+            !precondition.optBoolean(
+                "allowed",
+                false
+            )
+        ) {
+            return JSONObject()
+                .put("success", false)
+                .put("verified", false)
+                .put(
+                    "reason",
+                    precondition.optString(
+                        "reason",
+                        "current_state_diverged"
+                    )
+                )
+                .put("kind", entry.kind.wireName)
+                .put("precondition", precondition)
+                .put(
+                    "message",
+                    "Отмена остановлена: яркость или режим экрана уже изменились после записанного действия. AYANA ничего не изменила."
+                )
+        }
+
+        if (
+            trackExecutionKernel &&
+            !beginLocalVerifiedSideEffect(
+                kind = "reversible_undo_screen_brightness",
+                detail = "journal=${entry.id}; restore_mode=$beforeMode; restore_raw=$beforeRaw"
+            )
+        ) {
+            return JSONObject()
+                .put("success", false)
+                .put("verified", false)
+                .put("reason", "dispatch_cancelled")
+                .put("message", "Отмена остановлена до изменения яркости.")
+        }
+
+        val rawWritten =
+            try {
+                Settings.System.putInt(
+                    contentResolver,
+                    Settings.System.SCREEN_BRIGHTNESS,
+                    beforeRaw
+                )
+            } catch (_: Exception) {
+                false
+            }
+
+        val modeWritten =
+            try {
+                Settings.System.putInt(
+                    contentResolver,
+                    Settings.System.SCREEN_BRIGHTNESS_MODE,
+                    beforeMode
+                )
+            } catch (_: Exception) {
+                false
+            }
+
+        val dispatched =
+            rawWritten &&
+                modeWritten
+
+        if (trackExecutionKernel && dispatched) {
+            executionKernel.markIrreversibleDispatchAccepted(
+                "reversible_undo_screen_brightness:${entry.id}"
+            )
+            executionKernel.markSideEffectReconciliationStarted(
+                "verify_reversible_undo_screen_brightness"
+            )
+        }
+
+        try {
+            Thread.sleep(120L)
+        } catch (_: Exception) {
+        }
+
+        val restoredMode =
+            try {
+                Settings.System.getInt(
+                    contentResolver,
+                    Settings.System.SCREEN_BRIGHTNESS_MODE,
+                    -1
+                )
+            } catch (_: Exception) {
+                -1
+            }
+
+        val restoredRaw =
+            try {
+                Settings.System.getInt(
+                    contentResolver,
+                    Settings.System.SCREEN_BRIGHTNESS,
+                    -1
+                )
+            } catch (_: Exception) {
+                -1
+            }
+
+        val rawVerified =
+            if (
+                beforeMode ==
+                Settings.System.SCREEN_BRIGHTNESS_MODE_MANUAL
+            ) {
+                restoredRaw >= 0 &&
+                    abs(restoredRaw - beforeRaw) <= 2
+            } else {
+                // Automatic mode may immediately choose another numeric brightness.
+                true
+            }
+
+        val verified =
+            dispatched &&
+                restoredMode == beforeMode &&
+                rawVerified
+
+        if (trackExecutionKernel) {
+            if (!dispatched) {
+                markLocalSideEffectNotCommitted(
+                    "reversible_undo_screen_brightness_dispatch_failed"
+                )
+            } else {
+                executionKernel.markSideEffectReconciled(
+                    committed = verified,
+                    detail =
+                        "mode=$beforeMode/$restoredMode; raw=$beforeRaw/$restoredRaw"
+                )
+            }
+        }
+
+        try {
+            reversibleActionJournal.markUndoResult(
+                id = entry.id,
+                verified = verified,
+                reason =
+                    if (verified) {
+                        "verified_restore:mode=$restoredMode;raw=$restoredRaw"
+                    } else {
+                        "restore_failed:mode=$restoredMode;raw=$restoredRaw"
+                    }
+            )
+        } catch (_: Exception) {
+        }
+
+        return JSONObject()
+            .put("success", verified)
+            .put("verified", verified)
+            .put(
+                "reason",
+                if (verified) {
+                    "verified_undo"
+                } else {
+                    "verification_failed"
+                }
+            )
+            .put("kind", entry.kind.wireName)
+            .put("restore_mode", beforeMode)
+            .put("restore_raw", beforeRaw)
+            .put("actual_mode", restoredMode)
+            .put("actual_raw", restoredRaw)
+            .put(
+                "message",
+                if (verified) {
+                    "Последнее изменение яркости отменено и подтверждено."
+                } else {
+                    "Не удалось подтверждённо восстановить предыдущее состояние яркости."
+                }
+            )
+    }
+
+    private fun runLocalReversibleActionJournalAcceptance(
+        silent: Boolean
+    ) {
+        executionPhase(
+            phase = "reversible_action_journal_acceptance",
+            executor = "reversible_action_journal"
+        )
+
+        val audioManager =
+            getSystemService(Context.AUDIO_SERVICE) as AudioManager
+
+        val max =
+            audioManager.getStreamMaxVolume(
+                AudioManager.STREAM_MUSIC
+            )
+
+        val min =
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+                audioManager.getStreamMinVolume(
+                    AudioManager.STREAM_MUSIC
+                )
+            } else {
+                0
+            }
+
+        val original =
+            audioManager.getStreamVolume(
+                AudioManager.STREAM_MUSIC
+            )
+
+        if (max <= min) {
+            respondUnsupportedAndResume(
+                text = "Диапазон media volume не позволяет выполнить R9.9 acceptance.",
+                silent = silent,
+                technical = "r9_9_acceptance_volume_range_unavailable"
+            )
+            return
+        }
+
+        val target =
+            if (original < max) {
+                original + 1
+            } else {
+                original - 1
+            }.coerceIn(min, max)
+
+        var entry: AyanaReversibleActionJournal.Entry? = null
+        var observedTarget = original
+        var observedRestored = original
+        var undoResult = JSONObject()
+        var cleanup = false
+
+        try {
+            audioManager.setStreamVolume(
+                AudioManager.STREAM_MUSIC,
+                target,
+                0
+            )
+            Thread.sleep(90L)
+            observedTarget =
+                audioManager.getStreamVolume(
+                    AudioManager.STREAM_MUSIC
+                )
+
+            if (observedTarget != target) {
+                respondAndResume(
+                    text = "R9.9 acceptance: тестовое изменение громкости не подтвердилось.",
+                    silent = silent,
+                    success = false,
+                    technical = "r9_9_acceptance_target_not_verified"
+                )
+                return
+            }
+
+            entry =
+                recordVerifiedReversibleVolume(
+                    beforeLevel = original,
+                    afterLevel = observedTarget,
+                    deviceMin = min,
+                    deviceMax = max,
+                    source = "r9_9_device_acceptance"
+                )
+
+            if (entry == null) {
+                respondAndResume(
+                    text = "R9.9 acceptance: journal не создал verified undo record.",
+                    silent = silent,
+                    success = false,
+                    technical = "r9_9_acceptance_record_missing"
+                )
+                return
+            }
+
+            undoResult =
+                performReversibleUndo(
+                    entry = entry,
+                    trackExecutionKernel = false
+                )
+
+            observedRestored =
+                audioManager.getStreamVolume(
+                    AudioManager.STREAM_MUSIC
+                )
+
+            val contractOk =
+                try {
+                    reversibleActionJournal.selfTest()
+                } catch (_: Exception) {
+                    false
+                }
+
+            cleanup =
+                try {
+                    reversibleActionJournal.remove(entry.id)
+                } catch (_: Exception) {
+                    false
+                }
+
+            val ok =
+                contractOk &&
+                    undoResult.optBoolean("success", false) &&
+                    undoResult.optBoolean("verified", false) &&
+                    observedRestored == original &&
+                    cleanup &&
+                    reversibleActionJournal
+                        .summary(8)
+                        .optBoolean("universal_undo_claimed", true)
+                        .not()
+
+            commandHistoryStore.addEvent(
+                activeCommandHistoryId,
+                state =
+                    if (ok) {
+                        "reversible_action_journal_acceptance_verified"
+                    } else {
+                        "reversible_action_journal_acceptance_failed"
+                    },
+                message =
+                    if (ok) {
+                        "R9.9 verified undo acceptance подтверждён"
+                    } else {
+                        "R9.9 verified undo acceptance обнаружил отклонение"
+                    },
+                details =
+                    JSONObject()
+                        .put("journal_version", AyanaReversibleActionJournal.VERSION)
+                        .put("original", original)
+                        .put("target", target)
+                        .put("observed_target", observedTarget)
+                        .put("observed_restored", observedRestored)
+                        .put("undo", undoResult)
+                        .put("contract_self_test", contractOk)
+                        .put("persistent_mutation_detected", observedRestored != original)
+                        .put("test_entry_cleanup_verified", cleanup)
+                        .toString()
+                        .take(2600)
+            )
+
+            if (ok) {
+                finishLocalCommand(
+                    "R9.9 verified undo подтверждён: media volume $original → $target → $observedRestored, rollback read-back verified, persistent mutation отсутствует.",
+                    silent
+                )
+            } else {
+                respondAndResume(
+                    text = "R9.9 verified undo не прошёл acceptance: исходное состояние не было полностью подтверждено после rollback.",
+                    silent = silent,
+                    success = false,
+                    technical = "r9_9_reversible_undo_acceptance_failed"
+                )
+            }
+        } catch (error: Exception) {
+            respondAndResume(
+                text = "R9.9 verified undo acceptance завершился ошибкой: ${error.message ?: error.javaClass.simpleName}",
+                silent = silent,
+                success = false,
+                technical = "r9_9_acceptance_exception:${error.javaClass.simpleName}"
+            )
+        } finally {
+            try {
+                val current =
+                    audioManager.getStreamVolume(
+                        AudioManager.STREAM_MUSIC
+                    )
+
+                if (current != original) {
+                    audioManager.setStreamVolume(
+                        AudioManager.STREAM_MUSIC,
+                        original,
+                        0
+                    )
+                    Thread.sleep(90L)
+                }
+            } catch (_: Exception) {
+            }
+
+            val id = entry?.id
+            if (!cleanup && !id.isNullOrBlank()) {
+                cleanup =
+                    try {
+                        reversibleActionJournal.remove(id)
+                    } catch (_: Exception) {
+                        false
+                    }
+            }
+
+            if (!cleanup && !entry?.id.isNullOrBlank()) {
+                commandHistoryStore.addEvent(
+                    activeCommandHistoryId,
+                    state = "reversible_action_journal_acceptance_cleanup_warning",
+                    message = "Тестовая запись R9.9 не была удалена из журнала",
+                    details = "entry=${entry?.id}"
+                )
+            }
+        }
+    }
+
     private data class ExactMediaVolumeRequest(
         val requestedLevel: Int,
         val requestedScaleMax: Int?,
@@ -10801,6 +11773,15 @@ SystemClock.elapsedRealtime() +
             )
         }
 
+        val beforeVolume =
+            try {
+                audioManager.getStreamVolume(
+                    AudioManager.STREAM_MUSIC
+                )
+            } catch (_: Exception) {
+                -1
+            }
+
         val target =
             if (request.requestedScaleMax != null) {
                 val scale = request.requestedScaleMax
@@ -10846,6 +11827,7 @@ SystemClock.elapsedRealtime() +
                 false,
                 "Установка громкости отменена до изменения состояния устройства."
             )
+                .put("before_level", beforeVolume)
                 .put("target_level", target)
                 .put("actual_level", audioManager.getStreamVolume(AudioManager.STREAM_MUSIC))
                 .put("device_min", minVolume)
@@ -10882,8 +11864,23 @@ SystemClock.elapsedRealtime() +
                 detail = "target=$target; actual=$actual"
             )
 
+            if (
+                success &&
+                beforeVolume in minVolume..maxVolume &&
+                beforeVolume != actual
+            ) {
+                recordVerifiedReversibleVolume(
+                    beforeLevel = beforeVolume,
+                    afterLevel = actual,
+                    deviceMin = minVolume,
+                    deviceMax = maxVolume,
+                    source = "media_volume_exact_set"
+                )
+            }
+
             JSONObject()
                 .put("success", success)
+                .put("before_level", beforeVolume)
                 .put("target_level", target)
                 .put("actual_level", actual)
                 .put("device_min", minVolume)
@@ -10922,8 +11919,23 @@ SystemClock.elapsedRealtime() +
                 detail = "target=$target; actual=$actual; error=${error.javaClass.simpleName}"
             )
 
+            if (
+                actual == target &&
+                beforeVolume in minVolume..maxVolume &&
+                beforeVolume != actual
+            ) {
+                recordVerifiedReversibleVolume(
+                    beforeLevel = beforeVolume,
+                    afterLevel = actual,
+                    deviceMin = minVolume,
+                    deviceMax = maxVolume,
+                    source = "media_volume_exact_set_exception_reconciled"
+                )
+            }
+
             JSONObject()
                 .put("success", actual == target)
+                .put("before_level", beforeVolume)
                 .put("target_level", target)
                 .put("actual_level", actual)
                 .put("device_min", minVolume)
@@ -17296,6 +18308,14 @@ private fun executePreExecutionPlan(
         )
 
         if (verified) {
+            recordVerifiedReversibleVolume(
+                beforeLevel = before,
+                afterLevel = actual,
+                deviceMin = min,
+                deviceMax = max,
+                source = "media_volume_relative_change"
+            )
+
             finishLocalCommand(
                 "Громкость мультимедиа изменена: $before → $actual из $max.",
                 silent
@@ -19385,6 +20405,28 @@ append(index + 1)
                     255
                 )
 
+        val beforeMode =
+            try {
+                Settings.System.getInt(
+                    contentResolver,
+                    Settings.System.SCREEN_BRIGHTNESS_MODE,
+                    -1
+                )
+            } catch (_: Exception) {
+                -1
+            }
+
+        val beforeRaw =
+            try {
+                Settings.System.getInt(
+                    contentResolver,
+                    Settings.System.SCREEN_BRIGHTNESS,
+                    -1
+                )
+            } catch (_: Exception) {
+                -1
+            }
+
         if (
             !beginLocalVerifiedSideEffect(
                 kind = "screen_brightness_set",
@@ -19483,6 +20525,20 @@ append(index + 1)
             )
 
         if (verified) {
+            if (
+                beforeMode >= 0 &&
+                beforeRaw in 0..255 &&
+                (beforeMode != mode || beforeRaw != actual)
+            ) {
+                recordVerifiedReversibleBrightness(
+                    beforeMode = beforeMode,
+                    beforeRaw = beforeRaw,
+                    afterMode = mode,
+                    afterRaw = actual.coerceIn(0, 255),
+                    source = "screen_brightness_set"
+                )
+            }
+
             finishLocalCommand(
                 "Яркость экрана установлена на $percent%.",
                 silent
@@ -25770,6 +26826,64 @@ append(index + 1)
                     )
         )
 
+        val reversibleUndoOk =
+            try {
+                reversibleActionJournal.selfTest() &&
+                    isUndoLastReversibleActionCommand(
+                        "отмени последнее действие"
+                    ) &&
+                    !isUndoLastReversibleActionCommand(
+                        "отмени текущую задачу"
+                    ) &&
+                    isReversibleActionJournalStatusCommand(
+                        "что можно отменить"
+                    )
+            } catch (_: Exception) {
+                false
+            }
+
+        add(
+            id = "R9-FOUND-014",
+            title = "R9.9 reversible action journal / verified undo contract",
+            critical = true,
+            ok = reversibleUndoOk,
+            message =
+                if (reversibleUndoOk) {
+                    "R9.9 records only allow-listed verified technical BEFORE/AFTER state, separates undo from durable-goal cancellation and requires read-back verified rollback."
+                } else {
+                    "R9.9 reversible action journal / undo contract self-test failed."
+                },
+            evidence =
+                JSONObject()
+                    .put(
+                        "version",
+                        AyanaReversibleActionJournal.VERSION
+                    )
+                    .put(
+                        "supported_kinds",
+                        JSONArray(
+                            AyanaReversibleActionJournal.Kind.values()
+                                .map { it.wireName }
+                        )
+                    )
+                    .put(
+                        "current_state_match_required_before_undo",
+                        true
+                    )
+                    .put(
+                        "rollback_readback_verification_required",
+                        true
+                    )
+                    .put(
+                        "universal_undo_claimed",
+                        false
+                    )
+                    .put(
+                        "sensitive_content_stored",
+                        false
+                    )
+        )
+
         return tests
     }
 
@@ -31599,7 +32713,7 @@ requestMethod = "GET"
                 .put("id", "verified_result_transfer_semantics_v1")
                 .put(
                     "label",
-                    "R9.5 переносит только явно подтверждённые visible marker/title/action fields; скрытое содержимое страницы и свободная семантическая интерпретация не считаются verified result"
+                    "R9.8 generic transfer использует только provenance-bound typed verified fields/structured visible data; скрытое содержимое и свободная семантическая интерпретация не считаются verified result"
                 )
         )
 
@@ -48048,9 +49162,9 @@ state
         private const val MASTER_STATUS_MANUAL_REQUIRED =
             "MANUAL_REQUIRED"
 
-        // R9.8.1 RELEASE / FEATURE LINEAGE TRUTH.
+        // R9.9 RELEASE / FEATURE LINEAGE TRUTH.
         private const val AYANA_VOICE_SERVICE_RELEASE =
-            "v12.30.1 / R9.8.1 MASTER FULL ACCEPTANCE & DIAGNOSTIC ENGINE"
+            "v12.31.0 / R9.9 REVERSIBLE ACTION JOURNAL + VERIFIED UNDO"
 
         private const val AYANA_PERSONAL_SEARCH_ENGINE_RELEASE =
             "v1.5.1 IMAGE COVERAGE TRUTH"
@@ -48062,13 +49176,13 @@ state
             "v11.1.10 Multi-Attachment"
 
         private const val AYANA_ACCEPTED_FEATURE_CHECKPOINT =
-            "R9.8 GENERIC VERIFIED RESULT TRANSFER — DEVICE-CONFIRMED ACCEPTED"
+            "R9.8.1 MASTER FULL ACCEPTANCE & DIAGNOSTIC ENGINE — DEVICE-CONFIRMED ACCEPTED"
 
         private const val AYANA_CURRENT_FEATURE_RELEASE =
-            "R9.8.1 MASTER FULL ACCEPTANCE & DIAGNOSTIC ENGINE — PENDING DEVICE CONFIRMATION"
+            "R9.9 REVERSIBLE ACTION JOURNAL + VERIFIED UNDO — PENDING DEVICE CONFIRMATION"
 
         private const val AYANA_RELEASE_LINEAGE =
-            "Android v12.21.0 / R7.9 truth-hardening + R8.0 multi-attachment + R8.1–R8.4 accepted Personal Global Search stack + R8.5–R8.5.4 capability/evidence truth + R9.0 autonomous agent foundation + R9.0.1 history live-refresh proof fix + R9.0.2 diagnostic reconciliation/history refresh fix + R9.0.3 TTS health reconciliation + R9.1 IME perception/active telemetry truth + R9.2 autonomous recovery/long-task reconciliation + R9.2.1 adaptive hypothesis reconciliation + R9.3 app integration framework + R9.3.1 screen health reconciliation + R9.3.2 history latency recovery reconciliation + R9.3.3 informational terminal reconciliation + R9.3.4 app integration device acceptance + R9.4 multi-app task orchestration + R9.4.1 screen ownership union reconciliation + R9.5 verified result transfer between app steps + R9.5.1 partial marker provenance reconciliation + R9.5.2 bounded marker observation + R9.5.3 verified action result transfer + R9.6 verified semantic observation fallback + R9.6.1 visual fallback acceptance truth + R9.7 structured screen reading + R9.7.1 conversation routing/terminal truth + R9.7.2 structured router conversation precedence + R9.7.3 action morphology/terminal truth + R9.8 generic verified result transfer + R9.8.1 master full acceptance/diagnostic engine"
+            "Android v12.21.0 / R7.9 truth-hardening + R8.0 multi-attachment + R8.1–R8.4 accepted Personal Global Search stack + R8.5–R8.5.4 capability/evidence truth + R9.0 autonomous agent foundation + R9.0.1 history live-refresh proof fix + R9.0.2 diagnostic reconciliation/history refresh fix + R9.0.3 TTS health reconciliation + R9.1 IME perception/active telemetry truth + R9.2 autonomous recovery/long-task reconciliation + R9.2.1 adaptive hypothesis reconciliation + R9.3 app integration framework + R9.3.1 screen health reconciliation + R9.3.2 history latency recovery reconciliation + R9.3.3 informational terminal reconciliation + R9.3.4 app integration device acceptance + R9.4 multi-app task orchestration + R9.4.1 screen ownership union reconciliation + R9.5 verified result transfer between app steps + R9.5.1 partial marker provenance reconciliation + R9.5.2 bounded marker observation + R9.5.3 verified action result transfer + R9.6 verified semantic observation fallback + R9.6.1 visual fallback acceptance truth + R9.7 structured screen reading + R9.7.1 conversation routing/terminal truth + R9.7.2 structured router conversation precedence + R9.7.3 action morphology/terminal truth + R9.8 generic verified result transfer + R9.8.1 master full acceptance/diagnostic engine + R9.9 reversible action journal/verified undo"
 
         // AyanaCommandHistoryStore v2.8 keeps up to 4k chars inline and stores longer
         // results out-of-line. Self-review intentionally remains inline so copied History
