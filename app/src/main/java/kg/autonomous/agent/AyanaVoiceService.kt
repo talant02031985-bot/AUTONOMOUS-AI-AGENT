@@ -7,6 +7,7 @@ import android.app.NotificationManager
 import android.app.PendingIntent
 import android.app.Service
 import android.content.ActivityNotFoundException
+import android.content.BroadcastReceiver
 import android.content.ComponentName
 import android.content.ClipData
 import android.content.ClipboardManager
@@ -61,6 +62,16 @@ import kotlin.math.abs
 
 class AyanaVoiceService : Service() {
 
+    // AYANA v12.32.0 / R10.0 OPT-IN LOW-BATTERY CONTROLLED PROACTIVITY.
+    // Builds on DEVICE-CONFIRMED R9.9.1 verified undo.
+    // - low-battery monitoring is disabled by default and requires explicit user opt-in;
+    // - one bounded ACTION_BATTERY_CHANGED watcher may emit notification-only alerts;
+    // - no proactive device mutation, app launch, typing, settings change or external action authority;
+    // - cooldown + hourly rate-limit are enforced by persistent technical rule state;
+    // - test notification is verified and cleaned up during targeted acceptance;
+    // - broad/general controlled proactivity remains intentionally unclaimed.
+    // R9.9/R9.9.1 undo, R9.8.1 MASTER, R9.8 transfer and ORB remain unchanged.
+    //
     // AYANA v12.31.0 / R9.9 REVERSIBLE ACTION JOURNAL + VERIFIED UNDO.
     // Builds on DEVICE-CONFIRMED R9.8.1 MASTER FULL ACCEPTANCE.
     // - verified local media-volume and brightness changes write bounded BEFORE/AFTER state;
@@ -1046,6 +1057,51 @@ class AyanaVoiceService : Service() {
         AyanaControlledProactivityPolicy()
     }
 
+    // R10.0 BOUNDED CONTROLLED PROACTIVITY.
+    // This is deliberately NOT a general autonomous watcher framework. The only
+    // active rule in R10.0 is explicit opt-in low-battery notification monitoring.
+    private val batteryProactivityController by lazy {
+        AyanaBatteryProactivityController(
+            applicationContext
+        )
+    }
+
+    @Volatile
+    private var batteryProactivityReceiverRegistered =
+        false
+
+    @Volatile
+    private var lastBatteryProactivitySampleAtMs =
+        0L
+
+    @Volatile
+    private var lastBatteryProactivityPercent =
+        -1
+
+    @Volatile
+    private var lastBatteryProactivityCharging =
+        false
+
+    private val batteryProactivityReceiver =
+        object : BroadcastReceiver() {
+            override fun onReceive(
+                context: Context?,
+                intent: Intent?
+            ) {
+                if (
+                    intent?.action !=
+                    Intent.ACTION_BATTERY_CHANGED
+                ) {
+                    return
+                }
+
+                handleBatteryProactivitySample(
+                    intent = intent,
+                    source = "battery_broadcast"
+                )
+            }
+        }
+
     // R9.9 VERIFIED UNDO. Only bounded technical state for allow-listed reversible
     // actions is persisted. The journal never stores arbitrary screen/clipboard text.
     private val reversibleActionJournal by lazy {
@@ -1221,6 +1277,8 @@ class AyanaVoiceService : Service() {
         shuttingDown = false
 
         createNotificationChannel()
+        createBatteryProactivityNotificationChannel()
+        registerBatteryProactivityReceiver()
 
         promoteToForeground(
             "AYANA запускает локальное распознавание"
@@ -1517,6 +1575,19 @@ mainHandler.post {
 
                 maybeAutoResumeDurableGoal()
             }
+        }
+
+        if (
+            isRunning &&
+            !shuttingDown
+        ) {
+            currentBatteryIntent()
+                ?.let { batteryIntent ->
+                    handleBatteryProactivitySample(
+                        intent = batteryIntent,
+                        source = "service_start_or_command"
+                    )
+                }
         }
 
         return START_STICKY
@@ -3823,6 +3894,54 @@ mainHandler.post {
             )
             confirmedPreExecutionOriginal =
                 ""
+        }
+
+        // R10.0 BOUNDED CONTROLLED PROACTIVITY ROUTING.
+        // These local commands only manage an explicit notification-only battery
+        // rule or run its bounded acceptance. They do not grant mutation authority.
+        if (
+            isBatteryProactivityAcceptanceCommand(
+                originalCommand
+            )
+        ) {
+            runBatteryProactivityAcceptance(
+                silent = silent
+            )
+            return
+        }
+
+        if (
+            isBatteryProactivityEnableCommand(
+                originalCommand
+            )
+        ) {
+            runBatteryProactivityEnable(
+                command = originalCommand,
+                silent = silent
+            )
+            return
+        }
+
+        if (
+            isBatteryProactivityDisableCommand(
+                originalCommand
+            )
+        ) {
+            runBatteryProactivityDisable(
+                silent = silent
+            )
+            return
+        }
+
+        if (
+            isBatteryProactivityStatusCommand(
+                originalCommand
+            )
+        ) {
+            runBatteryProactivityStatus(
+                silent = silent
+            )
+            return
         }
 
         // R9.9 VERIFIED UNDO PRECEDENCE. Durable-goal cancel/resume phrases were
@@ -10508,6 +10627,859 @@ SystemClock.elapsedRealtime() +
         }
 
         lifecycleWorker.start()
+    }
+
+    private fun normalizeBatteryProactivityCommand(
+        value: String
+    ): String =
+        value
+            .trim()
+            .lowercase(Locale.ROOT)
+            .replace('ё', 'е')
+            .replace(Regex("\\s+"), " ")
+
+    private fun isBatteryProactivityAcceptanceCommand(
+        command: String
+    ): Boolean {
+        val normalized =
+            normalizeBatteryProactivityCommand(command)
+
+        return normalized in
+            setOf(
+                "проверь контролируемую проактивность",
+                "протестируй контролируемую проактивность",
+                "проверь контроль низкого заряда",
+                "протестируй контроль низкого заряда",
+                "проверь proactive battery monitor",
+                "протестируй proactive battery monitor"
+            )
+    }
+
+    private fun isBatteryProactivityEnableCommand(
+        command: String
+    ): Boolean {
+        val normalized =
+            normalizeBatteryProactivityCommand(command)
+
+        val enable =
+            normalized.contains("включи") ||
+                normalized.contains("включить") ||
+                normalized.contains("следи") ||
+                normalized.contains("отслеживай") ||
+                normalized.contains("предупреждай")
+
+        val battery =
+            normalized.contains("заряд") ||
+                normalized.contains("батар")
+
+        val low =
+            normalized.contains("низк") ||
+                normalized.contains("меньше") ||
+                normalized.contains("ниже") ||
+                normalized.contains("при ")
+
+        return enable && battery && low
+    }
+
+    private fun isBatteryProactivityDisableCommand(
+        command: String
+    ): Boolean {
+        val normalized =
+            normalizeBatteryProactivityCommand(command)
+
+        val disable =
+            normalized.contains("выключи") ||
+                normalized.contains("отключи") ||
+                normalized.contains("перестань") ||
+                normalized.contains("не следи")
+
+        val battery =
+            normalized.contains("заряд") ||
+                normalized.contains("батар")
+
+        return disable && battery
+    }
+
+    private fun isBatteryProactivityStatusCommand(
+        command: String
+    ): Boolean {
+        val normalized =
+            normalizeBatteryProactivityCommand(command)
+
+        return normalized in
+            setOf(
+                "покажи контроль низкого заряда",
+                "какой контроль низкого заряда",
+                "контроль низкого заряда",
+                "покажи проактивные правила",
+                "какие проактивные правила включены",
+                "покажи активные проактивные правила"
+            )
+    }
+
+    private fun extractBatteryProactivityThreshold(
+        command: String
+    ): Int? {
+        val normalized =
+            normalizeBatteryProactivityCommand(command)
+
+        val percentMatch =
+            Regex(
+                "(\\d{1,2})\\s*(?:%|процент(?:а|ов|ы)?)"
+            )
+                .find(normalized)
+                ?.groupValues
+                ?.getOrNull(1)
+                ?.toIntOrNull()
+
+        val fallback =
+            percentMatch ?:
+                Regex("\\b(\\d{1,2})\\b")
+                    .find(normalized)
+                    ?.groupValues
+                    ?.getOrNull(1)
+                    ?.toIntOrNull()
+
+        return fallback
+    }
+
+    private fun registerBatteryProactivityReceiver() {
+        if (
+            batteryProactivityReceiverRegistered ||
+            shuttingDown
+        ) {
+            return
+        }
+
+        val filter =
+            IntentFilter(
+                Intent.ACTION_BATTERY_CHANGED
+            )
+
+        batteryProactivityReceiverRegistered =
+            try {
+                if (Build.VERSION.SDK_INT >= 33) {
+                    registerReceiver(
+                        batteryProactivityReceiver,
+                        filter,
+                        Context.RECEIVER_NOT_EXPORTED
+                    )
+                } else {
+                    @Suppress("DEPRECATION")
+                    registerReceiver(
+                        batteryProactivityReceiver,
+                        filter
+                    )
+                }
+                true
+            } catch (_: Exception) {
+                false
+            }
+    }
+
+    private fun unregisterBatteryProactivityReceiver() {
+        if (!batteryProactivityReceiverRegistered) {
+            return
+        }
+
+        try {
+            unregisterReceiver(
+                batteryProactivityReceiver
+            )
+        } catch (_: Exception) {
+        } finally {
+            batteryProactivityReceiverRegistered =
+                false
+        }
+    }
+
+    private fun currentBatteryIntent():
+        Intent? =
+        try {
+            val filter =
+                IntentFilter(
+                    Intent.ACTION_BATTERY_CHANGED
+                )
+
+            if (Build.VERSION.SDK_INT >= 33) {
+                registerReceiver(
+                    null,
+                    filter,
+                    Context.RECEIVER_NOT_EXPORTED
+                )
+            } else {
+                @Suppress("DEPRECATION")
+                registerReceiver(
+                    null,
+                    filter
+                )
+            }
+        } catch (_: Exception) {
+            null
+        }
+
+    private data class BatteryProactivitySample(
+        val percent: Int,
+        val charging: Boolean
+    )
+
+    private fun parseBatteryProactivitySample(
+        intent: Intent?
+    ): BatteryProactivitySample? {
+        if (intent == null) {
+            return null
+        }
+
+        val level =
+            intent.getIntExtra(
+                BatteryManager.EXTRA_LEVEL,
+                -1
+            )
+
+        val scale =
+            intent.getIntExtra(
+                BatteryManager.EXTRA_SCALE,
+                100
+            )
+                .takeIf {
+                    it > 0
+                }
+                ?: 100
+
+        if (level < 0) {
+            return null
+        }
+
+        val percent =
+            (
+                level
+                    .toDouble()
+                    .div(scale.toDouble())
+                    .times(100.0)
+                )
+                .toInt()
+                .coerceIn(
+                    0,
+                    100
+                )
+
+        val status =
+            intent.getIntExtra(
+                BatteryManager.EXTRA_STATUS,
+                -1
+            )
+
+        val plugged =
+            intent.getIntExtra(
+                BatteryManager.EXTRA_PLUGGED,
+                0
+            )
+
+        val charging =
+            status ==
+                BatteryManager.BATTERY_STATUS_CHARGING ||
+                status ==
+                    BatteryManager.BATTERY_STATUS_FULL ||
+                plugged != 0
+
+        return BatteryProactivitySample(
+            percent = percent,
+            charging = charging
+        )
+    }
+
+    private fun handleBatteryProactivitySample(
+        intent: Intent?,
+        source: String
+    ) {
+        val sample =
+            parseBatteryProactivitySample(intent)
+                ?: return
+
+        lastBatteryProactivitySampleAtMs =
+            System.currentTimeMillis()
+
+        lastBatteryProactivityPercent =
+            sample.percent
+
+        lastBatteryProactivityCharging =
+            sample.charging
+
+        if (
+            !isRunning ||
+            shuttingDown
+        ) {
+            return
+        }
+
+        val decision =
+            try {
+                batteryProactivityController.evaluate(
+                    batteryPercent = sample.percent,
+                    charging = sample.charging
+                )
+            } catch (_: Exception) {
+                return
+            }
+
+        if (!decision.allowed) {
+            return
+        }
+
+        val posted =
+            postBatteryProactivityNotification(
+                batteryPercent = sample.percent,
+                thresholdPercent =
+                    decision.thresholdPercent,
+                notificationId =
+                    BATTERY_PROACTIVITY_NOTIFICATION_ID,
+                testMode = false
+            )
+
+        if (!posted) {
+            return
+        }
+
+        try {
+            batteryProactivityController
+                .markNotificationDelivered()
+        } catch (_: Exception) {
+        }
+
+        // Proactive activity is auditable without attaching it to an unrelated
+        // foreground command. If a command is currently active, only a compact
+        // event is appended to that command; no terminal state is modified.
+        val historyId =
+            activeCommandHistoryId
+
+        if (historyId != null) {
+            commandHistoryStore.addEvent(
+                historyId,
+                state = "controlled_proactivity_notification",
+                message = "R10.0 low-battery notification emitted",
+                details =
+                    "source=$source; battery=${sample.percent}; threshold=${decision.thresholdPercent}; mutation_authority=false"
+            )
+        }
+    }
+
+    private fun createBatteryProactivityNotificationChannel() {
+        if (Build.VERSION.SDK_INT < 26) {
+            return
+        }
+
+        val manager =
+            getSystemService(
+                NotificationManager::class.java
+            )
+
+        val existing =
+            manager.getNotificationChannel(
+                BATTERY_PROACTIVITY_CHANNEL_ID
+            )
+
+        if (existing != null) {
+            return
+        }
+
+        val channel =
+            NotificationChannel(
+                BATTERY_PROACTIVITY_CHANNEL_ID,
+                "AYANA — контроль заряда",
+                NotificationManager.IMPORTANCE_LOW
+            ).apply {
+                description =
+                    "Контролируемые уведомления AYANA о низком заряде"
+                setShowBadge(false)
+            }
+
+        manager.createNotificationChannel(
+            channel
+        )
+    }
+
+    private fun canPostBatteryProactivityNotification():
+        Boolean =
+        Build.VERSION.SDK_INT < 33 ||
+            checkSelfPermission(
+                Manifest.permission.POST_NOTIFICATIONS
+            ) ==
+            PackageManager.PERMISSION_GRANTED
+
+    private fun postBatteryProactivityNotification(
+        batteryPercent: Int,
+        thresholdPercent: Int,
+        notificationId: Int,
+        testMode: Boolean
+    ): Boolean {
+        if (!canPostBatteryProactivityNotification()) {
+            return false
+        }
+
+        createBatteryProactivityNotificationChannel()
+
+        val openIntent =
+            Intent(
+                this,
+                MainActivity::class.java
+            )
+
+        val pendingIntent =
+            PendingIntent.getActivity(
+                this,
+                notificationId,
+                openIntent,
+                PendingIntent.FLAG_UPDATE_CURRENT or
+                    PendingIntent.FLAG_IMMUTABLE
+            )
+
+        val builder =
+            if (Build.VERSION.SDK_INT >= 26) {
+                Notification.Builder(
+                    this,
+                    BATTERY_PROACTIVITY_CHANNEL_ID
+                )
+            } else {
+                @Suppress("DEPRECATION")
+                Notification.Builder(this)
+            }
+
+        val title =
+            if (testMode) {
+                "AYANA — тест проактивности"
+            } else {
+                "AYANA — низкий заряд"
+            }
+
+        val message =
+            if (testMode) {
+                "Проверка notification-only proactivity без изменения настроек устройства."
+            } else {
+                "Заряд $batteryPercent%. Порог $thresholdPercent%. Подключите зарядное устройство."
+            }
+
+        val notification =
+            builder
+                .setSmallIcon(
+                    android.R.drawable.ic_popup_reminder
+                )
+                .setContentTitle(title)
+                .setContentText(message)
+                .setAutoCancel(true)
+                .setOnlyAlertOnce(true)
+                .setCategory(
+                    Notification.CATEGORY_STATUS
+                )
+                .setContentIntent(
+                    pendingIntent
+                )
+                .build()
+
+        return try {
+            val manager =
+                getSystemService(
+                    NotificationManager::class.java
+                )
+
+            manager.notify(
+                notificationId,
+                notification
+            )
+            true
+        } catch (_: Exception) {
+            false
+        }
+    }
+
+    private fun isNotificationActive(
+        notificationId: Int
+    ): Boolean {
+        if (Build.VERSION.SDK_INT < 23) {
+            return false
+        }
+
+        return try {
+            val manager =
+                getSystemService(
+                    NotificationManager::class.java
+                )
+
+            manager.activeNotifications
+                .any {
+                    it.id == notificationId
+                }
+        } catch (_: Exception) {
+            false
+        }
+    }
+
+    private fun cancelProactivityNotification(
+        notificationId: Int
+    ) {
+        try {
+            val manager =
+                getSystemService(
+                    NotificationManager::class.java
+                )
+
+            manager.cancel(
+                notificationId
+            )
+        } catch (_: Exception) {
+        }
+    }
+
+    private fun runBatteryProactivityEnable(
+        command: String,
+        silent: Boolean
+    ) {
+        executionPhase(
+            phase = "controlled_battery_proactivity_configure",
+            executor = "battery_proactivity_controller"
+        )
+
+        val requestedThreshold =
+            extractBatteryProactivityThreshold(
+                command
+            ) ?:
+                AyanaBatteryProactivityController
+                    .DEFAULT_THRESHOLD_PERCENT
+
+        val rule =
+            try {
+                batteryProactivityController
+                    .enable(
+                        requestedThreshold
+                    )
+            } catch (_: Exception) {
+                null
+            }
+
+        if (rule == null) {
+            respondAndResume(
+                "Порог низкого заряда должен быть от ${AyanaBatteryProactivityController.MIN_THRESHOLD_PERCENT}% до ${AyanaBatteryProactivityController.MAX_THRESHOLD_PERCENT}%.",
+                silent,
+                success = false
+            )
+            return
+        }
+
+        // Evaluate the current sticky battery state immediately after explicit
+        // opt-in. The rule may only post a notification; no device mutation.
+        currentBatteryIntent()
+            ?.let { intent ->
+                handleBatteryProactivitySample(
+                    intent = intent,
+                    source = "user_enable_immediate_sample"
+                )
+            }
+
+        commandHistoryStore.addEvent(
+            activeCommandHistoryId,
+            state = "controlled_proactivity_rule_enabled",
+            message = "R10.0 low-battery rule enabled",
+            details =
+                "threshold=${rule.thresholdPercent}; cooldown_ms=${rule.cooldownMs}; max_notifications_per_hour=${rule.maxNotificationsPerHour}; mutation_authority=false"
+        )
+
+        finishLocalCommand(
+            "Контроль низкого заряда включён: AYANA предупредит уведомлением при ${rule.thresholdPercent}% или ниже. Изменять настройки или запускать действия самостоятельно этот контроль не может.",
+            silent
+        )
+    }
+
+    private fun runBatteryProactivityDisable(
+        silent: Boolean
+    ) {
+        executionPhase(
+            phase = "controlled_battery_proactivity_configure",
+            executor = "battery_proactivity_controller"
+        )
+
+        val rule =
+            try {
+                batteryProactivityController
+                    .disable()
+            } catch (_: Exception) {
+                null
+            }
+
+        if (rule == null) {
+            respondAndResume(
+                "Не удалось сохранить состояние контроля низкого заряда.",
+                silent,
+                success = false
+            )
+            return
+        }
+
+        cancelProactivityNotification(
+            BATTERY_PROACTIVITY_NOTIFICATION_ID
+        )
+
+        commandHistoryStore.addEvent(
+            activeCommandHistoryId,
+            state = "controlled_proactivity_rule_disabled",
+            message = "R10.0 low-battery rule disabled",
+            details = "mutation_authority=false"
+        )
+
+        finishLocalCommand(
+            "Контроль низкого заряда выключен.",
+            silent
+        )
+    }
+
+    private fun runBatteryProactivityStatus(
+        silent: Boolean
+    ) {
+        executionPhase(
+            phase = "controlled_battery_proactivity_status",
+            executor = "battery_proactivity_controller"
+        )
+
+        val rule =
+            try {
+                batteryProactivityController
+                    .currentRule()
+            } catch (_: Exception) {
+                null
+            }
+
+        if (rule == null) {
+            respondAndResume(
+                "Не удалось прочитать правило контроля низкого заряда.",
+                silent,
+                success = false
+            )
+            return
+        }
+
+        val sampleText =
+            if (
+                lastBatteryProactivityPercent >= 0 &&
+                lastBatteryProactivitySampleAtMs > 0L
+            ) {
+                " Последний battery sample: ${lastBatteryProactivityPercent}%, charging=$lastBatteryProactivityCharging."
+            } else {
+                ""
+            }
+
+        finishLocalCommand(
+            if (rule.enabled) {
+                "Контроль низкого заряда включён: порог ${rule.thresholdPercent}%, cooldown ${rule.cooldownMs / 60_000L} мин, максимум ${rule.maxNotificationsPerHour} уведомление в час.$sampleText"
+            } else {
+                "Контроль низкого заряда выключен.$sampleText"
+            },
+            silent
+        )
+    }
+
+    private fun runBatteryProactivityAcceptance(
+        silent: Boolean
+    ) {
+        executionPhase(
+            phase = "controlled_battery_proactivity_acceptance",
+            executor = "battery_proactivity_controller"
+        )
+
+        val ruleBefore =
+            try {
+                batteryProactivityController
+                    .currentRule()
+            } catch (_: Exception) {
+                null
+            }
+
+        val controllerSelfTest =
+            try {
+                batteryProactivityController
+                    .selfTest()
+            } catch (_: Exception) {
+                false
+            }
+
+        val foundationPolicySelfTest =
+            try {
+                controlledProactivityPolicy
+                    .selfTest()
+            } catch (_: Exception) {
+                false
+            }
+
+        val liveSample =
+            parseBatteryProactivitySample(
+                currentBatteryIntent()
+            )
+
+        val notificationPermission =
+            canPostBatteryProactivityNotification()
+
+        var notificationPosted =
+            false
+
+        var notificationVerified =
+            false
+
+        var notificationCleanupVerified =
+            false
+
+        try {
+            cancelProactivityNotification(
+                BATTERY_PROACTIVITY_TEST_NOTIFICATION_ID
+            )
+
+            notificationPosted =
+                postBatteryProactivityNotification(
+                    batteryPercent =
+                        liveSample?.percent ?: 0,
+                    thresholdPercent =
+                        AyanaBatteryProactivityController
+                            .DEFAULT_THRESHOLD_PERCENT,
+                    notificationId =
+                        BATTERY_PROACTIVITY_TEST_NOTIFICATION_ID,
+                    testMode = true
+                )
+
+            if (notificationPosted) {
+                SystemClock.sleep(120L)
+                notificationVerified =
+                    isNotificationActive(
+                        BATTERY_PROACTIVITY_TEST_NOTIFICATION_ID
+                    )
+            }
+        } finally {
+            cancelProactivityNotification(
+                BATTERY_PROACTIVITY_TEST_NOTIFICATION_ID
+            )
+            SystemClock.sleep(120L)
+            notificationCleanupVerified =
+                !isNotificationActive(
+                    BATTERY_PROACTIVITY_TEST_NOTIFICATION_ID
+                )
+        }
+
+        val ruleAfter =
+            try {
+                batteryProactivityController
+                    .currentRule()
+            } catch (_: Exception) {
+                null
+            }
+
+        val ruleUnchanged =
+            ruleBefore != null &&
+                ruleAfter != null &&
+                ruleBefore == ruleAfter
+
+        val liveReceiverObserved =
+            batteryProactivityReceiverRegistered &&
+                (
+                    lastBatteryProactivitySampleAtMs > 0L ||
+                        liveSample != null
+                    )
+
+        val ok =
+            controllerSelfTest &&
+                foundationPolicySelfTest &&
+                notificationPermission &&
+                notificationPosted &&
+                notificationVerified &&
+                notificationCleanupVerified &&
+                ruleUnchanged &&
+                liveReceiverObserved
+
+        val evidence =
+            JSONObject()
+                .put(
+                    "controller_version",
+                    AyanaBatteryProactivityController.VERSION
+                )
+                .put(
+                    "controller_self_test",
+                    controllerSelfTest
+                )
+                .put(
+                    "foundation_policy_self_test",
+                    foundationPolicySelfTest
+                )
+                .put(
+                    "receiver_registered",
+                    batteryProactivityReceiverRegistered
+                )
+                .put(
+                    "live_battery_sample_available",
+                    liveSample != null
+                )
+                .put(
+                    "live_battery_percent",
+                    liveSample?.percent ?: -1
+                )
+                .put(
+                    "live_battery_charging",
+                    liveSample?.charging ?: false
+                )
+                .put(
+                    "notification_permission",
+                    notificationPermission
+                )
+                .put(
+                    "test_notification_posted",
+                    notificationPosted
+                )
+                .put(
+                    "test_notification_verified",
+                    notificationVerified
+                )
+                .put(
+                    "test_notification_cleanup_verified",
+                    notificationCleanupVerified
+                )
+                .put(
+                    "persistent_rule_mutation",
+                    !ruleUnchanged
+                )
+                .put(
+                    "device_mutation_authority",
+                    false
+                )
+                .put(
+                    "broad_proactivity_claimed",
+                    false
+                )
+
+        commandHistoryStore.addEvent(
+            activeCommandHistoryId,
+            state =
+                if (ok) {
+                    "controlled_battery_proactivity_acceptance_verified"
+                } else {
+                    "controlled_battery_proactivity_acceptance_failed"
+                },
+            message =
+                if (ok) {
+                    "R10.0 opt-in low-battery controlled proactivity подтверждена"
+                } else {
+                    "R10.0 controlled proactivity acceptance обнаружил отклонение"
+                },
+            details =
+                evidence
+                    .toString()
+                    .take(2200)
+        )
+
+        if (ok) {
+            finishLocalCommand(
+                "R10.0 контролируемая проактивность подтверждена: opt-in battery watcher активен, test notification verified/cleaned, mutation authority отсутствует.",
+                silent
+            )
+        } else {
+            respondAndResume(
+                "R10.0 контролируемая проактивность не прошла acceptance. Проверь technical evidence в истории команды.",
+                silent,
+                success = false
+            )
+        }
     }
 
     private fun normalizeReversibleUndoCommand(
@@ -27188,6 +28160,62 @@ append(index + 1)
                     )
         )
 
+        val boundedBatteryProactivityOk =
+            try {
+                batteryProactivityController.selfTest() &&
+                    controlledProactivityPolicy.selfTest() &&
+                    isBatteryProactivityAcceptanceCommand(
+                        "проверь контролируемую проактивность"
+                    ) &&
+                    isBatteryProactivityEnableCommand(
+                        "включи контроль низкого заряда 20 процентов"
+                    ) &&
+                    isBatteryProactivityDisableCommand(
+                        "выключи контроль низкого заряда"
+                    )
+            } catch (_: Exception) {
+                false
+            }
+
+        add(
+            id = "R10-FOUND-015",
+            title = "R10.0 bounded opt-in low-battery proactivity contract",
+            critical = true,
+            ok = boundedBatteryProactivityOk,
+            message =
+                if (boundedBatteryProactivityOk) {
+                    "R10.0 low-battery proactivity is explicit opt-in, notification-only, cooldown/rate-limited and carries no device-mutation authority."
+                } else {
+                    "R10.0 bounded battery proactivity contract self-test failed."
+                },
+            evidence =
+                JSONObject()
+                    .put(
+                        "controller_version",
+                        AyanaBatteryProactivityController.VERSION
+                    )
+                    .put(
+                        "explicit_opt_in_required",
+                        true
+                    )
+                    .put(
+                        "default_enabled",
+                        false
+                    )
+                    .put(
+                        "notification_only",
+                        true
+                    )
+                    .put(
+                        "device_mutation_authority",
+                        false
+                    )
+                    .put(
+                        "broad_proactivity_claimed",
+                        false
+                    )
+        )
+
         return tests
     }
 
@@ -32967,7 +33995,7 @@ requestMethod = "GET"
                 "external_mail_calendar_files" to "нет авторизованных внешних mail/calendar/files account executors; R9.3 local app integration не заменяет account API",
                 "video_audio_analysis" to "аудиодорожка видео не анализируется",
                 "offline_llm" to "полноценный offline LLM отсутствует",
-                "controlled_proactivity" to "R9.2 recovery-event permission/evidence/cooldown policy готова, но широкие proactive watchers/actions по умолчанию не включены"
+                "controlled_proactivity" to "R10.0 добавляет только explicit opt-in low-battery notification watcher; широкая/general proactivity и silent device mutations по-прежнему не реализованы"
             )
 
         labels.forEach { (id, label) ->
@@ -49398,6 +50426,7 @@ state
         listenMode =
             ListenMode.BUSY
 
+        unregisterBatteryProactivityReceiver()
         stopCancelListenerWatchdog()
         backgroundImageIndexer.stop()
         stopSherpaListening()
@@ -49466,9 +50495,9 @@ state
         private const val MASTER_STATUS_MANUAL_REQUIRED =
             "MANUAL_REQUIRED"
 
-        // R9.9.1 RELEASE / FEATURE LINEAGE TRUTH.
+        // R10.0 RELEASE / FEATURE LINEAGE TRUTH.
         private const val AYANA_VOICE_SERVICE_RELEASE =
-            "v12.31.1 / R9.9.1 BRIGHTNESS VERIFIED UNDO DEVICE ACCEPTANCE"
+            "v12.32.0 / R10.0 OPT-IN LOW-BATTERY CONTROLLED PROACTIVITY"
 
         private const val AYANA_PERSONAL_SEARCH_ENGINE_RELEASE =
             "v1.5.1 IMAGE COVERAGE TRUTH"
@@ -49480,13 +50509,13 @@ state
             "v11.1.10 Multi-Attachment"
 
         private const val AYANA_ACCEPTED_FEATURE_CHECKPOINT =
-            "R9.9 REVERSIBLE ACTION JOURNAL + VERIFIED UNDO — DEVICE-CONFIRMED ACCEPTED"
+            "R9.9.1 BRIGHTNESS VERIFIED UNDO DEVICE ACCEPTANCE — DEVICE-CONFIRMED ACCEPTED"
 
         private const val AYANA_CURRENT_FEATURE_RELEASE =
-            "R9.9.1 BRIGHTNESS VERIFIED UNDO DEVICE ACCEPTANCE — PENDING DEVICE CONFIRMATION"
+            "R10.0 OPT-IN LOW-BATTERY CONTROLLED PROACTIVITY — PENDING DEVICE CONFIRMATION"
 
         private const val AYANA_RELEASE_LINEAGE =
-            "Android v12.21.0 / R7.9 truth-hardening + R8.0 multi-attachment + R8.1–R8.4 accepted Personal Global Search stack + R8.5–R8.5.4 capability/evidence truth + R9.0 autonomous agent foundation + R9.0.1 history live-refresh proof fix + R9.0.2 diagnostic reconciliation/history refresh fix + R9.0.3 TTS health reconciliation + R9.1 IME perception/active telemetry truth + R9.2 autonomous recovery/long-task reconciliation + R9.2.1 adaptive hypothesis reconciliation + R9.3 app integration framework + R9.3.1 screen health reconciliation + R9.3.2 history latency recovery reconciliation + R9.3.3 informational terminal reconciliation + R9.3.4 app integration device acceptance + R9.4 multi-app task orchestration + R9.4.1 screen ownership union reconciliation + R9.5 verified result transfer between app steps + R9.5.1 partial marker provenance reconciliation + R9.5.2 bounded marker observation + R9.5.3 verified action result transfer + R9.6 verified semantic observation fallback + R9.6.1 visual fallback acceptance truth + R9.7 structured screen reading + R9.7.1 conversation routing/terminal truth + R9.7.2 structured router conversation precedence + R9.7.3 action morphology/terminal truth + R9.8 generic verified result transfer + R9.8.1 master full acceptance/diagnostic engine + R9.9 reversible action journal/verified undo + R9.9.1 brightness verified undo device acceptance"
+            "Android v12.21.0 / R7.9 truth-hardening + R8.0 multi-attachment + R8.1–R8.4 accepted Personal Global Search stack + R8.5–R8.5.4 capability/evidence truth + R9.0 autonomous agent foundation + R9.0.1 history live-refresh proof fix + R9.0.2 diagnostic reconciliation/history refresh fix + R9.0.3 TTS health reconciliation + R9.1 IME perception/active telemetry truth + R9.2 autonomous recovery/long-task reconciliation + R9.2.1 adaptive hypothesis reconciliation + R9.3 app integration framework + R9.3.1 screen health reconciliation + R9.3.2 history latency recovery reconciliation + R9.3.3 informational terminal reconciliation + R9.3.4 app integration device acceptance + R9.4 multi-app task orchestration + R9.4.1 screen ownership union reconciliation + R9.5 verified result transfer between app steps + R9.5.1 partial marker provenance reconciliation + R9.5.2 bounded marker observation + R9.5.3 verified action result transfer + R9.6 verified semantic observation fallback + R9.6.1 visual fallback acceptance truth + R9.7 structured screen reading + R9.7.1 conversation routing/terminal truth + R9.7.2 structured router conversation precedence + R9.7.3 action morphology/terminal truth + R9.8 generic verified result transfer + R9.8.1 master full acceptance/diagnostic engine + R9.9 reversible action journal/verified undo + R9.9.1 brightness verified undo device acceptance + R10.0 opt-in low-battery controlled proactivity"
 
         // AyanaCommandHistoryStore v2.8 keeps up to 4k chars inline and stores longer
         // results out-of-line. Self-review intentionally remains inline so copied History
@@ -49529,6 +50558,15 @@ state
 
         private const val RESULT_TRANSFER_OBSERVATION_POLL_MS =
             180L
+
+        private const val BATTERY_PROACTIVITY_CHANNEL_ID =
+            "ayana_battery_proactivity"
+
+        private const val BATTERY_PROACTIVITY_NOTIFICATION_ID =
+            91301
+
+        private const val BATTERY_PROACTIVITY_TEST_NOTIFICATION_ID =
+            91302
 
         const val ACTION_START =
             "kg.autonomous.agent.action.START_AYANA"
