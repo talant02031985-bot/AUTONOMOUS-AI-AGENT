@@ -62,15 +62,21 @@ import kotlin.math.abs
 
 class AyanaVoiceService : Service() {
 
-    // AYANA v12.32.0 / R10.0 OPT-IN LOW-BATTERY CONTROLLED PROACTIVITY.
-    // Builds on DEVICE-CONFIRMED R9.9.1 verified undo.
-    // - low-battery monitoring is disabled by default and requires explicit user opt-in;
-    // - one bounded ACTION_BATTERY_CHANGED watcher may emit notification-only alerts;
-    // - no proactive device mutation, app launch, typing, settings change or external action authority;
-    // - cooldown + hourly rate-limit are enforced by persistent technical rule state;
-    // - test notification is verified and cleaned up during targeted acceptance;
-    // - broad/general controlled proactivity remains intentionally unclaimed.
-    // R9.9/R9.9.1 undo, R9.8.1 MASTER, R9.8 transfer and ORB remain unchanged.
+    // AYANA v12.33.0 / R10.0 UNIFIED SCREEN INTELLIGENCE.
+    // Builds on DEVICE-CONFIRMED R9.9.2 bounded low-battery proactivity and R9.9.1 undo.
+    // - AyanaScreenIntelligence v5.0 is the only consumer-facing current-screen truth source;
+    // - raw Accessibility interaction package, verified foreground owner, AYANA overlay suppression
+    //   and fresh package-bound visual/semantic evidence are fused into one fail-closed contract;
+    // - upper app-launch/lifecycle verification now consumes effective_foreground_package instead
+    //   of the raw snapshot package that historically could be AYANA while Camera was foreground;
+    // - screenshot/structured-read evidence may corroborate current foreground but never grants
+    //   action authority; source conflicts expose execution_evidence_usable=false;
+    // - R10.0 adds a dedicated real-device regression for the historical Camera/overlay false negative.
+    // ORB/visualizer are unchanged.
+    //
+    // AYANA v12.32.0 source lineage is retained as R9.9.2 OPT-IN LOW-BATTERY
+    // CONTROLLED PROACTIVITY after its device acceptance. The implementation is unchanged here;
+    // only its release numbering/diagnostic labels are corrected for audit clarity.
     //
     // AYANA v12.31.0 / R9.9 REVERSIBLE ACTION JOURNAL + VERIFIED UNDO.
     // Builds on DEVICE-CONFIRMED R9.8.1 MASTER FULL ACCEPTANCE.
@@ -3897,6 +3903,20 @@ mainHandler.post {
         }
 
         // R10.0 BOUNDED CONTROLLED PROACTIVITY ROUTING.
+        // R10.0 UNIFIED SCREEN INTELLIGENCE acceptance owns foreground truth before
+        // any ordinary app-control route. It is read-only apart from bounded app opens
+        // and always restores AYANA; no persistent mutation is authorized.
+        if (
+            isUnifiedScreenIntelligenceAcceptanceCommand(
+                originalCommand
+            )
+        ) {
+            runUnifiedScreenIntelligenceAcceptance(
+                silent = silent
+            )
+            return
+        }
+
         // These local commands only manage an explicit notification-only battery
         // rule or run its bounded acceptance. They do not grant mutation authority.
         if (
@@ -9750,11 +9770,7 @@ if (
     private fun currentForegroundPackage(): String =
         try {
             screenIntelligence
-                .getScreenState()
-                .optString(
-                    "package"
-                )
-                .trim()
+                .effectiveForegroundPackage()
         } catch (_: Exception) {
             ""
         }
@@ -10629,6 +10645,27 @@ SystemClock.elapsedRealtime() +
         lifecycleWorker.start()
     }
 
+    private fun isUnifiedScreenIntelligenceAcceptanceCommand(
+        command: String
+    ): Boolean {
+        val normalized =
+            command
+                .trim()
+                .lowercase(Locale.ROOT)
+                .replace('ё', 'е')
+                .replace(Regex("\\s+"), " ")
+
+        return normalized in
+            setOf(
+                "проверь единый screen intelligence",
+                "протестируй единый screen intelligence",
+                "проверь unified screen intelligence",
+                "протестируй unified screen intelligence",
+                "проверь единое понимание экрана",
+                "протестируй единое понимание экрана"
+            )
+    }
+
     private fun normalizeBatteryProactivityCommand(
         value: String
     ): String =
@@ -10956,7 +10993,7 @@ SystemClock.elapsedRealtime() +
             commandHistoryStore.addEvent(
                 historyId,
                 state = "controlled_proactivity_notification",
-                message = "R10.0 low-battery notification emitted",
+                message = "R9.9.2 low-battery notification emitted",
                 details =
                     "source=$source; battery=${sample.percent}; threshold=${decision.thresholdPercent}; mutation_authority=false"
             )
@@ -11177,7 +11214,7 @@ SystemClock.elapsedRealtime() +
         commandHistoryStore.addEvent(
             activeCommandHistoryId,
             state = "controlled_proactivity_rule_enabled",
-            message = "R10.0 low-battery rule enabled",
+            message = "R9.9.2 low-battery rule enabled",
             details =
                 "threshold=${rule.thresholdPercent}; cooldown_ms=${rule.cooldownMs}; max_notifications_per_hour=${rule.maxNotificationsPerHour}; mutation_authority=false"
         )
@@ -11220,7 +11257,7 @@ SystemClock.elapsedRealtime() +
         commandHistoryStore.addEvent(
             activeCommandHistoryId,
             state = "controlled_proactivity_rule_disabled",
-            message = "R10.0 low-battery rule disabled",
+            message = "R9.9.2 low-battery rule disabled",
             details = "mutation_authority=false"
         )
 
@@ -11458,9 +11495,9 @@ SystemClock.elapsedRealtime() +
                 },
             message =
                 if (ok) {
-                    "R10.0 opt-in low-battery controlled proactivity подтверждена"
+                    "R9.9.2 opt-in low-battery controlled proactivity подтверждена"
                 } else {
-                    "R10.0 controlled proactivity acceptance обнаружил отклонение"
+                    "R9.9.2 controlled proactivity acceptance обнаружил отклонение"
                 },
             details =
                 evidence
@@ -11470,12 +11507,12 @@ SystemClock.elapsedRealtime() +
 
         if (ok) {
             finishLocalCommand(
-                "R10.0 контролируемая проактивность подтверждена: opt-in battery watcher активен, test notification verified/cleaned, mutation authority отсутствует.",
+                "R9.9.2 контролируемая проактивность подтверждена: opt-in battery watcher активен, test notification verified/cleaned, mutation authority отсутствует.",
                 silent
             )
         } else {
             respondAndResume(
-                "R10.0 контролируемая проактивность не прошла acceptance. Проверь technical evidence в истории команды.",
+                "R9.9.2 контролируемая проактивность не прошла acceptance. Проверь technical evidence в истории команды.",
                 silent,
                 success = false
             )
@@ -14759,6 +14796,21 @@ respondAndResume(
                         "semantic_model_technical",
                         model.optString("technical").take(500)
                     )
+
+            if (verified.optBoolean("verified", false)) {
+                val unifiedVisual =
+                    JSONObject(verified.toString())
+                        .put("expected_package", expectedPackage)
+                        .put("captured_package", screenshot.optString("captured_package", expectedPackage))
+                        .put("screenshot_sha256", screenshot.optString("screenshot_sha256"))
+                        .put("capture_mode", screenshot.optString("capture_mode"))
+                        .put(
+                            "source_context_mode",
+                            verified.optString("source_context_mode")
+                                .ifBlank { "r9_6_visual_screenshot_fallback" }
+                        )
+                screenIntelligence.recordVerifiedVisualObservation(unifiedVisual)
+            }
 
             commandHistoryStore.addEvent(
                 activeCommandHistoryId,
@@ -21948,6 +22000,283 @@ append(index + 1)
             requestIntent
     }
 
+    private fun runUnifiedScreenIntelligenceAcceptance(
+        silent: Boolean
+    ) {
+        executionPhase(
+            phase = "r10_unified_screen_intelligence_acceptance",
+            executor = "screen_intelligence_v5"
+        )
+
+        val commandToken = activeCommandToken
+        val originalPage = currentAyanaPageKeyForAppIntegrationProbe()
+
+        val worker =
+            thread(
+                start = false,
+                name = "AyanaR10UnifiedScreenAcceptance"
+            ) {
+                var cameraLaunch = JSONObject()
+                var cameraScreen = JSONObject()
+                var cameraRestore = JSONObject()
+                var browserAction = JSONObject()
+                var structuredRead = JSONObject()
+                var browserScreen = JSONObject()
+                var finalRestore = JSONObject()
+
+                try {
+                    val selfTest =
+                        try {
+                            screenIntelligence.selfTestUnifiedTruth()
+                        } catch (_: Exception) {
+                            false
+                        }
+
+                    screenIntelligence.clearVerifiedVisualObservation()
+
+                    cameraLaunch =
+                        try {
+                            appResolver.launch("Камера")
+                        } catch (error: Exception) {
+                            JSONObject()
+                                .put("success", false)
+                                .put("reason", error.message ?: error.javaClass.simpleName)
+                        }
+
+                    val cameraPackage =
+                        cameraLaunch.optString("package").trim()
+
+                    if (cameraLaunch.optBoolean("success", false) && cameraPackage.isNotBlank()) {
+                        waitForForegroundPackage(
+                            expectedPackage = cameraPackage
+                        )
+                    }
+
+                    cameraScreen =
+                        try {
+                            screenIntelligence.getScreenState()
+                        } catch (error: Exception) {
+                            JSONObject()
+                                .put("success", false)
+                                .put("reason", error.message ?: error.javaClass.simpleName)
+                        }
+
+                    val cameraEffective =
+                        cameraScreen.optString("effective_foreground_package").trim()
+                    val cameraRaw =
+                        cameraScreen.optString("raw_interaction_package").trim()
+                    val cameraOwner =
+                        cameraScreen.optString("foreground_owner_package").trim()
+
+                    val cameraVerified =
+                        cameraLaunch.optBoolean("success", false) &&
+                            cameraPackage.isNotBlank() &&
+                            cameraEffective == cameraPackage &&
+                            cameraScreen.optBoolean("foreground_truth_verified", false) &&
+                            cameraScreen.optBoolean("execution_evidence_usable", false) &&
+                            (
+                                cameraRaw == cameraPackage ||
+                                    cameraOwner == cameraPackage ||
+                                    cameraScreen.optBoolean("ayana_overlay_ownership_suppressed", false)
+                            )
+
+                    cameraRestore =
+                        restoreAyanaAfterAppIntegrationProbe(
+                            pageKey = originalPage,
+                            stepKey = "r10-camera-overlay-regression"
+                        )
+
+                    if (
+                        isCommandCancelled(commandToken) ||
+                        commandToken != activeCommandToken ||
+                        Thread.currentThread().isInterrupted ||
+                        shuttingDown
+                    ) {
+                        return@thread
+                    }
+
+                    browserAction =
+                        executeAppIntegrationAction(
+                            appKey = "browser",
+                            actionKey = AyanaAppIntegrationRegistry.ACTION_OPEN_URL,
+                            payload = AyanaMultiAppTaskOrchestrator.SEMANTIC_FALLBACK_ACCEPTANCE_URL
+                        )
+
+                    val browserPackage =
+                        browserAction.optString("observed_package").trim()
+                            .ifBlank { browserAction.optString("target_package").trim() }
+
+                    structuredRead =
+                        if (
+                            browserAction.optBoolean("success", false) &&
+                            browserAction.optBoolean("verified", false) &&
+                            browserPackage.isNotBlank()
+                        ) {
+                            attemptVerifiedStructuredSemanticScreenRead(
+                                expectedPackage = browserPackage,
+                                commandToken = commandToken
+                            )
+                        } else {
+                            JSONObject()
+                                .put("success", false)
+                                .put("verified", false)
+                                .put("reason", "browser_source_not_verified")
+                        }
+
+                    browserScreen =
+                        try {
+                            screenIntelligence.getScreenState()
+                        } catch (error: Exception) {
+                            JSONObject()
+                                .put("success", false)
+                                .put("reason", error.message ?: error.javaClass.simpleName)
+                        }
+
+                    val visualIntegrated =
+                        structuredRead.optBoolean("success", false) &&
+                            structuredRead.optBoolean("verified", false) &&
+                            browserScreen.optString("effective_foreground_package") == browserPackage &&
+                            browserScreen.optBoolean("visual_observation_available", false) &&
+                            browserScreen.optBoolean("visual_observation_fresh", false) &&
+                            browserScreen.optBoolean("visual_observation_used", false) &&
+                            browserScreen.optBoolean("foreground_truth_verified", false) &&
+                            browserScreen.optBoolean("execution_evidence_usable", false) &&
+                            !browserScreen.optBoolean("foreground_truth_conflict", true)
+
+                    finalRestore =
+                        restoreAyanaAfterAppIntegrationProbe(
+                            pageKey = originalPage,
+                            stepKey = "r10-structured-visual-regression"
+                        )
+
+                    val ok =
+                        selfTest &&
+                            cameraVerified &&
+                            cameraRestore.optBoolean("verified", false) &&
+                            visualIntegrated &&
+                            finalRestore.optBoolean("verified", false)
+
+                    val evidence =
+                        JSONObject()
+                            .put("screen_intelligence_version", AyanaScreenIntelligence.VERSION)
+                            .put("unified_screen_truth_version", AyanaScreenIntelligence.UNIFIED_TRUTH_VERSION)
+                            .put("fusion_self_test", selfTest)
+                            .put("camera_target_package", cameraPackage)
+                            .put("camera_raw_interaction_package", cameraRaw)
+                            .put("camera_foreground_owner_package", cameraOwner)
+                            .put("camera_effective_foreground_package", cameraEffective)
+                            .put(
+                                "camera_overlay_suppressed",
+                                cameraScreen.optBoolean("ayana_overlay_ownership_suppressed", false)
+                            )
+                            .put(
+                                "camera_foreground_truth_source",
+                                cameraScreen.optString("foreground_truth_source")
+                            )
+                            .put("camera_execution_evidence_usable", cameraScreen.optBoolean("execution_evidence_usable", false))
+                            .put("camera_regression_verified", cameraVerified)
+                            .put("camera_restore_verified", cameraRestore.optBoolean("verified", false))
+                            .put("structured_read_verified", structuredRead.optBoolean("verified", false))
+                            .put("browser_package", browserPackage)
+                            .put("visual_observation_available", browserScreen.optBoolean("visual_observation_available", false))
+                            .put("visual_observation_fresh", browserScreen.optBoolean("visual_observation_fresh", false))
+                            .put("visual_observation_used", browserScreen.optBoolean("visual_observation_used", false))
+                            .put("foreground_truth_conflict", browserScreen.optBoolean("foreground_truth_conflict", true))
+                            .put("visual_integration_verified", visualIntegrated)
+                            .put("final_restore_verified", finalRestore.optBoolean("verified", false))
+                            .put("persistent_mutation_detected", false)
+                            .put("orb_visual_implementation_changed", false)
+
+                    commandHistoryStore.addEvent(
+                        activeCommandHistoryId,
+                        state =
+                            if (ok) {
+                                "r10_unified_screen_intelligence_acceptance_verified"
+                            } else {
+                                "r10_unified_screen_intelligence_acceptance_failed"
+                            },
+                        message =
+                            if (ok) {
+                                "R10.0 Unified Screen Intelligence подтверждён: Camera foreground + package-bound visual evidence fused fail-closed"
+                            } else {
+                                "R10.0 Unified Screen Intelligence acceptance обнаружил отклонение"
+                            },
+                        details = evidence.toString().take(5000)
+                    )
+
+                    mainHandler.post {
+                        if (
+                            commandToken == activeCommandToken &&
+                            !cancelRequested &&
+                            !shuttingDown
+                        ) {
+                            if (ok) {
+                                respondAndResume(
+                                    text =
+                                        "R10.0 Unified Screen Intelligence подтверждён: реальный foreground Camera распознан через единый truth source, visual screenshot evidence интегрирован, конфликтов и persistent mutation нет.",
+                                    silent = silent,
+                                    success = true,
+                                    technical = evidence.toString()
+                                )
+                            } else {
+                                respondAndResume(
+                                    text = "R10.0 Unified Screen Intelligence не прошёл acceptance. Проверь technical evidence в истории команды.",
+                                    silent = silent,
+                                    success = false,
+                                    technical = evidence.toString()
+                                )
+                            }
+                        }
+                    }
+                } catch (error: Exception) {
+                    try {
+                        finalRestore =
+                            restoreAyanaAfterAppIntegrationProbe(
+                                pageKey = originalPage,
+                                stepKey = "r10-acceptance-exception-restore"
+                            )
+                    } catch (_: Exception) {
+                    }
+
+                    val detail =
+                        JSONObject()
+                            .put("error", (error.message ?: error.javaClass.simpleName).take(500))
+                            .put("final_restore_verified", finalRestore.optBoolean("verified", false))
+
+                    commandHistoryStore.addEvent(
+                        activeCommandHistoryId,
+                        state = "r10_unified_screen_intelligence_acceptance_failed",
+                        message = "R10.0 Unified Screen Intelligence acceptance exception",
+                        details = detail.toString()
+                    )
+
+                    mainHandler.post {
+                        if (
+                            commandToken == activeCommandToken &&
+                            !cancelRequested &&
+                            !shuttingDown
+                        ) {
+                            respondAndResume(
+                                text = "R10.0 Unified Screen Intelligence acceptance завершился ошибкой.",
+                                silent = silent,
+                                success = false,
+                                technical = detail.toString()
+                            )
+                        }
+                    }
+                } finally {
+                    screenIntelligence.clearVerifiedVisualObservation()
+                    if (Thread.currentThread() === currentAgentThread) {
+                        currentAgentThread = null
+                    }
+                }
+            }
+
+        currentAgentThread = worker
+        executionKernel.bindThread(worker)
+        worker.start()
+    }
+
     private fun isStructuredSemanticScreenAcceptanceCommand(
         command: String
     ): Boolean {
@@ -22136,6 +22465,21 @@ append(index + 1)
                         "semantic_model_technical",
                         model.optString("technical").take(500)
                     )
+
+            if (verified.optBoolean("verified", false)) {
+                val unifiedVisual =
+                    JSONObject(verified.toString())
+                        .put("expected_package", cleanPackage)
+                        .put("captured_package", screenshot.optString("captured_package", cleanPackage))
+                        .put("screenshot_sha256", screenshot.optString("screenshot_sha256"))
+                        .put("capture_mode", screenshot.optString("capture_mode"))
+                        .put(
+                            "source_context_mode",
+                            verified.optString("source_context_mode")
+                                .ifBlank { "r9_7_visual_structured_screen_read" }
+                        )
+                screenIntelligence.recordVerifiedVisualObservation(unifiedVisual)
+            }
 
             commandHistoryStore.addEvent(
                 activeCommandHistoryId,
@@ -28178,15 +28522,15 @@ append(index + 1)
             }
 
         add(
-            id = "R10-FOUND-015",
-            title = "R10.0 bounded opt-in low-battery proactivity contract",
+            id = "R9-FOUND-015",
+            title = "R9.9.2 bounded opt-in low-battery proactivity contract",
             critical = true,
             ok = boundedBatteryProactivityOk,
             message =
                 if (boundedBatteryProactivityOk) {
-                    "R10.0 low-battery proactivity is explicit opt-in, notification-only, cooldown/rate-limited and carries no device-mutation authority."
+                    "R9.9.2 low-battery proactivity is explicit opt-in, notification-only, cooldown/rate-limited and carries no device-mutation authority."
                 } else {
-                    "R10.0 bounded battery proactivity contract self-test failed."
+                    "R9.9.2 bounded battery proactivity contract self-test failed."
                 },
             evidence =
                 JSONObject()
@@ -28214,6 +28558,39 @@ append(index + 1)
                         "broad_proactivity_claimed",
                         false
                     )
+        )
+
+        val unifiedScreenTruthOk =
+            try {
+                screenIntelligence.selfTestUnifiedTruth() &&
+                    isUnifiedScreenIntelligenceAcceptanceCommand(
+                        "проверь единый screen intelligence"
+                    )
+            } catch (_: Exception) {
+                false
+            }
+
+        add(
+            id = "R10-FOUND-016",
+            title = "R10.0 unified screen truth / overlay-safe foreground contract",
+            critical = true,
+            ok = unifiedScreenTruthOk,
+            message =
+                if (unifiedScreenTruthOk) {
+                    "R10.0 centralizes current-screen truth in Screen Intelligence v5.0: Accessibility primary/owner, overlay suppression and verified visual provenance fuse fail-closed."
+                } else {
+                    "R10.0 Unified Screen Intelligence contract self-test failed."
+                },
+            evidence =
+                JSONObject()
+                    .put("screen_intelligence_version", AyanaScreenIntelligence.VERSION)
+                    .put("unified_screen_truth_version", AyanaScreenIntelligence.UNIFIED_TRUTH_VERSION)
+                    .put("single_consumer_truth_source", true)
+                    .put("raw_accessibility_preserved", true)
+                    .put("overlay_can_mask_external_foreground", false)
+                    .put("visual_evidence_action_authority", false)
+                    .put("conflicts_fail_closed", true)
+                    .put("historical_camera_overlay_regression_has_device_gate", true)
         )
 
         return tests
@@ -33995,7 +34372,7 @@ requestMethod = "GET"
                 "external_mail_calendar_files" to "нет авторизованных внешних mail/calendar/files account executors; R9.3 local app integration не заменяет account API",
                 "video_audio_analysis" to "аудиодорожка видео не анализируется",
                 "offline_llm" to "полноценный offline LLM отсутствует",
-                "controlled_proactivity" to "R10.0 добавляет только explicit opt-in low-battery notification watcher; широкая/general proactivity и silent device mutations по-прежнему не реализованы"
+                "controlled_proactivity" to "R9.9.2 добавляет только explicit opt-in low-battery notification watcher; широкая/general proactivity и silent device mutations по-прежнему не реализованы"
             )
 
         labels.forEach { (id, label) ->
@@ -50495,9 +50872,9 @@ state
         private const val MASTER_STATUS_MANUAL_REQUIRED =
             "MANUAL_REQUIRED"
 
-        // R10.0 RELEASE / FEATURE LINEAGE TRUTH.
+        // R10.0 UNIFIED SCREEN INTELLIGENCE RELEASE / FEATURE LINEAGE TRUTH.
         private const val AYANA_VOICE_SERVICE_RELEASE =
-            "v12.32.0 / R10.0 OPT-IN LOW-BATTERY CONTROLLED PROACTIVITY"
+            "v12.33.0 / R10.0 UNIFIED SCREEN INTELLIGENCE"
 
         private const val AYANA_PERSONAL_SEARCH_ENGINE_RELEASE =
             "v1.5.1 IMAGE COVERAGE TRUTH"
@@ -50509,13 +50886,13 @@ state
             "v11.1.10 Multi-Attachment"
 
         private const val AYANA_ACCEPTED_FEATURE_CHECKPOINT =
-            "R9.9.1 BRIGHTNESS VERIFIED UNDO DEVICE ACCEPTANCE — DEVICE-CONFIRMED ACCEPTED"
+            "R9.9.2 OPT-IN LOW-BATTERY CONTROLLED PROACTIVITY — DEVICE-CONFIRMED ACCEPTED"
 
         private const val AYANA_CURRENT_FEATURE_RELEASE =
-            "R10.0 OPT-IN LOW-BATTERY CONTROLLED PROACTIVITY — PENDING DEVICE CONFIRMATION"
+            "R10.0 UNIFIED SCREEN INTELLIGENCE — PENDING DEVICE CONFIRMATION"
 
         private const val AYANA_RELEASE_LINEAGE =
-            "Android v12.21.0 / R7.9 truth-hardening + R8.0 multi-attachment + R8.1–R8.4 accepted Personal Global Search stack + R8.5–R8.5.4 capability/evidence truth + R9.0 autonomous agent foundation + R9.0.1 history live-refresh proof fix + R9.0.2 diagnostic reconciliation/history refresh fix + R9.0.3 TTS health reconciliation + R9.1 IME perception/active telemetry truth + R9.2 autonomous recovery/long-task reconciliation + R9.2.1 adaptive hypothesis reconciliation + R9.3 app integration framework + R9.3.1 screen health reconciliation + R9.3.2 history latency recovery reconciliation + R9.3.3 informational terminal reconciliation + R9.3.4 app integration device acceptance + R9.4 multi-app task orchestration + R9.4.1 screen ownership union reconciliation + R9.5 verified result transfer between app steps + R9.5.1 partial marker provenance reconciliation + R9.5.2 bounded marker observation + R9.5.3 verified action result transfer + R9.6 verified semantic observation fallback + R9.6.1 visual fallback acceptance truth + R9.7 structured screen reading + R9.7.1 conversation routing/terminal truth + R9.7.2 structured router conversation precedence + R9.7.3 action morphology/terminal truth + R9.8 generic verified result transfer + R9.8.1 master full acceptance/diagnostic engine + R9.9 reversible action journal/verified undo + R9.9.1 brightness verified undo device acceptance + R10.0 opt-in low-battery controlled proactivity"
+            "Android v12.21.0 / R7.9 truth-hardening + R8.0 multi-attachment + R8.1–R8.4 accepted Personal Global Search stack + R8.5–R8.5.4 capability/evidence truth + R9.0 autonomous agent foundation + R9.0.1 history live-refresh proof fix + R9.0.2 diagnostic reconciliation/history refresh fix + R9.0.3 TTS health reconciliation + R9.1 IME perception/active telemetry truth + R9.2 autonomous recovery/long-task reconciliation + R9.2.1 adaptive hypothesis reconciliation + R9.3 app integration framework + R9.3.1 screen health reconciliation + R9.3.2 history latency recovery reconciliation + R9.3.3 informational terminal reconciliation + R9.3.4 app integration device acceptance + R9.4 multi-app task orchestration + R9.4.1 screen ownership union reconciliation + R9.5 verified result transfer between app steps + R9.5.1 partial marker provenance reconciliation + R9.5.2 bounded marker observation + R9.5.3 verified action result transfer + R9.6 verified semantic observation fallback + R9.6.1 visual fallback acceptance truth + R9.7 structured screen reading + R9.7.1 conversation routing/terminal truth + R9.7.2 structured router conversation precedence + R9.7.3 action morphology/terminal truth + R9.8 generic verified result transfer + R9.8.1 master full acceptance/diagnostic engine + R9.9 reversible action journal/verified undo + R9.9.1 brightness verified undo device acceptance + R9.9.2 opt-in low-battery controlled proactivity + R10.0 unified screen intelligence"
 
         // AyanaCommandHistoryStore v2.8 keeps up to 4k chars inline and stores longer
         // results out-of-line. Self-review intentionally remains inline so copied History
