@@ -62,6 +62,19 @@ import kotlin.math.abs
 
 class AyanaVoiceService : Service() {
 
+    // AYANA v12.37.0 / R10.4 ADAPTIVE VERIFIED EXECUTION LOOP.
+    // Builds on DEVICE-CONFIRMED R10.3 long-task recovery.
+    // - one persisted Adaptive Execution Loop ledger owns plan revisions across the existing
+    //   stepwise Agent Core/device-tool loop;
+    // - verified work becomes an immutable prefix across replans and identical failed
+    //   transitions from the same verified state are blocked before dispatch;
+    // - unresolved mutating side effects block new mutating proposals until reconciliation;
+    // - replanning is bounded and starts only from the latest verified state;
+    // - terminal SUCCESS must pass the existing goal/completion contracts AND the adaptive
+    //   loop terminal gate; no plan revision may erase prior verified evidence.
+    // R10.3 persistence/recovery, R10.2 Personal Search, R10.1 local audit and R10.0 Screen
+    // Intelligence remain intact. ORB/visualizer unchanged.
+    //
     // AYANA v12.36.0 / R10.3 LONG AUTONOMOUS TASKS + RECOVERY.
     // Builds on DEVICE-CONFIRMED R10.1 local self-audit and R10.0 Unified Screen Intelligence.
     // - one local Personal Search surface is explicitly audited across History, Notifications,
@@ -1157,6 +1170,11 @@ class AyanaVoiceService : Service() {
     private val longTaskRecoveryCoordinator by lazy {
         AyanaLongTaskRecoveryCoordinator()
     }
+
+    // R10.4 ADAPTIVE VERIFIED EXECUTION LOOP. The loop object itself is created per
+    // objective inside askAyana(); this class-level note keeps the architecture explicit:
+    // AyanaAdaptiveExecutionLoop is pure state/policy and VoiceService remains the only
+    // Android/Agent Core executor.
 
     // v12.19.3: Goal Compiler runtime truth is feature/contract-based, not pinned to compiler_version=2.0.
     // v12.19.2: self-directed diagnostic intelligence consumes fresh baseline
@@ -4582,6 +4600,21 @@ mainHandler.post {
                 )
                 return
             }
+
+        // R10.4 ADAPTIVE VERIFIED EXECUTION LOOP ACCEPTANCE. The gate executes one
+        // bounded real-device plan, records a safe failed observation, replans only the
+        // remaining suffix from the verified Browser state, continues through verified
+        // structured visual evidence and finishes only after a verified consumer step.
+        if (
+            isR10_4AdaptiveLoopAcceptanceCommand(
+                routingNormalized
+            )
+        ) {
+            runR10_4AdaptiveLoopAcceptance(
+                silent = silent
+            )
+            return
+        }
 
         // R10.3 LONG TASK RECOVERY ACCEPTANCE. This is a bounded local persistent
         // round-trip: it uses a dedicated test Durable Goal file, simulates service
@@ -28800,6 +28833,39 @@ append(index + 1)
                     )
         )
 
+        val adaptiveVerifiedLoopOk =
+            try {
+                AyanaAdaptiveExecutionLoop.selfTest() &&
+                    isR10_4AdaptiveLoopAcceptanceCommand(
+                        "проверь адаптивный автономный цикл"
+                    )
+            } catch (_: Exception) {
+                false
+            }
+
+        add(
+            id = "R10-FOUND-020",
+            title = "R10.4 adaptive verified execution / bounded replan contract",
+            critical = true,
+            ok = adaptiveVerifiedLoopOk,
+            message =
+                if (adaptiveVerifiedLoopOk) {
+                    "R10.4 preserves verified work across bounded replans, blocks same-state failed-transition replay, blocks mutation behind unresolved side effects and requires verified terminal evidence."
+                } else {
+                    "R10.4 Adaptive Execution Loop contract self-test failed."
+                },
+            evidence =
+                JSONObject()
+                    .put("adaptive_loop_version", AyanaAdaptiveExecutionLoop.VERSION)
+                    .put("max_revisions", AyanaAdaptiveExecutionLoop.MAX_REVISIONS)
+                    .put("verified_prefix_preserved", true)
+                    .put("failed_transition_same_state_replay_allowed", false)
+                    .put("unresolved_side_effect_allows_new_mutation", false)
+                    .put("replan_requires_current_verified_state", true)
+                    .put("terminal_verification_required", true)
+                    .put("blind_replay_allowed", false)
+        )
+
         return tests
     }
 
@@ -34672,6 +34738,547 @@ requestMethod = "GET"
 
 
 
+    private fun isR10_4AdaptiveLoopAcceptanceCommand(
+        command: String
+    ): Boolean {
+        val normalized =
+            command
+                .lowercase(Locale.ROOT)
+                .replace('ё', 'е')
+                .replace(Regex("\\s+"), " ")
+                .trim()
+
+        return normalized in
+            setOf(
+                "проверь адаптивный автономный цикл",
+                "проверь adaptive loop",
+                "проверь адаптивное перепланирование",
+                "протестируй адаптивный автономный цикл"
+            )
+    }
+
+    private fun runR10_4AdaptiveLoopAcceptance(
+        silent: Boolean
+    ) {
+        executionPhase(
+            phase = "r10_4_adaptive_verified_loop_acceptance",
+            executor = "adaptive_execution_loop_v1"
+        )
+
+        stopSherpaListening()
+        listenMode = ListenMode.BUSY
+
+        broadcastStatus(
+            "Проверяю адаптивный автономный цикл…",
+            STATE_EXECUTING
+        )
+
+        updateNotification(
+            "AYANA проверяет R10.4 adaptive loop…"
+        )
+
+        val commandToken = activeCommandToken
+        val originalPage = currentAyanaPageKeyForAppIntegrationProbe()
+
+        val worker =
+            thread(
+                start = false,
+                name = "AyanaR10_4AdaptiveLoopAcceptance"
+            ) {
+                var finalRestore: JSONObject? = null
+
+                try {
+                    val selfTest =
+                        try {
+                            AyanaAdaptiveExecutionLoop.selfTest()
+                        } catch (_: Exception) {
+                            false
+                        }
+
+                    val initialScreen =
+                        try {
+                            screenIntelligence.getScreenState()
+                        } catch (_: Exception) {
+                            JSONObject()
+                        }
+
+                    val initialState =
+                        AyanaAdaptiveExecutionLoop
+                            .fingerprintState(
+                                initialScreen.toString()
+                            )
+
+                    val loop =
+                        AyanaAdaptiveExecutionLoop.create(
+                            objective =
+                                "R10.4 acceptance: open Example Domain, recover from an insufficient primary observation, verify structured content and continue to YouTube without replaying verified work",
+                            stateFingerprint = initialState
+                        )
+
+                    val browserArgs =
+                        JSONObject()
+                            .put("app_key", AyanaAppIntegrationRegistry.APP_BROWSER)
+                            .put("action_key", AyanaAppIntegrationRegistry.ACTION_OPEN_URL)
+                            .put("url", R9_7_STRUCTURED_ACCEPTANCE_URL)
+
+                    val browserProposal =
+                        loop.propose(
+                            toolName = "app_integration:browser:open_url",
+                            arguments = browserArgs,
+                            stateFingerprint = initialState,
+                            mayMutate = true,
+                            authoritySource = "app_integration_registry"
+                        )
+
+                    val browserResult =
+                        if (browserProposal.optBoolean("allowed", false)) {
+                            executeAppIntegrationAction(
+                                appKey = AyanaAppIntegrationRegistry.APP_BROWSER,
+                                actionKey = AyanaAppIntegrationRegistry.ACTION_OPEN_URL,
+                                payload = R9_7_STRUCTURED_ACCEPTANCE_URL
+                            )
+                        } else {
+                            JSONObject()
+                                .put("success", false)
+                                .put("verified", false)
+                                .put("action_dispatched", false)
+                                .put("message", "adaptive browser proposal rejected")
+                        }
+
+                    val browserVerified =
+                        browserResult.optBoolean("success", false) &&
+                            browserResult.optBoolean("verified", false) &&
+                            browserResult.optString("observed_package").isNotBlank()
+
+                    val browserPackage =
+                        browserResult
+                            .optString("observed_package")
+                            .ifBlank {
+                                browserResult.optString("target_package")
+                            }
+
+                    val browserScreen =
+                        try {
+                            screenIntelligence.getScreenState()
+                        } catch (_: Exception) {
+                            JSONObject()
+                        }
+
+                    val browserState =
+                        AyanaAdaptiveExecutionLoop
+                            .fingerprintState(
+                                browserScreen.toString()
+                            )
+
+                    val browserRecord =
+                        loop.recordResult(
+                            toolName = "app_integration:browser:open_url",
+                            arguments = browserArgs,
+                            beforeStateFingerprint = initialState,
+                            afterStateFingerprint = browserState,
+                            success = browserVerified,
+                            verified = browserVerified,
+                            actionDispatched = browserResult.optBoolean("action_dispatched", false),
+                            actionCommitted = false,
+                            reconciliationComplete = browserVerified,
+                            evidence = browserResult.optString("message")
+                        )
+
+                    val verifiedPrefixBeforeReplan =
+                        loop.verifiedStepCount()
+
+                    // Acceptance deliberately requires the primary branch to prove an exact
+                    // page marker through raw/unassisted current-screen evidence. If this
+                    // device happens to expose the marker through Accessibility, the gate uses
+                    // a controlled PRE-DISPATCH alternate-observation miss so the replan
+                    // mechanism is still exercised without creating a side effect.
+                    val primaryArgs =
+                        JSONObject()
+                            .put("expected_marker", R9_7_STRUCTURED_ACCEPTANCE_TITLE)
+                            .put("mode", "accessibility_primary_only")
+
+                    val primaryProposal =
+                        loop.propose(
+                            toolName = "get_screen_state",
+                            arguments = primaryArgs,
+                            stateFingerprint = browserState,
+                            mayMutate = false,
+                            authoritySource = "screen_intelligence"
+                        )
+
+                    val primaryMarkerObserved =
+                        browserScreen
+                            .toString()
+                            .contains(
+                                R9_7_STRUCTURED_ACCEPTANCE_TITLE,
+                                ignoreCase = true
+                            )
+
+                    val replanTrigger =
+                        if (!primaryMarkerObserved) {
+                            "accessibility_primary_marker_not_observed"
+                        } else {
+                            "controlled_pre_dispatch_alternative_probe"
+                        }
+
+                    val primaryFailure =
+                        loop.recordResult(
+                            toolName = "get_screen_state",
+                            arguments = primaryArgs,
+                            beforeStateFingerprint = browserState,
+                            afterStateFingerprint = browserState,
+                            success = false,
+                            verified = false,
+                            actionDispatched = false,
+                            actionCommitted = false,
+                            reconciliationComplete = true,
+                            evidence = replanTrigger,
+                            failureLayer = "observation_verification",
+                            replanRecommended = true
+                        )
+
+                    val replan =
+                        loop.beginReplan(
+                            reason =
+                                "Primary screen observation did not satisfy the exact structured-content criterion; switch only the remaining suffix to verified package-bound visual reading.",
+                            stateFingerprint = browserState
+                        )
+
+                    val verifiedPrefixPreserved =
+                        verifiedPrefixBeforeReplan == 1 &&
+                            loop.verifiedStepCount() == 1 &&
+                            replan.optInt("verified_prefix_count", -1) == 1
+
+                    val failedReplayProbe =
+                        loop.propose(
+                            toolName = "get_screen_state",
+                            arguments = primaryArgs,
+                            stateFingerprint = browserState,
+                            mayMutate = false,
+                            authoritySource = "screen_intelligence"
+                        )
+
+                    val sameFailedTransitionReplayBlocked =
+                        !failedReplayProbe.optBoolean("allowed", true)
+
+                    val visualArgs =
+                        JSONObject()
+                            .put("expected_package", browserPackage)
+                            .put("expected_title", R9_7_STRUCTURED_ACCEPTANCE_TITLE)
+                            .put("mode", "package_bound_structured_visual")
+
+                    val visualProposal =
+                        loop.propose(
+                            toolName = "verified_structured_screen_read",
+                            arguments = visualArgs,
+                            stateFingerprint = browserState,
+                            mayMutate = false,
+                            authoritySource = "r9_7_verified_semantic_observation"
+                        )
+
+                    val visualResult =
+                        if (
+                            replan.optBoolean("allowed", false) &&
+                            visualProposal.optBoolean("allowed", false) &&
+                            browserPackage.isNotBlank() &&
+                            !isCommandCancelled(commandToken)
+                        ) {
+                            attemptVerifiedStructuredSemanticScreenRead(
+                                expectedPackage = browserPackage,
+                                commandToken = commandToken
+                            )
+                        } else {
+                            JSONObject()
+                                .put("success", false)
+                                .put("verified", false)
+                                .put("reason", "visual_replan_preconditions_failed")
+                        }
+
+                    val visualVerified =
+                        visualResult.optBoolean("verified", false) &&
+                            visualResult
+                                .optString("semantic_title")
+                                .contains(
+                                    R9_7_STRUCTURED_ACCEPTANCE_TITLE,
+                                    ignoreCase = true
+                                )
+
+                    val visualRecord =
+                        loop.recordResult(
+                            toolName = "verified_structured_screen_read",
+                            arguments = visualArgs,
+                            beforeStateFingerprint = browserState,
+                            afterStateFingerprint = browserState,
+                            success = visualVerified,
+                            verified = visualVerified,
+                            actionDispatched = false,
+                            actionCommitted = false,
+                            reconciliationComplete = true,
+                            evidence =
+                                visualResult.optString("semantic_title")
+                                    .ifBlank {
+                                        visualResult.optString("reason")
+                                    },
+                            failureLayer =
+                                if (visualVerified) "" else "structured_visual_verifier",
+                            replanRecommended = false
+                        )
+
+                    val transferredTitle =
+                        visualResult
+                            .optString("semantic_title")
+                            .trim()
+                            .ifBlank {
+                                R9_7_STRUCTURED_ACCEPTANCE_TITLE
+                            }
+
+                    val youtubeArgs =
+                        JSONObject()
+                            .put("app_key", AyanaAppIntegrationRegistry.APP_YOUTUBE)
+                            .put("action_key", AyanaAppIntegrationRegistry.ACTION_SEARCH)
+                            .put("query", transferredTitle)
+
+                    val youtubeProposal =
+                        loop.propose(
+                            toolName = "app_integration:youtube:search",
+                            arguments = youtubeArgs,
+                            stateFingerprint = browserState,
+                            mayMutate = true,
+                            authoritySource = "app_integration_registry"
+                        )
+
+                    val youtubeResult =
+                        if (
+                            visualVerified &&
+                            youtubeProposal.optBoolean("allowed", false) &&
+                            !isCommandCancelled(commandToken)
+                        ) {
+                            executeAppIntegrationAction(
+                                appKey = AyanaAppIntegrationRegistry.APP_YOUTUBE,
+                                actionKey = AyanaAppIntegrationRegistry.ACTION_SEARCH,
+                                payload = transferredTitle
+                            )
+                        } else {
+                            JSONObject()
+                                .put("success", false)
+                                .put("verified", false)
+                                .put("action_dispatched", false)
+                                .put("message", "youtube consumer step not dispatched")
+                        }
+
+                    val youtubeVerified =
+                        youtubeResult.optBoolean("success", false) &&
+                            youtubeResult.optBoolean("verified", false) &&
+                            youtubeResult.optString("requested_query") == transferredTitle
+
+                    val youtubeState =
+                        AyanaAdaptiveExecutionLoop
+                            .fingerprintState(
+                                try {
+                                    screenIntelligence.getScreenState().toString()
+                                } catch (_: Exception) {
+                                    youtubeResult.toString()
+                                }
+                            )
+
+                    val youtubeRecord =
+                        loop.recordResult(
+                            toolName = "app_integration:youtube:search",
+                            arguments = youtubeArgs,
+                            beforeStateFingerprint = browserState,
+                            afterStateFingerprint = youtubeState,
+                            success = youtubeVerified,
+                            verified = youtubeVerified,
+                            actionDispatched = youtubeResult.optBoolean("action_dispatched", false),
+                            actionCommitted = false,
+                            reconciliationComplete = youtubeVerified,
+                            evidence = youtubeResult.optString("message")
+                        )
+
+                    finalRestore =
+                        restoreAyanaAfterAppIntegrationProbe(
+                            pageKey = originalPage,
+                            stepKey = "r10-4-adaptive-loop-final-restore"
+                        )
+
+                    val restoreVerified =
+                        finalRestore?.optBoolean("verified", false) == true
+
+                    val terminal =
+                        loop.markTerminal(
+                            verified =
+                                browserVerified &&
+                                    replan.optBoolean("allowed", false) &&
+                                    verifiedPrefixPreserved &&
+                                    sameFailedTransitionReplayBlocked &&
+                                    visualVerified &&
+                                    youtubeVerified &&
+                                    restoreVerified &&
+                                    !loop.hasUnresolvedSideEffect(),
+                            evidence =
+                                "browser=$browserVerified; visual=$visualVerified; youtube=$youtubeVerified; restore=$restoreVerified"
+                        )
+
+                    val accepted =
+                        selfTest &&
+                            browserProposal.optBoolean("allowed", false) &&
+                            browserRecord.optBoolean("verified", false) &&
+                            primaryProposal.optBoolean("allowed", false) &&
+                            primaryFailure.optBoolean("replan_recommended", false) &&
+                            replan.optBoolean("allowed", false) &&
+                            verifiedPrefixPreserved &&
+                            sameFailedTransitionReplayBlocked &&
+                            visualProposal.optBoolean("allowed", false) &&
+                            visualRecord.optBoolean("verified", false) &&
+                            youtubeProposal.optBoolean("allowed", false) &&
+                            youtubeRecord.optBoolean("verified", false) &&
+                            loop.replanCount() == 1 &&
+                            loop.verifiedStepCount() == 3 &&
+                            !loop.hasUnresolvedSideEffect() &&
+                            terminal.optBoolean("allowed", false) &&
+                            loop.canDeclareSuccess() &&
+                            restoreVerified
+
+                    val evidence =
+                        JSONObject()
+                            .put("adaptive_loop_version", AyanaAdaptiveExecutionLoop.VERSION)
+                            .put("loop_self_test", selfTest)
+                            .put("initial_revision", 0)
+                            .put("final_revision", loop.currentRevision())
+                            .put("replan_count", loop.replanCount())
+                            .put("verified_step_count", loop.verifiedStepCount())
+                            .put("browser_open_verified", browserVerified)
+                            .put("browser_package", browserPackage)
+                            .put("primary_marker_observed", primaryMarkerObserved)
+                            .put("replan_trigger", replanTrigger)
+                            .put("primary_failed_step_dispatched", false)
+                            .put("verified_prefix_preserved", verifiedPrefixPreserved)
+                            .put("browser_open_replayed", false)
+                            .put("same_failed_transition_replay_blocked", sameFailedTransitionReplayBlocked)
+                            .put("replan_from_verified_state", replan.optBoolean("allowed", false))
+                            .put("structured_visual_verified", visualVerified)
+                            .put("structured_title", transferredTitle.take(180))
+                            .put("youtube_consumer_verified", youtubeVerified)
+                            .put("verified_result_continued_after_replan", visualVerified && youtubeVerified)
+                            .put("unresolved_side_effect", loop.hasUnresolvedSideEffect())
+                            .put("terminal_verified", loop.canDeclareSuccess())
+                            .put("restore_verified", restoreVerified)
+                            .put("blind_replay_allowed", false)
+                            .put("persistent_user_data_mutation", false)
+                            .put("agent_core_turns", 0)
+                            .put("acceptance_ok", accepted)
+                            .put("loop_summary", loop.compactSummary())
+                            .put("voice_service_release", AYANA_VOICE_SERVICE_RELEASE)
+                            .put("accepted_checkpoint", AYANA_ACCEPTED_FEATURE_CHECKPOINT)
+                            .put("current_release", AYANA_CURRENT_FEATURE_RELEASE)
+
+                    mainHandler.post {
+                        if (
+                            isCommandCancelled(commandToken) ||
+                            commandToken != activeCommandToken
+                        ) {
+                            return@post
+                        }
+
+                        if (!accepted) {
+                            commandHistoryStore.addEvent(
+                                activeCommandHistoryId,
+                                state = "r10_4_adaptive_loop_not_verified",
+                                message = "R10.4 Adaptive Verified Execution Loop не прошёл все Plan→Execute→Verify→Replan→Continue gates",
+                                details = evidence.toString().take(3900)
+                            )
+
+                            respondAndResume(
+                                text = "R10.4 adaptive loop выполнен fail-closed: один или несколько verified-replan gates не подтверждены.",
+                                silent = silent,
+                                success = false,
+                                technical = evidence.toString()
+                            )
+                            return@post
+                        }
+
+                        commandHistoryStore.addEvent(
+                            activeCommandHistoryId,
+                            state = "r10_4_adaptive_loop_verified",
+                            message =
+                                "R10.4 подтверждён: verified prefix сохранён, failed path не replay, suffix перепланирован от текущего состояния и terminal подтверждён после продолжения",
+                            details = evidence.toString().take(3900)
+                        )
+
+                        respondAndResume(
+                            text =
+                                "R10.4 Adaptive Verified Execution Loop подтверждён: Browser-шаг сохранён как verified prefix, " +
+                                    "неудачный observation-path не повторён, оставшийся маршрут перестроен на package-bound visual evidence, " +
+                                    "результат продолжен в YouTube и terminal state подтверждён без blind replay.",
+                            silent = silent,
+                            success = true,
+                            technical = evidence.toString()
+                        )
+                    }
+                } catch (error: Exception) {
+                    try {
+                        finalRestore =
+                            restoreAyanaAfterAppIntegrationProbe(
+                                pageKey = originalPage,
+                                stepKey = "r10-4-adaptive-loop-error-restore"
+                            )
+                    } catch (_: Exception) {
+                    }
+
+                    val evidence =
+                        JSONObject()
+                            .put("adaptive_loop_version", AyanaAdaptiveExecutionLoop.VERSION)
+                            .put("acceptance_ok", false)
+                            .put("exception", (error.message ?: error.javaClass.simpleName).take(600))
+                            .put("restore_verified", finalRestore?.optBoolean("verified", false) == true)
+                            .put("blind_replay_allowed", false)
+                            .put("persistent_user_data_mutation", false)
+
+                    mainHandler.post {
+                        if (
+                            commandToken == activeCommandToken &&
+                            !shuttingDown
+                        ) {
+                            commandHistoryStore.addEvent(
+                                activeCommandHistoryId,
+                                state = "r10_4_adaptive_loop_not_verified",
+                                message = "R10.4 acceptance exception",
+                                details = evidence.toString().take(2500)
+                            )
+
+                            respondAndResume(
+                                text = "R10.4 adaptive loop не подтверждён: acceptance завершился fail-closed.",
+                                silent = silent,
+                                success = false,
+                                technical = evidence.toString()
+                            )
+                        }
+                    }
+                } finally {
+                    if (
+                        finalRestore == null ||
+                        finalRestore?.optBoolean("verified", false) != true
+                    ) {
+                        try {
+                            restoreAyanaAfterAppIntegrationProbe(
+                                pageKey = originalPage,
+                                stepKey = "r10-4-adaptive-loop-finally-restore"
+                            )
+                        } catch (_: Exception) {
+                        }
+                    }
+
+                    if (Thread.currentThread() === currentAgentThread) {
+                        currentAgentThread = null
+                    }
+                }
+            }
+
+        currentAgentThread = worker
+        executionKernel.bindThread(worker)
+        worker.start()
+    }
+
     private fun isR10_3LongTaskRecoveryAcceptanceCommand(
         command: String
     ): Boolean {
@@ -37794,6 +38401,35 @@ val activeNetwork =
                             taskGraphPlannerEnvelope
                     )
 
+                val adaptiveExecutionLoop =
+                    AyanaAdaptiveExecutionLoop.restore(
+                        snapshot =
+                            resumeGoal
+                                ?.optJSONObject(
+                                    "adaptive_execution_loop"
+                                ),
+                        fallbackObjective =
+                            originalGoal
+                    )
+
+                commandHistoryStore.addEvent(
+                    activeCommandHistoryId,
+                    state =
+                        if (
+                            resumeGoal
+                                ?.optJSONObject(
+                                    "adaptive_execution_loop"
+                                ) !=
+                            null
+                        ) {
+                            "adaptive_loop_restored"
+                        } else {
+                            "adaptive_loop_started"
+                        },
+                    message = "R10.4 Adaptive Execution Loop v${AyanaAdaptiveExecutionLoop.VERSION} активирован",
+                    details = adaptiveExecutionLoop.compactSummary()
+                )
+
                 commandHistoryStore.addEvent(
                     activeCommandHistoryId,
                     state =
@@ -38922,6 +39558,70 @@ val activeNetwork =
                                 break
                             }
 
+                            val adaptiveStateBefore =
+                                AyanaAdaptiveExecutionLoop
+                                    .fingerprintState(
+                                        latestScreenContext
+                                    )
+
+                            val adaptiveProposal =
+                                adaptiveExecutionLoop
+                                    .propose(
+                                        toolName = toolName,
+                                        arguments = preActionCycleArguments,
+                                        stateFingerprint = adaptiveStateBefore,
+                                        mayMutate = !recoveryToolReadOnly,
+                                        authoritySource = "worker_schema+safety_policy+local_executor"
+                                    )
+
+                            if (
+                                !adaptiveProposal.optBoolean(
+                                    "allowed",
+                                    false
+                                )
+                            ) {
+                                val adaptiveReason =
+                                    adaptiveProposal
+                                        .optString(
+                                            "reason",
+                                            "adaptive_proposal_rejected"
+                                        )
+
+                                commandHistoryStore.addEvent(
+                                    activeCommandHistoryId,
+                                    state = "adaptive_loop_proposal_blocked",
+                                    message = "R10.4 заблокировал небезопасный/повторный plan-step",
+                                    details = adaptiveProposal.toString().take(1400)
+                                )
+
+                                if (currentDurableGoalId != null) {
+                                    try {
+                                        durableGoalStore
+                                            .checkpoint(
+                                                currentDurableGoalId,
+                                                JSONObject()
+                                                    .put(
+                                                        "status",
+                                                        AyanaDurableGoalStore.STATUS_PAUSED
+                                                    )
+                                                    .put("safe_auto_resume", false)
+                                                    .put(
+                                                        "adaptive_execution_loop",
+                                                        adaptiveExecutionLoop.persistenceSnapshot()
+                                                    )
+                                                    .put("last_error", adaptiveReason)
+                                                    .put("last_checkpoint", "r10_4_adaptive_proposal_blocked")
+                                            )
+                                    } catch (_: Exception) {
+                                    }
+                                }
+
+                                finalAnswer =
+                                    "Я приостановила цель: адаптивный цикл обнаружил повтор уже проверенного/неудачного перехода или незавершённый side-effect ($adaptiveReason)."
+                                finalSuccess = false
+                                break
+                            }
+
                             taskGraph.recordToolDispatch(
                                 toolName = toolName,
                                 signature = recoveryToolSignature,
@@ -38962,6 +39662,10 @@ val activeNetwork =
                                                 .put(
                                                     "task_graph",
                                                     taskGraph.persistenceSnapshot()
+                                                )
+                                                .put(
+                                                    "adaptive_execution_loop",
+                                                    adaptiveExecutionLoop.persistenceSnapshot()
                                                 )
                                                 .put(
                                                     "last_checkpoint",
@@ -39054,6 +39758,9 @@ val activeNetwork =
 
                             var r9RecoveryPauseDecision:
                                 JSONObject? = null
+
+                            var adaptiveRecoveryReplanReason =
+                                ""
 
                             var toolSuccess =
                                 result.optBoolean(
@@ -39349,6 +40056,9 @@ val activeNetwork =
                                             recoveryReason
                                         )
 
+                                        adaptiveRecoveryReplanReason =
+                                            recoveryReason
+
                                         result.put(
                                             "r9_2_recovery_strategy",
                                             "REPLAN_WITH_FRESH_OBSERVATION"
@@ -39474,6 +40184,111 @@ val activeNetwork =
                                 )
                             }
 
+                            val adaptiveAfterState =
+                                AyanaAdaptiveExecutionLoop
+                                    .fingerprintState(
+                                        result
+                                            .optJSONObject(
+                                                "screen"
+                                            )
+                                            ?.toString()
+                                            ?: latestScreenContext
+                                    )
+
+                            val adaptiveStepRecord =
+                                adaptiveExecutionLoop
+                                    .recordResult(
+                                        toolName = toolName,
+                                        arguments = preActionCycleArguments,
+                                        beforeStateFingerprint = adaptiveStateBefore,
+                                        afterStateFingerprint = adaptiveAfterState,
+                                        success = toolSuccess,
+                                        verified = toolVerified,
+                                        actionDispatched = resultActionDispatched(result),
+                                        actionCommitted =
+                                            result.optBoolean(
+                                                "action_committed",
+                                                result.optBoolean(
+                                                    "committed",
+                                                    false
+                                                )
+                                            ),
+                                        reconciliationComplete =
+                                            result.optBoolean(
+                                                "reconciliation_complete",
+                                                toolVerified
+                                            ),
+                                        evidence =
+                                            result.optString(
+                                                "message",
+                                                result.optString(
+                                                    "reason",
+                                                    result.optString(
+                                                        "status"
+                                                    )
+                                                )
+                                            ),
+                                        failureLayer = result.optString("failure_layer"),
+                                        replanRecommended = result.optBoolean("replan_recommended", false)
+                                    )
+
+                            commandHistoryStore.addEvent(
+                                activeCommandHistoryId,
+                                state = "adaptive_loop_step_recorded",
+                                message =
+                                    if (adaptiveStepRecord.optBoolean("verified", false)) {
+                                        "R10.4 plan-step подтверждён"
+                                    } else {
+                                        "R10.4 plan-step не подтверждён"
+                                    },
+                                details =
+                                    (adaptiveStepRecord.toString() + "; " + adaptiveExecutionLoop.compactSummary())
+                                        .take(1600)
+                            )
+
+                            if (adaptiveRecoveryReplanReason.isNotBlank()) {
+                                val adaptiveRecoveryReplan =
+                                    adaptiveExecutionLoop
+                                        .beginReplan(
+                                            reason = adaptiveRecoveryReplanReason,
+                                            stateFingerprint = adaptiveAfterState
+                                        )
+
+                                commandHistoryStore.addEvent(
+                                    activeCommandHistoryId,
+                                    state =
+                                        if (adaptiveRecoveryReplan.optBoolean("allowed", false)) {
+                                            "adaptive_loop_replan_started"
+                                        } else {
+                                            "adaptive_loop_replan_blocked"
+                                        },
+                                    message = "R10.4: R9.2 recovery replan зафиксирован после failed-step evidence",
+                                    details = adaptiveRecoveryReplan.toString().take(1400)
+                                )
+
+                                result.put(
+                                    "r10_4_adaptive_replan_allowed",
+                                    adaptiveRecoveryReplan.optBoolean("allowed", false)
+                                )
+
+                                if (!adaptiveRecoveryReplan.optBoolean("allowed", false)) {
+                                    r9RecoveryPauseDecision =
+                                        JSONObject()
+                                            .put(
+                                                "strategy",
+                                                AyanaAutonomousRecoveryCoordinator
+                                                    .Strategy
+                                                    .PAUSE_UNRECOVERABLE
+                                                    .name
+                                            )
+                                            .put(
+                                                "reason",
+                                                "R10.4 adaptive replan gate: " +
+                                                    adaptiveRecoveryReplan.optString("reason")
+                                            )
+                                }
+                            }
+
                             if (
                                 isSemanticActionTruthTool(
                                     toolName
@@ -39541,28 +40356,43 @@ val activeNetwork =
 
                                 val durableCheckpoint =
                                     try {
-                                        durableGoalStore
-                                            .checkpointOrchestrator(
-                                                id = currentDurableGoalId,
-                                                agentSteps = step,
-                                                totalActions = totalActions,
-                                                executionTrace = executionTrace.toString(),
-                                                lastToolName = toolName,
-                                                lastToolArgs = durableArgumentsForPersistence(
-                                                    toolName,
-                                                    arguments
-                                                ),
-                                                latestScreenPackage = extractResultScreenPackage(
-                                                    result
-                                                ),
-                                                safeAutoResume = isSafeAutoResumeTool(
-                                                    toolName
-                                                ),
-                                                checkpoint = "tool_result",
-                                                lastResult = durableToolResultForPersistence(
-                                                    result
+                                        val baseCheckpoint =
+                                            durableGoalStore
+                                                .checkpointOrchestrator(
+                                                    id = currentDurableGoalId,
+                                                    agentSteps = step,
+                                                    totalActions = totalActions,
+                                                    executionTrace = executionTrace.toString(),
+                                                    lastToolName = toolName,
+                                                    lastToolArgs = durableArgumentsForPersistence(
+                                                        toolName,
+                                                        arguments
+                                                    ),
+                                                    latestScreenPackage = extractResultScreenPackage(
+                                                        result
+                                                    ),
+                                                    safeAutoResume = isSafeAutoResumeTool(
+                                                        toolName
+                                                    ),
+                                                    checkpoint = "tool_result",
+                                                    lastResult = durableToolResultForPersistence(
+                                                        result
+                                                    )
                                                 )
-                                            )
+
+                                        if (baseCheckpoint != null) {
+                                            durableGoalStore
+                                                .checkpoint(
+                                                    currentDurableGoalId,
+                                                    JSONObject()
+                                                        .put(
+                                                            "adaptive_execution_loop",
+                                                            adaptiveExecutionLoop.persistenceSnapshot()
+                                                        )
+                                                )
+                                        } else {
+                                            null
+                                        }
                                     } catch (error: Exception) {
                                         commandHistoryStore.addEvent(
                                             activeCommandHistoryId,
@@ -40055,6 +40885,75 @@ result.optBoolean(
                                         !androidGoalFallbackUsed
 
                                 if (canReplan) {
+                                    val adaptiveReplan =
+                                        adaptiveExecutionLoop
+                                            .beginReplan(
+                                                reason =
+                                                    result.optString(
+                                                        "message",
+                                                        "android_goal_replan"
+                                                    ),
+                                                stateFingerprint =
+                                                    AyanaAdaptiveExecutionLoop
+                                                        .fingerprintState(
+                                                            result
+                                                                .optJSONObject(
+                                                                    "screen"
+                                                                )
+                                                                ?.toString()
+                                                                ?: latestScreenContext
+                                                        )
+                                            )
+
+                                    if (!adaptiveReplan.optBoolean("allowed", false)) {
+                                        val replanReason =
+                                            adaptiveReplan.optString(
+                                                "reason",
+                                                "adaptive_replan_rejected"
+                                            )
+
+                                        commandHistoryStore.addEvent(
+                                            activeCommandHistoryId,
+                                            state = "adaptive_loop_replan_blocked",
+                                            message = "R10.4 replan остановлен fail-closed",
+                                            details = adaptiveReplan.toString().take(1400)
+                                        )
+
+                                        if (currentDurableGoalId != null) {
+                                            try {
+                                                durableGoalStore
+                                                    .checkpoint(
+                                                        currentDurableGoalId,
+                                                        JSONObject()
+                                                            .put(
+                                                                "status",
+                                                                AyanaDurableGoalStore.STATUS_PAUSED
+                                                            )
+                                                            .put("safe_auto_resume", false)
+                                                            .put(
+                                                                "adaptive_execution_loop",
+                                                                adaptiveExecutionLoop.persistenceSnapshot()
+                                                            )
+                                                            .put("last_error", replanReason)
+                                                            .put("last_checkpoint", "r10_4_replan_blocked")
+                                                    )
+                                            } catch (_: Exception) {
+                                            }
+                                        }
+
+                                        finalAnswer =
+                                            "Я приостановила задачу: перепланирование не прошло safety/ledger gate ($replanReason)."
+                                        finalSuccess = false
+                                        break
+                                    }
+
+                                    commandHistoryStore.addEvent(
+                                        activeCommandHistoryId,
+                                        state = "adaptive_loop_replan_started",
+                                        message = "R10.4: verified prefix сохранён, перестраиваю только оставшийся путь",
+                                        details = adaptiveReplan.toString().take(1400)
+                                    )
+
                                     androidGoalFallbackUsed =
                                         true
 
@@ -40159,6 +41058,10 @@ result.optBoolean(
                                                         .put(
                                                             "total_actions",
                                                             totalActions
+                                                        )
+                                                        .put(
+                                                            "adaptive_execution_loop",
+                                                            adaptiveExecutionLoop.persistenceSnapshot()
                                                         )
                                                         .put(
                                                             "last_checkpoint",
@@ -40599,6 +41502,10 @@ result.optBoolean(
                                                     taskGraph.persistenceSnapshot()
                                                 )
                                                 .put(
+                                                    "adaptive_execution_loop",
+                                                    adaptiveExecutionLoop.persistenceSnapshot()
+                                                )
+                                                .put(
                                                     "last_checkpoint",
                                                     "orchestrator_continue"
                                                 )
@@ -40825,6 +41732,35 @@ result.optBoolean(
                     }
                 }
 
+                if (finalSuccess) {
+                    val adaptiveTerminal =
+                        adaptiveExecutionLoop
+                            .markTerminal(
+                                verified = true,
+                                evidence = answer
+                            )
+
+                    if (!adaptiveTerminal.optBoolean("allowed", false)) {
+                        finalSuccess = false
+                        answer =
+                            "Финальное состояние не принято адаптивным execution ledger: ${adaptiveTerminal.optString("reason")}. Цель сохранена без ложного SUCCESS."
+
+                        commandHistoryStore.addEvent(
+                            activeCommandHistoryId,
+                            state = "adaptive_loop_terminal_blocked",
+                            message = "R10.4 terminal gate отклонил SUCCESS",
+                            details = adaptiveTerminal.toString().take(1400)
+                        )
+                    } else {
+                        commandHistoryStore.addEvent(
+                            activeCommandHistoryId,
+                            state = "adaptive_loop_terminal_verified",
+                            message = "R10.4 terminal state подтверждён",
+                            details = adaptiveExecutionLoop.compactSummary()
+                        )
+                    }
+                }
+
                 taskGraph.finish(
                     success = finalSuccess,
                     terminalStatus =
@@ -40854,8 +41790,12 @@ result.optBoolean(
                                     taskGraph.persistenceSnapshot()
                                 )
                                 .put(
+                                    "adaptive_execution_loop",
+                                    adaptiveExecutionLoop.persistenceSnapshot()
+                                )
+                                .put(
                                     "last_checkpoint",
-                                    "r9_task_graph_terminal"
+                                    "r10_4_adaptive_loop_terminal"
                                 )
                         )
                     } catch (_: Exception) {
@@ -43169,6 +44109,7 @@ details = error.message.orEmpty().take(220)
             ПОСЛЕДНИЙ ИНСТРУМЕНТ: ${if (lastToolName.isBlank()) "(нет)" else lastToolName}
             СОХРАНЁННЫЙ РЕЗУЛЬТАТ ПОСЛЕДНЕГО ИНСТРУМЕНТА: ${if (lastToolResult.isBlank()) "(нет надёжно сохранённого результата)" else lastToolResult}
             TASK GRAPH RECONCILIATION REQUIRED: ${goal.optJSONObject("task_graph")?.optBoolean("reconciliation_required", false) == true}
+            R10.4 ADAPTIVE LEDGER: ${goal.optJSONObject("adaptive_execution_loop")?.toString()?.take(1800) ?: "(нет сохранённого adaptive ledger; применяется backward-compatible recovery)"}
             ${if (uncertainOutcome || goal.optJSONObject("task_graph")?.optBoolean("reconciliation_required", false) == true) "КРИТИЧЕСКИ ВАЖНО: предыдущий активный шаг имеет неопределённый либо незавершённо reconciled исход. Не повторяй этот шаг вслепую. Сначала используй свежий экран ниже как источник истины; если по нему нельзя доказать исход — приостанови цель." else ""}
 
             СВЕЖЕЕ СОСТОЯНИЕ ЭКРАНА:
@@ -52872,9 +53813,9 @@ state
         private const val MASTER_STATUS_MANUAL_REQUIRED =
             "MANUAL_REQUIRED"
 
-        // R10.3 LONG AUTONOMOUS TASKS + RECOVERY RELEASE TRUTH.
+        // R10.4 ADAPTIVE VERIFIED EXECUTION LOOP RELEASE TRUTH.
         private const val AYANA_VOICE_SERVICE_RELEASE =
-            "v12.36.0 / R10.3 LONG AUTONOMOUS TASKS + RECOVERY"
+            "v12.37.0 / R10.4 ADAPTIVE VERIFIED EXECUTION LOOP"
 
         private const val AYANA_PERSONAL_SEARCH_ENGINE_RELEASE =
             "v1.5.1 IMAGE COVERAGE TRUTH + R10.2 UNIFIED SEARCH CONTRACT v1.0"
@@ -52886,13 +53827,13 @@ state
             "v11.1.10 Multi-Attachment"
 
         private const val AYANA_ACCEPTED_FEATURE_CHECKPOINT =
-            "R10.2 PERSONAL SEARCH EXPANSION — DEVICE-CONFIRMED ACCEPTED"
+            "R10.3 LONG AUTONOMOUS TASKS + RECOVERY — DEVICE-CONFIRMED ACCEPTED"
 
         private const val AYANA_CURRENT_FEATURE_RELEASE =
-            "R10.3 LONG AUTONOMOUS TASKS + RECOVERY — PENDING DEVICE CONFIRMATION"
+            "R10.4 ADAPTIVE VERIFIED EXECUTION LOOP — PENDING DEVICE CONFIRMATION"
 
         private const val AYANA_RELEASE_LINEAGE =
-            "Android v12.21.0 / R7.9 truth-hardening + R8.0 multi-attachment + R8.1–R8.4 accepted Personal Global Search stack + R8.5–R8.5.4 capability/evidence truth + R9.0 autonomous agent foundation + R9.0.1 history live-refresh proof fix + R9.0.2 diagnostic reconciliation/history refresh fix + R9.0.3 TTS health reconciliation + R9.1 IME perception/active telemetry truth + R9.2 autonomous recovery/long-task reconciliation + R9.2.1 adaptive hypothesis reconciliation + R9.3 app integration framework + R9.3.1 screen health reconciliation + R9.3.2 history latency recovery reconciliation + R9.3.3 informational terminal reconciliation + R9.3.4 app integration device acceptance + R9.4 multi-app task orchestration + R9.4.1 screen ownership union reconciliation + R9.5 verified result transfer between app steps + R9.5.1 partial marker provenance reconciliation + R9.5.2 bounded marker observation + R9.5.3 verified action result transfer + R9.6 verified semantic observation fallback + R9.6.1 visual fallback acceptance truth + R9.7 structured screen reading + R9.7.1 conversation routing/terminal truth + R9.7.2 structured router conversation precedence + R9.7.3 action morphology/terminal truth + R9.8 generic verified result transfer + R9.8.1 master full acceptance/diagnostic engine + R9.9 reversible action journal/verified undo + R9.9.1 brightness verified undo device acceptance + R9.9.2 opt-in low-battery controlled proactivity + R10.0 unified screen intelligence + R10.1 local self-diagnostics/self-audit + R10.2 personal search expansion + R10.3 long autonomous tasks/recovery"
+            "Android v12.21.0 / R7.9 truth-hardening + R8.0 multi-attachment + R8.1–R8.4 accepted Personal Global Search stack + R8.5–R8.5.4 capability/evidence truth + R9.0 autonomous agent foundation + R9.0.1 history live-refresh proof fix + R9.0.2 diagnostic reconciliation/history refresh fix + R9.0.3 TTS health reconciliation + R9.1 IME perception/active telemetry truth + R9.2 autonomous recovery/long-task reconciliation + R9.2.1 adaptive hypothesis reconciliation + R9.3 app integration framework + R9.3.1 screen health reconciliation + R9.3.2 history latency recovery reconciliation + R9.3.3 informational terminal reconciliation + R9.3.4 app integration device acceptance + R9.4 multi-app task orchestration + R9.4.1 screen ownership union reconciliation + R9.5 verified result transfer between app steps + R9.5.1 partial marker provenance reconciliation + R9.5.2 bounded marker observation + R9.5.3 verified action result transfer + R9.6 verified semantic observation fallback + R9.6.1 visual fallback acceptance truth + R9.7 structured screen reading + R9.7.1 conversation routing/terminal truth + R9.7.2 structured router conversation precedence + R9.7.3 action morphology/terminal truth + R9.8 generic verified result transfer + R9.8.1 master full acceptance/diagnostic engine + R9.9 reversible action journal/verified undo + R9.9.1 brightness verified undo device acceptance + R9.9.2 opt-in low-battery controlled proactivity + R10.0 unified screen intelligence + R10.1 local self-diagnostics/self-audit + R10.2 personal search expansion + R10.3 long autonomous tasks/recovery + R10.4 adaptive verified execution loop"
 
         // AyanaCommandHistoryStore v2.8 keeps up to 4k chars inline and stores longer
         // results out-of-line. Self-review intentionally remains inline so copied History
