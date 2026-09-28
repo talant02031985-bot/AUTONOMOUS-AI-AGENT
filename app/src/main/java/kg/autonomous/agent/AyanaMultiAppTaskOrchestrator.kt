@@ -5,7 +5,7 @@ import org.json.JSONObject
 import java.util.Locale
 
 /**
- * AYANA R9.6 Multi-App Task Orchestrator v1.4 — VERIFIED SEMANTIC FALLBACK ACCEPTANCE.
+ * AYANA R9.8 Multi-App Task Orchestrator v1.5 — GENERIC VERIFIED RESULT TRANSFER.
  *
  * Extends the device-confirmed R9.4 orchestrator without creating a second
  * execution stack. Android dispatch remains in AyanaVoiceService; this class
@@ -21,7 +21,10 @@ import java.util.Locale
  * - first failed stage/reason is surfaced at report top level for device debugging;
  * - AYANA restore evidence remains part of every dispatched step;
  * - Calendar remains DRAFT_ONLY and action_committed must remain false;
- * - R9.6 adds a dedicated SCREEN_MARKER acceptance plan for verified visual fallback;
+ * - R9.6 dedicated SCREEN_MARKER acceptance remains preserved;
+ * - R9.8 compiles generic typed transfer edges from explicit previous-result references;
+ * - producer/consumer contracts are resolved by action semantics, not app-chain identity;
+ * - a single step may consume one verified record and produce the next verified record;
  * - no blind continuation, replay or automatic restart authority is granted.
  */
 class AyanaMultiAppTaskOrchestrator(
@@ -47,6 +50,21 @@ class AyanaMultiAppTaskOrchestrator(
         val acceptanceProbe: Boolean = false
     )
 
+    private enum class TransferReferenceKind {
+        PREVIOUS_RESULT,
+        PREVIOUS_SCREEN_TITLE
+    }
+
+    private data class TransferReference(
+        val kind: TransferReferenceKind,
+        val rewrittenClause: String
+    )
+
+    private data class GenericParsedStep(
+        val action: AyanaAppIntegrationRegistry.ParsedCommand,
+        val reference: TransferReference?
+    )
+
     fun parse(
         command: String
     ): TaskPlan? {
@@ -57,6 +75,10 @@ class AyanaMultiAppTaskOrchestrator(
 
         if (clean.isBlank()) return null
 
+        if (isGenericResultTransferAcceptanceCommand(clean)) {
+            return genericResultTransferAcceptancePlan(clean)
+        }
+
         if (isSemanticFallbackAcceptanceCommand(clean)) {
             return semanticFallbackAcceptancePlan(clean)
         }
@@ -64,6 +86,9 @@ class AyanaMultiAppTaskOrchestrator(
         if (isResultTransferAcceptanceCommand(clean)) {
             return resultTransferAcceptancePlan(clean)
         }
+
+        parseGenericVerifiedTransferPlan(clean)
+            ?.let { return it }
 
         parseVerifiedTransferUserPlan(clean)
             ?.let { return it }
@@ -166,6 +191,24 @@ class AyanaMultiAppTaskOrchestrator(
                         it.bindingSpec != null
                 }
             )
+            .put(
+                "generic_result_transfer",
+                plan.source.startsWith("r9_8_generic")
+            )
+            .put(
+                "transfer_edge_count",
+                plan.steps.count { it.bindingSpec != null }
+            )
+            .put(
+                "typed_transfer_contracts",
+                plan.steps
+                    .filter { it.bindingSpec != null }
+                    .all { step ->
+                        step.bindingSpec
+                            ?.consumerActionKey
+                            ?.isNotBlank() == true
+                    }
+            )
             .put("subgoals", subgoals)
             .put(
                 "terminal_criterion",
@@ -249,6 +292,54 @@ class AyanaMultiAppTaskOrchestrator(
             return false
         }
         if (userTransfer.steps[1].bindingSpec == null) return false
+
+        val genericTransfer =
+            parse(
+                "найди в YouTube AYANA R9.8 generic transfer затем найди в интернете результат предыдущего шага затем подготовь событие в календаре результат предыдущего шага"
+            ) ?: return false
+
+        if (genericTransfer.source != "r9_8_generic_verified_transfer_grammar") return false
+        if (genericTransfer.steps.size != 3) return false
+        if (genericTransfer.steps.count { it.captureSpec != null } != 2) return false
+        if (genericTransfer.steps.count { it.bindingSpec != null } != 2) return false
+        if (genericTransfer.steps[0].appKey != AyanaAppIntegrationRegistry.APP_YOUTUBE) return false
+        if (genericTransfer.steps[1].appKey != AyanaAppIntegrationRegistry.APP_BROWSER) return false
+        if (genericTransfer.steps[2].appKey != AyanaAppIntegrationRegistry.APP_CALENDAR) return false
+        if (genericTransfer.steps[0].captureSpec?.valueType != AyanaVerifiedResultTransfer.ValueType.QUERY) return false
+        if (genericTransfer.steps[1].captureSpec?.valueType != AyanaVerifiedResultTransfer.ValueType.QUERY) return false
+        if (genericTransfer.steps.drop(1).any { it.bindingSpec?.consumerActionKey.isNullOrBlank() }) return false
+
+        val genericTitle =
+            parse(
+                "открой сайт example.com затем найди в YouTube название этой страницы"
+            ) ?: return false
+
+        if (genericTitle.source != "r9_8_generic_verified_transfer_grammar") return false
+        if (genericTitle.steps[0].captureSpec?.kind != AyanaVerifiedResultTransfer.CaptureKind.SCREEN_TITLE) return false
+        if (genericTitle.steps[0].captureSpec?.valueType != AyanaVerifiedResultTransfer.ValueType.TITLE) return false
+
+        // A QUERY cannot become an OPEN_URL input merely because both are strings.
+        if (
+            parse(
+                "найди в YouTube AYANA затем открой сайт результат предыдущего шага"
+            ) != null
+        ) {
+            return false
+        }
+
+        val genericProbe =
+            genericResultTransferAcceptancePlan(
+                "проверь универсальный перенос результатов между приложениями"
+            )
+
+        if (!genericProbe.acceptanceProbe) return false
+        if (genericProbe.steps.size != GENERIC_RESULT_TRANSFER_ACCEPTANCE_STEP_COUNT) return false
+        if (genericProbe.steps.count { it.captureSpec != null } != 2) return false
+        if (genericProbe.steps.count { it.bindingSpec != null } != 2) return false
+        val genericEnvelope = plannerEnvelope(genericProbe)
+        if (!genericEnvelope.optBoolean("generic_result_transfer", false)) return false
+        if (!genericEnvelope.optBoolean("typed_transfer_contracts", false)) return false
+        if (genericEnvelope.optInt("transfer_edge_count", 0) != 2) return false
 
         val semanticProbe =
             semanticFallbackAcceptancePlan(
@@ -883,6 +974,24 @@ class AyanaMultiAppTaskOrchestrator(
                     transferLedger.length()
                 )
                 .put(
+                    "generic_result_transfer",
+                    plan.source.startsWith("r9_8_generic")
+                )
+                .put(
+                    "transfer_edge_count",
+                    plan.steps.count { it.bindingSpec != null }
+                )
+                .put(
+                    "typed_transfer_contracts",
+                    plan.steps
+                        .filter { it.bindingSpec != null }
+                        .all { step ->
+                            step.bindingSpec
+                                ?.consumerActionKey
+                                ?.isNotBlank() == true
+                        }
+                )
+                .put(
                     "transfer_ledger",
                     JSONObject(transferLedger.toString())
                 )
@@ -1069,6 +1178,263 @@ class AyanaMultiAppTaskOrchestrator(
                 )
         )
 
+    private fun genericResultTransferAcceptancePlan(
+        command: String
+    ): TaskPlan {
+        val compiled =
+            compileGenericVerifiedTransferPlan(
+                scenario = GENERIC_RESULT_TRANSFER_ACCEPTANCE_SCENARIO,
+                originalCommand = command.trim(),
+                planKey = "r9.8-generic-result-transfer-device-acceptance",
+                source = "r9_8_generic_result_transfer_acceptance_command",
+                acceptanceProbe = true
+            )
+
+        return requireNotNull(compiled) {
+            "R9.8 generic result-transfer acceptance scenario did not compile"
+        }
+    }
+
+    private fun parseGenericVerifiedTransferPlan(
+        clean: String
+    ): TaskPlan? =
+        compileGenericVerifiedTransferPlan(
+            scenario = clean,
+            originalCommand = clean,
+            planKey = "generic-verified-result-transfer",
+            source = "r9_8_generic_verified_transfer_grammar",
+            acceptanceProbe = false
+        )
+
+    private fun compileGenericVerifiedTransferPlan(
+        scenario: String,
+        originalCommand: String,
+        planKey: String,
+        source: String,
+        acceptanceProbe: Boolean
+    ): TaskPlan? {
+        val clauses = splitExplicitSteps(scenario)
+        if (clauses.size !in 2..MAX_STEPS) return null
+
+        val parsed =
+            mutableListOf<GenericParsedStep>()
+
+        clauses.forEachIndexed { index, clause ->
+            val reference =
+                detectTransferReference(clause)
+
+            if (reference != null && index == 0) return null
+
+            val action =
+                registry.parse(
+                    reference?.rewrittenClause ?: clause
+                ) ?: return null
+
+            if (
+                action.actionKey == AyanaAppIntegrationRegistry.ACTION_DESCRIBE ||
+                action.actionKey == AyanaAppIntegrationRegistry.ACTION_FIND_LOCAL
+            ) {
+                return null
+            }
+
+            val actionSpec =
+                registry.action(
+                    action.appKey,
+                    action.actionKey
+                ) ?: return null
+
+            if (
+                !actionSpec.autonomousAllowed ||
+                actionSpec.commitSemantics ==
+                AyanaAppIntegrationRegistry.CommitSemantics.MUTATION
+            ) {
+                return null
+            }
+
+            if (
+                reference != null &&
+                !action.payload.contains(TRANSFER_PARSE_SENTINEL)
+            ) {
+                return null
+            }
+
+            parsed +=
+                GenericParsedStep(
+                    action = action,
+                    reference = reference
+                )
+        }
+
+        if (parsed.none { it.reference != null }) return null
+        if (parsed.map { it.action.appKey }.toSet().size < 2) return null
+
+        val steps =
+            parsed
+                .mapIndexed { index, item ->
+                    TaskStep(
+                        key =
+                            "step-${index + 1}-${item.action.appKey}-${item.action.actionKey}",
+                        label =
+                            "${index + 1}. ${item.action.appKey}:${item.action.actionKey}",
+                        appKey = item.action.appKey,
+                        actionKey = item.action.actionKey,
+                        payload =
+                            if (item.reference == null) {
+                                item.action.payload
+                            } else {
+                                ""
+                            }
+                    )
+                }
+                .toMutableList()
+
+        for (index in 1 until parsed.size) {
+            val reference =
+                parsed[index].reference
+                    ?: continue
+
+            val producer =
+                parsed[index - 1].action
+
+            val consumer =
+                parsed[index].action
+
+            val transferKey =
+                "r9_8_edge_${index}_${index + 1}"
+
+            val semanticHint =
+                when (reference.kind) {
+                    TransferReferenceKind.PREVIOUS_RESULT -> ""
+                    TransferReferenceKind.PREVIOUS_SCREEN_TITLE ->
+                        AyanaVerifiedResultTransfer.SEMANTIC_HINT_SCREEN_TITLE
+                }
+
+            val captureSpec =
+                resultTransfer.captureSpecForAction(
+                    transferKey = transferKey,
+                    appKey = producer.appKey,
+                    actionKey = producer.actionKey,
+                    semanticHint = semanticHint
+                ) ?: return null
+
+            val template =
+                consumer.payload
+                    .replace(
+                        TRANSFER_PARSE_SENTINEL,
+                        AyanaVerifiedResultTransfer.DEFAULT_PLACEHOLDER
+                    )
+                    .trim()
+
+            if (
+                template.countOccurrences(
+                    AyanaVerifiedResultTransfer.DEFAULT_PLACEHOLDER
+                ) != 1
+            ) {
+                return null
+            }
+
+            val bindingSpec =
+                resultTransfer.bindingSpecForAction(
+                    transferKey = transferKey,
+                    appKey = consumer.appKey,
+                    actionKey = consumer.actionKey,
+                    template = template
+                ) ?: return null
+
+            if (!resultTransfer.areCompatible(captureSpec, bindingSpec)) {
+                return null
+            }
+
+            if (steps[index - 1].captureSpec != null) return null
+
+            steps[index - 1] =
+                steps[index - 1]
+                    .copy(
+                        captureSpec = captureSpec
+                    )
+
+            steps[index] =
+                steps[index]
+                    .copy(
+                        bindingSpec = bindingSpec
+                    )
+        }
+
+        if (steps.count { it.bindingSpec != null } == 0) return null
+
+        return TaskPlan(
+            key = planKey,
+            originalCommand = originalCommand,
+            source = source,
+            steps = steps,
+            acceptanceProbe = acceptanceProbe
+        )
+    }
+
+    private fun detectTransferReference(
+        clause: String
+    ): TransferReference? {
+        val candidates =
+            listOf(
+                TransferReferenceKind.PREVIOUS_SCREEN_TITLE to
+                    Regex(
+                        """(?:с\s+)?(?:названием|заголовком)\s+(?:этой\s+)?страницы|(?:название|заголовок)\s+(?:этой\s+)?страницы""",
+                        RegexOption.IGNORE_CASE
+                    ),
+                TransferReferenceKind.PREVIOUS_RESULT to
+                    Regex(
+                        """(?:результат|значение)\s+(?:предыдущего\s+шага|предыдущего\s+приложения)|(?:этот|полученный|предыдущий)\s+результат""",
+                        RegexOption.IGNORE_CASE
+                    )
+            )
+
+        val matches =
+            candidates
+                .mapNotNull { (kind, regex) ->
+                    regex.find(clause)
+                        ?.let { match ->
+                            Triple(kind, match.range, match.value)
+                        }
+                }
+
+        if (matches.size != 1) return null
+
+        val (kind, range, _) = matches.single()
+
+        val rewritten =
+            clause
+                .replaceRange(
+                    range,
+                    TRANSFER_PARSE_SENTINEL
+                )
+                .replace(Regex("\\s+"), " ")
+                .trim()
+
+        if (rewritten.isBlank()) return null
+
+        return TransferReference(
+            kind = kind,
+            rewrittenClause = rewritten
+        )
+    }
+
+    private fun String.countOccurrences(
+        needle: String
+    ): Int {
+        if (needle.isBlank()) return 0
+        var count = 0
+        var cursor = 0
+
+        while (true) {
+            val found = indexOf(needle, cursor)
+            if (found < 0) break
+            count += 1
+            cursor = found + needle.length
+        }
+
+        return count
+    }
+
     private fun parseVerifiedTransferUserPlan(
         clean: String
     ): TaskPlan? {
@@ -1187,6 +1553,22 @@ class AyanaMultiAppTaskOrchestrator(
         )
     }
 
+    private fun isGenericResultTransferAcceptanceCommand(
+        value: String
+    ): Boolean {
+        val normalized = normalize(value)
+
+        return normalized in
+            setOf(
+                "проверь универсальный перенос результатов между приложениями",
+                "протестируй универсальный перенос результатов между приложениями",
+                "проверь универсальную передачу результатов между приложениями",
+                "протестируй универсальную передачу результатов между приложениями",
+                "проверь generic result transfer",
+                "протестируй generic result transfer"
+            )
+    }
+
     private fun isSemanticFallbackAcceptanceCommand(
         value: String
     ): Boolean {
@@ -1241,7 +1623,7 @@ class AyanaMultiAppTaskOrchestrator(
             value
                 .split(
                     Regex(
-                        """\s*(?:[,;]\s*)?(?:затем|потом|после этого|а затем|а потом)\s+""",
+                        """(?:\s*[,;]\s*|\s+)(?:а\s+затем|а\s+потом|затем|потом|после этого)\s+""",
                         RegexOption.IGNORE_CASE
                     )
                 )
@@ -1301,11 +1683,18 @@ class AyanaMultiAppTaskOrchestrator(
             .replace(Regex("\\s+"), " ")
 
     companion object {
-        const val VERSION = "1.4"
+        const val VERSION = "1.5"
         const val MAX_STEPS = 5
         const val ACCEPTANCE_STEP_COUNT = 3
         const val RESULT_TRANSFER_ACCEPTANCE_STEP_COUNT = 3
         const val SEMANTIC_FALLBACK_ACCEPTANCE_STEP_COUNT = 3
+        const val GENERIC_RESULT_TRANSFER_ACCEPTANCE_STEP_COUNT = 3
+
+        const val GENERIC_RESULT_TRANSFER_ACCEPTANCE_SCENARIO =
+            "найди в YouTube AYANA R9.8 generic transfer затем найди в интернете результат предыдущего шага затем подготовь событие в календаре результат предыдущего шага"
+
+        const val TRANSFER_PARSE_SENTINEL =
+            "https://ayana-transfer.invalid/"
 
         const val ACCEPTANCE_QUERY =
             "AYANA R9.4 multi-app orchestration probe"
