@@ -61,6 +61,16 @@ import kotlin.math.abs
 
 class AyanaVoiceService : Service() {
 
+    // AYANA v12.30.0 / R9.8 GENERIC VERIFIED RESULT TRANSFER.
+    // Builds on DEVICE-CONFIRMED R9.7.3.
+    // - Verified Result Transfer v2.0 adds typed producer/consumer contracts;
+    // - Multi-App Task Orchestrator v1.5 compiles explicit previous-result references generically;
+    // - transfer edges depend on action semantics, not hard-coded Browser -> YouTube -> Calendar chains;
+    // - one verified app step may consume a prior record and produce the next record;
+    // - incompatible typed edges fail closed before Android dispatch;
+    // - R9.5/R9.6/R9.7 behavior and R9.7.3 routing/terminal truth remain preserved.
+    // ORB, visualizer, Worker, MainActivity, Personal Search and Accessibility source untouched.
+    //
     // AYANA v12.29.3 / R9.7.3 ACTION MORPHOLOGY + TERMINAL TRUTH.
     // Builds on DEVICE-CONFIRMED R9.7 STRUCTURED SCREEN READING.
     // - Accessibility remains the primary low-latency semantic source for external screens;
@@ -13176,6 +13186,12 @@ respondAndResume(
                             append(report.optString("result_transfer_version"))
                             append("; transfer_count=")
                             append(report.optInt("transfer_count", 0))
+                            append("; generic_result_transfer=")
+                            append(report.optBoolean("generic_result_transfer", false))
+                            append("; transfer_edge_count=")
+                            append(report.optInt("transfer_edge_count", 0))
+                            append("; typed_transfer_contracts=")
+                            append(report.optBoolean("typed_transfer_contracts", false))
                             append("; first_failure_stage=")
                             append(report.optString("first_failure_stage"))
                             append("; first_failure_reason=")
@@ -13183,6 +13199,29 @@ respondAndResume(
                             append("; report=")
                             append(report.toString().take(4200))
                         }
+
+                    if (report.optBoolean("generic_result_transfer", false)) {
+                        commandHistoryStore.addEvent(
+                            activeCommandHistoryId,
+                            state =
+                                if (success) {
+                                    "generic_result_transfer_verified"
+                                } else {
+                                    "generic_result_transfer_failed"
+                                },
+                            message =
+                                if (success) {
+                                    "R9.8 generic verified result transfer подтверждён"
+                                } else {
+                                    "R9.8 generic verified result transfer остановлен fail-closed"
+                                },
+                            details =
+                                "edges=${report.optInt("transfer_edge_count", 0)}; " +
+                                    "records=${report.optInt("transfer_count", 0)}; " +
+                                    "typed=${report.optBoolean("typed_transfer_contracts", false)}; " +
+                                    "terminal=${report.optString("terminal_status")}"
+                        )
+                    }
 
                     commandHistoryStore.addEvent(
                         activeCommandHistoryId,
@@ -13279,6 +13318,36 @@ respondAndResume(
         ) {
             when {
                 planKey ==
+                    "r9.8-generic-result-transfer-device-acceptance" -> {
+                    val ledger =
+                        report.optJSONObject("transfer_ledger")
+                            ?: JSONObject()
+
+                    val first =
+                        ledger.optJSONObject("r9_8_edge_1_2")
+
+                    val second =
+                        ledger.optJSONObject("r9_8_edge_2_3")
+
+                    val firstType =
+                        first?.optString("value_type")
+                            .orEmpty()
+                            .ifBlank { "UNKNOWN" }
+
+                    val secondType =
+                        second?.optString("value_type")
+                            .orEmpty()
+                            .ifBlank { "UNKNOWN" }
+
+                    "R9.8 универсальный перенос результатов подтверждён: $passed/$total PASS. " +
+                        "Generic compiler построил цепочку YouTube -> Browser -> Calendar без отдельного сценария под этот порядок; " +
+                        "созданы ${report.optInt("transfer_edge_count", 0)} typed transfer-edge и " +
+                        "${report.optInt("transfer_count", 0)} verified record ($firstType -> $secondType). " +
+                        "Каждый вход получен только из verified provenance; Календарь остался DRAFT_ONLY, " +
+                        "AYANA восстановлена после каждого шага, постоянных изменений нет."
+                }
+
+                planKey ==
                     "r9.6-semantic-fallback-device-acceptance" -> {
                     val ledger =
                         report.optJSONObject("transfer_ledger")
@@ -13326,6 +13395,12 @@ respondAndResume(
                         "из verified action-result использовано в поиске YouTube и в несохранённом черновике Календаря. " +
                         "AYANA возвращена после каждого шага; постоянных изменений нет."
                 }
+
+                report.optBoolean("generic_result_transfer", false) ->
+                    "Универсальная многошаговая передача результата выполнена и подтверждена: $passed/$total шага. " +
+                        "Typed transfer edges=${report.optInt("transfer_edge_count", 0)}, " +
+                        "verified records=${report.optInt("transfer_count", 0)}; " +
+                        "каждый consumer получил только проверенный input, постоянные изменения не выполнялись."
 
                 acceptanceProbe ->
                     "Многошаговая работа приложений подтверждена: $passed/$total PASS. " +
@@ -46265,9 +46340,9 @@ state
 
     companion object {
 
-        // R9.7.3 RELEASE / FEATURE LINEAGE TRUTH.
+        // R9.8 RELEASE / FEATURE LINEAGE TRUTH.
         private const val AYANA_VOICE_SERVICE_RELEASE =
-            "v12.29.3 / R9.7.3 ACTION MORPHOLOGY + TERMINAL TRUTH"
+            "v12.30.0 / R9.8 GENERIC VERIFIED RESULT TRANSFER"
 
         private const val AYANA_PERSONAL_SEARCH_ENGINE_RELEASE =
             "v1.5.1 IMAGE COVERAGE TRUTH"
@@ -46279,13 +46354,13 @@ state
             "v11.1.10 Multi-Attachment"
 
         private const val AYANA_ACCEPTED_FEATURE_CHECKPOINT =
-            "R9.7 Structured Screen Reading — DEVICE-CONFIRMED ACCEPTED"
+            "R9.7.3 ACTION MORPHOLOGY + TERMINAL TRUTH — DEVICE-CONFIRMED ACCEPTED"
 
         private const val AYANA_CURRENT_FEATURE_RELEASE =
-            "R9.7.3 ACTION MORPHOLOGY + TERMINAL TRUTH"
+            "R9.8 GENERIC VERIFIED RESULT TRANSFER — PENDING DEVICE CONFIRMATION"
 
         private const val AYANA_RELEASE_LINEAGE =
-            "Android v12.21.0 / R7.9 truth-hardening + R8.0 multi-attachment + R8.1–R8.4 accepted Personal Global Search stack + R8.5–R8.5.4 capability/evidence truth + R9.0 autonomous agent foundation + R9.0.1 history live-refresh proof fix + R9.0.2 diagnostic reconciliation/history refresh fix + R9.0.3 TTS health reconciliation + R9.1 IME perception/active telemetry truth + R9.2 autonomous recovery/long-task reconciliation + R9.2.1 adaptive hypothesis reconciliation + R9.3 app integration framework + R9.3.1 screen health reconciliation + R9.3.2 history latency recovery reconciliation + R9.3.3 informational terminal reconciliation + R9.3.4 app integration device acceptance + R9.4 multi-app task orchestration + R9.4.1 screen ownership union reconciliation + R9.5 verified result transfer between app steps + R9.5.1 partial marker provenance reconciliation + R9.5.2 bounded marker observation + R9.5.3 verified action result transfer + R9.6 verified semantic observation fallback + R9.6.1 visual fallback acceptance truth + R9.7 structured screen reading + R9.7.1 conversation routing/terminal truth + R9.7.2 structured router conversation precedence + R9.7.3 action morphology/terminal truth"
+            "Android v12.21.0 / R7.9 truth-hardening + R8.0 multi-attachment + R8.1–R8.4 accepted Personal Global Search stack + R8.5–R8.5.4 capability/evidence truth + R9.0 autonomous agent foundation + R9.0.1 history live-refresh proof fix + R9.0.2 diagnostic reconciliation/history refresh fix + R9.0.3 TTS health reconciliation + R9.1 IME perception/active telemetry truth + R9.2 autonomous recovery/long-task reconciliation + R9.2.1 adaptive hypothesis reconciliation + R9.3 app integration framework + R9.3.1 screen health reconciliation + R9.3.2 history latency recovery reconciliation + R9.3.3 informational terminal reconciliation + R9.3.4 app integration device acceptance + R9.4 multi-app task orchestration + R9.4.1 screen ownership union reconciliation + R9.5 verified result transfer between app steps + R9.5.1 partial marker provenance reconciliation + R9.5.2 bounded marker observation + R9.5.3 verified action result transfer + R9.6 verified semantic observation fallback + R9.6.1 visual fallback acceptance truth + R9.7 structured screen reading + R9.7.1 conversation routing/terminal truth + R9.7.2 structured router conversation precedence + R9.7.3 action morphology/terminal truth + R9.8 generic verified result transfer"
 
         // AyanaCommandHistoryStore v2.8 keeps up to 4k chars inline and stores longer
         // results out-of-line. Self-review intentionally remains inline so copied History
