@@ -3852,6 +3852,17 @@ mainHandler.post {
         }
 
         if (
+            isReversibleBrightnessUndoAcceptanceCommand(
+                originalCommand
+            )
+        ) {
+            runLocalReversibleBrightnessUndoAcceptance(
+                silent = silent
+            )
+            return
+        }
+
+        if (
             isReversibleActionJournalAcceptanceCommand(
                 originalCommand
             )
@@ -10561,6 +10572,21 @@ SystemClock.elapsedRealtime() +
             )
     }
 
+    private fun isReversibleBrightnessUndoAcceptanceCommand(
+        command: String
+    ): Boolean {
+        val normalized =
+            normalizeReversibleUndoCommand(command)
+
+        return normalized in
+            setOf(
+                "проверь отмену яркости",
+                "протестируй отмену яркости",
+                "проверь rollback яркости",
+                "протестируй rollback яркости"
+            )
+    }
+
     private fun isReversibleActionJournalAcceptanceCommand(
         command: String
     ): Boolean {
@@ -11197,6 +11223,284 @@ SystemClock.elapsedRealtime() +
                     "Не удалось подтверждённо восстановить предыдущее состояние яркости."
                 }
             )
+    }
+
+    private fun runLocalReversibleBrightnessUndoAcceptance(
+        silent: Boolean
+    ) {
+        executionPhase(
+            phase = "reversible_brightness_undo_acceptance",
+            executor = "reversible_action_journal"
+        )
+
+        if (
+            Build.VERSION.SDK_INT >= Build.VERSION_CODES.M &&
+            !Settings.System.canWrite(this)
+        ) {
+            respondUnsupportedAndResume(
+                text = "R9.9.1 acceptance яркости требует системный доступ «Изменение системных настроек».",
+                silent = silent,
+                technical = "r9_9_1_brightness_acceptance_write_settings_required"
+            )
+            return
+        }
+
+        val originalMode =
+            try {
+                Settings.System.getInt(
+                    contentResolver,
+                    Settings.System.SCREEN_BRIGHTNESS_MODE,
+                    -1
+                )
+            } catch (_: Exception) {
+                -1
+            }
+
+        val originalRaw =
+            try {
+                Settings.System.getInt(
+                    contentResolver,
+                    Settings.System.SCREEN_BRIGHTNESS,
+                    -1
+                )
+            } catch (_: Exception) {
+                -1
+            }
+
+        if (originalMode < 0 || originalRaw !in 0..255) {
+            respondAndResume(
+                text = "R9.9.1 acceptance: исходное состояние яркости не удалось прочитать.",
+                silent = silent,
+                success = false,
+                technical = "r9_9_1_brightness_acceptance_original_unavailable"
+            )
+            return
+        }
+
+        val targetMode =
+            Settings.System.SCREEN_BRIGHTNESS_MODE_MANUAL
+
+        val targetRaw =
+            if (originalRaw <= 223) {
+                (originalRaw + 24).coerceAtMost(255)
+            } else {
+                (originalRaw - 24).coerceAtLeast(0)
+            }
+
+        var entry: AyanaReversibleActionJournal.Entry? = null
+        var observedTargetMode = originalMode
+        var observedTargetRaw = originalRaw
+        var observedRestoredMode = originalMode
+        var observedRestoredRaw = originalRaw
+        var undoResult = JSONObject()
+        var cleanup = false
+
+        try {
+            val modeWritten =
+                Settings.System.putInt(
+                    contentResolver,
+                    Settings.System.SCREEN_BRIGHTNESS_MODE,
+                    targetMode
+                )
+
+            val rawWritten =
+                Settings.System.putInt(
+                    contentResolver,
+                    Settings.System.SCREEN_BRIGHTNESS,
+                    targetRaw
+                )
+
+            Thread.sleep(120L)
+
+            observedTargetMode =
+                Settings.System.getInt(
+                    contentResolver,
+                    Settings.System.SCREEN_BRIGHTNESS_MODE,
+                    -1
+                )
+
+            observedTargetRaw =
+                Settings.System.getInt(
+                    contentResolver,
+                    Settings.System.SCREEN_BRIGHTNESS,
+                    -1
+                )
+
+            val targetVerified =
+                modeWritten &&
+                    rawWritten &&
+                    observedTargetMode == targetMode &&
+                    abs(observedTargetRaw - targetRaw) <= 2
+
+            if (!targetVerified) {
+                respondAndResume(
+                    text = "R9.9.1 acceptance: тестовое изменение яркости не подтвердилось.",
+                    silent = silent,
+                    success = false,
+                    technical = "r9_9_1_brightness_acceptance_target_not_verified"
+                )
+                return
+            }
+
+            entry =
+                recordVerifiedReversibleBrightness(
+                    beforeMode = originalMode,
+                    beforeRaw = originalRaw,
+                    afterMode = observedTargetMode,
+                    afterRaw = observedTargetRaw,
+                    source = "r9_9_1_brightness_device_acceptance"
+                )
+
+            if (entry == null) {
+                respondAndResume(
+                    text = "R9.9.1 acceptance: journal не создал verified brightness undo record.",
+                    silent = silent,
+                    success = false,
+                    technical = "r9_9_1_brightness_acceptance_record_missing"
+                )
+                return
+            }
+
+            undoResult =
+                performReversibleUndo(
+                    entry = entry,
+                    trackExecutionKernel = false
+                )
+
+            observedRestoredMode =
+                Settings.System.getInt(
+                    contentResolver,
+                    Settings.System.SCREEN_BRIGHTNESS_MODE,
+                    -1
+                )
+
+            observedRestoredRaw =
+                Settings.System.getInt(
+                    contentResolver,
+                    Settings.System.SCREEN_BRIGHTNESS,
+                    -1
+                )
+
+            val rawRestored =
+                if (
+                    originalMode ==
+                    Settings.System.SCREEN_BRIGHTNESS_MODE_MANUAL
+                ) {
+                    abs(observedRestoredRaw - originalRaw) <= 2
+                } else {
+                    true
+                }
+
+            val contractOk =
+                try {
+                    reversibleActionJournal.selfTest()
+                } catch (_: Exception) {
+                    false
+                }
+
+            cleanup =
+                try {
+                    reversibleActionJournal.remove(entry.id)
+                } catch (_: Exception) {
+                    false
+                }
+
+            val ok =
+                contractOk &&
+                    undoResult.optBoolean("success", false) &&
+                    undoResult.optBoolean("verified", false) &&
+                    observedRestoredMode == originalMode &&
+                    rawRestored &&
+                    cleanup
+
+            commandHistoryStore.addEvent(
+                activeCommandHistoryId,
+                state =
+                    if (ok) {
+                        "reversible_brightness_undo_acceptance_verified"
+                    } else {
+                        "reversible_brightness_undo_acceptance_failed"
+                    },
+                message =
+                    if (ok) {
+                        "R9.9.1 brightness verified undo acceptance подтверждён"
+                    } else {
+                        "R9.9.1 brightness verified undo acceptance обнаружил отклонение"
+                    },
+                details =
+                    JSONObject()
+                        .put("journal_version", AyanaReversibleActionJournal.VERSION)
+                        .put("original_mode", originalMode)
+                        .put("original_raw", originalRaw)
+                        .put("target_mode", targetMode)
+                        .put("target_raw", targetRaw)
+                        .put("observed_target_mode", observedTargetMode)
+                        .put("observed_target_raw", observedTargetRaw)
+                        .put("observed_restored_mode", observedRestoredMode)
+                        .put("observed_restored_raw", observedRestoredRaw)
+                        .put("undo", undoResult)
+                        .put("contract_self_test", contractOk)
+                        .put("persistent_mutation_detected", !ok && (observedRestoredMode != originalMode || !rawRestored))
+                        .put("test_entry_cleanup_verified", cleanup)
+                        .toString()
+                        .take(3000)
+            )
+
+            if (ok) {
+                finishLocalCommand(
+                    "R9.9.1 verified undo яркости подтверждён: mode/raw $originalMode/$originalRaw → $observedTargetMode/$observedTargetRaw → $observedRestoredMode/$observedRestoredRaw, rollback read-back verified.",
+                    silent
+                )
+            } else {
+                respondAndResume(
+                    text = "R9.9.1 verified undo яркости не прошёл acceptance: исходное состояние не было полностью подтверждено после rollback.",
+                    silent = silent,
+                    success = false,
+                    technical = "r9_9_1_brightness_undo_acceptance_failed"
+                )
+            }
+        } catch (error: Exception) {
+            respondAndResume(
+                text = "R9.9.1 brightness undo acceptance завершился ошибкой: ${error.message ?: error.javaClass.simpleName}",
+                silent = silent,
+                success = false,
+                technical = "r9_9_1_brightness_acceptance_exception:${error.javaClass.simpleName}"
+            )
+        } finally {
+            try {
+                Settings.System.putInt(
+                    contentResolver,
+                    Settings.System.SCREEN_BRIGHTNESS,
+                    originalRaw
+                )
+                Settings.System.putInt(
+                    contentResolver,
+                    Settings.System.SCREEN_BRIGHTNESS_MODE,
+                    originalMode
+                )
+                Thread.sleep(120L)
+            } catch (_: Exception) {
+            }
+
+            val id = entry?.id
+            if (!cleanup && !id.isNullOrBlank()) {
+                cleanup =
+                    try {
+                        reversibleActionJournal.remove(id)
+                    } catch (_: Exception) {
+                        false
+                    }
+            }
+
+            if (!cleanup && !entry?.id.isNullOrBlank()) {
+                commandHistoryStore.addEvent(
+                    activeCommandHistoryId,
+                    state = "reversible_brightness_undo_acceptance_cleanup_warning",
+                    message = "Тестовая запись R9.9.1 яркости не была удалена из журнала",
+                    details = "entry=${entry?.id}"
+                )
+            }
+        }
     }
 
     private fun runLocalReversibleActionJournalAcceptance(
@@ -49162,9 +49466,9 @@ state
         private const val MASTER_STATUS_MANUAL_REQUIRED =
             "MANUAL_REQUIRED"
 
-        // R9.9 RELEASE / FEATURE LINEAGE TRUTH.
+        // R9.9.1 RELEASE / FEATURE LINEAGE TRUTH.
         private const val AYANA_VOICE_SERVICE_RELEASE =
-            "v12.31.0 / R9.9 REVERSIBLE ACTION JOURNAL + VERIFIED UNDO"
+            "v12.31.1 / R9.9.1 BRIGHTNESS VERIFIED UNDO DEVICE ACCEPTANCE"
 
         private const val AYANA_PERSONAL_SEARCH_ENGINE_RELEASE =
             "v1.5.1 IMAGE COVERAGE TRUTH"
@@ -49176,13 +49480,13 @@ state
             "v11.1.10 Multi-Attachment"
 
         private const val AYANA_ACCEPTED_FEATURE_CHECKPOINT =
-            "R9.8.1 MASTER FULL ACCEPTANCE & DIAGNOSTIC ENGINE — DEVICE-CONFIRMED ACCEPTED"
+            "R9.9 REVERSIBLE ACTION JOURNAL + VERIFIED UNDO — DEVICE-CONFIRMED ACCEPTED"
 
         private const val AYANA_CURRENT_FEATURE_RELEASE =
-            "R9.9 REVERSIBLE ACTION JOURNAL + VERIFIED UNDO — PENDING DEVICE CONFIRMATION"
+            "R9.9.1 BRIGHTNESS VERIFIED UNDO DEVICE ACCEPTANCE — PENDING DEVICE CONFIRMATION"
 
         private const val AYANA_RELEASE_LINEAGE =
-            "Android v12.21.0 / R7.9 truth-hardening + R8.0 multi-attachment + R8.1–R8.4 accepted Personal Global Search stack + R8.5–R8.5.4 capability/evidence truth + R9.0 autonomous agent foundation + R9.0.1 history live-refresh proof fix + R9.0.2 diagnostic reconciliation/history refresh fix + R9.0.3 TTS health reconciliation + R9.1 IME perception/active telemetry truth + R9.2 autonomous recovery/long-task reconciliation + R9.2.1 adaptive hypothesis reconciliation + R9.3 app integration framework + R9.3.1 screen health reconciliation + R9.3.2 history latency recovery reconciliation + R9.3.3 informational terminal reconciliation + R9.3.4 app integration device acceptance + R9.4 multi-app task orchestration + R9.4.1 screen ownership union reconciliation + R9.5 verified result transfer between app steps + R9.5.1 partial marker provenance reconciliation + R9.5.2 bounded marker observation + R9.5.3 verified action result transfer + R9.6 verified semantic observation fallback + R9.6.1 visual fallback acceptance truth + R9.7 structured screen reading + R9.7.1 conversation routing/terminal truth + R9.7.2 structured router conversation precedence + R9.7.3 action morphology/terminal truth + R9.8 generic verified result transfer + R9.8.1 master full acceptance/diagnostic engine + R9.9 reversible action journal/verified undo"
+            "Android v12.21.0 / R7.9 truth-hardening + R8.0 multi-attachment + R8.1–R8.4 accepted Personal Global Search stack + R8.5–R8.5.4 capability/evidence truth + R9.0 autonomous agent foundation + R9.0.1 history live-refresh proof fix + R9.0.2 diagnostic reconciliation/history refresh fix + R9.0.3 TTS health reconciliation + R9.1 IME perception/active telemetry truth + R9.2 autonomous recovery/long-task reconciliation + R9.2.1 adaptive hypothesis reconciliation + R9.3 app integration framework + R9.3.1 screen health reconciliation + R9.3.2 history latency recovery reconciliation + R9.3.3 informational terminal reconciliation + R9.3.4 app integration device acceptance + R9.4 multi-app task orchestration + R9.4.1 screen ownership union reconciliation + R9.5 verified result transfer between app steps + R9.5.1 partial marker provenance reconciliation + R9.5.2 bounded marker observation + R9.5.3 verified action result transfer + R9.6 verified semantic observation fallback + R9.6.1 visual fallback acceptance truth + R9.7 structured screen reading + R9.7.1 conversation routing/terminal truth + R9.7.2 structured router conversation precedence + R9.7.3 action morphology/terminal truth + R9.8 generic verified result transfer + R9.8.1 master full acceptance/diagnostic engine + R9.9 reversible action journal/verified undo + R9.9.1 brightness verified undo device acceptance"
 
         // AyanaCommandHistoryStore v2.8 keeps up to 4k chars inline and stores longer
         // results out-of-line. Self-review intentionally remains inline so copied History
