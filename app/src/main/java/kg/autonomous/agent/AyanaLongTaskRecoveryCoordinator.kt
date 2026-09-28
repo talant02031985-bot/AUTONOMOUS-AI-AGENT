@@ -5,7 +5,7 @@ import org.json.JSONObject
 import java.util.Locale
 
 /**
- * AYANA R10.3 Long Task Recovery Coordinator v1.0.
+ * AYANA R10.3 Long Task Recovery Coordinator v1.0.1.
  *
  * Pure policy/reconciliation layer over the persisted Durable Goal state.
  *
@@ -137,6 +137,16 @@ class AyanaLongTaskRecoveryCoordinator {
             when {
                 requiresConfirmation ->
                     Strategy.REQUIRE_USER_CONFIRMATION
+
+                // R10.3.1: an explicitly PAUSED goal is never eligible for
+                // automatic continuation, even when its persisted plan also
+                // looks terminal-complete. The previous precedence evaluated
+                // VERIFY_COMPLETION_ONLY before PAUSED and caused the real-device
+                // network-pause acceptance gate to report false.
+                status ==
+                    "paused" &&
+                    automatic ->
+                    Strategy.MANUAL_RESUME_ONLY
 
                 reconciliationRequired ||
                     inFlight ->
@@ -897,6 +907,49 @@ class AyanaLongTaskRecoveryCoordinator {
             return false
         }
 
+        // Regression for the real-device R10.3 acceptance failure: a PAUSED
+        // network goal may still have next_plan_step >= plan_size. Automatic
+        // recovery must preserve the pause instead of selecting terminal verify.
+        val networkPausedAtTerminal =
+            JSONObject(
+                completed.toString()
+            )
+                .put(
+                    "status",
+                    "paused"
+                )
+                .put(
+                    "recovery_reason",
+                    "network_unavailable"
+                )
+                .put(
+                    "safe_auto_resume",
+                    true
+                )
+                .put(
+                    "last_checkpoint",
+                    "network_wait"
+                )
+
+        val networkPausedDecision =
+            evaluate(
+                networkPausedAtTerminal,
+                automatic = true
+            )
+
+        if (
+            networkPausedDecision.optString(
+                "strategy"
+            ) !=
+            Strategy.MANUAL_RESUME_ONLY.name ||
+            networkPausedDecision.optBoolean(
+                "automatic_resume_allowed",
+                true
+            )
+        ) {
+            return false
+        }
+
         return true
     }
 
@@ -1344,7 +1397,7 @@ class AyanaLongTaskRecoveryCoordinator {
 
     companion object {
         const val VERSION =
-            "1.0"
+            "1.0.1"
 
         private val SAFE_AUTOMATIC_ANDROID_ACTIONS =
             setOf(
