@@ -62,6 +62,20 @@ import kotlin.math.abs
 
 class AyanaVoiceService : Service() {
 
+    // AYANA v12.35.0 / R10.2 PERSONAL SEARCH EXPANSION.
+    // Builds on DEVICE-CONFIRMED R10.1 local self-audit and R10.0 Unified Screen Intelligence.
+    // - one local Personal Search surface is explicitly audited across History, Notifications,
+    //   file metadata, document-content index and photo metadata/OCR/visual labels/timestamps;
+    // - existing Memory and Tasks sources remain available as additional local sources;
+    // - Android source-unavailability remains visible instead of being treated as an empty result;
+    // - no Agent Core or Worker turn is required for the search path or R10.2 acceptance;
+    // - photo search does not add face matching/person-identity inference;
+    // - R10.2 adds a dedicated real-device multi-source coverage gate without changing ORB/visualizer.
+    //
+    // AYANA v12.34.0 / R10.1 LOCAL SELF-DIAGNOSTICS / SELF-AUDIT.
+    // Full capability inventory/audit is rendered locally from Registry/runtime evidence and
+    // publishes a verified TXT report without Agent Core/Worker completion dependency.
+    //
     // AYANA v12.33.0 / R10.0 UNIFIED SCREEN INTELLIGENCE.
     // Builds on DEVICE-CONFIRMED R9.9.2 bounded low-battery proactivity and R9.9.1 undo.
     // - AyanaScreenIntelligence v5.0 is the only consumer-facing current-screen truth source;
@@ -709,6 +723,12 @@ class AyanaVoiceService : Service() {
     // Capability Registry/runtime/diagnostic truth and never calls Agent Core.
     private val localSelfAudit by lazy {
         AyanaLocalSelfAudit()
+    }
+
+    // R10.2: contract/audit layer over the already local Personal Search stack.
+    // It does not create a second search engine and grants no action authority.
+    private val unifiedPersonalSearchContract by lazy {
+        AyanaUnifiedPersonalSearchContract()
     }
 
     private val agentPlannerV2 by lazy {
@@ -4553,6 +4573,20 @@ mainHandler.post {
                 )
                 return
             }
+
+        // R10.2 UNIFIED PERSONAL SEARCH ACCEPTANCE. This dedicated gate runs a
+        // bounded local search across every registered Personal Search source and
+        // verifies the file/document/notification/history/photo evidence contract.
+        if (
+            isR10_2UnifiedPersonalSearchAcceptanceCommand(
+                routingNormalized
+            )
+        ) {
+            runR10_2UnifiedPersonalSearchAcceptance(
+                silent = silent
+            )
+            return
+        }
 
         // R10.1 LOCAL SELF-AUDIT. Explicit capability inventory/audit requests
         // are fully local and must never depend on a long Agent Core completion.
@@ -28649,6 +28683,44 @@ append(index + 1)
                     .put("historical_502_path_bypassed", true)
         )
 
+        val unifiedPersonalSearchOk =
+            try {
+                unifiedPersonalSearchContract.selfTest() &&
+                    isR10_2UnifiedPersonalSearchAcceptanceCommand(
+                        "проверь единый personal search"
+                    )
+            } catch (_: Exception) {
+                false
+            }
+
+        add(
+            id = "R10-FOUND-018",
+            title = "R10.2 unified Personal Search / local source-coverage contract",
+            critical = true,
+            ok = unifiedPersonalSearchOk,
+            message =
+                if (unifiedPersonalSearchOk) {
+                    "R10.2 formalizes one local Personal Search truth surface across history, notifications, file metadata, document contents and photo metadata/OCR/labels without face identity inference."
+                } else {
+                    "R10.2 Unified Personal Search contract self-test failed."
+                },
+            evidence =
+                JSONObject()
+                    .put("contract_version", AyanaUnifiedPersonalSearchContract.VERSION)
+                    .put("registered_search_sources", AyanaPersonalSearchEngine.Source.values().size)
+                    .put("history_search", true)
+                    .put("notification_search", true)
+                    .put("file_metadata_search", true)
+                    .put("document_content_search", true)
+                    .put("photo_metadata_search", true)
+                    .put("photo_ocr_and_labels", true)
+                    .put("photo_timestamp_signal", true)
+                    .put("face_identity_inference", false)
+                    .put("agent_core_required", false)
+                    .put("worker_required", false)
+                    .put("persistent_user_data_mutation", false)
+        )
+
         return tests
     }
 
@@ -34520,6 +34592,213 @@ requestMethod = "GET"
             .put("evidence", evidence)
 
 
+
+    private fun isR10_2UnifiedPersonalSearchAcceptanceCommand(
+        command: String
+    ): Boolean {
+        val normalized =
+            command
+                .lowercase(Locale.ROOT)
+                .replace('ё', 'е')
+                .replace(Regex("\\s+"), " ")
+                .trim()
+                .removePrefix("аяна ")
+                .trim()
+
+        return normalized in
+            setOf(
+                "проверь единый personal search",
+                "проверь единый персональный поиск",
+                "проверь единый личный поиск",
+                "проверь personal search r10.2",
+                "проверь personal search"
+            )
+    }
+
+    private fun runR10_2UnifiedPersonalSearchAcceptance(
+        silent: Boolean
+    ) {
+        executionPhase(
+            phase = "r10_2_unified_personal_search_acceptance",
+            executor = "unified_personal_search_contract_v1"
+        )
+
+        val commandToken =
+            activeCommandToken
+
+        val worker =
+            thread(
+                start = false,
+                name = "AyanaR10_2UnifiedPersonalSearch"
+            ) {
+                try {
+                    val selfTest =
+                        try {
+                            unifiedPersonalSearchContract.selfTest()
+                        } catch (_: Exception) {
+                            false
+                        }
+
+                    if (!selfTest) {
+                        mainHandler.post {
+                            if (
+                                !isCommandCancelled(commandToken) &&
+                                commandToken == activeCommandToken
+                            ) {
+                                respondAndResume(
+                                    text = "R10.2 Unified Personal Search не прошёл внутренний contract self-test.",
+                                    silent = silent,
+                                    success = false,
+                                    technical =
+                                        JSONObject()
+                                            .put("contract_version", AyanaUnifiedPersonalSearchContract.VERSION)
+                                            .put("contract_self_test", false)
+                                            .toString()
+                                )
+                            }
+                        }
+                        return@thread
+                    }
+
+                    val request =
+                        AyanaPersonalSearchEngine.Request(
+                            query = "AYANA",
+                            sources =
+                                AyanaPersonalSearchEngine.Source
+                                    .values()
+                                    .toSet()
+                        )
+
+                    val report =
+                        try {
+                            personalSearchEngine.search(
+                                request = request,
+                                perSourceLimit = 3,
+                                totalLimit = 18
+                            )
+                        } catch (error: Exception) {
+                            mainHandler.post {
+                                if (
+                                    !isCommandCancelled(commandToken) &&
+                                    commandToken == activeCommandToken
+                                ) {
+                                    respondAndResume(
+                                        text = "R10.2 Unified Personal Search не смог выполнить локальный multi-source probe: ${error.message ?: "ошибка локального поиска"}.",
+                                        silent = silent,
+                                        success = false,
+                                        technical =
+                                            JSONObject()
+                                                .put("contract_version", AyanaUnifiedPersonalSearchContract.VERSION)
+                                                .put("contract_self_test", true)
+                                                .put("probe_exception", error.javaClass.simpleName)
+                                                .toString()
+                                    )
+                                }
+                            }
+                            return@thread
+                        }
+
+                    if (
+                        isCommandCancelled(commandToken) ||
+                        commandToken != activeCommandToken
+                    ) {
+                        return@thread
+                    }
+
+                    val evidence =
+                        unifiedPersonalSearchContract
+                            .inspect(report)
+                            .put("contract_self_test", true)
+                            .put("probe_query", request.query)
+                            .put("personal_search_engine_release", AYANA_PERSONAL_SEARCH_ENGINE_RELEASE)
+                            .put("voice_service_release", AYANA_VOICE_SERVICE_RELEASE)
+                            .put("accepted_checkpoint", AYANA_ACCEPTED_FEATURE_CHECKPOINT)
+                            .put("current_release", AYANA_CURRENT_FEATURE_RELEASE)
+
+                    val accepted =
+                        unifiedPersonalSearchContract
+                            .acceptanceOk(evidence)
+
+                    if (!accepted) {
+                        mainHandler.post {
+                            if (
+                                !isCommandCancelled(commandToken) &&
+                                commandToken == activeCommandToken
+                            ) {
+                                commandHistoryStore.addEvent(
+                                    activeCommandHistoryId,
+                                    state = "r10_2_unified_personal_search_not_verified",
+                                    message = "R10.2 Unified Personal Search не подтвердил все обязательные локальные источники",
+                                    details = evidence.toString().take(3900)
+                                )
+
+                                respondAndResume(
+                                    text =
+                                        "R10.2 Unified Personal Search выполнен fail-closed: не все обязательные источники/индексы подтверждены. Проверь technical evidence.",
+                                    silent = silent,
+                                    success = false,
+                                    technical = evidence.toString()
+                                )
+                            }
+                        }
+                        return@thread
+                    }
+
+                    evidence
+                        .put("r10_2_verified", true)
+                        .put("persistent_mutation_detected", false)
+                        .put("face_identity_claimed", false)
+
+                    mainHandler.post {
+                        if (
+                            isCommandCancelled(commandToken) ||
+                            commandToken != activeCommandToken
+                        ) {
+                            return@post
+                        }
+
+                        commandHistoryStore.addEvent(
+                            activeCommandHistoryId,
+                            state = "r10_2_unified_personal_search_verified",
+                            message =
+                                "R10.2 Unified Personal Search подтверждён реальным local multi-source probe",
+                            details = evidence.toString().take(3900)
+                        )
+
+                        val sourceCount =
+                            evidence.optInt(
+                                "registered_source_count",
+                                0
+                            )
+
+                        val hits =
+                            evidence.optInt(
+                                "total_hits",
+                                0
+                            )
+
+                        respondAndResume(
+                            text =
+                                "R10.2 Unified Personal Search подтверждён: источников=$sourceCount; " +
+                                    "история/уведомления/файлы/документы/фото доступны; " +
+                                    "локальные OCR/labels и date signals включены; совпадений probe=$hits; " +
+                                    "идентификация личности по лицу не используется.",
+                            silent = silent,
+                            success = true,
+                            technical = evidence.toString()
+                        )
+                    }
+                } finally {
+                    if (Thread.currentThread() === currentAgentThread) {
+                        currentAgentThread = null
+                    }
+                }
+            }
+
+        currentAgentThread = worker
+        executionKernel.bindThread(worker)
+        worker.start()
+    }
 
     private fun isR10LocalSelfAuditRequest(
         command: String
@@ -51338,12 +51617,12 @@ state
         private const val MASTER_STATUS_MANUAL_REQUIRED =
             "MANUAL_REQUIRED"
 
-        // R10.1 LOCAL SELF-DIAGNOSTICS / SELF-AUDIT RELEASE TRUTH.
+        // R10.2 PERSONAL SEARCH EXPANSION RELEASE TRUTH.
         private const val AYANA_VOICE_SERVICE_RELEASE =
-            "v12.34.0 / R10.1 LOCAL SELF-DIAGNOSTICS / SELF-AUDIT"
+            "v12.35.0 / R10.2 PERSONAL SEARCH EXPANSION"
 
         private const val AYANA_PERSONAL_SEARCH_ENGINE_RELEASE =
-            "v1.5.1 IMAGE COVERAGE TRUTH"
+            "v1.5.1 IMAGE COVERAGE TRUTH + R10.2 UNIFIED SEARCH CONTRACT v1.0"
 
         private const val AYANA_CAPABILITY_REGISTRY_RELEASE =
             "v3.2.1"
@@ -51352,13 +51631,13 @@ state
             "v11.1.10 Multi-Attachment"
 
         private const val AYANA_ACCEPTED_FEATURE_CHECKPOINT =
-            "R10.0 UNIFIED SCREEN INTELLIGENCE — DEVICE-CONFIRMED ACCEPTED"
+            "R10.1 LOCAL SELF-DIAGNOSTICS / SELF-AUDIT — DEVICE-CONFIRMED ACCEPTED"
 
         private const val AYANA_CURRENT_FEATURE_RELEASE =
-            "R10.1 LOCAL SELF-DIAGNOSTICS / SELF-AUDIT — PENDING DEVICE CONFIRMATION"
+            "R10.2 PERSONAL SEARCH EXPANSION — PENDING DEVICE CONFIRMATION"
 
         private const val AYANA_RELEASE_LINEAGE =
-            "Android v12.21.0 / R7.9 truth-hardening + R8.0 multi-attachment + R8.1–R8.4 accepted Personal Global Search stack + R8.5–R8.5.4 capability/evidence truth + R9.0 autonomous agent foundation + R9.0.1 history live-refresh proof fix + R9.0.2 diagnostic reconciliation/history refresh fix + R9.0.3 TTS health reconciliation + R9.1 IME perception/active telemetry truth + R9.2 autonomous recovery/long-task reconciliation + R9.2.1 adaptive hypothesis reconciliation + R9.3 app integration framework + R9.3.1 screen health reconciliation + R9.3.2 history latency recovery reconciliation + R9.3.3 informational terminal reconciliation + R9.3.4 app integration device acceptance + R9.4 multi-app task orchestration + R9.4.1 screen ownership union reconciliation + R9.5 verified result transfer between app steps + R9.5.1 partial marker provenance reconciliation + R9.5.2 bounded marker observation + R9.5.3 verified action result transfer + R9.6 verified semantic observation fallback + R9.6.1 visual fallback acceptance truth + R9.7 structured screen reading + R9.7.1 conversation routing/terminal truth + R9.7.2 structured router conversation precedence + R9.7.3 action morphology/terminal truth + R9.8 generic verified result transfer + R9.8.1 master full acceptance/diagnostic engine + R9.9 reversible action journal/verified undo + R9.9.1 brightness verified undo device acceptance + R9.9.2 opt-in low-battery controlled proactivity + R10.0 unified screen intelligence + R10.1 local self-diagnostics/self-audit"
+            "Android v12.21.0 / R7.9 truth-hardening + R8.0 multi-attachment + R8.1–R8.4 accepted Personal Global Search stack + R8.5–R8.5.4 capability/evidence truth + R9.0 autonomous agent foundation + R9.0.1 history live-refresh proof fix + R9.0.2 diagnostic reconciliation/history refresh fix + R9.0.3 TTS health reconciliation + R9.1 IME perception/active telemetry truth + R9.2 autonomous recovery/long-task reconciliation + R9.2.1 adaptive hypothesis reconciliation + R9.3 app integration framework + R9.3.1 screen health reconciliation + R9.3.2 history latency recovery reconciliation + R9.3.3 informational terminal reconciliation + R9.3.4 app integration device acceptance + R9.4 multi-app task orchestration + R9.4.1 screen ownership union reconciliation + R9.5 verified result transfer between app steps + R9.5.1 partial marker provenance reconciliation + R9.5.2 bounded marker observation + R9.5.3 verified action result transfer + R9.6 verified semantic observation fallback + R9.6.1 visual fallback acceptance truth + R9.7 structured screen reading + R9.7.1 conversation routing/terminal truth + R9.7.2 structured router conversation precedence + R9.7.3 action morphology/terminal truth + R9.8 generic verified result transfer + R9.8.1 master full acceptance/diagnostic engine + R9.9 reversible action journal/verified undo + R9.9.1 brightness verified undo device acceptance + R9.9.2 opt-in low-battery controlled proactivity + R10.0 unified screen intelligence + R10.1 local self-diagnostics/self-audit + R10.2 personal search expansion"
 
         // AyanaCommandHistoryStore v2.8 keeps up to 4k chars inline and stores longer
         // results out-of-line. Self-review intentionally remains inline so copied History
