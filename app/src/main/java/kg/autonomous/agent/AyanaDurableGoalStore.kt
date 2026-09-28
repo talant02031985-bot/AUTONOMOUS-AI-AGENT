@@ -9,6 +9,12 @@ import java.util.UUID
 /**
  * Persistent execution state for AYANA long-running goals.
  *
+ * R10.3 / schema v3 adds interruption provenance needed for safe continuation:
+ * - the exact pre-interruption checkpoint is retained;
+ * - in-flight Android-step state and screen fingerprint are persisted;
+ * - verified completed steps remain distinguishable from uncertain dispatched work;
+ * - production storage cannot be deleted by acceptance helpers.
+ *
  * Design rules:
  * - multiple recoverable goals may coexist; exactly one may be selected/current;
  * - every write is atomic via temp-file replacement;
@@ -18,7 +24,8 @@ import java.util.UUID
  *   silently continuing after a reboot.
  */
 class AyanaDurableGoalStore(
-    context: Context
+    context: Context,
+    storageFileName: String = FILE_NAME
 ) {
 
     data class GoalView(
@@ -47,22 +54,37 @@ class AyanaDurableGoalStore(
     private val appContext =
         context.applicationContext
 
+    private val storageFileName =
+        storageFileName
+            .trim()
+            .takeIf {
+                it.matches(
+                    Regex(
+                        """[A-Za-z0-9._-]{1,120}"""
+                    )
+                ) &&
+                    it.startsWith(
+                        "ayana_durable_goals"
+                    )
+            }
+            ?: FILE_NAME
+
     private val file =
         File(
             appContext.filesDir,
-            FILE_NAME
+            storageFileName
         )
 
     private val tempFile =
         File(
             appContext.filesDir,
-            "$FILE_NAME.tmp"
+            "$storageFileName.tmp"
         )
 
     private val backupFile =
         File(
             appContext.filesDir,
-            "$FILE_NAME.bak"
+            "$storageFileName.bak"
         )
 
     private val lock =
@@ -268,6 +290,54 @@ class AyanaDurableGoalStore(
                     )
                     .put(
                         "actions_used",
+                        0
+                    )
+                    .put(
+                        "last_step_id",
+                        ""
+                    )
+                    .put(
+                        "last_step_action",
+                        ""
+                    )
+                    .put(
+                        "last_step_success",
+                        false
+                    )
+                    .put(
+                        "last_step_status",
+                        ""
+                    )
+                    .put(
+                        "last_failure_layer",
+                        ""
+                    )
+                    .put(
+                        "step_in_flight",
+                        false
+                    )
+                    .put(
+                        "screen_fingerprint",
+                        ""
+                    )
+                    .put(
+                        "interrupted_from_status",
+                        ""
+                    )
+                    .put(
+                        "interrupted_from_checkpoint",
+                        ""
+                    )
+                    .put(
+                        "interrupted_from_in_flight",
+                        false
+                    )
+                    .put(
+                        "interrupted_at_ms",
+                        0L
+                    )
+                    .put(
+                        "interruption_count",
                         0
                     )
                     .put(
@@ -545,6 +615,50 @@ class AyanaDurableGoalStore(
                     )
                 )
                 .put(
+                    "last_step_id",
+                    checkpoint.optString(
+                        "step_id"
+                    )
+                )
+                .put(
+                    "last_step_action",
+                    checkpoint.optString(
+                        "step_action"
+                    )
+                )
+                .put(
+                    "last_step_success",
+                    checkpoint.optBoolean(
+                        "step_success",
+                        false
+                    )
+                )
+                .put(
+                    "last_step_status",
+                    checkpoint.optString(
+                        "step_status"
+                    )
+                )
+                .put(
+                    "last_failure_layer",
+                    checkpoint.optString(
+                        "failure_layer"
+                    )
+                )
+                .put(
+                    "step_in_flight",
+                    checkpoint.optBoolean(
+                        "in_flight",
+                        false
+                    )
+                )
+                .put(
+                    "screen_fingerprint",
+                    checkpoint.optString(
+                        "screen_fingerprint"
+                    )
+                )
+                .put(
                     "last_checkpoint",
                     checkpoint.optString(
                         "checkpoint",
@@ -665,6 +779,44 @@ class AyanaDurableGoalStore(
                     status ==
                     STATUS_ACTIVE
                 ) {
+                    val previousCheckpoint =
+                        item.optString(
+                            "last_checkpoint"
+                        )
+
+                    val previousInFlight =
+                        item.optBoolean(
+                            "step_in_flight",
+                            false
+                        ) ||
+                            previousCheckpoint ==
+                            "before_step" ||
+                            previousCheckpoint ==
+                            "tool_started"
+
+                    item.put(
+                        "interrupted_from_status",
+                        status
+                    )
+                    item.put(
+                        "interrupted_from_checkpoint",
+                        previousCheckpoint
+                    )
+                    item.put(
+                        "interrupted_from_in_flight",
+                        previousInFlight
+                    )
+                    item.put(
+                        "interrupted_at_ms",
+                        now
+                    )
+                    item.put(
+                        "interruption_count",
+                        item.optInt(
+                            "interruption_count",
+                            0
+                        ) + 1
+                    )
                     item.put(
                         "status",
                         STATUS_RECOVERY_PENDING
@@ -1367,6 +1519,40 @@ class AyanaDurableGoalStore(
             AUTO_RESUME_WINDOW_MS
     }
 
+    /**
+     * R10.3 acceptance helper.
+     *
+     * Only a dedicated test store may be deleted through this API. The production
+     * durable-goal file can never be removed by this method.
+     */
+    fun clearAcceptanceStorage(): Boolean {
+
+        if (
+            !storageFileName.startsWith(
+                ACCEPTANCE_FILE_PREFIX
+            )
+        ) {
+            return false
+        }
+
+        synchronized(lock) {
+            return try {
+                file.delete()
+                tempFile.delete()
+                backupFile.delete()
+
+                File(
+                    appContext.filesDir,
+                    "$storageFileName.corrupt"
+                ).delete()
+
+                true
+            } catch (_: Exception) {
+                false
+            }
+        }
+    }
+
     fun confirmationIsFresh(
         item: JSONObject?,
         now: Long = System.currentTimeMillis()
@@ -1465,7 +1651,14 @@ class AyanaDurableGoalStore(
             "recovery_reason",
             "latest_screen_package",
             "last_tool_name",
-            "last_tool_signature" ->
+            "last_tool_signature",
+            "last_step_id",
+            "last_step_action",
+            "last_step_status",
+            "last_failure_layer",
+            "screen_fingerprint",
+            "interrupted_from_status",
+            "interrupted_from_checkpoint" ->
                 value.toString()
                     .take(
                         MAX_SHORT_CHARS
@@ -1624,7 +1817,7 @@ class AyanaDurableGoalStore(
                 val broken =
                     File(
                         appContext.filesDir,
-                        "$FILE_NAME.corrupt"
+                        "$storageFileName.corrupt"
                     )
 
                 if (
@@ -2037,14 +2230,20 @@ class AyanaDurableGoalStore(
         const val STATUS_FAILED =
             "failed"
 
+        const val VERSION =
+            "2.1"
+
         const val MAX_RECOVERIES =
             2
 
         private const val SCHEMA_VERSION =
-            2
+            3
 
         private const val FILE_NAME =
             "ayana_durable_goals.json"
+
+        private const val ACCEPTANCE_FILE_PREFIX =
+            "ayana_durable_goals_r10_3_acceptance"
 
         private const val MAX_GOALS =
             20
