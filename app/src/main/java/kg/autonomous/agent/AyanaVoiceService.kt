@@ -705,6 +705,12 @@ class AyanaVoiceService : Service() {
         )
     }
 
+    // R10.1: deterministic local self-audit renderer. It consumes only local
+    // Capability Registry/runtime/diagnostic truth and never calls Agent Core.
+    private val localSelfAudit by lazy {
+        AyanaLocalSelfAudit()
+    }
+
     private val agentPlannerV2 by lazy {
         AyanaAgentPlanner(
             appResolver,
@@ -4547,6 +4553,19 @@ mainHandler.post {
                 )
                 return
             }
+
+        // R10.1 LOCAL SELF-AUDIT. Explicit capability inventory/audit requests
+        // are fully local and must never depend on a long Agent Core completion.
+        if (
+            isR10LocalSelfAuditRequest(
+                routingNormalized
+            )
+        ) {
+            runR10LocalSelfAuditCommand(
+                silent = silent
+            )
+            return
+        }
 
         // v12.9.0 LOCAL SELF-DIAGNOSTICS TRUTH.
         // Diagnostics must observe the previous Agent Core measurement, not create a
@@ -28593,6 +28612,43 @@ append(index + 1)
                     .put("historical_camera_overlay_regression_has_device_gate", true)
         )
 
+        val localSelfAuditOk =
+            try {
+                localSelfAudit.selfTest() &&
+                    isR10LocalSelfAuditRequest(
+                        "проведи полный самоаудит своих возможностей: перечисли все зарегистрированные возможности, их фактическую доступность на этом устройстве, чем подтверждена каждая возможность, какие функции ограничены или не подтверждены, и укажи текущую версию приложения, VoiceService, Search Engine и release lineage"
+                    ) &&
+                    isR10LocalSelfAuditRequest(
+                        "проверь локальный самоаудит"
+                    )
+            } catch (_: Exception) {
+                false
+            }
+
+        add(
+            id = "R10-FOUND-017",
+            title = "R10.1 local self-audit / model-independent capability truth contract",
+            critical = true,
+            ok = localSelfAuditOk,
+            message =
+                if (localSelfAuditOk) {
+                    "R10.1 routes full self-audit locally through Capability Registry/runtime evidence and renders a complete TXT without Agent Core completion dependency."
+                } else {
+                    "R10.1 local self-audit contract self-test failed."
+                },
+            evidence =
+                JSONObject()
+                    .put("self_audit_engine_version", AyanaLocalSelfAudit.VERSION)
+                    .put("agent_core_required", false)
+                    .put("worker_required", false)
+                    .put("capability_registry_is_inventory_source", true)
+                    .put("runtime_evidence_fused", true)
+                    .put("unified_screen_truth_included", true)
+                    .put("release_lineage_included", true)
+                    .put("txt_report_required", true)
+                    .put("historical_502_path_bypassed", true)
+        )
+
         return tests
     }
 
@@ -34464,6 +34520,416 @@ requestMethod = "GET"
             .put("evidence", evidence)
 
 
+
+    private fun isR10LocalSelfAuditRequest(
+        command: String
+    ): Boolean {
+        val normalized =
+            command
+                .lowercase(Locale.ROOT)
+                .replace('ё', 'е')
+                .replace(Regex("\\s+"), " ")
+                .trim()
+
+        if (normalized.isBlank()) return false
+
+        if (
+            normalized == "проверь локальный самоаудит" ||
+            normalized == "проверь локальный self audit" ||
+            normalized == "проверь local self audit"
+        ) {
+            return true
+        }
+
+        val explicitAudit =
+            normalized.contains("самоаудит") ||
+                normalized.contains("self audit") ||
+                normalized.contains("self-audit")
+
+        val fullCapabilityInventory =
+            (
+                normalized.contains("зарегистрированные возможности") ||
+                    normalized.contains("зарегистрированных возможностей") ||
+                    normalized.contains("зарегистрированные функции") ||
+                    normalized.contains("зарегистрированных функций")
+                ) &&
+                (
+                    normalized.contains("подтверж") ||
+                        normalized.contains("доступн") ||
+                        normalized.contains("огранич") ||
+                        normalized.contains("release lineage") ||
+                        normalized.contains("верси")
+                    )
+
+        return explicitAudit || fullCapabilityInventory
+    }
+
+    private fun runR10LocalSelfAuditCommand(
+        silent: Boolean
+    ) {
+        executionPhase(
+            phase = "r10_1_local_self_audit",
+            executor = "local_self_audit_v1"
+        )
+
+        broadcastStatus(
+            "Формирую полный локальный самоаудит…",
+            STATE_EXECUTING
+        )
+
+        val engineSelfTest =
+            try {
+                localSelfAudit.selfTest()
+            } catch (_: Exception) {
+                false
+            }
+
+        if (!engineSelfTest) {
+            respondAndResume(
+                text = "R10.1 локальный Self-Audit не прошёл внутренний self-test.",
+                silent = silent,
+                success = false,
+                technical = "r10_1_local_self_audit_self_test_failed"
+            )
+            return
+        }
+
+        val registry =
+            try {
+                capabilityRegistry.snapshot()
+            } catch (error: Exception) {
+                respondAndResume(
+                    text = "Не удалось прочитать Capability Registry для локального самоаудита.",
+                    silent = silent,
+                    success = false,
+                    technical =
+                        "r10_1_registry_exception=" +
+                            (error.message ?: error.javaClass.simpleName).take(400)
+                )
+                return
+            }
+
+        val capabilities =
+            registry.optJSONArray("capabilities")
+                ?: JSONArray()
+
+        if (
+            !registry.optBoolean("success", false) ||
+            capabilities.length() <= 0
+        ) {
+            respondAndResume(
+                text = "R10.1 самоаудит остановлен: Capability Registry не вернул полный список возможностей.",
+                silent = silent,
+                success = false,
+                technical =
+                    "r10_1_registry_incomplete; count=${capabilities.length()}"
+            )
+            return
+        }
+
+        val enriched = JSONArray()
+        for (index in 0 until capabilities.length()) {
+            val item = capabilities.optJSONObject(index) ?: continue
+            val copy = JSONObject(item.toString())
+            val id = item.optString("id").trim().ifBlank { "unnamed_$index" }
+            val implemented = item.optBoolean("implemented", false)
+            val available = item.optBoolean("available_now", false)
+            val resolution =
+                selfReviewEvidenceResolution(
+                    item = item,
+                    capabilityId = id,
+                    implemented = implemented,
+                    available = available
+                )
+
+            copy
+                .put(
+                    "effective_device_confirmed",
+                    resolution.effectiveConfirmed
+                )
+                .put(
+                    "evidence_code",
+                    resolution.sourceCode
+                )
+                .put(
+                    "evidence_historical",
+                    resolution.historicalAccepted
+                )
+
+            enriched.put(copy)
+        }
+
+        if (enriched.length() != capabilities.length()) {
+            respondAndResume(
+                text = "R10.1 самоаудит остановлен: capability inventory разобран не полностью.",
+                silent = silent,
+                success = false,
+                technical =
+                    "r10_1_capability_parse_incomplete; registry=${capabilities.length()}; enriched=${enriched.length()}"
+            )
+            return
+        }
+
+        val rawDiagnostics =
+            try {
+                selfDiagnostics.run(
+                    focus = "all",
+                    appName = ""
+                )
+            } catch (error: Exception) {
+                respondAndResume(
+                    text = "R10.1 самоаудит остановлен: локальная Self-Diagnostics недоступна.",
+                    silent = silent,
+                    success = false,
+                    technical =
+                        "r10_1_self_diagnostics_exception=" +
+                            (error.message ?: error.javaClass.simpleName).take(400)
+                )
+                return
+            }
+
+        val diagnostics =
+            diagnosticClosure.normalizeSelfDiagnostics(
+                raw = rawDiagnostics,
+                recentHistory = commandHistoryStore.recent(24)
+            )
+
+        val latency =
+            try {
+                capabilityRegistry.agentCoreLatencySnapshot()
+            } catch (_: Exception) {
+                JSONObject()
+                    .put("classification", "NO_DATA")
+                    .put("total_ms", -1L)
+            }
+
+        val screenTruth =
+            try {
+                screenIntelligence.getScreenState()
+            } catch (_: Exception) {
+                JSONObject()
+                    .put("success", false)
+                    .put("screen_intelligence_version", AyanaScreenIntelligence.VERSION)
+                    .put("unified_screen_truth_version", AyanaScreenIntelligence.UNIFIED_TRUTH_VERSION)
+                    .put("foreground_truth_verified", false)
+                    .put("execution_evidence_usable", false)
+            }
+
+        val knownLimits =
+            try {
+                acceptanceKnownLimitsProbe()
+                    .optJSONArray("limits")
+                    ?: JSONArray()
+            } catch (_: Exception) {
+                JSONArray()
+            }
+
+        val releaseMetadata =
+            JSONObject()
+                .put("app_version", currentAppVersionName())
+                .put("voice_service_release", AYANA_VOICE_SERVICE_RELEASE)
+                .put("personal_search_engine_release", AYANA_PERSONAL_SEARCH_ENGINE_RELEASE)
+                .put("capability_registry_release", AYANA_CAPABILITY_REGISTRY_RELEASE)
+                .put("acceptance_engine_version", AyanaAcceptanceTestEngine.ENGINE_VERSION)
+                .put("worker_release", AYANA_WORKER_RELEASE)
+                .put("accepted_checkpoint", AYANA_ACCEPTED_FEATURE_CHECKPOINT)
+                .put("current_release", AYANA_CURRENT_FEATURE_RELEASE)
+                .put("release_lineage", AYANA_RELEASE_LINEAGE)
+
+        val audit =
+            try {
+                localSelfAudit.build(
+                    registrySnapshot = registry,
+                    diagnostics = diagnostics,
+                    latency = latency,
+                    screenTruth = screenTruth,
+                    releaseMetadata = releaseMetadata,
+                    enrichedCapabilities = enriched,
+                    knownLimits = knownLimits
+                )
+            } catch (error: Exception) {
+                JSONObject()
+                    .put("success", false)
+                    .put("verified", false)
+                    .put("reason", "local_audit_exception")
+                    .put(
+                        "detail",
+                        (error.message ?: error.javaClass.simpleName).take(400)
+                    )
+            }
+
+        if (!audit.optBoolean("success", false)) {
+            respondAndResume(
+                text = "R10.1 локальный самоаудит сформирован с ошибкой целостности и не может быть отмечен SUCCESS.",
+                silent = silent,
+                success = false,
+                technical = audit.toString().take(1800)
+            )
+            return
+        }
+
+        val reportText = audit.optString("report_text")
+        if (reportText.isBlank()) {
+            respondAndResume(
+                text = "R10.1 локальный самоаудит не сформировал TXT-отчёт.",
+                silent = silent,
+                success = false,
+                technical = "r10_1_report_text_missing"
+            )
+            return
+        }
+
+        val filename =
+            "AYANA_LOCAL_SELF_AUDIT_" +
+                DateTimeFormatter
+                    .ofPattern("yyyy-MM-dd_HHmmss")
+                    .format(LocalDateTime.now()) +
+                ".txt"
+
+        val published =
+            try {
+                artifactEngine.create(
+                    arguments =
+                        JSONObject()
+                            .put("kind", "txt")
+                            .put("filename", filename)
+                            .put("title", "AYANA R10.1 Local Self-Audit")
+                            .put("content", reportText)
+                            .put("columns", JSONArray())
+                            .put("rows", JSONArray())
+                            .put("column_types", JSONArray())
+                            .put("chart_type", "none"),
+                    tryBeginPublish = { detail ->
+                        executionKernel.tryBeginIrreversibleDispatch(
+                            kind = "r10_1_local_self_audit_report_publish",
+                            detail = detail
+                        )
+                    },
+                    onPublishAccepted = { detail ->
+                        executionKernel.markIrreversibleDispatchAccepted(detail)
+                    },
+                    onPublishReconciliationStarted = { detail ->
+                        executionKernel.markSideEffectReconciliationStarted(detail)
+                    },
+                    onPublishReconciled = { committed, detail ->
+                        executionKernel.markSideEffectReconciled(
+                            committed = committed,
+                            detail = detail
+                        )
+                    }
+                )
+            } catch (error: Exception) {
+                JSONObject()
+                    .put("success", false)
+                    .put("verified", false)
+                    .put(
+                        "message",
+                        error.message ?: error.javaClass.simpleName
+                    )
+            }
+
+        val reportVerified =
+            published.optBoolean("success", false) &&
+                published.optString("artifact_reference").isNotBlank()
+
+        if (!reportVerified) {
+            respondAndResume(
+                text =
+                    audit.optString("summary") +
+                        "\n\nСамоаудит выполнен локально, но публикация TXT не подтверждена.",
+                silent = silent,
+                success = false,
+                technical =
+                    "r10_1_report_publish_unverified; " +
+                        published.toString().take(1200)
+            )
+            return
+        }
+
+        val finalName =
+            published.optString("name", filename)
+                .ifBlank { filename }
+
+        val technical =
+            JSONObject()
+                .put("self_audit_engine_version", AyanaLocalSelfAudit.VERSION)
+                .put("local_only", true)
+                .put("agent_core_turns", 0)
+                .put("worker_turns", 0)
+                .put("engine_self_test", engineSelfTest)
+                .put(
+                    "registered_capabilities",
+                    audit.optInt("registered_capabilities", 0)
+                )
+                .put(
+                    "reported_capabilities",
+                    audit.optInt("reported_capabilities", 0)
+                )
+                .put(
+                    "verified_available",
+                    audit.optInt("verified_available", 0)
+                )
+                .put(
+                    "verified_unavailable_now",
+                    audit.optInt("verified_unavailable_now", 0)
+                )
+                .put(
+                    "not_implemented",
+                    audit.optInt("not_implemented", 0)
+                )
+                .put(
+                    "contradictions",
+                    audit.optInt("contradictions", 0)
+                )
+                .put(
+                    "audit_integrity_status",
+                    audit.optString("audit_integrity_status", "unknown")
+                )
+                .put(
+                    "diagnostics_overall",
+                    audit.optString("diagnostics_overall", "unknown")
+                )
+                .put("report_verified", true)
+                .put("report_name", finalName)
+                .put(
+                    "capability_registry_version",
+                    AYANA_CAPABILITY_REGISTRY_RELEASE
+                )
+                .put(
+                    "voice_service_release",
+                    AYANA_VOICE_SERVICE_RELEASE
+                )
+                .put(
+                    "search_engine_release",
+                    AYANA_PERSONAL_SEARCH_ENGINE_RELEASE
+                )
+                .put(
+                    "accepted_checkpoint",
+                    AYANA_ACCEPTED_FEATURE_CHECKPOINT
+                )
+                .put(
+                    "current_release",
+                    AYANA_CURRENT_FEATURE_RELEASE
+                )
+                .put("release_lineage", AYANA_RELEASE_LINEAGE)
+
+        commandHistoryStore.addEvent(
+            activeCommandHistoryId,
+            state = "r10_local_self_audit_verified",
+            message =
+                "R10.1 полный локальный Self-Audit сформирован без Agent Core и TXT подтверждён",
+            details = technical.toString().take(1800)
+        )
+
+        respondAndResume(
+            text =
+                audit.optString("summary") +
+                    "\n\nПодробный локальный TXT-отчёт сохранён в Downloads/AYANA: $finalName",
+            silent = silent,
+            success = true,
+            technical = technical.toString()
+        )
+    }
 
     private fun isLocalSelfReviewOrAutonomyRequest(
         command: String
@@ -50872,9 +51338,9 @@ state
         private const val MASTER_STATUS_MANUAL_REQUIRED =
             "MANUAL_REQUIRED"
 
-        // R10.0 UNIFIED SCREEN INTELLIGENCE RELEASE / FEATURE LINEAGE TRUTH.
+        // R10.1 LOCAL SELF-DIAGNOSTICS / SELF-AUDIT RELEASE TRUTH.
         private const val AYANA_VOICE_SERVICE_RELEASE =
-            "v12.33.0 / R10.0 UNIFIED SCREEN INTELLIGENCE"
+            "v12.34.0 / R10.1 LOCAL SELF-DIAGNOSTICS / SELF-AUDIT"
 
         private const val AYANA_PERSONAL_SEARCH_ENGINE_RELEASE =
             "v1.5.1 IMAGE COVERAGE TRUTH"
@@ -50886,13 +51352,13 @@ state
             "v11.1.10 Multi-Attachment"
 
         private const val AYANA_ACCEPTED_FEATURE_CHECKPOINT =
-            "R9.9.2 OPT-IN LOW-BATTERY CONTROLLED PROACTIVITY — DEVICE-CONFIRMED ACCEPTED"
+            "R10.0 UNIFIED SCREEN INTELLIGENCE — DEVICE-CONFIRMED ACCEPTED"
 
         private const val AYANA_CURRENT_FEATURE_RELEASE =
-            "R10.0 UNIFIED SCREEN INTELLIGENCE — PENDING DEVICE CONFIRMATION"
+            "R10.1 LOCAL SELF-DIAGNOSTICS / SELF-AUDIT — PENDING DEVICE CONFIRMATION"
 
         private const val AYANA_RELEASE_LINEAGE =
-            "Android v12.21.0 / R7.9 truth-hardening + R8.0 multi-attachment + R8.1–R8.4 accepted Personal Global Search stack + R8.5–R8.5.4 capability/evidence truth + R9.0 autonomous agent foundation + R9.0.1 history live-refresh proof fix + R9.0.2 diagnostic reconciliation/history refresh fix + R9.0.3 TTS health reconciliation + R9.1 IME perception/active telemetry truth + R9.2 autonomous recovery/long-task reconciliation + R9.2.1 adaptive hypothesis reconciliation + R9.3 app integration framework + R9.3.1 screen health reconciliation + R9.3.2 history latency recovery reconciliation + R9.3.3 informational terminal reconciliation + R9.3.4 app integration device acceptance + R9.4 multi-app task orchestration + R9.4.1 screen ownership union reconciliation + R9.5 verified result transfer between app steps + R9.5.1 partial marker provenance reconciliation + R9.5.2 bounded marker observation + R9.5.3 verified action result transfer + R9.6 verified semantic observation fallback + R9.6.1 visual fallback acceptance truth + R9.7 structured screen reading + R9.7.1 conversation routing/terminal truth + R9.7.2 structured router conversation precedence + R9.7.3 action morphology/terminal truth + R9.8 generic verified result transfer + R9.8.1 master full acceptance/diagnostic engine + R9.9 reversible action journal/verified undo + R9.9.1 brightness verified undo device acceptance + R9.9.2 opt-in low-battery controlled proactivity + R10.0 unified screen intelligence"
+            "Android v12.21.0 / R7.9 truth-hardening + R8.0 multi-attachment + R8.1–R8.4 accepted Personal Global Search stack + R8.5–R8.5.4 capability/evidence truth + R9.0 autonomous agent foundation + R9.0.1 history live-refresh proof fix + R9.0.2 diagnostic reconciliation/history refresh fix + R9.0.3 TTS health reconciliation + R9.1 IME perception/active telemetry truth + R9.2 autonomous recovery/long-task reconciliation + R9.2.1 adaptive hypothesis reconciliation + R9.3 app integration framework + R9.3.1 screen health reconciliation + R9.3.2 history latency recovery reconciliation + R9.3.3 informational terminal reconciliation + R9.3.4 app integration device acceptance + R9.4 multi-app task orchestration + R9.4.1 screen ownership union reconciliation + R9.5 verified result transfer between app steps + R9.5.1 partial marker provenance reconciliation + R9.5.2 bounded marker observation + R9.5.3 verified action result transfer + R9.6 verified semantic observation fallback + R9.6.1 visual fallback acceptance truth + R9.7 structured screen reading + R9.7.1 conversation routing/terminal truth + R9.7.2 structured router conversation precedence + R9.7.3 action morphology/terminal truth + R9.8 generic verified result transfer + R9.8.1 master full acceptance/diagnostic engine + R9.9 reversible action journal/verified undo + R9.9.1 brightness verified undo device acceptance + R9.9.2 opt-in low-battery controlled proactivity + R10.0 unified screen intelligence + R10.1 local self-diagnostics/self-audit"
 
         // AyanaCommandHistoryStore v2.8 keeps up to 4k chars inline and stores longer
         // results out-of-line. Self-review intentionally remains inline so copied History
