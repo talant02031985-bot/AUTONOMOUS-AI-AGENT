@@ -61,7 +61,14 @@ import kotlin.math.abs
 
 class AyanaVoiceService : Service() {
 
-    // AYANA v12.30.0 / R9.8 GENERIC VERIFIED RESULT TRANSFER.
+    // AYANA v12.30.1 / R9.8.1 MASTER FULL ACCEPTANCE & DIAGNOSTIC ENGINE.
+    // Builds on the device-confirmed R9.8 generic transfer baseline.
+    // The master command reuses the existing exhaustive acceptance engine, then
+    // adds real external-app/device regressions for App Integration, R9.4/R9.5/R9.6,
+    // R9.7 structured screen reading and R9.8 generic typed transfer. Tests that
+    // cannot be honestly self-proven (human wake-word/background voice, subjective
+    // Marin audio/voice STOP, ORB visual persistence over Samsung Settings) are
+    // reported as MANUAL_REQUIRED instead of false PASS. ORB/visualizer untouched.
     // Builds on DEVICE-CONFIRMED R9.7.3.
     // - Verified Result Transfer v2.0 adds typed producer/consumer contracts;
     // - Multi-App Task Orchestrator v1.5 compiles explicit previous-result references generically;
@@ -4305,6 +4312,21 @@ mainHandler.post {
                 )
                 return
             }
+
+        // R9.8.1 MASTER FULL ACCEPTANCE.
+        // This is intentionally more invasive than ordinary full diagnostics:
+        // after the exhaustive local/adaptive suite it runs bounded real-device
+        // app/screen/transfer regressions and restores AYANA after every step.
+        if (
+            isMasterFullAcceptanceRequest(
+                originalCommand
+            )
+        ) {
+            runLocalMasterFullAcceptanceCommand(
+                silent = silent
+            )
+            return
+        }
 
         // v12.13 LOCAL ACCEPTANCE ROUTER.
         // Requests to test AYANA herself are owned locally before the generic
@@ -13018,7 +13040,7 @@ respondAndResume(
                         activeCommandHistoryId,
                         state = "multi_app_task_started",
                         message =
-                            "R9.6 Multi-App Task Orchestrator v${AyanaMultiAppTaskOrchestrator.VERSION} запущен: ${plan.steps.size} шага",
+                            "Multi-App Task Orchestrator v${AyanaMultiAppTaskOrchestrator.VERSION} запущен: ${plan.steps.size} шага",
                         details =
                             "goal_id=${goalId.orEmpty()}; plan=${plan.key}; " +
                                 "source=${plan.source}; graph=${taskGraph.compactSummary()}"
@@ -13104,7 +13126,7 @@ respondAndResume(
                                     activeCommandHistoryId,
                                     state = "multi_app_task_checkpoint",
                                     message =
-                                        "R9.6 checkpoint: $phase",
+                                        "Multi-App checkpoint: $phase",
                                     details =
                                         "goal_id=${goalId.orEmpty()}; index=$index; " +
                                             "step=${step?.key.orEmpty()}"
@@ -21730,6 +21752,1561 @@ append(index + 1)
             )
     }
 
+
+    // =========================================================
+    // R9.8.1 MASTER FULL ACCEPTANCE & DIAGNOSTIC ENGINE
+    // =========================================================
+
+    private fun isMasterFullAcceptanceRequest(
+        value: String
+    ): Boolean {
+        val normalized =
+            value
+                .trim()
+                .lowercase(Locale.ROOT)
+                .replace('ё', 'е')
+                .replace(Regex("\\s+"), " ")
+
+        return normalized in
+            setOf(
+                "проведи полный приемочный тест ayana",
+                "проведи полный приемочный тест аяна",
+                "запусти полный приемочный тест ayana",
+                "запусти полный приемочный тест аяна",
+                "проведи master full acceptance",
+                "запусти master full acceptance",
+                "проведи master acceptance ayana",
+                "проведи мастер приемочный тест ayana",
+                "проведи мастер приемочный тест аяна"
+            )
+    }
+
+    private fun masterAcceptanceTestResult(
+        id: String,
+        title: String,
+        status: String,
+        critical: Boolean,
+        message: String,
+        evidenceScope: String,
+        evidence: JSONObject = JSONObject(),
+        durationMs: Long = 0L
+    ): JSONObject =
+        JSONObject()
+            .put("id", id)
+            .put("title", title)
+            .put("status", status)
+            .put("critical", critical)
+            .put(
+                "verified",
+                status ==
+                    AyanaAcceptanceTestEngine.STATUS_PASS
+            )
+            .put(
+                "success",
+                status !in
+                    setOf(
+                        AyanaAcceptanceTestEngine.STATUS_FAIL,
+                        AyanaAcceptanceTestEngine.STATUS_CANCELLED
+                    )
+            )
+            .put("duration_ms", durationMs.coerceAtLeast(0L))
+            .put("message", message)
+            .put("evidence_scope", evidenceScope)
+            .put("evidence", evidence)
+
+    private fun runMasterAppIntegrationDeviceScenario(
+        commandToken: Long,
+        originalPage: String
+    ): JSONObject {
+        val startedAt =
+            System.currentTimeMillis()
+
+        val report =
+            try {
+                appIntegrationDeviceProbe.run(
+                    execute = { step ->
+                        if (
+                            isCommandCancelled(commandToken) ||
+                            commandToken != activeCommandToken
+                        ) {
+                            JSONObject()
+                                .put("success", false)
+                                .put("verified", false)
+                                .put("terminal_status", "CANCELLED")
+                                .put("message", "MASTER acceptance cancelled before app action.")
+                        } else {
+                            executeAppIntegrationAction(
+                                appKey = step.appKey,
+                                actionKey = step.actionKey,
+                                payload = step.payload
+                            )
+                        }
+                    },
+                    restore = { step ->
+                        restoreAyanaAfterAppIntegrationProbe(
+                            pageKey = originalPage,
+                            stepKey = "master-${step.key}"
+                        )
+                    },
+                    shouldCancel = {
+                        isCommandCancelled(commandToken) ||
+                            commandToken != activeCommandToken ||
+                            Thread.currentThread().isInterrupted
+                    }
+                )
+            } catch (error: Exception) {
+                JSONObject()
+                    .put("success", false)
+                    .put("verified", false)
+                    .put("cancelled", false)
+                    .put(
+                        "reason",
+                        error.message
+                            ?: error.javaClass.simpleName
+                    )
+            }
+
+        val cancelled =
+            report.optBoolean("cancelled", false) ||
+                isCommandCancelled(commandToken) ||
+                commandToken != activeCommandToken
+
+        val ok =
+            !cancelled &&
+                report.optBoolean("success", false) &&
+                report.optBoolean("verified", false) &&
+                report.optInt("passed", 0) ==
+                    AyanaAppIntegrationDeviceProbe.EXPECTED_STEP_COUNT &&
+                !report.optBoolean(
+                    "mutation_committed_detected",
+                    false
+                )
+
+        val status =
+            when {
+                cancelled ->
+                    AyanaAcceptanceTestEngine.STATUS_CANCELLED
+
+                ok ->
+                    AyanaAcceptanceTestEngine.STATUS_PASS
+
+                else ->
+                    AyanaAcceptanceTestEngine.STATUS_FAIL
+            }
+
+        return masterAcceptanceTestResult(
+            id = "MASTER-DEVICE-001",
+            title = "Real App Integration round-trip / AYANA restore",
+            status = status,
+            critical = true,
+            message =
+                if (ok) {
+                    "Пять зарегистрированных app-domain проверены реальными Android dispatch/foreground evidence; AYANA восстановлена после шагов, persistent mutation не обнаружена."
+                } else if (cancelled) {
+                    "Real App Integration round-trip отменён пользователем."
+                } else {
+                    "Real App Integration round-trip не подтвердил все обязательные шаги."
+                },
+            evidenceScope = "live_external_app_roundtrip",
+            durationMs =
+                System.currentTimeMillis() -
+                    startedAt,
+            evidence =
+                JSONObject()
+                    .put(
+                        "probe_version",
+                        AyanaAppIntegrationDeviceProbe.VERSION
+                    )
+                    .put(
+                        "steps_total",
+                        report.optInt("steps_total", 0)
+                    )
+                    .put(
+                        "passed",
+                        report.optInt("passed", 0)
+                    )
+                    .put(
+                        "failed",
+                        report.optInt("failed", 0)
+                    )
+                    .put(
+                        "mutation_committed_detected",
+                        report.optBoolean(
+                            "mutation_committed_detected",
+                            false
+                        )
+                    )
+                    .put("cancelled", cancelled)
+        )
+    }
+
+    private fun runMasterMultiAppScenario(
+        id: String,
+        title: String,
+        command: String,
+        expectedPlanKey: String,
+        commandToken: Long,
+        originalPage: String,
+        requiredTransferCount: Int = 0,
+        requireGenericTransfer: Boolean = false,
+        requireVisualScreenshotProvenance: Boolean = false
+    ): JSONObject {
+        val startedAt =
+            System.currentTimeMillis()
+
+        val plan =
+            try {
+                multiAppTaskOrchestrator
+                    .parse(command)
+            } catch (_: Exception) {
+                null
+            }
+
+        if (plan == null) {
+            return masterAcceptanceTestResult(
+                id = id,
+                title = title,
+                status = AyanaAcceptanceTestEngine.STATUS_FAIL,
+                critical = true,
+                message = "Multi-App plan не скомпилирован.",
+                evidenceScope = "live_multi_app_roundtrip",
+                durationMs =
+                    System.currentTimeMillis() -
+                        startedAt,
+                evidence =
+                    JSONObject()
+                        .put("command", command)
+                        .put("expected_plan_key", expectedPlanKey)
+            )
+        }
+
+        val taskGraph =
+            try {
+                AyanaAutonomousTaskGraph.create(
+                    goal = plan.originalCommand,
+                    plannerEnvelope =
+                        multiAppTaskOrchestrator
+                            .plannerEnvelope(plan)
+                )
+            } catch (error: Exception) {
+                return masterAcceptanceTestResult(
+                    id = id,
+                    title = title,
+                    status = AyanaAcceptanceTestEngine.STATUS_FAIL,
+                    critical = true,
+                    message = "Task Graph для MASTER-сценария не создан.",
+                    evidenceScope = "live_multi_app_roundtrip",
+                    durationMs =
+                        System.currentTimeMillis() -
+                            startedAt,
+                    evidence =
+                        JSONObject()
+                            .put(
+                                "error",
+                                error.message
+                                    ?: error.javaClass.simpleName
+                            )
+                )
+            }
+
+        val report =
+            try {
+                multiAppTaskOrchestrator.run(
+                    plan = plan,
+                    taskGraph = taskGraph,
+                    execute = { step ->
+                        if (
+                            isCommandCancelled(commandToken) ||
+                            commandToken != activeCommandToken
+                        ) {
+                            JSONObject()
+                                .put("success", false)
+                                .put("verified", false)
+                                .put("terminal_status", "CANCELLED")
+                                .put("action_dispatched", false)
+                                .put("message", "MASTER acceptance cancelled before multi-app step.")
+                        } else {
+                            executeAppIntegrationAction(
+                                appKey = step.appKey,
+                                actionKey = step.actionKey,
+                                payload = step.payload
+                            )
+                        }
+                    },
+                    observe = { step, actionResult ->
+                        observeVerifiedResultTransferScreen(
+                            step = step,
+                            actionResult = actionResult,
+                            commandToken = commandToken
+                        )
+                    },
+                    restore = { step ->
+                        restoreAyanaAfterAppIntegrationProbe(
+                            pageKey = originalPage,
+                            stepKey = "master-${step.key}"
+                        )
+                    },
+                    checkpoint = { phase, index, step, evidence ->
+                        commandHistoryStore.addEvent(
+                            activeCommandHistoryId,
+                            state = "master_acceptance_multi_app_checkpoint",
+                            message =
+                                "$id: $phase",
+                            details =
+                                (
+                                    "index=$index; step=${step?.key.orEmpty()}; " +
+                                        "graph=${evidence.optJSONObject("task_graph")?.optString("status").orEmpty()}"
+                                    ).take(700)
+                        )
+                    },
+                    shouldCancel = {
+                        isCommandCancelled(commandToken) ||
+                            commandToken != activeCommandToken ||
+                            Thread.currentThread().isInterrupted
+                    }
+                )
+            } catch (error: Exception) {
+                JSONObject()
+                    .put("success", false)
+                    .put("verified", false)
+                    .put("terminal_status", "ERROR")
+                    .put(
+                        "first_failure_reason",
+                        error.message
+                            ?: error.javaClass.simpleName
+                    )
+            }
+
+        val cancelled =
+            report.optBoolean("cancelled", false) ||
+                isCommandCancelled(commandToken) ||
+                commandToken != activeCommandToken
+
+        val baseOk =
+            !cancelled &&
+                report.optBoolean("success", false) &&
+                report.optBoolean("verified", false) &&
+                report.optString("terminal_status")
+                    .equals(
+                        "SUCCESS",
+                        ignoreCase = true
+                    ) &&
+                report.optString("plan_key") ==
+                    expectedPlanKey &&
+                report.optInt("passed", 0) ==
+                    report.optInt("steps_total", -1) &&
+                !report.optBoolean(
+                    "mutation_committed_detected",
+                    false
+                ) &&
+                !report.optBoolean(
+                    "restore_failure_detected",
+                    false
+                ) &&
+                !report.optBoolean(
+                    "persistent_mutation_authority",
+                    true
+                ) &&
+                !report.optBoolean(
+                    "safe_auto_resume",
+                    true
+                ) &&
+                !report.optBoolean(
+                    "blind_replay_allowed",
+                    true
+                )
+
+        val transferOk =
+            requiredTransferCount <= 0 ||
+                report.optInt(
+                    "transfer_count",
+                    0
+                ) >= requiredTransferCount
+
+        val genericOk =
+            !requireGenericTransfer ||
+                (
+                    report.optBoolean(
+                        "generic_result_transfer",
+                        false
+                    ) &&
+                        report.optBoolean(
+                            "typed_transfer_contracts",
+                            false
+                        ) &&
+                        report.optInt(
+                            "transfer_edge_count",
+                            0
+                        ) >= 2 &&
+                        report.optString(
+                            "result_transfer_version"
+                        ) ==
+                        AyanaVerifiedResultTransfer.VERSION
+                    )
+
+        val ledger =
+            report.optJSONObject(
+                "transfer_ledger"
+            ) ?: JSONObject()
+
+        val visualRecord =
+            ledger.optJSONObject(
+                AyanaMultiAppTaskOrchestrator
+                    .SEMANTIC_FALLBACK_ACCEPTANCE_KEY
+            )
+
+        val visualOk =
+            !requireVisualScreenshotProvenance ||
+                (
+                    visualRecord != null &&
+                        visualRecord.optBoolean(
+                            "verified",
+                            false
+                        ) &&
+                        visualRecord.optString(
+                            "source_context_mode"
+                        ) ==
+                        "r9_6_visual_screenshot_fallback"
+                    )
+
+        val ok =
+            baseOk &&
+                transferOk &&
+                genericOk &&
+                visualOk
+
+        val status =
+            when {
+                cancelled ->
+                    AyanaAcceptanceTestEngine.STATUS_CANCELLED
+
+                ok ->
+                    AyanaAcceptanceTestEngine.STATUS_PASS
+
+                else ->
+                    AyanaAcceptanceTestEngine.STATUS_FAIL
+            }
+
+        return masterAcceptanceTestResult(
+            id = id,
+            title = title,
+            status = status,
+            critical = true,
+            message =
+                when {
+                    ok ->
+                        "$expectedPlanKey подтверждён реальным multi-app execution с verified provenance, восстановлением AYANA и без persistent mutation."
+
+                    cancelled ->
+                        "$expectedPlanKey отменён пользователем."
+
+                    else ->
+                        "$expectedPlanKey не прошёл один или несколько обязательных verified contracts."
+                },
+            evidenceScope = "live_multi_app_roundtrip",
+            durationMs =
+                System.currentTimeMillis() -
+                    startedAt,
+            evidence =
+                JSONObject()
+                    .put(
+                        "orchestrator_version",
+                        AyanaMultiAppTaskOrchestrator.VERSION
+                    )
+                    .put(
+                        "result_transfer_version",
+                        report.optString(
+                            "result_transfer_version"
+                        )
+                    )
+                    .put(
+                        "plan_key",
+                        report.optString("plan_key")
+                    )
+                    .put(
+                        "terminal_status",
+                        report.optString(
+                            "terminal_status"
+                        )
+                    )
+                    .put(
+                        "steps_total",
+                        report.optInt("steps_total", 0)
+                    )
+                    .put(
+                        "passed",
+                        report.optInt("passed", 0)
+                    )
+                    .put(
+                        "failed",
+                        report.optInt("failed", 0)
+                    )
+                    .put(
+                        "transfer_count",
+                        report.optInt("transfer_count", 0)
+                    )
+                    .put(
+                        "generic_result_transfer",
+                        report.optBoolean(
+                            "generic_result_transfer",
+                            false
+                        )
+                    )
+                    .put(
+                        "transfer_edge_count",
+                        report.optInt(
+                            "transfer_edge_count",
+                            0
+                        )
+                    )
+                    .put(
+                        "typed_transfer_contracts",
+                        report.optBoolean(
+                            "typed_transfer_contracts",
+                            false
+                        )
+                    )
+                    .put(
+                        "visual_context_mode",
+                        visualRecord
+                            ?.optString(
+                                "source_context_mode"
+                            )
+                            .orEmpty()
+                    )
+                    .put(
+                        "mutation_committed_detected",
+                        report.optBoolean(
+                            "mutation_committed_detected",
+                            false
+                        )
+                    )
+                    .put(
+                        "restore_failure_detected",
+                        report.optBoolean(
+                            "restore_failure_detected",
+                            false
+                        )
+                    )
+                    .put("cancelled", cancelled)
+        )
+    }
+
+    private fun runMasterStructuredScreenScenario(
+        commandToken: Long,
+        originalPage: String
+    ): JSONObject {
+        val startedAt =
+            System.currentTimeMillis()
+
+        val action =
+            try {
+                executeAppIntegrationAction(
+                    appKey =
+                        AyanaAppIntegrationRegistry
+                            .APP_BROWSER,
+                    actionKey =
+                        AyanaAppIntegrationRegistry
+                            .ACTION_OPEN_URL,
+                    payload =
+                        R9_7_STRUCTURED_ACCEPTANCE_URL
+                )
+            } catch (error: Exception) {
+                JSONObject()
+                    .put("success", false)
+                    .put("verified", false)
+                    .put(
+                        "message",
+                        error.message
+                            ?: error.javaClass.simpleName
+                    )
+            }
+
+        if (
+            isCommandCancelled(commandToken) ||
+            commandToken != activeCommandToken
+        ) {
+            restoreAyanaAfterAppIntegrationProbe(
+                pageKey = originalPage,
+                stepKey = "master-r9.7-structured"
+            )
+
+            return masterAcceptanceTestResult(
+                id = "MASTER-R97-001",
+                title = "R9.7 structured external-screen reading",
+                status = AyanaAcceptanceTestEngine.STATUS_CANCELLED,
+                critical = true,
+                message = "R9.7 structured screen scenario отменён.",
+                evidenceScope = "live_package_bound_visual",
+                durationMs =
+                    System.currentTimeMillis() -
+                        startedAt
+            )
+        }
+
+        if (
+            !action.optBoolean("success", false) ||
+            !action.optBoolean("verified", false)
+        ) {
+            val restore =
+                restoreAyanaAfterAppIntegrationProbe(
+                    pageKey = originalPage,
+                    stepKey = "master-r9.7-structured"
+                )
+
+            return masterAcceptanceTestResult(
+                id = "MASTER-R97-001",
+                title = "R9.7 structured external-screen reading",
+                status = AyanaAcceptanceTestEngine.STATUS_FAIL,
+                critical = true,
+                message = "Browser source для R9.7 structured read не подтверждён.",
+                evidenceScope = "live_package_bound_visual",
+                durationMs =
+                    System.currentTimeMillis() -
+                        startedAt,
+                evidence =
+                    JSONObject()
+                        .put("action", action)
+                        .put(
+                            "restore_verified",
+                            restore.optBoolean(
+                                "verified",
+                                false
+                            )
+                        )
+            )
+        }
+
+        val expectedPackage =
+            action
+                .optString("observed_package")
+                .trim()
+                .ifBlank {
+                    action
+                        .optString("target_package")
+                        .trim()
+                }
+
+        val visual =
+            attemptVerifiedStructuredSemanticScreenRead(
+                expectedPackage = expectedPackage,
+                commandToken = commandToken
+            )
+
+        val restore =
+            restoreAyanaAfterAppIntegrationProbe(
+                pageKey = originalPage,
+                stepKey = "master-r9.7-structured"
+            )
+
+        val title =
+            visual
+                .optString(
+                    "semantic_title"
+                )
+                .trim()
+
+        val textCount =
+            visual
+                .optJSONArray(
+                    "semantic_primary_text"
+                )
+                ?.length()
+                ?: 0
+
+        val controlsCount =
+            visual
+                .optJSONArray(
+                    "semantic_controls"
+                )
+                ?.length()
+                ?: 0
+
+        val valuesCount =
+            visual
+                .optJSONArray(
+                    "semantic_values"
+                )
+                ?.length()
+                ?: 0
+
+        val ok =
+            visual.optBoolean("success", false) &&
+                visual.optBoolean("verified", false) &&
+                visual.optBoolean(
+                    "semantic_structured_read_verified",
+                    false
+                ) &&
+                visual.optInt(
+                    "content_contract_version",
+                    0
+                ) == 4 &&
+                visual.optString(
+                    "window_context_mode"
+                ) ==
+                AyanaVerifiedSemanticObservation
+                    .STRUCTURED_CONTEXT_MODE &&
+                title.equals(
+                    R9_7_STRUCTURED_ACCEPTANCE_TITLE,
+                    ignoreCase = true
+                ) &&
+                textCount > 0 &&
+                !visual.optBoolean(
+                    "screen_text_instruction_authority",
+                    true
+                ) &&
+                restore.optBoolean(
+                    "verified",
+                    false
+                )
+
+        return masterAcceptanceTestResult(
+            id = "MASTER-R97-001",
+            title = "R9.7 structured external-screen reading",
+            status =
+                if (ok) {
+                    AyanaAcceptanceTestEngine.STATUS_PASS
+                } else {
+                    AyanaAcceptanceTestEngine.STATUS_FAIL
+                },
+            critical = true,
+            message =
+                if (ok) {
+                    "Package-bound screenshot извлёк structured content без заранее заданного маркера; screen text остался data-only."
+                } else {
+                    "R9.7 structured visual contract не подтверждён fail-closed."
+                },
+            evidenceScope = "live_package_bound_visual",
+            durationMs =
+                System.currentTimeMillis() -
+                    startedAt,
+            evidence =
+                JSONObject()
+                    .put(
+                        "semantic_observation_version",
+                        AyanaVerifiedSemanticObservation.VERSION
+                    )
+                    .put(
+                        "content_contract_version",
+                        visual.optInt(
+                            "content_contract_version",
+                            0
+                        )
+                    )
+                    .put("title", title)
+                    .put("text_count", textCount)
+                    .put("controls", controlsCount)
+                    .put("values", valuesCount)
+                    .put(
+                        "source_context_mode",
+                        visual.optString(
+                            "window_context_mode"
+                        )
+                    )
+                    .put(
+                        "capture_mode",
+                        visual.optString(
+                            "visual_capture_mode"
+                        )
+                    )
+                    .put(
+                        "screen_text_instruction_authority",
+                        visual.optBoolean(
+                            "screen_text_instruction_authority",
+                            true
+                        )
+                    )
+                    .put(
+                        "restore_verified",
+                        restore.optBoolean(
+                            "verified",
+                            false
+                        )
+                    )
+        )
+    }
+
+    private fun masterManualRequiredTests(): JSONArray =
+        JSONArray()
+            .put(
+                masterAcceptanceTestResult(
+                    id = "MASTER-MANUAL-001",
+                    title = "Wake-word/background voice with real human speech",
+                    status = MASTER_STATUS_MANUAL_REQUIRED,
+                    critical = true,
+                    message =
+                        "Нужен ручной тест: из background произнести «Аяна», проверить «Да?», follow-up window и «Аяна, открой YouTube». Микрофонный человеческий ввод нельзя честно самодоказать локальным parser test.",
+                    evidenceScope = "manual_human_voice"
+                )
+            )
+            .put(
+                masterAcceptanceTestResult(
+                    id = "MASTER-MANUAL-002",
+                    title = "Marin audible quality + spoken STOP during speech",
+                    status = MASTER_STATUS_MANUAL_REQUIRED,
+                    critical = false,
+                    message =
+                        "Нужен ручной слуховой тест качества Marin и реальной голосовой остановки во время TTS; HTTP/audio-byte telemetry не доказывает субъективное звучание и захват человеческого STOP.",
+                    evidenceScope = "manual_audio_perception"
+                )
+            )
+            .put(
+                masterAcceptanceTestResult(
+                    id = "MASTER-MANUAL-003",
+                    title = "ORB visual persistence over Samsung Settings",
+                    status = MASTER_STATUS_MANUAL_REQUIRED,
+                    critical = false,
+                    message =
+                        "Нужен визуальный ручной тест ORB поверх Samsung Settings и drag/visibility; Accessibility/package evidence не доказывает фактическую видимость overlay глазами пользователя.",
+                    evidenceScope = "manual_visual_overlay"
+                )
+            )
+
+    private fun appendJsonObjects(
+        target: JSONArray,
+        source: JSONArray
+    ) {
+        for (index in 0 until source.length()) {
+            source
+                .optJSONObject(index)
+                ?.let {
+                    target.put(
+                        JSONObject(
+                            it.toString()
+                        )
+                    )
+                }
+        }
+    }
+
+    private fun finalizeMasterAcceptanceResult(
+        base: JSONObject,
+        supplemental: JSONArray,
+        manual: JSONArray,
+        evidenceSweep: JSONObject,
+        startedAtMs: Long
+    ): JSONObject {
+        val tests =
+            JSONArray()
+
+        appendJsonObjects(
+            tests,
+            base.optJSONArray("tests")
+                ?: JSONArray()
+        )
+
+        appendJsonObjects(
+            tests,
+            supplemental
+        )
+
+        appendJsonObjects(
+            tests,
+            manual
+        )
+
+        var pass = 0
+        var warning = 0
+        var failed = 0
+        var blocked = 0
+        var unsupported = 0
+        var noData = 0
+        var cancelled = 0
+        var manualRequired = 0
+        var criticalFailures = 0
+
+        for (index in 0 until tests.length()) {
+            val item =
+                tests.optJSONObject(index)
+                    ?: continue
+
+            val status =
+                item
+                    .optString("status")
+                    .uppercase(Locale.ROOT)
+
+            when (status) {
+                AyanaAcceptanceTestEngine.STATUS_PASS ->
+                    pass += 1
+
+                AyanaAcceptanceTestEngine.STATUS_WARNING ->
+                    warning += 1
+
+                AyanaAcceptanceTestEngine.STATUS_FAIL -> {
+                    failed += 1
+                    if (
+                        item.optBoolean(
+                            "critical",
+                            false
+                        )
+                    ) {
+                        criticalFailures += 1
+                    }
+                }
+
+                AyanaAcceptanceTestEngine.STATUS_BLOCKED ->
+                    blocked += 1
+
+                AyanaAcceptanceTestEngine.STATUS_UNSUPPORTED ->
+                    unsupported += 1
+
+                AyanaAcceptanceTestEngine.STATUS_NO_DATA ->
+                    noData += 1
+
+                AyanaAcceptanceTestEngine.STATUS_CANCELLED ->
+                    cancelled += 1
+
+                MASTER_STATUS_MANUAL_REQUIRED ->
+                    manualRequired += 1
+
+                else ->
+                    warning += 1
+            }
+        }
+
+        val automatedGrade =
+            when {
+                criticalFailures > 0 ||
+                    failed > 0 ->
+                    AyanaAcceptanceTestEngine
+                        .GRADE_NOT_READY
+
+                blocked > 0 ||
+                    unsupported > 0 ||
+                    noData > 0 ||
+                    warning > 0 ->
+                    AyanaAcceptanceTestEngine
+                        .GRADE_READY_WITH_LIMITATIONS
+
+                else ->
+                    AyanaAcceptanceTestEngine
+                        .GRADE_READY
+            }
+
+        val grade =
+            when {
+                cancelled > 0 ->
+                    AyanaAcceptanceTestEngine
+                        .GRADE_CANCELLED
+
+                automatedGrade ==
+                    AyanaAcceptanceTestEngine
+                        .GRADE_NOT_READY ->
+                    automatedGrade
+
+                manualRequired > 0 ->
+                    AyanaAcceptanceTestEngine
+                        .GRADE_READY_WITH_LIMITATIONS
+
+                else ->
+                    automatedGrade
+            }
+
+        val finishedAtMs =
+            System.currentTimeMillis()
+
+        val executionSuccess =
+            base.optBoolean(
+                "execution_success",
+                false
+            ) &&
+                cancelled == 0
+
+        val summary =
+            "MASTER FULL ACCEPTANCE завершён: PASS $pass, WARNING $warning, FAIL $failed, " +
+                "BLOCKED $blocked, UNSUPPORTED $unsupported, NO_DATA $noData, " +
+                "MANUAL_REQUIRED $manualRequired. Automated grade=$automatedGrade; overall grade=$grade."
+
+        return JSONObject(
+            base.toString()
+        )
+            .put("success", executionSuccess)
+            .put(
+                "execution_success",
+                executionSuccess
+            )
+            .put(
+                "engine",
+                "AyanaMasterFullAcceptance"
+            )
+            .put(
+                "engine_version",
+                MASTER_ACCEPTANCE_VERSION
+            )
+            .put(
+                "base_engine",
+                base.optString(
+                    "engine",
+                    "AyanaAcceptanceTestEngine"
+                )
+            )
+            .put(
+                "base_engine_version",
+                base.optString(
+                    "engine_version",
+                    AyanaAcceptanceTestEngine.ENGINE_VERSION
+                )
+            )
+            .put(
+                "mode",
+                MASTER_ACCEPTANCE_MODE
+            )
+            .put(
+                "accepted_baseline",
+                AYANA_ACCEPTED_FEATURE_CHECKPOINT
+            )
+            .put(
+                "current_release",
+                AYANA_CURRENT_FEATURE_RELEASE
+            )
+            .put("started_at_ms", startedAtMs)
+            .put("finished_at_ms", finishedAtMs)
+            .put(
+                "duration_ms",
+                (
+                    finishedAtMs -
+                        startedAtMs
+                    ).coerceAtLeast(0L)
+            )
+            .put("tests", tests)
+            .put(
+                "tests_requested",
+                tests.length()
+            )
+            .put(
+                "tests_completed",
+                tests.length()
+            )
+            .put(
+                "baseline_tests_requested",
+                base.optInt(
+                    "baseline_tests_requested",
+                    base.optInt(
+                        "tests_requested",
+                        0
+                    )
+                )
+            )
+            .put(
+                "adaptive_tests_generated",
+                base.optInt(
+                    "adaptive_tests_generated",
+                    0
+                )
+            )
+            .put(
+                "master_supplemental_tests",
+                supplemental.length()
+            )
+            .put(
+                "manual_required",
+                manualRequired
+            )
+            .put(
+                "automated_tests_completed",
+                tests.length() -
+                    manualRequired
+            )
+            .put("passed", pass)
+            .put("warnings", warning)
+            .put("failed", failed)
+            .put("blocked", blocked)
+            .put("unsupported", unsupported)
+            .put("no_data", noData)
+            .put("cancelled", cancelled)
+            .put(
+                "critical_failures",
+                criticalFailures
+            )
+            .put(
+                "automated_grade",
+                automatedGrade
+            )
+            .put("grade", grade)
+            .put(
+                "device_evidence_sweep",
+                evidenceSweep
+            )
+            .put(
+                "master_external_device_scenarios",
+                supplemental.length()
+            )
+            .put(
+                "summary",
+                summary
+            )
+            .put(
+                "voice_summary",
+                summary
+            )
+    }
+
+    private fun runLocalMasterFullAcceptanceCommand(
+        silent: Boolean
+    ) {
+        executionPhase(
+            phase = "master_full_acceptance",
+            executor = "master_acceptance_engine"
+        )
+
+        broadcastStatus(
+            "Провожу MASTER FULL ACCEPTANCE: базовая диагностика и реальные device-сценарии…",
+            STATE_EXECUTING
+        )
+
+        val startedAtMs =
+            System.currentTimeMillis()
+
+        val commandToken =
+            activeCommandToken
+
+        val originalPage =
+            currentAyanaPageKeyForAppIntegrationProbe()
+
+        val evidenceSweep =
+            try {
+                runCapabilityProofSweep()
+            } catch (error: Exception) {
+                JSONObject()
+                    .put(
+                        "version",
+                        "master-fallback"
+                    )
+                    .put(
+                        "error",
+                        error.message
+                            ?: error.javaClass.simpleName
+                    )
+            }
+
+        val base =
+            try {
+                acceptanceTestEngine.run(
+                    AyanaAcceptanceTestEngine
+                        .Mode
+                        .EXHAUSTIVE_ACCEPTANCE
+                )
+            } catch (error: Exception) {
+                JSONObject()
+                    .put("success", false)
+                    .put(
+                        "execution_success",
+                        false
+                    )
+                    .put(
+                        "engine",
+                        "AyanaAcceptanceTestEngine"
+                    )
+                    .put(
+                        "engine_version",
+                        AyanaAcceptanceTestEngine
+                            .ENGINE_VERSION
+                    )
+                    .put(
+                        "mode",
+                        AyanaAcceptanceTestEngine
+                            .Mode
+                            .EXHAUSTIVE_ACCEPTANCE
+                            .wireName
+                    )
+                    .put(
+                        "grade",
+                        AyanaAcceptanceTestEngine
+                            .GRADE_NOT_READY
+                    )
+                    .put("tests", JSONArray())
+                    .put("known_limits", JSONArray())
+                    .put(
+                        "summary",
+                        "Базовая exhaustive acceptance не завершена: ${error.message ?: error.javaClass.simpleName}"
+                    )
+            }
+
+        if (
+            base.optBoolean(
+                "execution_success",
+                false
+            )
+        ) {
+            reconcileAcceptancePostProbeRuntimeTruth(
+                base
+            )
+        }
+
+        val supplemental =
+            JSONArray()
+
+        fun addScenario(
+            test: JSONObject
+        ) {
+            supplemental.put(test)
+
+            commandHistoryStore.addEvent(
+                activeCommandHistoryId,
+                state = "master_acceptance_scenario",
+                message =
+                    "${test.optString("id")}: ${test.optString("status")}",
+                details =
+                    (
+                        "title=${test.optString("title")}; " +
+                            "duration_ms=${test.optLong("duration_ms", 0L)}; " +
+                            "message=${test.optString("message").take(500)}"
+                        ).take(1000)
+            )
+        }
+
+        if (
+            base.optBoolean(
+                "execution_success",
+                false
+            ) &&
+            !isCommandCancelled(commandToken) &&
+            commandToken == activeCommandToken
+        ) {
+            addScenario(
+                runMasterAppIntegrationDeviceScenario(
+                    commandToken = commandToken,
+                    originalPage = originalPage
+                )
+            )
+
+            addScenario(
+                runMasterMultiAppScenario(
+                    id = "MASTER-R94-001",
+                    title = "R9.4 verified multi-app orchestration regression",
+                    command =
+                        "проверь многошаговую работу приложений",
+                    expectedPlanKey =
+                        "r9.4-device-acceptance",
+                    commandToken = commandToken,
+                    originalPage = originalPage
+                )
+            )
+
+            addScenario(
+                runMasterMultiAppScenario(
+                    id = "MASTER-R95-001",
+                    title = "R9.5 verified action-result transfer regression",
+                    command =
+                        "проверь перенос результата между приложениями",
+                    expectedPlanKey =
+                        "r9.5-result-transfer-device-acceptance",
+                    commandToken = commandToken,
+                    originalPage = originalPage,
+                    requiredTransferCount = 1
+                )
+            )
+
+            addScenario(
+                runMasterMultiAppScenario(
+                    id = "MASTER-R96-001",
+                    title = "R9.6.1 exact-marker visual provenance regression",
+                    command =
+                        "проверь семантическое чтение внешнего экрана",
+                    expectedPlanKey =
+                        "r9.6-semantic-fallback-device-acceptance",
+                    commandToken = commandToken,
+                    originalPage = originalPage,
+                    requiredTransferCount = 1,
+                    requireVisualScreenshotProvenance = true
+                )
+            )
+
+            addScenario(
+                runMasterStructuredScreenScenario(
+                    commandToken = commandToken,
+                    originalPage = originalPage
+                )
+            )
+
+            addScenario(
+                runMasterMultiAppScenario(
+                    id = "MASTER-R98-001",
+                    title = "R9.8 generic typed result-transfer regression",
+                    command =
+                        "проверь универсальный перенос результатов между приложениями",
+                    expectedPlanKey =
+                        "r9.8-generic-result-transfer-device-acceptance",
+                    commandToken = commandToken,
+                    originalPage = originalPage,
+                    requiredTransferCount = 2,
+                    requireGenericTransfer = true
+                )
+            )
+        }
+
+        val manual =
+            masterManualRequiredTests()
+
+        val result =
+            finalizeMasterAcceptanceResult(
+                base = base,
+                supplemental = supplemental,
+                manual = manual,
+                evidenceSweep = evidenceSweep,
+                startedAtMs = startedAtMs
+            )
+
+        try {
+            capabilityRegistry
+                .recordAcceptanceResult(
+                    mode = MASTER_ACCEPTANCE_MODE,
+                    grade =
+                        result.optString(
+                            "grade",
+                            AyanaAcceptanceTestEngine
+                                .GRADE_NOT_READY
+                        ),
+                    passed =
+                        result.optInt(
+                            "passed",
+                            0
+                        ),
+                    warnings =
+                        result.optInt(
+                            "warnings",
+                            0
+                        ),
+                    failed =
+                        result.optInt(
+                            "failed",
+                            0
+                        ),
+                    blocked =
+                        result.optInt(
+                            "blocked",
+                            0
+                        ),
+                    unsupported =
+                        result.optInt(
+                            "unsupported",
+                            0
+                        ),
+                    noData =
+                        result.optInt(
+                            "no_data",
+                            0
+                        ),
+                    durationMs =
+                        result.optLong(
+                            "duration_ms",
+                            0L
+                        ),
+                    executionSuccess =
+                        result.optBoolean(
+                            "execution_success",
+                            false
+                        )
+                )
+        } catch (_: Exception) {
+        }
+
+        commandHistoryStore.addEvent(
+            activeCommandHistoryId,
+            state = "master_acceptance_result",
+            message =
+                "R9.8.1 MASTER: ${result.optString("grade", "UNKNOWN")}",
+            details =
+                (
+                    "pass=${result.optInt("passed")}; " +
+                        "warning=${result.optInt("warnings")}; " +
+                        "fail=${result.optInt("failed")}; " +
+                        "blocked=${result.optInt("blocked")}; " +
+                        "unsupported=${result.optInt("unsupported")}; " +
+                        "no_data=${result.optInt("no_data")}; " +
+                        "manual_required=${result.optInt("manual_required")}; " +
+                        "tests=${result.optInt("tests_completed")}; " +
+                        "duration_ms=${result.optLong("duration_ms")}"
+                    ).take(1200)
+        )
+
+        if (
+            !result.optBoolean(
+                "execution_success",
+                false
+            )
+        ) {
+            respondAndResume(
+                text =
+                    result.optString(
+                        "summary",
+                        "MASTER FULL ACCEPTANCE не завершён."
+                    ),
+                silent = silent,
+                success = false,
+                technical =
+                    "master_acceptance_execution_failed; " +
+                        "grade=${result.optString("grade")}; " +
+                        "tests=${result.optInt("tests_completed", 0)}"
+            )
+            return
+        }
+
+        executionPhase(
+            phase = "master_acceptance_report_publish",
+            executor = "artifact_engine"
+        )
+
+        val reportText =
+            try {
+                buildAcceptanceDetailedReport(
+                    result
+                )
+            } catch (error: Exception) {
+                respondAndResume(
+                    text =
+                        result.optString("summary") +
+                            "\n\nТесты выполнены, но MASTER TXT-отчёт сформировать не удалось.",
+                    silent = silent,
+                    success = false,
+                    technical =
+                        "master_acceptance_report_build_failed:" +
+                            (
+                                error.message
+                                    ?: error.javaClass.simpleName
+                                ).take(500)
+                )
+                return
+            }
+
+        val filename =
+            "AYANA_MASTER_FULL_ACCEPTANCE_" +
+                DateTimeFormatter
+                    .ofPattern(
+                        "yyyy-MM-dd_HHmmss"
+                    )
+                    .format(
+                        LocalDateTime.now()
+                    ) +
+                ".txt"
+
+        val published =
+            try {
+                artifactEngine.create(
+                    arguments =
+                        JSONObject()
+                            .put("kind", "txt")
+                            .put(
+                                "filename",
+                                filename
+                            )
+                            .put(
+                                "title",
+                                "AYANA Master Full Acceptance"
+                            )
+                            .put(
+                                "content",
+                                reportText
+                            )
+                            .put(
+                                "columns",
+                                JSONArray()
+                            )
+                            .put(
+                                "rows",
+                                JSONArray()
+                            )
+                            .put(
+                                "column_types",
+                                JSONArray()
+                            )
+                            .put(
+                                "chart_type",
+                                "none"
+                            ),
+                    tryBeginPublish = { detail ->
+                        executionKernel
+                            .tryBeginIrreversibleDispatch(
+                                kind =
+                                    "master_acceptance_report_publish",
+                                detail = detail
+                            )
+                    },
+                    onPublishAccepted = { detail ->
+                        executionKernel
+                            .markIrreversibleDispatchAccepted(
+                                detail
+                            )
+                    },
+                    onPublishReconciliationStarted = { detail ->
+                        executionKernel
+                            .markSideEffectReconciliationStarted(
+                                detail
+                            )
+                    },
+                    onPublishReconciled = { committed, detail ->
+                        executionKernel
+                            .markSideEffectReconciled(
+                                committed = committed,
+                                detail = detail
+                            )
+                    }
+                )
+            } catch (error: Exception) {
+                JSONObject()
+                    .put("success", false)
+                    .put("verified", false)
+                    .put(
+                        "message",
+                        error.message
+                            ?: error.javaClass.simpleName
+                    )
+            }
+
+        val reportVerified =
+            published.optBoolean(
+                "success",
+                false
+            ) &&
+                published
+                    .optString(
+                        "artifact_reference"
+                    )
+                    .isNotBlank()
+
+        if (!reportVerified) {
+            respondAndResume(
+                text =
+                    result.optString("summary") +
+                        "\n\nMASTER FULL ACCEPTANCE выполнен, но сохранение TXT-отчёта не подтверждено.",
+                silent = silent,
+                success = false,
+                technical =
+                    "master_acceptance_report_publish_unverified:" +
+                        published.toString().take(1000)
+            )
+            return
+        }
+
+        val finalName =
+            published
+                .optString(
+                    "name",
+                    filename
+                )
+                .ifBlank {
+                    filename
+                }
+
+        commandHistoryStore.addEvent(
+            activeCommandHistoryId,
+            state = "master_acceptance_report_verified",
+            message = "MASTER FULL ACCEPTANCE TXT создан и подтверждён",
+            details =
+                (
+                    "name=$finalName; grade=${result.optString("grade")}; " +
+                        "tests=${result.optInt("tests_completed")}; " +
+                        "manual_required=${result.optInt("manual_required")}"
+                    ).take(1000)
+        )
+
+        finishLocalCommand(
+            result.optString("summary") +
+                "\n\nПодробный MASTER TXT-отчёт сохранён в Downloads/AYANA: $finalName",
+            silent
+        )
+    }
+
     private fun runLocalAcceptanceTestCommand(
         mode: AyanaAcceptanceTestEngine.Mode,
         silent: Boolean
@@ -22806,7 +24383,8 @@ append(index + 1)
                 AyanaAcceptanceTestEngine.STATUS_WARNING to 2,
                 AyanaAcceptanceTestEngine.STATUS_UNSUPPORTED to 3,
                 AyanaAcceptanceTestEngine.STATUS_NO_DATA to 4,
-                AyanaAcceptanceTestEngine.STATUS_CANCELLED to 5
+                MASTER_STATUS_MANUAL_REQUIRED to 5,
+                AyanaAcceptanceTestEngine.STATUS_CANCELLED to 6
             )
 
         val prioritized =
@@ -22847,7 +24425,8 @@ append(index + 1)
                     "FAIL ${result.optInt("failed", 0)}, " +
                     "BLOCKED ${result.optInt("blocked", 0)}, " +
                     "UNSUPPORTED ${result.optInt("unsupported", 0)}, " +
-                    "NO_DATA ${result.optInt("no_data", 0)}."
+                    "NO_DATA ${result.optInt("no_data", 0)}, " +
+                    "MANUAL_REQUIRED ${result.optInt("manual_required", 0)}."
             )
             append("\n")
             append(
@@ -23000,7 +24579,8 @@ append(index + 1)
                 AyanaAcceptanceTestEngine.STATUS_WARNING to 2,
                 AyanaAcceptanceTestEngine.STATUS_UNSUPPORTED to 3,
                 AyanaAcceptanceTestEngine.STATUS_NO_DATA to 4,
-                AyanaAcceptanceTestEngine.STATUS_CANCELLED to 5
+                MASTER_STATUS_MANUAL_REQUIRED to 5,
+                AyanaAcceptanceTestEngine.STATUS_CANCELLED to 6
             )
 
         val prioritized =
@@ -23019,13 +24599,17 @@ append(index + 1)
 
         val detailedReport = buildString {
             append(
-                if (
-                    result.optString("mode") ==
-                    AyanaAcceptanceTestEngine.Mode.EXHAUSTIVE_ACCEPTANCE.wireName
+                when (
+                    result.optString("mode")
                 ) {
-                    "AYANA — ВСЕСТОРОННИЙ АВТОНОМНЫЙ ОТЧЁТ ДИАГНОСТИКИ\n"
-                } else {
-                    "AYANA — ПОЛНЫЙ ОТЧЁТ ДИАГНОСТИКИ\n"
+                    MASTER_ACCEPTANCE_MODE ->
+                        "AYANA — MASTER FULL ACCEPTANCE & DIAGNOSTIC REPORT\n"
+
+                    AyanaAcceptanceTestEngine.Mode.EXHAUSTIVE_ACCEPTANCE.wireName ->
+                        "AYANA — ВСЕСТОРОННИЙ АВТОНОМНЫЙ ОТЧЁТ ДИАГНОСТИКИ\n"
+
+                    else ->
+                        "AYANA — ПОЛНЫЙ ОТЧЁТ ДИАГНОСТИКИ\n"
                 }
             )
             append("========================================\n")
@@ -23046,6 +24630,7 @@ append(index + 1)
             append("BLOCKED: ${result.optInt("blocked", 0)}\n")
             append("UNSUPPORTED: ${result.optInt("unsupported", 0)}\n")
             append("NO_DATA: ${result.optInt("no_data", 0)}\n")
+            append("MANUAL_REQUIRED: ${result.optInt("manual_required", 0)}\n")
             append("CANCELLED: ${result.optInt("cancelled", 0)}\n")
             append("Critical failures: ${result.optInt("critical_failures", 0)}\n")
             append("Тестов запрошено: ${result.optInt("tests_requested", tests.length())}\n")
@@ -23370,7 +24955,8 @@ append(index + 1)
                         "FAIL=${result.optInt("failed", 0)}; " +
                         "BLOCKED=${result.optInt("blocked", 0)}; " +
                         "UNSUPPORTED=${result.optInt("unsupported", 0)}; " +
-                        "NO_DATA=${result.optInt("no_data", 0)}\n"
+                        "NO_DATA=${result.optInt("no_data", 0)}; " +
+                        "MANUAL_REQUIRED=${result.optInt("manual_required", 0)}\n"
                 )
                 append(
                     "tests=${tests.length()}; " +
@@ -24069,6 +25655,119 @@ append(index + 1)
                     .put("external_knowledge_allowed", false)
                     .put("blind_replay_allowed", false)
                     .put("persistent_mutation_authority", false)
+        )
+
+
+        val genericTransferOk =
+            try {
+                verifiedResultTransfer.selfTest() &&
+                    multiAppTaskOrchestrator.selfTest() &&
+                    multiAppTaskOrchestrator
+                        .parse(
+                            "проверь универсальный перенос результатов между приложениями"
+                        )
+                        ?.let { plan ->
+                            plan.key ==
+                                "r9.8-generic-result-transfer-device-acceptance" &&
+                                plan.steps.size == 3 &&
+                                plan.steps.count {
+                                    it.captureSpec != null
+                                } == 2 &&
+                                plan.steps.count {
+                                    it.bindingSpec != null
+                                } == 2
+                        } == true
+            } catch (_: Exception) {
+                false
+            }
+
+        add(
+            id = "R9-FOUND-012",
+            title = "R9.8 generic typed verified result-transfer contract",
+            critical = true,
+            ok = genericTransferOk,
+            message =
+                if (genericTransferOk) {
+                    "R9.8 generic compiler and typed transfer v2.0 self-tests pass; verified output can feed the next registered action without a hard-coded Browser->YouTube->Calendar chain."
+                } else {
+                    "R9.8 generic typed result-transfer self-test failed."
+                },
+            evidence =
+                JSONObject()
+                    .put(
+                        "orchestrator_version",
+                        AyanaMultiAppTaskOrchestrator.VERSION
+                    )
+                    .put(
+                        "result_transfer_version",
+                        AyanaVerifiedResultTransfer.VERSION
+                    )
+                    .put(
+                        "typed_value_contracts",
+                        true
+                    )
+                    .put(
+                        "verified_provenance_required",
+                        true
+                    )
+                    .put(
+                        "incompatible_edges_fail_closed",
+                        true
+                    )
+                    .put(
+                        "persistent_mutation_authority",
+                        false
+                    )
+        )
+
+        val conversationActionTruthOk =
+            try {
+                unsupportedExecutionCapabilityReason(
+                    "а что ты зациклилась на GitHub? как будто нет других приложений и задач и как будто если ты самостоятельно делать commit github ты станешь полноценным ии агентом"
+                ) == null &&
+                    !unsupportedExecutionCapabilityReason(
+                        "делай commit в GitHub"
+                    ).isNullOrBlank() &&
+                    AyanaStructuredLocalCommandRouter
+                        .parse(
+                            "а что ты зациклилась на GitHub? как будто нет других приложений и задач и как будто если ты самостоятельно делать commit github ты станешь полноценным ии агентом"
+                        )
+                        ?.let { intent ->
+                            shouldDeferStructuredUnknownCapabilityToConversation(
+                                command =
+                                    "а что ты зациклилась на GitHub? как будто нет других приложений и задач и как будто если ты самостоятельно делать commit github ты станешь полноценным ии агентом",
+                                intent = intent
+                            )
+                        } == true
+            } catch (_: Exception) {
+                false
+            }
+
+        add(
+            id = "R9-FOUND-013",
+            title = "R9.7.3 conversation/action routing truth regression",
+            critical = true,
+            ok = conversationActionTruthOk,
+            message =
+                if (conversationActionTruthOk) {
+                    "Real incident regressions remain separated: GitHub discussion is conversational while continuous imperative «делай commit» is fail-closed execution intent."
+                } else {
+                    "R9.7.3 conversation/action routing truth regression detected."
+                },
+            evidence =
+                JSONObject()
+                    .put(
+                        "github_discussion_is_execution",
+                        false
+                    )
+                    .put(
+                        "continuous_imperative_is_execution",
+                        true
+                    )
+                    .put(
+                        "unknown_capability_conversation_bypass_required",
+                        true
+                    )
         )
 
         return tests
@@ -46340,9 +48039,18 @@ state
 
     companion object {
 
-        // R9.8 RELEASE / FEATURE LINEAGE TRUTH.
+        private const val MASTER_ACCEPTANCE_VERSION =
+            "1.0"
+
+        private const val MASTER_ACCEPTANCE_MODE =
+            "master_full_acceptance"
+
+        private const val MASTER_STATUS_MANUAL_REQUIRED =
+            "MANUAL_REQUIRED"
+
+        // R9.8.1 RELEASE / FEATURE LINEAGE TRUTH.
         private const val AYANA_VOICE_SERVICE_RELEASE =
-            "v12.30.0 / R9.8 GENERIC VERIFIED RESULT TRANSFER"
+            "v12.30.1 / R9.8.1 MASTER FULL ACCEPTANCE & DIAGNOSTIC ENGINE"
 
         private const val AYANA_PERSONAL_SEARCH_ENGINE_RELEASE =
             "v1.5.1 IMAGE COVERAGE TRUTH"
@@ -46354,13 +48062,13 @@ state
             "v11.1.10 Multi-Attachment"
 
         private const val AYANA_ACCEPTED_FEATURE_CHECKPOINT =
-            "R9.7.3 ACTION MORPHOLOGY + TERMINAL TRUTH — DEVICE-CONFIRMED ACCEPTED"
+            "R9.8 GENERIC VERIFIED RESULT TRANSFER — DEVICE-CONFIRMED ACCEPTED"
 
         private const val AYANA_CURRENT_FEATURE_RELEASE =
-            "R9.8 GENERIC VERIFIED RESULT TRANSFER — PENDING DEVICE CONFIRMATION"
+            "R9.8.1 MASTER FULL ACCEPTANCE & DIAGNOSTIC ENGINE — PENDING DEVICE CONFIRMATION"
 
         private const val AYANA_RELEASE_LINEAGE =
-            "Android v12.21.0 / R7.9 truth-hardening + R8.0 multi-attachment + R8.1–R8.4 accepted Personal Global Search stack + R8.5–R8.5.4 capability/evidence truth + R9.0 autonomous agent foundation + R9.0.1 history live-refresh proof fix + R9.0.2 diagnostic reconciliation/history refresh fix + R9.0.3 TTS health reconciliation + R9.1 IME perception/active telemetry truth + R9.2 autonomous recovery/long-task reconciliation + R9.2.1 adaptive hypothesis reconciliation + R9.3 app integration framework + R9.3.1 screen health reconciliation + R9.3.2 history latency recovery reconciliation + R9.3.3 informational terminal reconciliation + R9.3.4 app integration device acceptance + R9.4 multi-app task orchestration + R9.4.1 screen ownership union reconciliation + R9.5 verified result transfer between app steps + R9.5.1 partial marker provenance reconciliation + R9.5.2 bounded marker observation + R9.5.3 verified action result transfer + R9.6 verified semantic observation fallback + R9.6.1 visual fallback acceptance truth + R9.7 structured screen reading + R9.7.1 conversation routing/terminal truth + R9.7.2 structured router conversation precedence + R9.7.3 action morphology/terminal truth + R9.8 generic verified result transfer"
+            "Android v12.21.0 / R7.9 truth-hardening + R8.0 multi-attachment + R8.1–R8.4 accepted Personal Global Search stack + R8.5–R8.5.4 capability/evidence truth + R9.0 autonomous agent foundation + R9.0.1 history live-refresh proof fix + R9.0.2 diagnostic reconciliation/history refresh fix + R9.0.3 TTS health reconciliation + R9.1 IME perception/active telemetry truth + R9.2 autonomous recovery/long-task reconciliation + R9.2.1 adaptive hypothesis reconciliation + R9.3 app integration framework + R9.3.1 screen health reconciliation + R9.3.2 history latency recovery reconciliation + R9.3.3 informational terminal reconciliation + R9.3.4 app integration device acceptance + R9.4 multi-app task orchestration + R9.4.1 screen ownership union reconciliation + R9.5 verified result transfer between app steps + R9.5.1 partial marker provenance reconciliation + R9.5.2 bounded marker observation + R9.5.3 verified action result transfer + R9.6 verified semantic observation fallback + R9.6.1 visual fallback acceptance truth + R9.7 structured screen reading + R9.7.1 conversation routing/terminal truth + R9.7.2 structured router conversation precedence + R9.7.3 action morphology/terminal truth + R9.8 generic verified result transfer + R9.8.1 master full acceptance/diagnostic engine"
 
         // AyanaCommandHistoryStore v2.8 keeps up to 4k chars inline and stores longer
         // results out-of-line. Self-review intentionally remains inline so copied History
