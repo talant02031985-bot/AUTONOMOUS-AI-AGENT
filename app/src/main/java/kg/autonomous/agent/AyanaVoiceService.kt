@@ -62,6 +62,19 @@ import kotlin.math.abs
 
 class AyanaVoiceService : Service() {
 
+    // AYANA v12.41.0 / R10.8 GENERAL-PURPOSE LONG AUTONOMOUS OBJECTIVES.
+    // Builds on DEVICE-CONFIRMED R10.7.1 durable cross-lane recovery + cleanup hardening.
+    // - Long Objective Coordinator v1.0 adds an explicit bounded dependency graph above the
+    //   accepted Adaptive/Cross-Lane/Durable Recovery ledgers;
+    // - verified subgoals become immutable and only verified producers may publish partial results;
+    // - partial results carry producer provenance and are persisted through DurableGoal checkpoints;
+    // - after restart, objective id, subgoal graph, verified-prefix state and partial-result provenance
+    //   must match exactly before unresolved subgoals may continue;
+    // - already verified Browser/visual producer work is replay-blocked while the restored result may
+    //   be consumed by a pending YouTube subgoal;
+    // - final SUCCESS requires all required subgoals plus the existing adaptive terminal gate.
+    // No new app/account/mutation authority is added. ORB/visualizer remain untouched.
+    //
     // AYANA v12.40.0 / R10.7 CROSS-LANE DURABLE RECOVERY CONTINUITY.
     // Builds on DEVICE-CONFIRMED R10.6.1 Cross-Lane Adaptive Continuity.
     // - Cross-Lane Recovery Continuity v1.0 joins R10.3 durable interruption truth with
@@ -4637,6 +4650,20 @@ originalCommand
                 )
                 return
             }
+
+        // R10.8 GENERAL-PURPOSE LONG AUTONOMOUS OBJECTIVE ACCEPTANCE.
+        // Dependency-aware subgoals publish only verified partial results; one persisted
+        // result survives restart and is consumed without replaying its Browser/visual producer.
+        if (
+            isR10_8GeneralPurposeLongObjectiveAcceptanceCommand(
+                routingNormalized
+            )
+        ) {
+            runR10_8GeneralPurposeLongObjectiveAcceptance(
+                silent = silent
+            )
+            return
+        }
 
         // R10.7 CROSS-LANE DURABLE RECOVERY ACCEPTANCE. One objective executes
         // verified work across three lanes, persists the common ledgers, crosses a
@@ -30152,6 +30179,57 @@ AyanaAcceptanceTestEngine.PROBE_NOTIFICATION_ROUTING ->
                     .put("blind_replay_allowed", false)
         )
 
+        val longAutonomousObjectiveOk =
+            try {
+                AyanaLongObjectiveCoordinator.selfTest() &&
+                    AyanaCrossLaneRecoveryContinuity.selfTest() &&
+                    AyanaCrossLaneAdaptiveContinuity.selfTest() &&
+                    AyanaAdaptiveExecutionLoop.selfTest() &&
+                    longTaskRecoveryCoordinator.selfTest() &&
+                    isR10_8GeneralPurposeLongObjectiveAcceptanceCommand(
+                        "проверь длинную автономную цель"
+                    ) &&
+                    !isR10_8GeneralPurposeLongObjectiveAcceptanceCommand(
+                        "открой YouTube"
+                    )
+            } catch (_: Exception) {
+                false
+            }
+
+        add(
+            id = "R10-FOUND-024",
+            title = "R10.8 dependency-aware long objective / verified partial-result continuity contract",
+            critical = true,
+            ok = longAutonomousObjectiveOk,
+            message =
+                if (longAutonomousObjectiveOk) {
+                    "R10.8 requires explicit dependency-gated subgoals, provenance-bound verified partial results, exact durable restore and continuation of only unresolved work under the existing authority ceiling."
+                } else {
+                    "R10.8 Long Objective Coordinator contract self-test failed."
+                },
+            evidence =
+                JSONObject()
+                    .put(
+                        "long_objective_coordinator_version",
+                        AyanaLongObjectiveCoordinator.VERSION
+                    )
+                    .put(
+                        "cross_lane_recovery_version",
+                        AyanaCrossLaneRecoveryContinuity.VERSION
+                    )
+                    .put(
+                        "adaptive_loop_version",
+                        AyanaAdaptiveExecutionLoop.VERSION
+                    )
+                    .put("dependency_gate_required", true)
+                    .put("verified_partial_result_provenance_required", true)
+                    .put("verified_subgoal_replay_allowed", false)
+                    .put("partial_result_survives_restart", true)
+                    .put("authority_expansion_allowed", false)
+                    .put("terminal_requires_all_required_subgoals", true)
+                    .put("blind_replay_allowed", false)
+        )
+
         return tests
     }
 
@@ -36021,6 +36099,1560 @@ routed.forEach {
             .put("evidence", evidence)
 
 
+
+    private fun isR10_8GeneralPurposeLongObjectiveAcceptanceCommand(
+        command: String
+    ): Boolean {
+        val normalized =
+            command
+                .lowercase(Locale.ROOT)
+                .replace('ё', 'е')
+                .replace(Regex("\\s+"), " ")
+                .trim()
+                .removePrefix("аяна ")
+                .trim()
+
+        return normalized in
+            setOf(
+                "проверь длинную автономную цель",
+                "проверь общую длинную автономную цель",
+                "проверь многоэтапную автономную цель",
+                "проверь general-purpose long autonomous objective",
+                "проверь general purpose long autonomous objective",
+                "проверь r10.8"
+            )
+    }
+
+    private fun r10_8LongObjectiveSpecs(): List<AyanaLongObjectiveCoordinator.SubgoalSpec> =
+        listOf(
+            AyanaLongObjectiveCoordinator.SubgoalSpec(
+                id = "device_state",
+                title = "Verify factual device state",
+                lane = AyanaCrossLaneAdaptiveContinuity.LANE_AGENT_CORE,
+                authority = AyanaCrossLaneAdaptiveContinuity.AUTH_AGENT_CORE
+            ),
+            AyanaLongObjectiveCoordinator.SubgoalSpec(
+                id = "open_ayana",
+                title = "Verify Android Goal execution",
+                lane = AyanaCrossLaneAdaptiveContinuity.LANE_ANDROID_GOAL,
+                authority = AyanaCrossLaneAdaptiveContinuity.AUTH_ANDROID_GOAL,
+                dependencies = listOf("device_state")
+            ),
+            AyanaLongObjectiveCoordinator.SubgoalSpec(
+                id = "open_example",
+                title = "Open verified Browser source",
+                lane = AyanaCrossLaneAdaptiveContinuity.LANE_MULTI_APP,
+                authority = AyanaCrossLaneAdaptiveContinuity.AUTH_MULTI_APP,
+                dependencies = listOf("open_ayana")
+            ),
+            AyanaLongObjectiveCoordinator.SubgoalSpec(
+                id = "read_title",
+                title = "Extract verified page title",
+                lane = AyanaCrossLaneAdaptiveContinuity.LANE_MULTI_APP,
+                authority = AyanaCrossLaneAdaptiveContinuity.AUTH_MULTI_APP,
+                dependencies = listOf("open_example"),
+                resultKey = "page_title"
+            ),
+            AyanaLongObjectiveCoordinator.SubgoalSpec(
+                id = "youtube_search",
+                title = "Consume verified title in YouTube",
+                lane = AyanaCrossLaneAdaptiveContinuity.LANE_MULTI_APP,
+                authority = AyanaCrossLaneAdaptiveContinuity.AUTH_MULTI_APP,
+                dependencies = listOf("read_title")
+            ),
+            AyanaLongObjectiveCoordinator.SubgoalSpec(
+                id = "final_device_state",
+                title = "Final factual verification after consumer",
+                lane = AyanaCrossLaneAdaptiveContinuity.LANE_AGENT_CORE,
+                authority = AyanaCrossLaneAdaptiveContinuity.AUTH_AGENT_CORE,
+                dependencies = listOf("read_title", "youtube_search")
+            )
+        )
+
+    private fun runR10_8GeneralPurposeLongObjectiveAcceptance(
+        silent: Boolean
+    ) {
+        executionPhase(
+            phase = "r10_8_general_purpose_long_objective_acceptance",
+            executor = "long_objective_coordinator_v1"
+        )
+
+        stopSherpaListening()
+        listenMode = ListenMode.BUSY
+
+        broadcastStatus(
+            "Проверяю длинную автономную цель…",
+            STATE_EXECUTING
+        )
+
+        updateNotification(
+            "AYANA проверяет R10.8 long autonomous objective…"
+        )
+
+        val commandToken = activeCommandToken
+        val originalPage = currentAyanaPageKeyForAppIntegrationProbe()
+
+        val worker =
+            thread(
+                start = false,
+                name = "AyanaR10_8LongObjective"
+            ) {
+                val testFileName =
+                    "ayana_durable_goals_r10_8_acceptance.json"
+
+                var acceptanceStore: AyanaDurableGoalStore? = null
+                var acceptanceGoalId: String? = null
+                var finalRestore: JSONObject? = null
+
+                try {
+                    val longObjectiveSelfTest =
+                        try {
+                            AyanaLongObjectiveCoordinator.selfTest()
+                        } catch (_: Exception) {
+                            false
+                        }
+
+                    val recoverySelfTest =
+                        try {
+                            AyanaCrossLaneRecoveryContinuity.selfTest()
+                        } catch (_: Exception) {
+                            false
+                        }
+
+                    val continuitySelfTest =
+                        try {
+                            AyanaCrossLaneAdaptiveContinuity.selfTest()
+                        } catch (_: Exception) {
+                            false
+                        }
+
+                    val adaptiveSelfTest =
+                        try {
+                            AyanaAdaptiveExecutionLoop.selfTest()
+                        } catch (_: Exception) {
+                            false
+                        }
+
+                    val longRecoverySelfTest =
+                        try {
+                            longTaskRecoveryCoordinator.selfTest()
+                        } catch (_: Exception) {
+                            false
+                        }
+
+                    val isolatedStore =
+                        AyanaDurableGoalStore(
+                            context = applicationContext,
+                            storageFileName = testFileName
+                        )
+
+                    isolatedStore.clearAcceptanceStorage()
+                    acceptanceStore = isolatedStore
+
+                    val objective =
+                        "R10.8 acceptance: dependency-aware long objective preserves verified partial results across restart and resumes only unresolved subgoals"
+
+                    val started =
+                        isolatedStore.startGoal(
+                            command = objective,
+                            source = "r10_8_acceptance",
+                            mode = AyanaDurableGoalStore.MODE_ORCHESTRATOR,
+                            safeAutoResume = true
+                        )
+
+                    acceptanceGoalId =
+                        started
+                            .optString("id")
+                            .trim()
+                            .takeIf { it.isNotBlank() }
+
+                    if (acceptanceGoalId == null) {
+                        throw IllegalStateException(
+                            "R10.8 isolated durable goal_id was not created"
+                        )
+                    }
+
+                    val initialScreen =
+                        try {
+                            screenIntelligence.getScreenState()
+                        } catch (_: Exception) {
+                            JSONObject()
+                        }
+
+                    val initialState =
+                        AyanaAdaptiveExecutionLoop.fingerprintState(
+                            initialScreen.toString()
+                        )
+
+                    var adaptiveLoop =
+                        AyanaAdaptiveExecutionLoop.create(
+                            objective = objective,
+                            stateFingerprint = initialState,
+                            executionLane =
+                                AyanaCrossLaneAdaptiveContinuity.LANE_AGENT_CORE,
+                            authorityContext =
+                                AyanaCrossLaneAdaptiveContinuity.AUTH_AGENT_CORE
+                        )
+
+                    var continuity =
+                        AyanaCrossLaneAdaptiveContinuity.create(
+                            objective = objective,
+                            adaptiveLoop = adaptiveLoop,
+                            initialLane =
+                                AyanaCrossLaneAdaptiveContinuity.LANE_AGENT_CORE,
+                            initialAuthority =
+                                AyanaCrossLaneAdaptiveContinuity.AUTH_AGENT_CORE,
+                            authorityCeiling =
+                                AyanaCrossLaneAdaptiveContinuity.defaultUnifiedAuthorityCeiling()
+                        )
+
+                    var longObjective =
+                        AyanaLongObjectiveCoordinator.create(
+                            objectiveId = continuity.objectiveId(),
+                            objective = objective,
+                            specs = r10_8LongObjectiveSpecs()
+                        )
+
+                    val objectiveIdBefore = continuity.objectiveId()
+
+                    val startPatch =
+                        crossLaneRecoveryContinuity
+                            .buildRecoveryCheckpoint(
+                                adaptiveLoop = adaptiveLoop,
+                                continuity = continuity,
+                                checkpointTag = "r10_8_started",
+                                safeAutoResume = true
+                            )
+                            .put(
+                                "mode",
+                                AyanaDurableGoalStore.MODE_ORCHESTRATOR
+                            )
+                            .put(
+                                "long_objective_plan",
+                                longObjective.snapshot()
+                            )
+
+                    val durableStartPersisted =
+                        isolatedStore.checkpoint(
+                            acceptanceGoalId,
+                            startPatch
+                        ) != null
+
+                    if (!durableStartPersisted) {
+                        throw IllegalStateException(
+                            "R10.8 initial durable long-objective checkpoint was not persisted"
+                        )
+                    }
+
+                    // Dependency preflight: consumer cannot start before producer.
+                    val dependencyBlockProbe =
+                        longObjective.beginSubgoal(
+                            subgoalId = "youtube_search",
+                            lane = AyanaCrossLaneAdaptiveContinuity.LANE_MULTI_APP,
+                            authority = AyanaCrossLaneAdaptiveContinuity.AUTH_MULTI_APP
+                        )
+
+                    val dependencyGateBlocked =
+                        !dependencyBlockProbe.optBoolean("allowed", true) &&
+                            dependencyBlockProbe.optString("reason") ==
+                            "dependency_not_verified"
+
+                    var browserOpenDispatchCount = 0
+
+                    // Subgoal 1: factual Agent Core/local device state.
+                    val deviceSubgoalGate =
+                        longObjective.beginSubgoal(
+                            subgoalId = "device_state",
+                            lane = AyanaCrossLaneAdaptiveContinuity.LANE_AGENT_CORE,
+                            authority = AyanaCrossLaneAdaptiveContinuity.AUTH_AGENT_CORE
+                        )
+
+                    val agentLaneGate =
+                        continuity.transitionTo(
+                            adaptiveLoop = adaptiveLoop,
+                            targetLane =
+                                AyanaCrossLaneAdaptiveContinuity.LANE_AGENT_CORE,
+                            targetAuthority =
+                                AyanaCrossLaneAdaptiveContinuity.AUTH_AGENT_CORE,
+                            stateFingerprint = initialState,
+                            reason = "r10_8_device_state"
+                        )
+
+                    val deviceArgs = JSONObject()
+                    val deviceProposal =
+                        if (
+                            deviceSubgoalGate.optBoolean("allowed", false) &&
+                            agentLaneGate.optBoolean("allowed", false)
+                        ) {
+                            adaptiveLoop.propose(
+                                toolName = "get_device_state",
+                                arguments = deviceArgs,
+                                stateFingerprint = initialState,
+                                mayMutate = false,
+                                authoritySource =
+                                    AyanaCrossLaneAdaptiveContinuity.AUTH_AGENT_CORE
+                            )
+                        } else {
+                            JSONObject().put("allowed", false)
+                        }
+
+                    val deviceResult =
+                        if (deviceProposal.optBoolean("allowed", false)) {
+                            executeAgentTool(
+                                name = "get_device_state",
+                                arguments = JSONObject()
+                            )
+                        } else {
+                            JSONObject()
+                                .put("success", false)
+                                .put("verified", false)
+                        }
+
+                    val deviceVerified =
+                        deviceResult.optBoolean("success", false) &&
+                            deviceResult.optBoolean(
+                                "verified",
+                                deviceResult.optBoolean("success", false)
+                            )
+
+                    val deviceAfterState =
+                        AyanaAdaptiveExecutionLoop.fingerprintState(
+                            deviceResult.toString()
+                        )
+
+                    val deviceAdaptiveRecord =
+                        adaptiveLoop.recordResult(
+                            toolName = "get_device_state",
+                            arguments = deviceArgs,
+                            beforeStateFingerprint = initialState,
+                            afterStateFingerprint = deviceAfterState,
+                            success = deviceVerified,
+                            verified = deviceVerified,
+                            actionDispatched = false,
+                            actionCommitted = false,
+                            reconciliationComplete = true,
+                            evidence = "R10.8 factual device state"
+                        )
+
+                    val deviceSubgoalRecord =
+                        if (deviceVerified) {
+                            longObjective.recordVerified(
+                                subgoalId = "device_state",
+                                lane = AyanaCrossLaneAdaptiveContinuity.LANE_AGENT_CORE,
+                                authority = AyanaCrossLaneAdaptiveContinuity.AUTH_AGENT_CORE,
+                                evidence = "device state verified"
+                            )
+                        } else {
+                            longObjective.recordFailure(
+                                "device_state",
+                                "device_state_not_verified"
+                            )
+                        }
+
+                    // Subgoal 2: real Android Goal with isolated durable checkpoints.
+                    val androidSubgoalGate =
+                        longObjective.beginSubgoal(
+                            subgoalId = "open_ayana",
+                            lane = AyanaCrossLaneAdaptiveContinuity.LANE_ANDROID_GOAL,
+                            authority = AyanaCrossLaneAdaptiveContinuity.AUTH_ANDROID_GOAL
+                        )
+
+                    val androidLaneGate =
+                        continuity.transitionTo(
+                            adaptiveLoop = adaptiveLoop,
+                            targetLane =
+                                AyanaCrossLaneAdaptiveContinuity.LANE_ANDROID_GOAL,
+                            targetAuthority =
+                                AyanaCrossLaneAdaptiveContinuity.AUTH_ANDROID_GOAL,
+                            stateFingerprint = deviceAfterState,
+                            reason = "r10_8_android_goal"
+                        )
+
+                    val androidArgs =
+                        JSONObject()
+                            .put("type", "open_app")
+                            .put("app", "AYANA AI")
+                            .put("max_actions", 2)
+
+                    val androidProposal =
+                        if (
+                            androidSubgoalGate.optBoolean("allowed", false) &&
+                            androidLaneGate.optBoolean("allowed", false)
+                        ) {
+                            adaptiveLoop.propose(
+                                toolName = "execute_android_goal",
+                                arguments = androidArgs,
+                                stateFingerprint = deviceAfterState,
+                                mayMutate = true,
+                                authoritySource =
+                                    AyanaCrossLaneAdaptiveContinuity.AUTH_ANDROID_GOAL
+                            )
+                        } else {
+                            JSONObject().put("allowed", false)
+                        }
+
+                    val androidResult =
+                        if (androidProposal.optBoolean("allowed", false)) {
+                            executeAndroidGoal(
+                                arguments = JSONObject(androidArgs.toString()),
+                                checkpointStore = isolatedStore,
+                                checkpointGoalId = acceptanceGoalId
+                            )
+                        } else {
+                            JSONObject()
+                                .put("success", false)
+                                .put("verified", false)
+                        }
+
+                    val androidVerified =
+                        androidResult.optBoolean("success", false) &&
+                            androidResult.optBoolean(
+                                "verified",
+                                androidResult.optBoolean("success", false)
+                            )
+
+                    val androidAfterState =
+                        AyanaAdaptiveExecutionLoop.fingerprintState(
+                            androidResult
+                                .optJSONObject("screen")
+                                ?.toString()
+                                ?: androidResult.toString()
+                        )
+
+                    val androidAdaptiveRecord =
+                        adaptiveLoop.recordResult(
+                            toolName = "execute_android_goal",
+                            arguments = androidArgs,
+                            beforeStateFingerprint = deviceAfterState,
+                            afterStateFingerprint = androidAfterState,
+                            success = androidVerified,
+                            verified = androidVerified,
+                            actionDispatched =
+                                androidResult.optBoolean(
+                                    "action_dispatched",
+                                    androidVerified
+                                ),
+                            actionCommitted = false,
+                            reconciliationComplete = androidVerified,
+                            evidence =
+                                androidResult.optString(
+                                    "message",
+                                    "R10.8 Android Goal verification"
+                                ),
+                            failureLayer =
+                                androidResult.optString("failure_layer")
+                        )
+
+                    val androidSubgoalRecord =
+                        if (androidVerified) {
+                            longObjective.recordVerified(
+                                subgoalId = "open_ayana",
+                                lane = AyanaCrossLaneAdaptiveContinuity.LANE_ANDROID_GOAL,
+                                authority = AyanaCrossLaneAdaptiveContinuity.AUTH_ANDROID_GOAL,
+                                evidence = "Android Goal verified"
+                            )
+                        } else {
+                            longObjective.recordFailure(
+                                "open_ayana",
+                                "android_goal_not_verified"
+                            )
+                        }
+
+                    // Subgoal 3: Browser source exactly once.
+                    val browserSubgoalGate =
+                        longObjective.beginSubgoal(
+                            subgoalId = "open_example",
+                            lane = AyanaCrossLaneAdaptiveContinuity.LANE_MULTI_APP,
+                            authority = AyanaCrossLaneAdaptiveContinuity.AUTH_MULTI_APP
+                        )
+
+                    val multiLaneGate =
+                        continuity.transitionTo(
+                            adaptiveLoop = adaptiveLoop,
+                            targetLane =
+                                AyanaCrossLaneAdaptiveContinuity.LANE_MULTI_APP,
+                            targetAuthority =
+                                AyanaCrossLaneAdaptiveContinuity.AUTH_MULTI_APP,
+                            stateFingerprint = androidAfterState,
+                            reason = "r10_8_browser_source"
+                        )
+
+                    val browserArgs =
+                        JSONObject()
+                            .put(
+                                "app_key",
+                                AyanaAppIntegrationRegistry.APP_BROWSER
+                            )
+                            .put(
+                                "action_key",
+                                AyanaAppIntegrationRegistry.ACTION_OPEN_URL
+                            )
+                            .put(
+                                "payload",
+                                R9_7_STRUCTURED_ACCEPTANCE_URL
+                            )
+
+                    val browserProposal =
+                        if (
+                            browserSubgoalGate.optBoolean("allowed", false) &&
+                            multiLaneGate.optBoolean("allowed", false)
+                        ) {
+                            adaptiveLoop.propose(
+                                toolName = "app_integration:browser:open_url",
+                                arguments = browserArgs,
+                                stateFingerprint = androidAfterState,
+                                mayMutate = false,
+                                authoritySource =
+                                    AyanaCrossLaneAdaptiveContinuity.AUTH_MULTI_APP
+                            )
+                        } else {
+                            JSONObject().put("allowed", false)
+                        }
+
+                    val browserResult =
+                        if (browserProposal.optBoolean("allowed", false)) {
+                            browserOpenDispatchCount++
+                            executeAppIntegrationAction(
+                                appKey = AyanaAppIntegrationRegistry.APP_BROWSER,
+                                actionKey = AyanaAppIntegrationRegistry.ACTION_OPEN_URL,
+                                payload = R9_7_STRUCTURED_ACCEPTANCE_URL
+                            )
+                        } else {
+                            JSONObject()
+                                .put("success", false)
+                                .put("verified", false)
+                                .put("action_dispatched", false)
+                        }
+
+                    val browserVerified =
+                        browserResult.optBoolean("success", false) &&
+                            browserResult.optBoolean("verified", false)
+
+                    val browserState =
+                        AyanaAdaptiveExecutionLoop.fingerprintState(
+                            browserResult.toString()
+                        )
+
+                    val browserAdaptiveRecord =
+                        adaptiveLoop.recordResult(
+                            toolName = "app_integration:browser:open_url",
+                            arguments = browserArgs,
+                            beforeStateFingerprint = androidAfterState,
+                            afterStateFingerprint = browserState,
+                            success = browserVerified,
+                            verified = browserVerified,
+                            actionDispatched =
+                                browserResult.optBoolean(
+                                    "action_dispatched",
+                                    false
+                                ),
+                            actionCommitted = false,
+                            reconciliationComplete = browserVerified,
+                            evidence =
+                                browserResult.optString(
+                                    "message",
+                                    "R10.8 Browser source verification"
+                                )
+                        )
+
+                    val browserSubgoalRecord =
+                        if (browserVerified) {
+                            longObjective.recordVerified(
+                                subgoalId = "open_example",
+                                lane = AyanaCrossLaneAdaptiveContinuity.LANE_MULTI_APP,
+                                authority = AyanaCrossLaneAdaptiveContinuity.AUTH_MULTI_APP,
+                                evidence = "Browser source verified"
+                            )
+                        } else {
+                            longObjective.recordFailure(
+                                "open_example",
+                                "browser_not_verified"
+                            )
+                        }
+
+                    val expectedBrowserPackage =
+                        browserResult
+                            .optString("observed_package")
+                            .trim()
+                            .ifBlank {
+                                browserResult
+                                    .optString("target_package")
+                                    .trim()
+                            }
+
+                    // Subgoal 4: verified partial result producer.
+                    val readSubgoalGate =
+                        longObjective.beginSubgoal(
+                            subgoalId = "read_title",
+                            lane = AyanaCrossLaneAdaptiveContinuity.LANE_MULTI_APP,
+                            authority = AyanaCrossLaneAdaptiveContinuity.AUTH_MULTI_APP
+                        )
+
+                    val visualArgs =
+                        JSONObject()
+                            .put(
+                                "expected_package",
+                                expectedBrowserPackage
+                            )
+                            .put(
+                                "mode",
+                                "package_bound_structured_visual"
+                            )
+
+                    val visualProposal =
+                        if (readSubgoalGate.optBoolean("allowed", false)) {
+                            adaptiveLoop.propose(
+                                toolName =
+                                    "screen_observe_package_bound_visual",
+                                arguments = visualArgs,
+                                stateFingerprint = browserState,
+                                mayMutate = false,
+                                authoritySource =
+                                    AyanaCrossLaneAdaptiveContinuity.AUTH_MULTI_APP
+                            )
+                        } else {
+                            JSONObject().put("allowed", false)
+                        }
+
+                    val visual =
+                        if (
+                            visualProposal.optBoolean("allowed", false) &&
+                            expectedBrowserPackage.isNotBlank()
+                        ) {
+                            attemptVerifiedStructuredSemanticScreenRead(
+                                expectedPackage = expectedBrowserPackage,
+                                commandToken = commandToken
+                            )
+                        } else {
+                            JSONObject()
+                                .put("success", false)
+                                .put("verified", false)
+                        }
+
+                    val visualVerified =
+                        visual.optBoolean("success", false) &&
+                            visual.optBoolean("verified", false) &&
+                            visual.optBoolean(
+                                "semantic_structured_read_verified",
+                                false
+                            ) &&
+                            visual.optString("semantic_title")
+                                .trim()
+                                .equals(
+                                    R9_7_STRUCTURED_ACCEPTANCE_TITLE,
+                                    ignoreCase = true
+                                )
+
+                    val visualAfterState =
+                        AyanaAdaptiveExecutionLoop.fingerprintState(
+                            visual.toString()
+                        )
+
+                    val visualAdaptiveRecord =
+                        if (visualProposal.optBoolean("allowed", false)) {
+                            adaptiveLoop.recordResult(
+                                toolName =
+                                    "screen_observe_package_bound_visual",
+                                arguments = visualArgs,
+                                beforeStateFingerprint = browserState,
+                                afterStateFingerprint = visualAfterState,
+                                success = visualVerified,
+                                verified = visualVerified,
+                                actionDispatched = false,
+                                actionCommitted = false,
+                                reconciliationComplete = true,
+                                evidence =
+                                    visual.optString(
+                                        "reason",
+                                        "R10.8 structured visual verification"
+                                    ),
+                                failureLayer =
+                                    if (visualVerified) "" else "verification"
+                            )
+                        } else {
+                            JSONObject()
+                                .put("recorded", false)
+                                .put("verified", false)
+                        }
+
+                    val transferredTitle =
+                        visual.optString("semantic_title")
+                            .trim()
+
+                    val readSubgoalRecord =
+                        if (visualVerified) {
+                            longObjective.recordVerified(
+                                subgoalId = "read_title",
+                                lane = AyanaCrossLaneAdaptiveContinuity.LANE_MULTI_APP,
+                                authority = AyanaCrossLaneAdaptiveContinuity.AUTH_MULTI_APP,
+                                evidence = "verified structured page title",
+                                resultValue = transferredTitle
+                            )
+                        } else {
+                            longObjective.recordFailure(
+                                "read_title",
+                                "structured_title_not_verified"
+                            )
+                        }
+
+                    val partialBeforeRestart =
+                        longObjective.partialResult(
+                            key = "page_title",
+                            consumerSubgoalId = "youtube_search"
+                        )
+
+                    val partialResultVerifiedBeforeRestart =
+                        partialBeforeRestart.optBoolean("verified", false) &&
+                            partialBeforeRestart.optString("value") ==
+                            R9_7_STRUCTURED_ACCEPTANCE_TITLE
+
+                    val longSnapshotBeforeRestart = longObjective.snapshot()
+                    val adaptiveVerifiedBeforeRestart =
+                        adaptiveLoop.verifiedStepCount()
+                    val transitionCountBeforeRestart =
+                        continuity.laneTransitionCount()
+
+                    val preInterruptPatch =
+                        crossLaneRecoveryContinuity
+                            .buildRecoveryCheckpoint(
+                                adaptiveLoop = adaptiveLoop,
+                                continuity = continuity,
+                                checkpointTag =
+                                    "r10_8_partial_result_verified_pre_interrupt",
+                                safeAutoResume = true
+                            )
+                            .put(
+                                "mode",
+                                AyanaDurableGoalStore.MODE_ORCHESTRATOR
+                            )
+                            .put("status", AyanaDurableGoalStore.STATUS_ACTIVE)
+                            .put(
+                                "long_objective_plan",
+                                longSnapshotBeforeRestart
+                            )
+                            .put(
+                                "partial_result_page_title",
+                                partialBeforeRestart
+                            )
+
+                    val durablePreInterruptPersisted =
+                        isolatedStore.checkpoint(
+                            acceptanceGoalId,
+                            preInterruptPatch
+                        ) != null
+
+                    val interruptedCount =
+                        if (durablePreInterruptPersisted) {
+                            isolatedStore.markInterruptedGoals(
+                                "service_destroyed"
+                            )
+                        } else {
+                            0
+                        }
+
+                    // New store instance = restart boundary.
+                    val restartedStore =
+                        AyanaDurableGoalStore(
+                            context = applicationContext,
+                            storageFileName = testFileName
+                        )
+                    acceptanceStore = restartedStore
+
+                    val restoredGoal =
+                        restartedStore.getById(
+                            acceptanceGoalId.orEmpty()
+                        )
+
+                    val recoveryDecision =
+                        crossLaneRecoveryContinuity.evaluate(
+                            goal = restoredGoal,
+                            automatic = true
+                        )
+
+                    val automaticRecoveryAllowed =
+                        recoveryDecision.optString("strategy") ==
+                            AyanaCrossLaneRecoveryContinuity.Strategy
+                                .RESTORE_AND_CONTINUE.name &&
+                            recoveryDecision.optBoolean(
+                                "automatic_resume_allowed",
+                                false
+                            )
+
+                    val persistedAdaptiveSnapshot =
+                        restoredGoal?.optJSONObject(
+                            "adaptive_execution_loop"
+                        )
+                    val persistedContinuitySnapshot =
+                        restoredGoal?.optJSONObject(
+                            "cross_lane_continuity"
+                        )
+                    val persistedLongObjectiveSnapshot =
+                        restoredGoal?.optJSONObject(
+                            "long_objective_plan"
+                        )
+
+                    adaptiveLoop =
+                        AyanaAdaptiveExecutionLoop.restore(
+                            snapshot = persistedAdaptiveSnapshot,
+                            fallbackObjective = objective,
+                            fallbackExecutionLane =
+                                AyanaCrossLaneAdaptiveContinuity.LANE_AGENT_CORE,
+                            fallbackAuthorityContext =
+                                AyanaCrossLaneAdaptiveContinuity.AUTH_AGENT_CORE
+                        )
+
+                    continuity =
+                        AyanaCrossLaneAdaptiveContinuity.restore(
+                            snapshot = persistedContinuitySnapshot,
+                            fallbackObjective = objective,
+                            adaptiveLoop = adaptiveLoop,
+                            fallbackAuthorityCeiling =
+                                AyanaCrossLaneAdaptiveContinuity.defaultUnifiedAuthorityCeiling()
+                        )
+
+                    longObjective =
+                        AyanaLongObjectiveCoordinator.restore(
+                            persistedLongObjectiveSnapshot
+                        )
+
+                    val crossLaneRestore =
+                        crossLaneRecoveryContinuity.verifyRestored(
+                            persistedGoal = restoredGoal,
+                            adaptiveLoop = adaptiveLoop,
+                            continuity = continuity
+                        )
+
+                    val longObjectiveRestore =
+                        longObjective.verifyRestoredAgainst(
+                            persistedLongObjectiveSnapshot
+                        )
+
+                    val recoveryIncremented =
+                        if (
+                            automaticRecoveryAllowed &&
+                            crossLaneRestore.optBoolean("verified", false) &&
+                            longObjectiveRestore.optBoolean("verified", false)
+                        ) {
+                            restartedStore.incrementRecovery(
+                                acceptanceGoalId
+                            ) != null
+                        } else {
+                            false
+                        }
+
+                    val interruptionCheckpointPreserved =
+                        restoredGoal?.optString(
+                            "interrupted_from_checkpoint"
+                        ) ==
+                        "r10_8_partial_result_verified_pre_interrupt"
+
+                    val restoredPartial =
+                        longObjective.partialResult(
+                            key = "page_title",
+                            consumerSubgoalId = "youtube_search"
+                        )
+
+                    val partialResultPreserved =
+                        restoredPartial.optBoolean("verified", false) &&
+                            restoredPartial.optString("value") ==
+                            R9_7_STRUCTURED_ACCEPTANCE_TITLE &&
+                            restoredPartial.optString("producer_subgoal_id") ==
+                            "read_title"
+
+                    val restartStatePreserved =
+                        interruptedCount == 1 &&
+                            interruptionCheckpointPreserved &&
+                            crossLaneRestore.optBoolean("verified", false) &&
+                            longObjectiveRestore.optBoolean("verified", false) &&
+                            continuity.objectiveId() == objectiveIdBefore &&
+                            longObjective.objectiveId() == objectiveIdBefore &&
+                            adaptiveLoop.verifiedStepCount() ==
+                            adaptiveVerifiedBeforeRestart &&
+                            continuity.laneTransitionCount() ==
+                            transitionCountBeforeRestart &&
+                            longObjective.verifiedSubgoalCount() == 4 &&
+                            partialResultPreserved
+
+                    // Already verified producer work must not replay after restart.
+                    val browserSubgoalReplay =
+                        longObjective.beginSubgoal(
+                            subgoalId = "open_example",
+                            lane = AyanaCrossLaneAdaptiveContinuity.LANE_MULTI_APP,
+                            authority = AyanaCrossLaneAdaptiveContinuity.AUTH_MULTI_APP
+                        )
+
+                    val visualSubgoalReplay =
+                        longObjective.beginSubgoal(
+                            subgoalId = "read_title",
+                            lane = AyanaCrossLaneAdaptiveContinuity.LANE_MULTI_APP,
+                            authority = AyanaCrossLaneAdaptiveContinuity.AUTH_MULTI_APP
+                        )
+
+                    val verifiedSubgoalReplayBlocked =
+                        browserSubgoalReplay.optString("reason") ==
+                            "verified_subgoal_replay_blocked" &&
+                            visualSubgoalReplay.optString("reason") ==
+                            "verified_subgoal_replay_blocked"
+
+                    val browserAdaptiveReplay =
+                        adaptiveLoop.propose(
+                            toolName = "app_integration:browser:open_url",
+                            arguments = browserArgs,
+                            stateFingerprint = androidAfterState,
+                            mayMutate = false,
+                            authoritySource =
+                                AyanaCrossLaneAdaptiveContinuity.AUTH_MULTI_APP
+                        )
+
+                    val adaptiveBrowserReplayBlocked =
+                        !browserAdaptiveReplay.optBoolean("allowed", true) &&
+                            browserAdaptiveReplay.optString("reason") ==
+                            "verified_transition_replay_blocked" &&
+                            browserOpenDispatchCount == 1
+
+                    // Subgoal 5 consumes the restored verified partial result.
+                    val youtubeSubgoalGate =
+                        longObjective.beginSubgoal(
+                            subgoalId = "youtube_search",
+                            lane = AyanaCrossLaneAdaptiveContinuity.LANE_MULTI_APP,
+                            authority = AyanaCrossLaneAdaptiveContinuity.AUTH_MULTI_APP
+                        )
+
+                    val resumeMultiGate =
+                        continuity.transitionTo(
+                            adaptiveLoop = adaptiveLoop,
+                            targetLane =
+                                AyanaCrossLaneAdaptiveContinuity.LANE_MULTI_APP,
+                            targetAuthority =
+                                AyanaCrossLaneAdaptiveContinuity.AUTH_MULTI_APP,
+                            stateFingerprint = visualAfterState,
+                            reason = "r10_8_resume_consumer"
+                        )
+
+                    val restoredTitle =
+                        restoredPartial.optString("value").trim()
+
+                    val youtubeArgs =
+                        JSONObject()
+                            .put(
+                                "app_key",
+                                AyanaAppIntegrationRegistry.APP_YOUTUBE
+                            )
+                            .put(
+                                "action_key",
+                                AyanaAppIntegrationRegistry.ACTION_SEARCH
+                            )
+                            .put("payload", restoredTitle)
+
+                    val youtubeProposal =
+                        if (
+                            youtubeSubgoalGate.optBoolean("allowed", false) &&
+                            resumeMultiGate.optBoolean("allowed", false) &&
+                            partialResultPreserved
+                        ) {
+                            adaptiveLoop.propose(
+                                toolName = "app_integration:youtube:search",
+                                arguments = youtubeArgs,
+                                stateFingerprint = visualAfterState,
+                                mayMutate = false,
+                                authoritySource =
+                                    AyanaCrossLaneAdaptiveContinuity.AUTH_MULTI_APP
+                            )
+                        } else {
+                            JSONObject().put("allowed", false)
+                        }
+
+                    val youtubeResult =
+                        if (youtubeProposal.optBoolean("allowed", false)) {
+                            executeAppIntegrationAction(
+                                appKey = AyanaAppIntegrationRegistry.APP_YOUTUBE,
+                                actionKey = AyanaAppIntegrationRegistry.ACTION_SEARCH,
+                                payload = restoredTitle
+                            )
+                        } else {
+                            JSONObject()
+                                .put("success", false)
+                                .put("verified", false)
+                                .put("action_dispatched", false)
+                        }
+
+                    val youtubeVerified =
+                        youtubeResult.optBoolean("success", false) &&
+                            youtubeResult.optBoolean("verified", false)
+
+                    val youtubeAfterState =
+                        AyanaAdaptiveExecutionLoop.fingerprintState(
+                            youtubeResult.toString()
+                        )
+
+                    val youtubeAdaptiveRecord =
+                        if (youtubeProposal.optBoolean("allowed", false)) {
+                            adaptiveLoop.recordResult(
+                                toolName = "app_integration:youtube:search",
+                                arguments = youtubeArgs,
+                                beforeStateFingerprint = visualAfterState,
+                                afterStateFingerprint = youtubeAfterState,
+                                success = youtubeVerified,
+                                verified = youtubeVerified,
+                                actionDispatched =
+                                    youtubeResult.optBoolean(
+                                        "action_dispatched",
+                                        false
+                                    ),
+                                actionCommitted = false,
+                                reconciliationComplete = youtubeVerified,
+                                evidence =
+                                    youtubeResult.optString(
+                                        "message",
+                                        "R10.8 YouTube consumer verification"
+                                    )
+                            )
+                        } else {
+                            JSONObject()
+                                .put("recorded", false)
+                                .put("verified", false)
+                        }
+
+                    val youtubeSubgoalRecord =
+                        if (youtubeVerified) {
+                            longObjective.recordVerified(
+                                subgoalId = "youtube_search",
+                                lane = AyanaCrossLaneAdaptiveContinuity.LANE_MULTI_APP,
+                                authority = AyanaCrossLaneAdaptiveContinuity.AUTH_MULTI_APP,
+                                evidence = "YouTube consumed restored page_title"
+                            )
+                        } else {
+                            longObjective.recordFailure(
+                                "youtube_search",
+                                "youtube_consumer_not_verified"
+                            )
+                        }
+
+                    // Subgoal 6 has two dependencies and moves back to Agent Core.
+                    val finalSubgoalGate =
+                        longObjective.beginSubgoal(
+                            subgoalId = "final_device_state",
+                            lane = AyanaCrossLaneAdaptiveContinuity.LANE_AGENT_CORE,
+                            authority = AyanaCrossLaneAdaptiveContinuity.AUTH_AGENT_CORE
+                        )
+
+                    val finalAgentGate =
+                        continuity.transitionTo(
+                            adaptiveLoop = adaptiveLoop,
+                            targetLane =
+                                AyanaCrossLaneAdaptiveContinuity.LANE_AGENT_CORE,
+                            targetAuthority =
+                                AyanaCrossLaneAdaptiveContinuity.AUTH_AGENT_CORE,
+                            stateFingerprint = youtubeAfterState,
+                            reason = "r10_8_final_agent_verification"
+                        )
+
+                    val finalArgs = JSONObject()
+                    val finalProposal =
+                        if (
+                            finalSubgoalGate.optBoolean("allowed", false) &&
+                            finalAgentGate.optBoolean("allowed", false)
+                        ) {
+                            adaptiveLoop.propose(
+                                toolName = "get_device_state",
+                                arguments = finalArgs,
+                                stateFingerprint = youtubeAfterState,
+                                mayMutate = false,
+                                authoritySource =
+                                    AyanaCrossLaneAdaptiveContinuity.AUTH_AGENT_CORE
+                            )
+                        } else {
+                            JSONObject().put("allowed", false)
+                        }
+
+                    val finalDeviceResult =
+                        if (finalProposal.optBoolean("allowed", false)) {
+                            executeAgentTool(
+                                name = "get_device_state",
+                                arguments = JSONObject()
+                            )
+                        } else {
+                            JSONObject()
+                                .put("success", false)
+                                .put("verified", false)
+                        }
+
+                    val finalDeviceVerified =
+                        finalDeviceResult.optBoolean("success", false) &&
+                            finalDeviceResult.optBoolean(
+                                "verified",
+                                finalDeviceResult.optBoolean("success", false)
+                            )
+
+                    val finalAfterState =
+                        AyanaAdaptiveExecutionLoop.fingerprintState(
+                            finalDeviceResult.toString()
+                        )
+
+                    val finalAdaptiveRecord =
+                        if (finalProposal.optBoolean("allowed", false)) {
+                            adaptiveLoop.recordResult(
+                                toolName = "get_device_state",
+                                arguments = finalArgs,
+                                beforeStateFingerprint = youtubeAfterState,
+                                afterStateFingerprint = finalAfterState,
+                                success = finalDeviceVerified,
+                                verified = finalDeviceVerified,
+                                actionDispatched = false,
+                                actionCommitted = false,
+                                reconciliationComplete = true,
+                                evidence = "R10.8 final factual device state"
+                            )
+                        } else {
+                            JSONObject()
+                                .put("recorded", false)
+                                .put("verified", false)
+                        }
+
+                    val finalSubgoalRecord =
+                        if (finalDeviceVerified) {
+                            longObjective.recordVerified(
+                                subgoalId = "final_device_state",
+                                lane = AyanaCrossLaneAdaptiveContinuity.LANE_AGENT_CORE,
+                                authority = AyanaCrossLaneAdaptiveContinuity.AUTH_AGENT_CORE,
+                                evidence = "final device state verified"
+                            )
+                        } else {
+                            longObjective.recordFailure(
+                                "final_device_state",
+                                "final_device_state_not_verified"
+                            )
+                        }
+
+                    finalRestore =
+                        restoreAyanaAfterAppIntegrationProbe(
+                            pageKey = originalPage,
+                            stepKey = "r10-8-long-objective-final-restore"
+                        )
+
+                    val restoreVerified =
+                        finalRestore?.optBoolean("verified", false) == true
+
+                    val longObjectiveTerminalReady =
+                        longObjective.canDeclareSuccess()
+
+                    val adaptiveTerminal =
+                        adaptiveLoop.markTerminal(
+                            verified =
+                                longObjectiveSelfTest &&
+                                    recoverySelfTest &&
+                                    continuitySelfTest &&
+                                    adaptiveSelfTest &&
+                                    longRecoverySelfTest &&
+                                    dependencyGateBlocked &&
+                                    restartStatePreserved &&
+                                    recoveryIncremented &&
+                                    verifiedSubgoalReplayBlocked &&
+                                    adaptiveBrowserReplayBlocked &&
+                                    youtubeAdaptiveRecord.optBoolean("verified", false) &&
+                                    finalAdaptiveRecord.optBoolean("verified", false) &&
+                                    longObjectiveTerminalReady &&
+                                    restoreVerified &&
+                                    !adaptiveLoop.hasUnresolvedSideEffect(),
+                            evidence =
+                                "dependency_gate=$dependencyGateBlocked; partial=$partialResultPreserved; restart=$restartStatePreserved; youtube=$youtubeVerified; final=$finalDeviceVerified; restore=$restoreVerified"
+                        )
+
+                    val finalPatch =
+                        crossLaneRecoveryContinuity
+                            .buildRecoveryCheckpoint(
+                                adaptiveLoop = adaptiveLoop,
+                                continuity = continuity,
+                                checkpointTag =
+                                    "r10_8_long_objective_terminal",
+                                safeAutoResume = false
+                            )
+                            .put(
+                                "mode",
+                                AyanaDurableGoalStore.MODE_ORCHESTRATOR
+                            )
+                            .put(
+                                "long_objective_plan",
+                                longObjective.snapshot()
+                            )
+                            .put(
+                                "terminal_verified",
+                                adaptiveLoop.canDeclareSuccess() &&
+                                    longObjectiveTerminalReady
+                            )
+
+                    val durableFinalPersisted =
+                        restartedStore.checkpoint(
+                            acceptanceGoalId,
+                            finalPatch
+                        ) != null
+
+                    val coreAccepted =
+                        longObjectiveSelfTest &&
+                            recoverySelfTest &&
+                            continuitySelfTest &&
+                            adaptiveSelfTest &&
+                            longRecoverySelfTest &&
+                            durableStartPersisted &&
+                            dependencyGateBlocked &&
+                            deviceSubgoalGate.optBoolean("allowed", false) &&
+                            deviceAdaptiveRecord.optBoolean("verified", false) &&
+                            deviceSubgoalRecord.optBoolean("verified", false) &&
+                            androidSubgoalGate.optBoolean("allowed", false) &&
+                            androidAdaptiveRecord.optBoolean("verified", false) &&
+                            androidSubgoalRecord.optBoolean("verified", false) &&
+                            browserSubgoalGate.optBoolean("allowed", false) &&
+                            browserAdaptiveRecord.optBoolean("verified", false) &&
+                            browserSubgoalRecord.optBoolean("verified", false) &&
+                            browserOpenDispatchCount == 1 &&
+                            readSubgoalGate.optBoolean("allowed", false) &&
+                            visualAdaptiveRecord.optBoolean("verified", false) &&
+                            readSubgoalRecord.optBoolean("verified", false) &&
+                            partialResultVerifiedBeforeRestart &&
+                            durablePreInterruptPersisted &&
+                            interruptedCount == 1 &&
+                            automaticRecoveryAllowed &&
+                            recoveryIncremented &&
+                            restartStatePreserved &&
+                            partialResultPreserved &&
+                            verifiedSubgoalReplayBlocked &&
+                            adaptiveBrowserReplayBlocked &&
+                            browserOpenDispatchCount == 1 &&
+                            youtubeSubgoalGate.optBoolean("allowed", false) &&
+                            youtubeAdaptiveRecord.optBoolean("verified", false) &&
+                            youtubeSubgoalRecord.optBoolean("verified", false) &&
+                            finalSubgoalGate.optBoolean("allowed", false) &&
+                            finalAdaptiveRecord.optBoolean("verified", false) &&
+                            finalSubgoalRecord.optBoolean("verified", false) &&
+                            longObjective.verifiedSubgoalCount() == 6 &&
+                            longObjective.partialResultCount() == 1 &&
+                            longObjectiveTerminalReady &&
+                            adaptiveTerminal.optBoolean("allowed", false) &&
+                            adaptiveLoop.canDeclareSuccess() &&
+                            continuity.objectiveId() == objectiveIdBefore &&
+                            longObjective.objectiveId() == objectiveIdBefore &&
+                            !adaptiveLoop.hasUnresolvedSideEffect() &&
+                            durableFinalPersisted &&
+                            restoreVerified
+
+                    if (coreAccepted) {
+                        restartedStore.markCompleted(
+                            acceptanceGoalId,
+                            "R10.8 general-purpose long autonomous objective verified"
+                        )
+                    } else {
+                        restartedStore.markFailed(
+                            acceptanceGoalId,
+                            "R10.8 long-objective acceptance failed verification"
+                        )
+                    }
+
+                    val cleanupVerified =
+                        try {
+                            restartedStore.clearAcceptanceStorage()
+                        } catch (_: Exception) {
+                            false
+                        }
+
+                    val accepted = coreAccepted && cleanupVerified
+
+                    val evidence =
+                        JSONObject()
+                            .put(
+                                "long_objective_coordinator_version",
+                                AyanaLongObjectiveCoordinator.VERSION
+                            )
+                            .put(
+                                "cross_lane_recovery_version",
+                                AyanaCrossLaneRecoveryContinuity.VERSION
+                            )
+                            .put(
+                                "cross_lane_continuity_version",
+                                AyanaCrossLaneAdaptiveContinuity.VERSION
+                            )
+                            .put(
+                                "adaptive_loop_version",
+                                AyanaAdaptiveExecutionLoop.VERSION
+                            )
+                            .put("objective_id", objectiveIdBefore)
+                            .put(
+                                "objective_id_preserved_after_restart",
+                                continuity.objectiveId() == objectiveIdBefore &&
+                                    longObjective.objectiveId() == objectiveIdBefore
+                            )
+                            .put("subgoal_count", longObjective.subgoalCount())
+                            .put(
+                                "required_subgoal_count",
+                                longObjective.requiredSubgoalCount()
+                            )
+                            .put(
+                                "verified_subgoal_count",
+                                longObjective.verifiedSubgoalCount()
+                            )
+                            .put(
+                                "dependency_gate_blocked_early_consumer",
+                                dependencyGateBlocked
+                            )
+                            .put(
+                                "partial_result_verified_before_restart",
+                                partialResultVerifiedBeforeRestart
+                            )
+                            .put(
+                                "partial_result_preserved_after_restart",
+                                partialResultPreserved
+                            )
+                            .put(
+                                "partial_result_value",
+                                restoredPartial.optString("value")
+                            )
+                            .put(
+                                "partial_result_provenance_verified",
+                                longObjectiveRestore.optBoolean(
+                                    "partial_result_provenance_verified",
+                                    false
+                                )
+                            )
+                            .put("interrupted_goal_count", interruptedCount)
+                            .put(
+                                "interruption_checkpoint_preserved",
+                                interruptionCheckpointPreserved
+                            )
+                            .put(
+                                "recovery_strategy",
+                                recoveryDecision.optString("strategy")
+                            )
+                            .put(
+                                "automatic_recovery_allowed",
+                                automaticRecoveryAllowed
+                            )
+                            .put(
+                                "cross_lane_restore_verified",
+                                crossLaneRestore.optBoolean("verified", false)
+                            )
+                            .put(
+                                "long_objective_restore_verified",
+                                longObjectiveRestore.optBoolean("verified", false)
+                            )
+                            .put(
+                                "recovery_count_incremented",
+                                recoveryIncremented
+                            )
+                            .put(
+                                "verified_subgoal_replay_blocked_after_restart",
+                                verifiedSubgoalReplayBlocked
+                            )
+                            .put(
+                                "verified_browser_replay_blocked_after_restart",
+                                adaptiveBrowserReplayBlocked
+                            )
+                            .put(
+                                "browser_open_dispatch_count",
+                                browserOpenDispatchCount
+                            )
+                            .put("browser_open_replayed", false)
+                            .put("agent_core_step_verified", deviceVerified)
+                            .put("android_goal_step_verified", androidVerified)
+                            .put("browser_step_verified", browserVerified)
+                            .put("structured_visual_verified", visualVerified)
+                            .put("youtube_consumer_verified", youtubeVerified)
+                            .put(
+                                "final_agent_verification_verified",
+                                finalDeviceVerified
+                            )
+                            .put(
+                                "durable_start_snapshot_persisted",
+                                durableStartPersisted
+                            )
+                            .put(
+                                "durable_partial_result_snapshot_persisted",
+                                durablePreInterruptPersisted
+                            )
+                            .put(
+                                "durable_final_checkpoint_persisted",
+                                durableFinalPersisted
+                            )
+                            .put(
+                                "isolated_acceptance_storage_cleanup_verified",
+                                cleanupVerified
+                            )
+                            .put(
+                                "production_durable_goal_store_touched",
+                                false
+                            )
+                            .put(
+                                "long_objective_terminal_ready",
+                                longObjectiveTerminalReady
+                            )
+                            .put(
+                                "unresolved_side_effect",
+                                adaptiveLoop.hasUnresolvedSideEffect()
+                            )
+                            .put(
+                                "terminal_verified",
+                                adaptiveLoop.canDeclareSuccess() &&
+                                    longObjectiveTerminalReady
+                            )
+                            .put("restore_verified", restoreVerified)
+                            .put("mutation_committed_detected", false)
+                            .put("blind_replay_allowed", false)
+                            .put("persistent_user_data_mutation", false)
+                            .put("worker_visual_turns", if (visualVerified) 1 else 0)
+                            .put("agent_core_model_turns", 0)
+                            .put("acceptance_ok", accepted)
+                            .put(
+                                "long_objective_summary",
+                                longObjective.compactSummary()
+                            )
+                            .put(
+                                "continuity_summary",
+                                continuity.compactSummary(adaptiveLoop)
+                            )
+                            .put(
+                                "voice_service_release",
+                                AYANA_VOICE_SERVICE_RELEASE
+                            )
+                            .put(
+                                "accepted_checkpoint",
+                                AYANA_ACCEPTED_FEATURE_CHECKPOINT
+                            )
+                            .put(
+                                "current_release",
+                                AYANA_CURRENT_FEATURE_RELEASE
+                            )
+
+                    mainHandler.post {
+                        if (
+                            isCommandCancelled(commandToken) ||
+                            commandToken != activeCommandToken
+                        ) {
+                            return@post
+                        }
+
+                        if (!accepted) {
+                            commandHistoryStore.addEvent(
+                                activeCommandHistoryId,
+                                state =
+                                    "r10_8_general_purpose_long_objective_not_verified",
+                                message =
+                                    "R10.8 long autonomous objective не прошёл dependency/partial-result/recovery/terminal gates",
+                                details = evidence.toString().take(3900)
+                            )
+
+                            respondAndResume(
+                                text =
+                                    "R10.8 выполнен fail-closed: длинная автономная цель не подтверждена по всем обязательным gates.",
+                                silent = silent,
+                                success = false,
+                                technical = evidence.toString()
+                            )
+                            return@post
+                        }
+
+                        commandHistoryStore.addEvent(
+                            activeCommandHistoryId,
+                            state =
+                                "r10_8_general_purpose_long_objective_verified",
+                            message =
+                                "R10.8 подтверждён: dependency-aware objective сохранил verified partial result через restart и продолжил только незавершённые subgoals",
+                            details = evidence.toString().take(3900)
+                        )
+
+                        respondAndResume(
+                            text =
+                                "R10.8 General-Purpose Long Autonomous Objective подтверждён: одна dependency-aware цель выполнила 6 subgoals через Agent Core → Android Goal → Multi-App, сохранила verified partial result через restart и продолжила только оставшиеся шаги без replay Browser/visual.",
+                            silent = silent,
+                            success = true,
+                            technical = evidence.toString()
+                        )
+                    }
+                } catch (error: Exception) {
+                    try {
+                        acceptanceStore?.markFailed(
+                            acceptanceGoalId,
+                            "R10.8 acceptance exception: ${error.message ?: error.javaClass.simpleName}"
+                        )
+                    } catch (_: Exception) {
+                    }
+
+                    try {
+                        finalRestore =
+                            restoreAyanaAfterAppIntegrationProbe(
+                                pageKey = originalPage,
+                                stepKey = "r10-8-long-objective-error-restore"
+                            )
+                    } catch (_: Exception) {
+                    }
+
+                    val evidence =
+                        JSONObject()
+                            .put(
+                                "long_objective_coordinator_version",
+                                AyanaLongObjectiveCoordinator.VERSION
+                            )
+                            .put("acceptance_ok", false)
+                            .put(
+                                "exception",
+                                (error.message ?: error.javaClass.simpleName)
+                                    .take(600)
+                            )
+                            .put(
+                                "restore_verified",
+                                finalRestore?.optBoolean("verified", false) == true
+                            )
+                            .put("blind_replay_allowed", false)
+                            .put("persistent_user_data_mutation", false)
+
+                    mainHandler.post {
+                        if (
+                            commandToken == activeCommandToken &&
+                            !shuttingDown
+                        ) {
+                            commandHistoryStore.addEvent(
+                                activeCommandHistoryId,
+                                state =
+                                    "r10_8_general_purpose_long_objective_not_verified",
+                                message = "R10.8 acceptance exception",
+                                details = evidence.toString().take(2500)
+                            )
+
+                            respondAndResume(
+                                text =
+                                    "R10.8 long autonomous objective не подтверждён: acceptance завершился fail-closed.",
+                                silent = silent,
+                                success = false,
+                                technical = evidence.toString()
+                            )
+                        }
+                    }
+                } finally {
+                    if (
+                        finalRestore == null ||
+                        finalRestore?.optBoolean("verified", false) != true
+                    ) {
+                        try {
+                            restoreAyanaAfterAppIntegrationProbe(
+                                pageKey = originalPage,
+                                stepKey = "r10-8-long-objective-finally-restore"
+                            )
+                        } catch (_: Exception) {
+                        }
+                    }
+
+                    try {
+                        acceptanceStore?.clearAcceptanceStorage()
+                    } catch (_: Exception) {
+                    }
+
+                    if (Thread.currentThread() === currentAgentThread) {
+                        currentAgentThread = null
+                    }
+                }
+            }
+
+        currentAgentThread = worker
+        executionKernel.bindThread(worker)
+        worker.start()
+    }
 
     private fun isR10_7CrossLaneDurableRecoveryAcceptanceCommand(
         command: String
@@ -57690,9 +59322,9 @@ state
         private const val MASTER_STATUS_MANUAL_REQUIRED =
             "MANUAL_REQUIRED"
 
-        // R10.7 CROSS-LANE DURABLE RECOVERY CONTINUITY RELEASE TRUTH.
+        // R10.8 GENERAL-PURPOSE LONG AUTONOMOUS OBJECTIVES RELEASE TRUTH.
         private const val AYANA_VOICE_SERVICE_RELEASE =
-            "v12.40.0 / R10.7 CROSS-LANE DURABLE RECOVERY CONTINUITY"
+            "v12.41.0 / R10.8 GENERAL-PURPOSE LONG AUTONOMOUS OBJECTIVES"
 
         private const val AYANA_PERSONAL_SEARCH_ENGINE_RELEASE =
             "v1.5.1 IMAGE COVERAGE TRUTH + R10.2 UNIFIED SEARCH CONTRACT v1.0"
@@ -57704,13 +59336,13 @@ state
             "v11.1.10 Multi-Attachment"
 
         private const val AYANA_ACCEPTED_FEATURE_CHECKPOINT =
-            "R10.6.1 CROSS-LANE ADAPTIVE CONTINUITY — DEVICE-CONFIRMED ACCEPTED"
+            "R10.7.1 CROSS-LANE DURABLE RECOVERY CONTINUITY — DEVICE-CONFIRMED ACCEPTED"
 
         private const val AYANA_CURRENT_FEATURE_RELEASE =
-            "R10.7 CROSS-LANE DURABLE RECOVERY CONTINUITY — PENDING DEVICE CONFIRMATION"
+            "R10.8 GENERAL-PURPOSE LONG AUTONOMOUS OBJECTIVES — PENDING DEVICE CONFIRMATION"
 
         private const val AYANA_RELEASE_LINEAGE =
-            "Android v12.21.0 / R7.9 truth-hardening + R8.0 multi-attachment + R8.1–R8.4 accepted Personal Global Search stack + R8.5–R8.5.4 capability/evidence truth + R9.0 autonomous agent foundation + R9.0.1 history live-refresh proof fix + R9.0.2 diagnostic reconciliation/history refresh fix + R9.0.3 TTS health reconciliation + R9.1 IME perception/active telemetry truth + R9.2 autonomous recovery/long-task reconciliation + R9.2.1 adaptive hypothesis reconciliation + R9.3 app integration framework + R9.3.1 screen health reconciliation + R9.3.2 history latency recovery reconciliation + R9.3.3 informational terminal reconciliation + R9.3.4 app integration device acceptance + R9.4 multi-app task orchestration + R9.4.1 screen ownership union reconciliation + R9.5 verified result transfer between app steps + R9.5.1 partial marker provenance reconciliation + R9.5.2 bounded marker observation + R9.5.3 verified action result transfer + R9.6 verified semantic observation fallback + R9.6.1 visual fallback acceptance truth + R9.7 structured screen reading + R9.7.1 conversation routing/terminal truth + R9.7.2 structured router conversation precedence + R9.7.3 action morphology/terminal truth + R9.8 generic verified result transfer + R9.8.1 master full acceptance/diagnostic engine + R9.9 reversible action journal/verified undo + R9.9.1 brightness verified undo device acceptance + R9.9.2 opt-in low-battery controlled proactivity + R10.0 unified screen intelligence + R10.1 local self-diagnostics/self-audit + R10.2 personal search expansion + R10.3 long autonomous tasks/recovery + R10.4 adaptive verified execution loop + R10.5 generalized live adaptive autonomy + R10.6 cross-lane adaptive continuity + R10.6.1 durable goal binding fix + R10.7 cross-lane durable recovery continuity"
+            "Android v12.21.0 / R7.9 truth-hardening + R8.0 multi-attachment + R8.1–R8.4 accepted Personal Global Search stack + R8.5–R8.5.4 capability/evidence truth + R9.0 autonomous agent foundation + R9.0.1 history live-refresh proof fix + R9.0.2 diagnostic reconciliation/history refresh fix + R9.0.3 TTS health reconciliation + R9.1 IME perception/active telemetry truth + R9.2 autonomous recovery/long-task reconciliation + R9.2.1 adaptive hypothesis reconciliation + R9.3 app integration framework + R9.3.1 screen health reconciliation + R9.3.2 history latency recovery reconciliation + R9.3.3 informational terminal reconciliation + R9.3.4 app integration device acceptance + R9.4 multi-app task orchestration + R9.4.1 screen ownership union reconciliation + R9.5 verified result transfer between app steps + R9.5.1 partial marker provenance reconciliation + R9.5.2 bounded marker observation + R9.5.3 verified action result transfer + R9.6 verified semantic observation fallback + R9.6.1 visual fallback acceptance truth + R9.7 structured screen reading + R9.7.1 conversation routing/terminal truth + R9.7.2 structured router conversation precedence + R9.7.3 action morphology/terminal truth + R9.8 generic verified result transfer + R9.8.1 master full acceptance/diagnostic engine + R9.9 reversible action journal/verified undo + R9.9.1 brightness verified undo device acceptance + R9.9.2 opt-in low-battery controlled proactivity + R10.0 unified screen intelligence + R10.1 local self-diagnostics/self-audit + R10.2 personal search expansion + R10.3 long autonomous tasks/recovery + R10.4 adaptive verified execution loop + R10.5 generalized live adaptive autonomy + R10.6 cross-lane adaptive continuity + R10.6.1 durable goal binding fix + R10.7 cross-lane durable recovery continuity + R10.7.1 isolated acceptance cleanup hardening + R10.8 general-purpose long autonomous objectives"
 
         // AyanaCommandHistoryStore v2.8 keeps up to 4k chars inline and stores longer
         // results out-of-line. Self-review intentionally remains inline so copied History
