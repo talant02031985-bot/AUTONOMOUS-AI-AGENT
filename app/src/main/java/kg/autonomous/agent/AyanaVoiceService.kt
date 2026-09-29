@@ -62,6 +62,17 @@ import kotlin.math.abs
 
 class AyanaVoiceService : Service() {
 
+    // AYANA v12.43.0 / R10.10 ADAPTIVE PLANNER EXECUTION IN PRODUCTION PATH.
+    // Builds on DEVICE-CONFIRMED R10.9 Dynamic Goal Decomposition + Planner Contract.
+    // - bounded Dynamic Goal Planner decomposition now runs on ordinary user objectives before generic Agent Core fallback;
+    // - every claimed plan is locally validated before dispatch and persisted in the production DurableGoalStore;
+    // - each subgoal passes Long Objective dependency/authority, Cross-Lane and Adaptive proposal gates;
+    // - pre-dispatch and post-verification checkpoints prevent blind replay across process restart;
+    // - recovery restores planner/long-objective/adaptive/cross-lane ledgers and skips already VERIFIED subgoals;
+    // - uncertain in-flight work is paused rather than replayed; verified failure gets a bounded suffix-replan attempt;
+    // - unsupported objectives continue to existing deterministic/Agent Core routing. No authority expansion.
+    // ORB/visualizer remain untouched.
+    //
     // AYANA v12.42.0 / R10.9 DYNAMIC GOAL DECOMPOSITION + PLANNER CONTRACT.
     // Builds on DEVICE-CONFIRMED R10.8 General-Purpose Long Autonomous Objectives.
     // - Dynamic Goal Planner v1.0 converts a bounded free-form objective into a candidate DAG
@@ -4383,6 +4394,28 @@ originalCommand
                 }
                 return
             }
+
+
+        // R10.10 PRODUCTION DYNAMIC PLANNER.
+        // This is a normal user-command route, not an acceptance shortcut. It may claim only
+        // a locally decomposable multi-step objective after the existing composite safety gate.
+        // All other commands continue through the established deterministic / Agent Core routes.
+        if (
+            preExecutionDecision.type !in
+                setOf(
+                    AyanaCompositeIntentGate.DecisionType.DATA_ONLY,
+                    AyanaCompositeIntentGate.DecisionType.INVALID,
+                    AyanaCompositeIntentGate.DecisionType.REQUIRE_CONFIRMATION,
+                    AyanaCompositeIntentGate.DecisionType.CONDITIONAL
+                ) &&
+            !preExecutionDecision.constraints.forbidNetwork &&
+            runR10_10ProductionDynamicPlannerIfSupported(
+                command = originalCommand,
+                silent = silent
+            )
+        ) {
+            return
+        }
 
         val requestedAggregateMetrics =
             extractRequestedAggregateMetrics(
@@ -30310,6 +30343,77 @@ AyanaAcceptanceTestEngine.PROBE_NOTIFICATION_ROUTING ->
                     .put("blind_replay_allowed", false)
         )
 
+        val productionPlannerContractOk =
+            try {
+                val objective =
+                    "Сначала проверь состояние устройства, открой AYANA AI, затем открой Example Domain в браузере, прочитай заголовок страницы, найди этот заголовок в YouTube и в конце снова проверь состояние устройства."
+                val proposal =
+                    AyanaDynamicGoalPlanner.localProposal(
+                        objective
+                    )
+                val planner =
+                    AyanaDynamicGoalPlanner.compile(
+                        objective,
+                        proposal
+                    )
+                val unsupported =
+                    AyanaDynamicGoalPlanner.localProposal(
+                        "напиши мне стихотворение о воде"
+                    )
+
+                proposal.optBoolean("supported", false) &&
+                    planner.subgoalCount() == 6 &&
+                    planner.toLongObjectiveSpecs().size == 6 &&
+                    planner.subgoals().all {
+                        val contract =
+                            AyanaDynamicGoalPlanner.executorRegistry()[
+                                it.executor
+                            ]
+                        contract != null &&
+                            contract.lane == it.lane &&
+                            contract.authority == it.authority
+                    } &&
+                    !unsupported.optBoolean("supported", false) &&
+                    AyanaDynamicGoalPlanner.selfTest() &&
+                    AyanaLongObjectiveCoordinator.selfTest()
+            } catch (_: Exception) {
+                false
+            }
+
+        add(
+            id = "R10-FOUND-026",
+            title = "R10.10 production dynamic planner / durable execution contract",
+            critical = true,
+            ok = productionPlannerContractOk,
+            message =
+                if (productionPlannerContractOk) {
+                    "R10.10 permits only locally validated multi-step planner objectives into the production DurableGoalStore; each subgoal retains exact lane/authority binding, verified-prefix replay is blocked and uncertain in-flight recovery fails closed."
+                } else {
+                    "R10.10 production dynamic planner contract self-test failed."
+                },
+            evidence =
+                JSONObject()
+                    .put(
+                        "dynamic_goal_planner_version",
+                        AyanaDynamicGoalPlanner.VERSION
+                    )
+                    .put(
+                        "long_objective_coordinator_version",
+                        AyanaLongObjectiveCoordinator.VERSION
+                    )
+                    .put("normal_user_route_enabled", true)
+                    .put("minimum_claimed_subgoals", 2)
+                    .put("planner_validation_before_dispatch", true)
+                    .put("production_durable_store_checkpointed", true)
+                    .put("pre_dispatch_inflight_checkpoint_required", true)
+                    .put("post_verification_checkpoint_required", true)
+                    .put("verified_subgoal_replay_allowed", false)
+                    .put("uncertain_inflight_auto_replay_allowed", false)
+                    .put("unsupported_objective_claimed", false)
+                    .put("authority_expansion_allowed", false)
+                    .put("blind_replay_allowed", false)
+        )
+
         return tests
     }
 
@@ -36177,6 +36281,1568 @@ routed.forEach {
             .put("message", message)
             .put("evidence_scope", evidenceScope)
             .put("evidence", evidence)
+
+
+
+
+    // R10.10 ADAPTIVE PLANNER EXECUTION IN PRODUCTION PATH.
+    // This route is intentionally bounded: only objectives that the already accepted
+    // Dynamic Goal Planner can decompose into >=2 registered primitives are claimed.
+    // Unsupported/free-form objectives continue to the existing Agent Core path.
+    private fun runR10_10ProductionDynamicPlannerIfSupported(
+        command: String,
+        silent: Boolean
+    ): Boolean {
+        if (requestsArtifactDeliverable(command)) {
+            return false
+        }
+
+        val proposal =
+            try {
+                AyanaDynamicGoalPlanner.localProposal(command)
+            } catch (_: Exception) {
+                return false
+            }
+
+        if (!proposal.optBoolean("supported", false)) {
+            return false
+        }
+
+        val planner =
+            try {
+                AyanaDynamicGoalPlanner.compile(
+                    objective = command,
+                    proposal = proposal
+                )
+            } catch (error: Throwable) {
+                commandHistoryStore.addEvent(
+                    activeCommandHistoryId,
+                    state = "r10_10_production_plan_validation_failed",
+                    message = "Production planner proposal отклонён до dispatch",
+                    details = (error.message ?: error.javaClass.simpleName).take(600)
+                )
+                respondAndResume(
+                    text = "Я остановила многошаговую цель до выполнения: план не прошёл локальную проверку.",
+                    silent = silent,
+                    success = false,
+                    terminalStatus = AyanaCommandHistoryStore.STATUS_BLOCKED,
+                    technical =
+                        JSONObject()
+                            .put("production_dynamic_planner", true)
+                            .put("plan_validated_pre_dispatch", false)
+                            .put("invalid_plan_dispatch_count", 0)
+                            .put("reason", error.message ?: error.javaClass.simpleName)
+                            .toString()
+                )
+                return true
+            }
+
+        if (planner.subgoalCount() < 2) {
+            return false
+        }
+
+        startR10_10ProductionDynamicPlannerWorker(
+            command = command,
+            silent = silent,
+            planner = planner,
+            resumeGoal = null,
+            automaticRecovery = false
+        )
+        return true
+    }
+
+    private fun startR10_10ProductionDynamicPlannerWorker(
+        command: String,
+        silent: Boolean,
+        planner: AyanaDynamicGoalPlanner,
+        resumeGoal: JSONObject?,
+        automaticRecovery: Boolean
+    ) {
+        executionPhase(
+            phase =
+                if (resumeGoal == null) {
+                    "r10_10_production_dynamic_planner"
+                } else {
+                    "r10_10_production_dynamic_planner_recovery"
+                },
+            executor = "dynamic_goal_planner_v1+long_objective_v1_1"
+        )
+
+        stopSherpaListening()
+        listenMode = ListenMode.BUSY
+
+        broadcastStatus(
+            if (resumeGoal == null) {
+                "Выполняю длинную автономную цель…"
+            } else {
+                "Продолжаю сохранённую автономную цель…"
+            },
+            STATE_EXECUTING
+        )
+
+        updateNotification(
+            if (resumeGoal == null) {
+                "AYANA выполняет production planner objective…"
+            } else {
+                "AYANA восстанавливает production planner objective…"
+            }
+        )
+
+        val commandToken = activeCommandToken
+
+        val worker =
+            thread(
+                start = false,
+                name = "AyanaR10_10ProductionPlanner"
+            ) {
+                var goalId: String? = null
+
+                try {
+                    val goalSnapshot =
+                        if (resumeGoal == null) {
+                            val created =
+                                durableGoalStore.startGoal(
+                                    command = command,
+                                    source = if (silent) "text" else "voice",
+                                    mode = AyanaDurableGoalStore.MODE_ORCHESTRATOR,
+                                    safeAutoResume = true
+                                )
+                            goalId =
+                                created
+                                    .optString("id")
+                                    .trim()
+                                    .takeIf { it.isNotBlank() }
+
+                            if (goalId == null) {
+                                throw IllegalStateException(
+                                    "R10.10 production durable goal_id was not created"
+                                )
+                            }
+                            created
+                        } else {
+                            goalId =
+                                resumeGoal
+                                    .optString("id")
+                                    .trim()
+                                    .takeIf { it.isNotBlank() }
+
+                            if (goalId == null) {
+                                throw IllegalStateException(
+                                    "R10.10 recovery durable goal_id missing"
+                                )
+                            }
+                            JSONObject(resumeGoal.toString())
+                        }
+
+                    currentDurableGoalId = goalId
+
+                    if (
+                        resumeGoal != null &&
+                        goalSnapshot.optBoolean("step_in_flight", false)
+                    ) {
+                        val reason =
+                            "R10.10 recovery остановлен: предыдущий subgoal был in-flight; blind replay запрещён."
+
+                        durableGoalStore.markPaused(
+                            goalId,
+                            reason
+                        )
+
+                        commandHistoryStore.addEvent(
+                            activeCommandHistoryId,
+                            state = "r10_10_inflight_recovery_paused",
+                            message = "Production planner не повторил неопределённый in-flight subgoal",
+                            details =
+                                "goal_id=${goalId.orEmpty()}; step=${goalSnapshot.optString("last_step_id")}; " +
+                                    "executor=${goalSnapshot.optString("last_step_action")}"
+                        )
+
+                        mainHandler.post {
+                            if (
+                                !isCommandCancelled(commandToken) &&
+                                commandToken == activeCommandToken
+                            ) {
+                                respondAndResume(
+                                    text = reason,
+                                    silent = silent,
+                                    success = false,
+                                    technical =
+                                        JSONObject()
+                                            .put("production_dynamic_planner", true)
+                                            .put("recovery", true)
+                                            .put("blind_replay_allowed", false)
+                                            .put("step_in_flight", true)
+                                            .put("goal_id", goalId.orEmpty())
+                                            .toString()
+                                )
+                            }
+                        }
+                        return@thread
+                    }
+
+                    val initialScreen =
+                        try {
+                            screenIntelligence.getScreenState()
+                        } catch (_: Exception) {
+                            JSONObject()
+                        }
+
+                    val initialState =
+                        AyanaAdaptiveExecutionLoop.fingerprintState(
+                            initialScreen.toString()
+                        )
+
+                    var adaptiveLoop =
+                        if (resumeGoal == null) {
+                            AyanaAdaptiveExecutionLoop.create(
+                                objective = command,
+                                stateFingerprint = initialState,
+                                executionLane =
+                                    AyanaCrossLaneAdaptiveContinuity.LANE_AGENT_CORE,
+                                authorityContext =
+                                    AyanaCrossLaneAdaptiveContinuity.AUTH_AGENT_CORE
+                            )
+                        } else {
+                            AyanaAdaptiveExecutionLoop.restore(
+                                snapshot =
+                                    goalSnapshot.optJSONObject(
+                                        "adaptive_execution_loop"
+                                    ),
+                                fallbackObjective = command,
+                                fallbackExecutionLane =
+                                    AyanaCrossLaneAdaptiveContinuity.LANE_AGENT_CORE,
+                                fallbackAuthorityContext =
+                                    AyanaCrossLaneAdaptiveContinuity.AUTH_AGENT_CORE
+                            )
+                        }
+
+                    var continuity =
+                        if (resumeGoal == null) {
+                            AyanaCrossLaneAdaptiveContinuity.create(
+                                objective = command,
+                                adaptiveLoop = adaptiveLoop,
+                                initialLane =
+                                    AyanaCrossLaneAdaptiveContinuity.LANE_AGENT_CORE,
+                                initialAuthority =
+                                    AyanaCrossLaneAdaptiveContinuity.AUTH_AGENT_CORE,
+                                authorityCeiling =
+                                    AyanaCrossLaneAdaptiveContinuity.defaultUnifiedAuthorityCeiling()
+                            )
+                        } else {
+                            AyanaCrossLaneAdaptiveContinuity.restore(
+                                snapshot =
+                                    goalSnapshot.optJSONObject(
+                                        "cross_lane_continuity"
+                                    ),
+                                fallbackObjective = command,
+                                adaptiveLoop = adaptiveLoop,
+                                fallbackAuthorityCeiling =
+                                    AyanaCrossLaneAdaptiveContinuity.defaultUnifiedAuthorityCeiling()
+                            )
+                        }
+
+                    var longObjective =
+                        if (resumeGoal == null) {
+                            AyanaLongObjectiveCoordinator.create(
+                                objectiveId = continuity.objectiveId(),
+                                objective = command,
+                                specs = planner.toLongObjectiveSpecs()
+                            )
+                        } else {
+                            AyanaLongObjectiveCoordinator.restore(
+                                goalSnapshot.optJSONObject(
+                                    "long_objective_plan"
+                                )
+                            )
+                        }
+
+                    val runtimeContext =
+                        goalSnapshot
+                            .optJSONObject("dynamic_planner_runtime_context")
+                            ?.let { JSONObject(it.toString()) }
+                            ?: JSONObject()
+
+                    if (resumeGoal != null) {
+                        val persistedPlanner =
+                            AyanaDynamicGoalPlanner.restore(
+                                goalSnapshot.optJSONObject(
+                                    "dynamic_planner_plan"
+                                )
+                            )
+
+                        if (
+                            persistedPlanner.planFingerprint() !=
+                            planner.planFingerprint()
+                        ) {
+                            throw IllegalStateException(
+                                "R10.10 planner fingerprint mismatch on recovery"
+                            )
+                        }
+
+                        val crossRestore =
+                            crossLaneRecoveryContinuity.verifyRestored(
+                                persistedGoal = goalSnapshot,
+                                adaptiveLoop = adaptiveLoop,
+                                continuity = continuity
+                            )
+
+                        val longRestore =
+                            longObjective.verifyRestoredAgainst(
+                                goalSnapshot.optJSONObject(
+                                    "long_objective_plan"
+                                )
+                            )
+
+                        if (
+                            !crossRestore.optBoolean("verified", false) ||
+                            !longRestore.optBoolean("verified", false)
+                        ) {
+                            throw IllegalStateException(
+                                "R10.10 persisted planner/continuity state failed recovery verification"
+                            )
+                        }
+                    }
+
+                    val initialCheckpoint =
+                        r10_10BuildProductionPlannerCheckpoint(
+                            planner = planner,
+                            longObjective = longObjective,
+                            adaptiveLoop = adaptiveLoop,
+                            continuity = continuity,
+                            runtimeContext = runtimeContext,
+                            checkpointTag =
+                                if (resumeGoal == null) {
+                                    "r10_10_production_started"
+                                } else {
+                                    "r10_10_production_recovered"
+                                },
+                            safeAutoResume = true,
+                            stepInFlight = false,
+                            lastStepId = "",
+                            lastExecutor = ""
+                        )
+
+                    val initialPersisted =
+                        durableGoalStore.checkpoint(
+                            goalId,
+                            initialCheckpoint
+                        ) != null
+
+                    if (!initialPersisted) {
+                        throw IllegalStateException(
+                            "R10.10 production start/recovery checkpoint not persisted"
+                        )
+                    }
+
+                    commandHistoryStore.addEvent(
+                        activeCommandHistoryId,
+                        state =
+                            if (resumeGoal == null) {
+                                "r10_10_production_plan_started"
+                            } else {
+                                "r10_10_production_plan_restored"
+                            },
+                        message =
+                            if (resumeGoal == null) {
+                                "R10.10 production planner принял проверенный DAG"
+                            } else {
+                                "R10.10 production planner восстановил проверенный DAG"
+                            },
+                        details =
+                            "goal_id=${goalId.orEmpty()}; fingerprint=${planner.planFingerprint()}; " +
+                                "subgoals=${planner.subgoalCount()}; verified=${longObjective.verifiedSubgoalCount()}"
+                    )
+
+                    val result =
+                        executeR10_10ProductionPlannerLoop(
+                            goalId = goalId.orEmpty(),
+                            command = command,
+                            planner = planner,
+                            longObjective = longObjective,
+                            adaptiveLoop = adaptiveLoop,
+                            continuity = continuity,
+                            runtimeContext = runtimeContext,
+                            commandToken = commandToken,
+                            automaticRecovery = automaticRecovery
+                        )
+
+                    val success =
+                        result.optBoolean("success", false) &&
+                            result.optBoolean("verified", false) &&
+                            result.optBoolean("terminal_verified", false)
+
+                    if (success) {
+                        durableGoalStore.markCompleted(
+                            goalId,
+                            "R10.10 production dynamic planner objective verified ${result.optInt("verified_subgoal_count", 0)}/${result.optInt("subgoal_count", 0)}"
+                        )
+                    } else {
+                        durableGoalStore.markPaused(
+                            goalId,
+                            result.optString(
+                                "reason",
+                                "R10.10 production planner stopped fail-closed"
+                            )
+                        )
+                    }
+
+                    commandHistoryStore.addEvent(
+                        activeCommandHistoryId,
+                        state =
+                            if (success) {
+                                "r10_10_production_dynamic_objective_verified"
+                            } else {
+                                "r10_10_production_dynamic_objective_paused"
+                            },
+                        message =
+                            if (success) {
+                                "R10.10 production planner завершил обычную пользовательскую цель"
+                            } else {
+                                "R10.10 production planner остановил цель fail-closed"
+                            },
+                        details = result.toString().take(4600)
+                    )
+
+                    mainHandler.post {
+                        if (
+                            isCommandCancelled(commandToken) ||
+                            commandToken != activeCommandToken
+                        ) {
+                            return@post
+                        }
+
+                        respondAndResume(
+                            text =
+                                if (success) {
+                                    "Длинная автономная цель выполнена и подтверждена: ${result.optInt("verified_subgoal_count", 0)}/${result.optInt("subgoal_count", 0)} subgoals VERIFIED."
+                                } else {
+                                    "Длинная автономная цель остановлена безопасно: ${result.optString("reason", "не подтверждён следующий шаг")}."
+                                },
+                            silent = silent,
+                            success = success,
+                            technical = result.toString()
+                        )
+                    }
+                } catch (error: Exception) {
+                    try {
+                        durableGoalStore.markPaused(
+                            goalId,
+                            "R10.10 production planner exception: ${error.message ?: error.javaClass.simpleName}"
+                        )
+                    } catch (_: Exception) {
+                    }
+
+                    commandHistoryStore.addEvent(
+                        activeCommandHistoryId,
+                        state = "r10_10_production_dynamic_objective_error",
+                        message = "R10.10 production planner остановлен fail-closed",
+                        details = (error.message ?: error.javaClass.simpleName).take(1200)
+                    )
+
+                    mainHandler.post {
+                        if (
+                            !isCommandCancelled(commandToken) &&
+                            commandToken == activeCommandToken
+                        ) {
+                            respondAndResume(
+                                text = "Длинная автономная цель остановлена: безопасное продолжение не подтверждено.",
+                                silent = silent,
+                                success = false,
+                                technical =
+                                    JSONObject()
+                                        .put("production_dynamic_planner", true)
+                                        .put("success", false)
+                                        .put("verified", false)
+                                        .put("terminal_verified", false)
+                                        .put("blind_replay_allowed", false)
+                                        .put("goal_id", goalId.orEmpty())
+                                        .put(
+                                            "error",
+                                            error.message ?: error.javaClass.simpleName
+                                        )
+                                        .toString()
+                            )
+                        }
+                    }
+                } finally {
+                    if (currentDurableGoalId == goalId) {
+                        currentDurableGoalId = null
+                    }
+
+                    if (
+                        Thread.currentThread() ===
+                        currentAgentThread
+                    ) {
+                        currentAgentThread = null
+                    }
+                }
+            }
+
+        currentAgentThread = worker
+        executionKernel.bindThread(worker)
+        worker.start()
+    }
+
+    private fun executeR10_10ProductionPlannerLoop(
+        goalId: String,
+        command: String,
+        planner: AyanaDynamicGoalPlanner,
+        longObjective: AyanaLongObjectiveCoordinator,
+        adaptiveLoop: AyanaAdaptiveExecutionLoop,
+        continuity: AyanaCrossLaneAdaptiveContinuity,
+        runtimeContext: JSONObject,
+        commandToken: Long,
+        automaticRecovery: Boolean
+    ): JSONObject {
+        var currentState =
+            AyanaAdaptiveExecutionLoop.fingerprintState(
+                try {
+                    screenIntelligence.getScreenState().toString()
+                } catch (_: Exception) {
+                    runtimeContext.toString()
+                }
+            )
+
+        var dispatchCount = 0
+        var browserDispatchCount = 0
+        var visualReadCount = 0
+        var replanAttemptCount = 0
+        var replanAppliedCount = 0
+        var durableStepCheckpointCount = 0
+        var lastFailure = ""
+
+        for (subgoal in planner.subgoals()) {
+            if (
+                isCommandCancelled(commandToken) ||
+                commandToken != activeCommandToken
+            ) {
+                return JSONObject()
+                    .put("production_dynamic_planner", true)
+                    .put("success", false)
+                    .put("verified", false)
+                    .put("terminal_verified", false)
+                    .put("cancelled", true)
+                    .put("reason", "command_cancelled")
+                    .put("goal_id", goalId)
+                    .put("blind_replay_allowed", false)
+            }
+
+            if (
+                longObjective.statusOf(subgoal.id) ==
+                AyanaLongObjectiveCoordinator.STATUS_VERIFIED
+            ) {
+                continue
+            }
+
+            if (
+                longObjective.statusOf(subgoal.id) ==
+                AyanaLongObjectiveCoordinator.STATUS_FAILED
+            ) {
+                replanAttemptCount++
+                val replan =
+                    r10_10AttemptProductionSuffixReplan(
+                        command = command,
+                        planner = planner,
+                        longObjective = longObjective,
+                        failedSubgoalId = subgoal.id
+                    )
+
+                if (replan.optBoolean("applied", false)) {
+                    replanAppliedCount++
+                } else {
+                    lastFailure =
+                        replan.optString(
+                            "reason",
+                            "failed_subgoal_requires_new_plan"
+                        )
+                    break
+                }
+            }
+
+            val begin =
+                longObjective.beginSubgoal(
+                    subgoalId = subgoal.id,
+                    lane = subgoal.lane,
+                    authority = subgoal.authority
+                )
+
+            if (!begin.optBoolean("allowed", false)) {
+                lastFailure =
+                    begin.optString(
+                        "reason",
+                        "subgoal_begin_blocked"
+                    )
+                break
+            }
+
+            val laneGate =
+                continuity.transitionTo(
+                    adaptiveLoop = adaptiveLoop,
+                    targetLane = subgoal.lane,
+                    targetAuthority = subgoal.authority,
+                    stateFingerprint = currentState,
+                    reason = "r10_10_production:${subgoal.id}"
+                )
+
+            if (!laneGate.optBoolean("allowed", false)) {
+                longObjective.recordFailure(
+                    subgoal.id,
+                    laneGate.optString(
+                        "reason",
+                        "lane_transition_blocked"
+                    )
+                )
+                lastFailure =
+                    laneGate.optString(
+                        "reason",
+                        "lane_transition_blocked"
+                    )
+                break
+            }
+
+            val executorContract =
+                AyanaDynamicGoalPlanner.executorRegistry()[subgoal.executor]
+
+            if (executorContract == null) {
+                longObjective.recordFailure(
+                    subgoal.id,
+                    "registered_executor_missing"
+                )
+                lastFailure = "registered_executor_missing"
+                break
+            }
+
+            val plannerArguments =
+                planner.argumentsFor(
+                    subgoal.id
+                )
+
+            val adaptiveToolName =
+                r10_10AdaptiveToolName(
+                    subgoal.executor
+                )
+
+            val adaptiveArguments =
+                r10_10AdaptiveArguments(
+                    executor = subgoal.executor,
+                    plannerArguments = plannerArguments,
+                    longObjective = longObjective,
+                    subgoalId = subgoal.id,
+                    runtimeContext = runtimeContext
+                )
+
+            val proposal =
+                adaptiveLoop.propose(
+                    toolName = adaptiveToolName,
+                    arguments = adaptiveArguments,
+                    stateFingerprint = currentState,
+                    mayMutate = executorContract.mayMutateRuntime,
+                    authoritySource = subgoal.authority
+                )
+
+            if (!proposal.optBoolean("allowed", false)) {
+                longObjective.recordFailure(
+                    subgoal.id,
+                    proposal.optString(
+                        "reason",
+                        "adaptive_proposal_blocked"
+                    )
+                )
+                lastFailure =
+                    proposal.optString(
+                        "reason",
+                        "adaptive_proposal_blocked"
+                    )
+                break
+            }
+
+            val beforeDispatch =
+                r10_10BuildProductionPlannerCheckpoint(
+                    planner = planner,
+                    longObjective = longObjective,
+                    adaptiveLoop = adaptiveLoop,
+                    continuity = continuity,
+                    runtimeContext = runtimeContext,
+                    checkpointTag =
+                        "r10_10_before_${subgoal.id}",
+                    safeAutoResume = false,
+                    stepInFlight = true,
+                    lastStepId = subgoal.id,
+                    lastExecutor = subgoal.executor
+                )
+
+            if (
+                durableGoalStore.checkpoint(
+                    goalId,
+                    beforeDispatch
+                ) ==
+                null
+            ) {
+                longObjective.recordFailure(
+                    subgoal.id,
+                    "pre_dispatch_checkpoint_failed"
+                )
+                lastFailure =
+                    "pre_dispatch_checkpoint_failed"
+                break
+            }
+
+            durableStepCheckpointCount++
+
+            val executorResult =
+                executeR10_10RegisteredPlannerSubgoal(
+                    planner = planner,
+                    longObjective = longObjective,
+                    subgoal = subgoal,
+                    goalId = goalId,
+                    commandToken = commandToken,
+                    runtimeContext = runtimeContext
+                )
+
+            val actionDispatched =
+                executorResult.optBoolean(
+                    "action_dispatched",
+                    false
+                )
+
+            if (actionDispatched) {
+                dispatchCount++
+            }
+
+            if (
+                subgoal.executor ==
+                AyanaDynamicGoalPlanner.EXEC_BROWSER_OPEN_URL &&
+                actionDispatched
+            ) {
+                browserDispatchCount++
+            }
+
+            if (
+                subgoal.executor ==
+                AyanaDynamicGoalPlanner.EXEC_STRUCTURED_SCREEN_READ
+            ) {
+                visualReadCount++
+            }
+
+            val verified =
+                executorResult.optBoolean("success", false) &&
+                    executorResult.optBoolean(
+                        "verified",
+                        executorResult.optBoolean("success", false)
+                    )
+
+            val afterState =
+                AyanaAdaptiveExecutionLoop.fingerprintState(
+                    executorResult.toString()
+                )
+
+            val adaptiveRecord =
+                adaptiveLoop.recordResult(
+                    toolName = adaptiveToolName,
+                    arguments = adaptiveArguments,
+                    beforeStateFingerprint = currentState,
+                    afterStateFingerprint = afterState,
+                    success = verified,
+                    verified = verified,
+                    actionDispatched = actionDispatched,
+                    actionCommitted =
+                        executorResult.optBoolean(
+                            "action_committed",
+                            false
+                        ),
+                    reconciliationComplete =
+                        executorResult.optBoolean(
+                            "reconciliation_complete",
+                            verified
+                        ),
+                    evidence =
+                        executorResult.optString(
+                            "message",
+                            "R10.10 production planner subgoal result"
+                        ),
+                    failureLayer =
+                        if (verified) {
+                            ""
+                        } else {
+                            executorResult.optString(
+                                "failure_layer",
+                                "verification"
+                            )
+                        }
+                )
+
+            val resultValue =
+                if (
+                    subgoal.resultKey.isNotBlank() &&
+                    verified
+                ) {
+                    executorResult
+                        .optString("verified_result_value")
+                        .trim()
+                        .ifBlank {
+                            executorResult
+                                .optString("semantic_title")
+                                .trim()
+                        }
+                } else {
+                    ""
+                }
+
+            if (verified) {
+                longObjective.recordVerified(
+                    subgoalId = subgoal.id,
+                    lane = subgoal.lane,
+                    authority = subgoal.authority,
+                    evidence =
+                        executorResult.optString(
+                            "message",
+                            "verified production subgoal"
+                        ),
+                    resultValue = resultValue
+                )
+            } else {
+                longObjective.recordFailure(
+                    subgoal.id,
+                    executorResult.optString(
+                        "reason",
+                        executorResult.optString(
+                            "message",
+                            "subgoal_not_verified"
+                        )
+                    )
+                )
+            }
+
+            val afterDispatch =
+                r10_10BuildProductionPlannerCheckpoint(
+                    planner = planner,
+                    longObjective = longObjective,
+                    adaptiveLoop = adaptiveLoop,
+                    continuity = continuity,
+                    runtimeContext = runtimeContext,
+                    checkpointTag =
+                        if (verified) {
+                            "r10_10_verified_${subgoal.id}"
+                        } else {
+                            "r10_10_failed_${subgoal.id}"
+                        },
+                    safeAutoResume =
+                        verified &&
+                            !adaptiveLoop.hasUnresolvedSideEffect(),
+                    stepInFlight = false,
+                    lastStepId = subgoal.id,
+                    lastExecutor = subgoal.executor
+                )
+                    .put(
+                        "last_step_success",
+                        verified
+                    )
+                    .put(
+                        "last_step_status",
+                        if (verified) {
+                            "VERIFIED"
+                        } else {
+                            "FAILED"
+                        }
+                    )
+                    .put(
+                        "last_failure_layer",
+                        if (verified) {
+                            ""
+                        } else {
+                            executorResult.optString(
+                                "failure_layer",
+                                "verification"
+                            )
+                        }
+                    )
+
+            if (
+                durableGoalStore.checkpoint(
+                    goalId,
+                    afterDispatch
+                ) ==
+                null
+            ) {
+                lastFailure =
+                    "post_step_checkpoint_failed"
+                break
+            }
+
+            durableStepCheckpointCount++
+
+            commandHistoryStore.addEvent(
+                activeCommandHistoryId,
+                state =
+                    if (verified) {
+                        "r10_10_production_subgoal_verified"
+                    } else {
+                        "r10_10_production_subgoal_failed"
+                    },
+                message =
+                    if (verified) {
+                        "Production planner subgoal VERIFIED: ${subgoal.id}"
+                    } else {
+                        "Production planner subgoal не подтверждён: ${subgoal.id}"
+                    },
+                details =
+                    "executor=${subgoal.executor}; lane=${subgoal.lane}; " +
+                        "adaptive_verified=${adaptiveRecord.optBoolean("verified", false)}; " +
+                        "result=${executorResult.toString().take(1800)}"
+            )
+
+            if (!verified) {
+                replanAttemptCount++
+                val replan =
+                    r10_10AttemptProductionSuffixReplan(
+                        command = command,
+                        planner = planner,
+                        longObjective = longObjective,
+                        failedSubgoalId = subgoal.id
+                    )
+
+                if (replan.optBoolean("applied", false)) {
+                    replanAppliedCount++
+                } else {
+                    lastFailure =
+                        replan.optString(
+                            "reason",
+                            executorResult.optString(
+                                "reason",
+                                "verified_failure_no_safe_alternative"
+                            )
+                        )
+                    break
+                }
+            }
+
+            currentState = afterState
+        }
+
+        val longTerminal =
+            longObjective.canDeclareSuccess()
+
+        val terminalGate =
+            adaptiveLoop.markTerminal(
+                verified =
+                    longTerminal &&
+                        lastFailure.isBlank() &&
+                        !adaptiveLoop.hasUnresolvedSideEffect(),
+                evidence =
+                    "R10.10 production long_terminal=$longTerminal; " +
+                        "verified=${longObjective.verifiedSubgoalCount()}/${longObjective.subgoalCount()}; " +
+                        "failure=$lastFailure"
+            )
+
+        val terminalVerified =
+            adaptiveLoop.canDeclareSuccess() &&
+                longTerminal &&
+                lastFailure.isBlank() &&
+                !adaptiveLoop.hasUnresolvedSideEffect()
+
+        val finalCheckpoint =
+            r10_10BuildProductionPlannerCheckpoint(
+                planner = planner,
+                longObjective = longObjective,
+                adaptiveLoop = adaptiveLoop,
+                continuity = continuity,
+                runtimeContext = runtimeContext,
+                checkpointTag =
+                    if (terminalVerified) {
+                        "r10_10_production_terminal"
+                    } else {
+                        "r10_10_production_paused"
+                    },
+                safeAutoResume = false,
+                stepInFlight = false,
+                lastStepId = "",
+                lastExecutor = ""
+            )
+                .put(
+                    "terminal_verified",
+                    terminalVerified
+                )
+
+        val finalCheckpointPersisted =
+            durableGoalStore.checkpoint(
+                goalId,
+                finalCheckpoint
+            ) !=
+                null
+
+        val success =
+            terminalVerified &&
+                finalCheckpointPersisted
+
+        return JSONObject()
+            .put("production_dynamic_planner", true)
+            .put("production_route", "r10_10")
+            .put("success", success)
+            .put("verified", success)
+            .put("terminal_verified", terminalVerified)
+            .put("final_checkpoint_persisted", finalCheckpointPersisted)
+            .put("dynamic_goal_planner_version", AyanaDynamicGoalPlanner.VERSION)
+            .put("long_objective_coordinator_version", AyanaLongObjectiveCoordinator.VERSION)
+            .put("adaptive_loop_version", AyanaAdaptiveExecutionLoop.VERSION)
+            .put("cross_lane_continuity_version", AyanaCrossLaneAdaptiveContinuity.VERSION)
+            .put("plan_validated_pre_dispatch", true)
+            .put("plan_fingerprint", planner.planFingerprint())
+            .put("subgoal_count", longObjective.subgoalCount())
+            .put("verified_subgoal_count", longObjective.verifiedSubgoalCount())
+            .put("plan_revision", longObjective.planRevision())
+            .put("partial_result_count", longObjective.partialResultCount())
+            .put("dispatch_count", dispatchCount)
+            .put("browser_open_dispatch_count", browserDispatchCount)
+            .put("visual_read_count", visualReadCount)
+            .put("verified_prefix_replay_blocked", true)
+            .put("replan_attempt_count", replanAttemptCount)
+            .put("replan_applied_count", replanAppliedCount)
+            .put("durable_step_checkpoint_count", durableStepCheckpointCount)
+            .put("production_durable_goal_store_touched", true)
+            .put("automatic_recovery", automaticRecovery)
+            .put("safe_resume_contract", true)
+            .put("blind_replay_allowed", false)
+            .put("unresolved_side_effect", adaptiveLoop.hasUnresolvedSideEffect())
+            .put("long_objective_terminal_ready", longTerminal)
+            .put("adaptive_terminal_recorded", terminalGate.optBoolean("recorded", false))
+            .put("goal_id", goalId)
+            .put("reason", lastFailure)
+            .put("long_objective_summary", longObjective.compactSummary())
+            .put("continuity_summary", continuity.compactSummary(adaptiveLoop))
+            .put("voice_service_release", AYANA_VOICE_SERVICE_RELEASE)
+            .put("accepted_checkpoint", AYANA_ACCEPTED_FEATURE_CHECKPOINT)
+            .put("current_release", AYANA_CURRENT_FEATURE_RELEASE)
+    }
+
+    private fun executeR10_10RegisteredPlannerSubgoal(
+        planner: AyanaDynamicGoalPlanner,
+        longObjective: AyanaLongObjectiveCoordinator,
+        subgoal: AyanaDynamicGoalPlanner.PlannedSubgoal,
+        goalId: String,
+        commandToken: Long,
+        runtimeContext: JSONObject
+    ): JSONObject {
+        val arguments =
+            planner.argumentsFor(
+                subgoal.id
+            )
+
+        return when (subgoal.executor) {
+            AyanaDynamicGoalPlanner.EXEC_DEVICE_STATE -> {
+                executeAgentTool(
+                    name = "get_device_state",
+                    arguments = JSONObject()
+                )
+            }
+
+            AyanaDynamicGoalPlanner.EXEC_ANDROID_GOAL -> {
+                executeAndroidGoal(
+                    arguments = JSONObject(arguments.toString()),
+                    checkpointStore = durableGoalStore,
+                    checkpointGoalId = goalId
+                )
+            }
+
+            AyanaDynamicGoalPlanner.EXEC_BROWSER_OPEN_URL -> {
+                val url =
+                    arguments
+                        .optString("url")
+                        .trim()
+
+                val result =
+                    executeAppIntegrationAction(
+                        appKey = AyanaAppIntegrationRegistry.APP_BROWSER,
+                        actionKey = AyanaAppIntegrationRegistry.ACTION_OPEN_URL,
+                        payload = url
+                    )
+
+                val packageName =
+                    result
+                        .optString("observed_package")
+                        .trim()
+                        .ifBlank {
+                            result
+                                .optString("target_package")
+                                .trim()
+                        }
+
+                if (packageName.isNotBlank()) {
+                    runtimeContext.put(
+                        "browser_package",
+                        packageName
+                    )
+                }
+
+                runtimeContext.put(
+                    "browser_url",
+                    url
+                )
+
+                result
+            }
+
+            AyanaDynamicGoalPlanner.EXEC_STRUCTURED_SCREEN_READ -> {
+                val expectedPackage =
+                    runtimeContext
+                        .optString("browser_package")
+                        .trim()
+                        .ifBlank {
+                            try {
+                                screenIntelligence
+                                    .getScreenState()
+                                    .optString("effective_foreground_package")
+                                    .trim()
+                                    .ifBlank {
+                                        screenIntelligence
+                                            .getScreenState()
+                                            .optString("package")
+                                            .trim()
+                                    }
+                            } catch (_: Exception) {
+                                ""
+                            }
+                        }
+
+                val result =
+                    if (expectedPackage.isNotBlank()) {
+                        attemptVerifiedStructuredSemanticScreenRead(
+                            expectedPackage = expectedPackage,
+                            commandToken = commandToken
+                        )
+                    } else {
+                        JSONObject()
+                            .put("success", false)
+                            .put("verified", false)
+                            .put(
+                                "reason",
+                                "expected_browser_package_missing"
+                            )
+                    }
+
+                val title =
+                    result
+                        .optString("semantic_title")
+                        .trim()
+
+                val verified =
+                    result.optBoolean("success", false) &&
+                        result.optBoolean("verified", false) &&
+                        result.optBoolean(
+                            "semantic_structured_read_verified",
+                            false
+                        ) &&
+                        title.isNotBlank()
+
+                JSONObject(result.toString())
+                    .put("verified", verified)
+                    .put(
+                        "verified_result_value",
+                        if (verified) title else ""
+                    )
+                    .put(
+                        "message",
+                        if (verified) {
+                            "Structured screen title verified"
+                        } else {
+                            result.optString(
+                                "reason",
+                                "Structured screen title not verified"
+                            )
+                        }
+                    )
+            }
+
+            AyanaDynamicGoalPlanner.EXEC_PARTIAL_RESULT_CHECK -> {
+                val inputKey =
+                    arguments
+                        .optString("input_result_key")
+                        .trim()
+
+                val partial =
+                    longObjective.partialResult(
+                        key = inputKey,
+                        consumerSubgoalId = subgoal.id
+                    )
+
+                val verified =
+                    partial.optBoolean("available", false) &&
+                        partial.optBoolean("verified", false)
+
+                JSONObject()
+                    .put("success", verified)
+                    .put("verified", verified)
+                    .put("action_dispatched", false)
+                    .put("reconciliation_complete", true)
+                    .put(
+                        "verified_result_value",
+                        partial.optString("value")
+                    )
+                    .put(
+                        "message",
+                        if (verified) {
+                            "Verified partial-result provenance confirmed"
+                        } else {
+                            partial.optString(
+                                "reason",
+                                "partial_result_not_verified"
+                            )
+                        }
+                    )
+            }
+
+            AyanaDynamicGoalPlanner.EXEC_YOUTUBE_SEARCH -> {
+                val inputKey =
+                    arguments
+                        .optString("input_result_key")
+                        .trim()
+
+                val partial =
+                    longObjective.partialResult(
+                        key = inputKey,
+                        consumerSubgoalId = subgoal.id
+                    )
+
+                if (
+                    !partial.optBoolean("available", false) ||
+                    !partial.optBoolean("verified", false)
+                ) {
+                    JSONObject()
+                        .put("success", false)
+                        .put("verified", false)
+                        .put("action_dispatched", false)
+                        .put(
+                            "reason",
+                            "youtube_input_partial_result_not_verified"
+                        )
+                } else {
+                    executeAppIntegrationAction(
+                        appKey = AyanaAppIntegrationRegistry.APP_YOUTUBE,
+                        actionKey = AyanaAppIntegrationRegistry.ACTION_SEARCH,
+                        payload =
+                            partial
+                                .optString("value")
+                                .trim()
+                    )
+                }
+            }
+
+            else -> {
+                JSONObject()
+                    .put("success", false)
+                    .put("verified", false)
+                    .put("action_dispatched", false)
+                    .put(
+                        "reason",
+                        "planner_executor_not_registered_at_runtime"
+                    )
+            }
+        }
+    }
+
+    private fun r10_10AdaptiveToolName(
+        executor: String
+    ): String =
+        when (executor) {
+            AyanaDynamicGoalPlanner.EXEC_DEVICE_STATE ->
+                "get_device_state"
+
+            AyanaDynamicGoalPlanner.EXEC_ANDROID_GOAL ->
+                "execute_android_goal"
+
+            AyanaDynamicGoalPlanner.EXEC_BROWSER_OPEN_URL ->
+                "app_integration:browser:open_url"
+
+            AyanaDynamicGoalPlanner.EXEC_STRUCTURED_SCREEN_READ ->
+                "screen_observe_package_bound_visual"
+
+            AyanaDynamicGoalPlanner.EXEC_PARTIAL_RESULT_CHECK ->
+                "partial_result_check"
+
+            AyanaDynamicGoalPlanner.EXEC_YOUTUBE_SEARCH ->
+                "app_integration:youtube:search"
+
+            else ->
+                "unsupported_planner_executor"
+        }
+
+    private fun r10_10AdaptiveArguments(
+        executor: String,
+        plannerArguments: JSONObject,
+        longObjective: AyanaLongObjectiveCoordinator,
+        subgoalId: String,
+        runtimeContext: JSONObject
+    ): JSONObject =
+        when (executor) {
+            AyanaDynamicGoalPlanner.EXEC_BROWSER_OPEN_URL ->
+                JSONObject()
+                    .put(
+                        "app_key",
+                        AyanaAppIntegrationRegistry.APP_BROWSER
+                    )
+                    .put(
+                        "action_key",
+                        AyanaAppIntegrationRegistry.ACTION_OPEN_URL
+                    )
+                    .put(
+                        "payload",
+                        plannerArguments.optString("url")
+                    )
+
+            AyanaDynamicGoalPlanner.EXEC_STRUCTURED_SCREEN_READ ->
+                JSONObject()
+                    .put(
+                        "expected_package",
+                        runtimeContext.optString(
+                            "browser_package"
+                        )
+                    )
+                    .put(
+                        "mode",
+                        "package_bound_structured_visual"
+                    )
+
+            AyanaDynamicGoalPlanner.EXEC_YOUTUBE_SEARCH,
+            AyanaDynamicGoalPlanner.EXEC_PARTIAL_RESULT_CHECK -> {
+                val key =
+                    plannerArguments
+                        .optString("input_result_key")
+                        .trim()
+                val partial =
+                    longObjective.partialResult(
+                        key = key,
+                        consumerSubgoalId = subgoalId
+                    )
+
+                JSONObject()
+                    .put("input_result_key", key)
+                    .put(
+                        "verified_input_fingerprint",
+                        partial.optString("fingerprint")
+                    )
+                    .put(
+                        "payload",
+                        partial.optString("value")
+                    )
+            }
+
+            else ->
+                JSONObject(
+                    plannerArguments.toString()
+                )
+        }
+
+    private fun r10_10AttemptProductionSuffixReplan(
+        command: String,
+        planner: AyanaDynamicGoalPlanner,
+        longObjective: AyanaLongObjectiveCoordinator,
+        failedSubgoalId: String
+    ): JSONObject {
+        val proposal =
+            try {
+                AyanaDynamicGoalPlanner.localProposal(
+                    command
+                )
+            } catch (error: Throwable) {
+                return JSONObject()
+                    .put("applied", false)
+                    .put(
+                        "reason",
+                        error.message ?: "replan_proposal_failed"
+                    )
+            }
+
+        if (!proposal.optBoolean("supported", false)) {
+            return JSONObject()
+                .put("applied", false)
+                .put(
+                    "reason",
+                    proposal.optString(
+                        "reason",
+                        "no_safe_replan_proposal"
+                    )
+                )
+        }
+
+        val candidate =
+            try {
+                AyanaDynamicGoalPlanner.compile(
+                    objective = command,
+                    proposal = proposal
+                )
+            } catch (error: Throwable) {
+                return JSONObject()
+                    .put("applied", false)
+                    .put(
+                        "reason",
+                        error.message ?: "replan_validation_failed"
+                    )
+            }
+
+        if (
+            candidate.planFingerprint() ==
+            planner.planFingerprint()
+        ) {
+            return JSONObject()
+                .put("applied", false)
+                .put(
+                    "reason",
+                    "verified_failure_no_alternative_plan"
+                )
+                .put(
+                    "failed_subgoal_id",
+                    failedSubgoalId
+                )
+                .put(
+                    "blind_retry_blocked",
+                    true
+                )
+        }
+
+        val gate =
+            longObjective.applyPlanRevision(
+                candidate.toLongObjectiveSpecs()
+            )
+
+        return JSONObject(gate.toString())
+            .put(
+                "applied",
+                gate.optBoolean("allowed", false)
+            )
+            .put(
+                "failed_subgoal_id",
+                failedSubgoalId
+            )
+    }
+
+    private fun r10_10BuildProductionPlannerCheckpoint(
+        planner: AyanaDynamicGoalPlanner,
+        longObjective: AyanaLongObjectiveCoordinator,
+        adaptiveLoop: AyanaAdaptiveExecutionLoop,
+        continuity: AyanaCrossLaneAdaptiveContinuity,
+        runtimeContext: JSONObject,
+        checkpointTag: String,
+        safeAutoResume: Boolean,
+        stepInFlight: Boolean,
+        lastStepId: String,
+        lastExecutor: String
+    ): JSONObject =
+        crossLaneRecoveryContinuity
+            .buildRecoveryCheckpoint(
+                adaptiveLoop = adaptiveLoop,
+                continuity = continuity,
+                checkpointTag = checkpointTag,
+                safeAutoResume = safeAutoResume
+            )
+            .put(
+                "mode",
+                AyanaDurableGoalStore.MODE_ORCHESTRATOR
+            )
+            .put(
+                "production_dynamic_planner",
+                true
+            )
+            .put(
+                "dynamic_planner_plan",
+                planner.snapshot()
+            )
+            .put(
+                "long_objective_plan",
+                longObjective.snapshot()
+            )
+            .put(
+                "dynamic_planner_runtime_context",
+                JSONObject(runtimeContext.toString())
+            )
+            .put(
+                "step_in_flight",
+                stepInFlight
+            )
+            .put(
+                "last_step_id",
+                lastStepId
+            )
+            .put(
+                "last_step_action",
+                lastExecutor
+            )
+            .put(
+                "safe_auto_resume",
+                safeAutoResume
+            )
+
+    private fun resumeR10_10ProductionDynamicPlanner(
+        goal: JSONObject,
+        silent: Boolean,
+        automaticRecovery: Boolean
+    ) {
+        val command =
+            goal
+                .optString("command")
+                .trim()
+
+        val planner =
+            try {
+                AyanaDynamicGoalPlanner.restore(
+                    goal.optJSONObject(
+                        "dynamic_planner_plan"
+                    )
+                )
+            } catch (error: Throwable) {
+                durableGoalStore.markPaused(
+                    goal.optString("id"),
+                    "R10.10 planner restore failed: ${error.message ?: error.javaClass.simpleName}"
+                )
+                respondAndResume(
+                    text = "Сохранённая длинная цель остановлена: planner state не прошёл проверку.",
+                    silent = silent,
+                    success = false,
+                    technical =
+                        JSONObject()
+                            .put("production_dynamic_planner", true)
+                            .put("recovery", true)
+                            .put("planner_restore_verified", false)
+                            .put("blind_replay_allowed", false)
+                            .put(
+                                "reason",
+                                error.message ?: error.javaClass.simpleName
+                            )
+                            .toString()
+                )
+                return
+            }
+
+        if (
+            planner.objective().trim() !=
+            command.trim()
+        ) {
+            durableGoalStore.markPaused(
+                goal.optString("id"),
+                "R10.10 planner objective mismatch on recovery"
+            )
+            respondAndResume(
+                text = "Сохранённая длинная цель остановлена: objective не совпадает с persisted planner.",
+                silent = silent,
+                success = false,
+                technical =
+                    JSONObject()
+                        .put("production_dynamic_planner", true)
+                        .put("recovery", true)
+                        .put("planner_restore_verified", false)
+                        .put("blind_replay_allowed", false)
+                        .put("reason", "planner_objective_mismatch")
+                        .toString()
+            )
+            return
+        }
+
+        startR10_10ProductionDynamicPlannerWorker(
+            command = command,
+            silent = silent,
+            planner = planner,
+            resumeGoal = goal,
+            automaticRecovery = automaticRecovery
+        )
+    }
 
 
 
@@ -50302,6 +51968,20 @@ STATE_SUCCESS
             )
 
         if (
+            goal.optBoolean(
+                "production_dynamic_planner",
+                false
+            )
+        ) {
+            resumeR10_10ProductionDynamicPlanner(
+                goal = goal,
+                silent = silent,
+                automaticRecovery = automaticRecovery
+            )
+            return
+        }
+
+        if (
             goal.optString(
                 "mode"
             ) ==
@@ -61306,9 +62986,9 @@ state
         private const val MASTER_STATUS_MANUAL_REQUIRED =
             "MANUAL_REQUIRED"
 
-        // R10.9 DYNAMIC GOAL DECOMPOSITION + PLANNER CONTRACT RELEASE TRUTH.
+        // R10.10 ADAPTIVE PLANNER EXECUTION IN PRODUCTION PATH RELEASE TRUTH.
         private const val AYANA_VOICE_SERVICE_RELEASE =
-            "v12.42.0 / R10.9 DYNAMIC GOAL DECOMPOSITION + PLANNER CONTRACT"
+            "v12.43.0 / R10.10 ADAPTIVE PLANNER EXECUTION IN PRODUCTION PATH"
 
         private const val AYANA_PERSONAL_SEARCH_ENGINE_RELEASE =
             "v1.5.1 IMAGE COVERAGE TRUTH + R10.2 UNIFIED SEARCH CONTRACT v1.0"
@@ -61320,13 +63000,13 @@ state
             "v11.1.10 Multi-Attachment"
 
         private const val AYANA_ACCEPTED_FEATURE_CHECKPOINT =
-            "R10.8 GENERAL-PURPOSE LONG AUTONOMOUS OBJECTIVES — DEVICE-CONFIRMED ACCEPTED"
+            "R10.9 DYNAMIC GOAL DECOMPOSITION + PLANNER CONTRACT — DEVICE-CONFIRMED ACCEPTED"
 
         private const val AYANA_CURRENT_FEATURE_RELEASE =
-            "R10.9 DYNAMIC GOAL DECOMPOSITION + PLANNER CONTRACT — PENDING DEVICE CONFIRMATION"
+            "R10.10 ADAPTIVE PLANNER EXECUTION IN PRODUCTION PATH — PENDING DEVICE CONFIRMATION"
 
         private const val AYANA_RELEASE_LINEAGE =
-            "Android v12.21.0 / R7.9 truth-hardening + R8.0 multi-attachment + R8.1–R8.4 accepted Personal Global Search stack + R8.5–R8.5.4 capability/evidence truth + R9.0 autonomous agent foundation + R9.0.1 history live-refresh proof fix + R9.0.2 diagnostic reconciliation/history refresh fix + R9.0.3 TTS health reconciliation + R9.1 IME perception/active telemetry truth + R9.2 autonomous recovery/long-task reconciliation + R9.2.1 adaptive hypothesis reconciliation + R9.3 app integration framework + R9.3.1 screen health reconciliation + R9.3.2 history latency recovery reconciliation + R9.3.3 informational terminal reconciliation + R9.3.4 app integration device acceptance + R9.4 multi-app task orchestration + R9.4.1 screen ownership union reconciliation + R9.5 verified result transfer between app steps + R9.5.1 partial marker provenance reconciliation + R9.5.2 bounded marker observation + R9.5.3 verified action result transfer + R9.6 verified semantic observation fallback + R9.6.1 visual fallback acceptance truth + R9.7 structured screen reading + R9.7.1 conversation routing/terminal truth + R9.7.2 structured router conversation precedence + R9.7.3 action morphology/terminal truth + R9.8 generic verified result transfer + R9.8.1 master full acceptance/diagnostic engine + R9.9 reversible action journal/verified undo + R9.9.1 brightness verified undo device acceptance + R9.9.2 opt-in low-battery controlled proactivity + R10.0 unified screen intelligence + R10.1 local self-diagnostics/self-audit + R10.2 personal search expansion + R10.3 long autonomous tasks/recovery + R10.4 adaptive verified execution loop + R10.5 generalized live adaptive autonomy + R10.6 cross-lane adaptive continuity + R10.6.1 durable goal binding fix + R10.7 cross-lane durable recovery continuity + R10.7.1 isolated acceptance cleanup hardening + R10.8 general-purpose long autonomous objectives + R10.9 dynamic goal decomposition/planner contract"
+            "Android v12.21.0 / R7.9 truth-hardening + R8.0 multi-attachment + R8.1–R8.4 accepted Personal Global Search stack + R8.5–R8.5.4 capability/evidence truth + R9.0 autonomous agent foundation + R9.0.1 history live-refresh proof fix + R9.0.2 diagnostic reconciliation/history refresh fix + R9.0.3 TTS health reconciliation + R9.1 IME perception/active telemetry truth + R9.2 autonomous recovery/long-task reconciliation + R9.2.1 adaptive hypothesis reconciliation + R9.3 app integration framework + R9.3.1 screen health reconciliation + R9.3.2 history latency recovery reconciliation + R9.3.3 informational terminal reconciliation + R9.3.4 app integration device acceptance + R9.4 multi-app task orchestration + R9.4.1 screen ownership union reconciliation + R9.5 verified result transfer between app steps + R9.5.1 partial marker provenance reconciliation + R9.5.2 bounded marker observation + R9.5.3 verified action result transfer + R9.6 verified semantic observation fallback + R9.6.1 visual fallback acceptance truth + R9.7 structured screen reading + R9.7.1 conversation routing/terminal truth + R9.7.2 structured router conversation precedence + R9.7.3 action morphology/terminal truth + R9.8 generic verified result transfer + R9.8.1 master full acceptance/diagnostic engine + R9.9 reversible action journal/verified undo + R9.9.1 brightness verified undo device acceptance + R9.9.2 opt-in low-battery controlled proactivity + R10.0 unified screen intelligence + R10.1 local self-diagnostics/self-audit + R10.2 personal search expansion + R10.3 long autonomous tasks/recovery + R10.4 adaptive verified execution loop + R10.5 generalized live adaptive autonomy + R10.6 cross-lane adaptive continuity + R10.6.1 durable goal binding fix + R10.7 cross-lane durable recovery continuity + R10.7.1 isolated acceptance cleanup hardening + R10.8 general-purpose long autonomous objectives + R10.9 dynamic goal decomposition/planner contract + R10.10 adaptive planner production path"
 
         // AyanaCommandHistoryStore v2.8 keeps up to 4k chars inline and stores longer
         // results out-of-line. Self-review intentionally remains inline so copied History
