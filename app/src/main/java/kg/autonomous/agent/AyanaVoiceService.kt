@@ -62,7 +62,7 @@ import kotlin.math.abs
 
 class AyanaVoiceService : Service() {
 
-    // AYANA v12.39.0 / R10.6 CROSS-LANE ADAPTIVE CONTINUITY.
+    // AYANA v12.39.1 / R10.6.1 DURABLE GOAL BINDING FIX.
     // Builds on DEVICE-CONFIRMED R10.5 Generalized Live Adaptive Autonomy.
     // - Cross-Lane Adaptive Continuity v1.0 adds one persistent objective ID above the existing
     //   Adaptive Execution Loop v1.1 without replacing its verified/replan ledger;
@@ -74,6 +74,9 @@ class AyanaVoiceService : Service() {
     // - cross-lane state is checkpointed in Durable Goal and restored with R10.3 recovery;
     // - same failed transition replay remains blocked because all lanes share one Adaptive Loop ledger;
     // - no new app/account/mutation authority is added. ORB/visualizer remain untouched.
+    // R10.6.1 acceptance fix: Android Goal acceptance checkpoints use an isolated
+    // DurableGoalStore with a real goal_id, exercising the same Task Engine checkpoint
+    // contract without pausing or mutating any production/user durable goal.
     //
     // AYANA v12.37.0 / R10.4 ADAPTIVE VERIFIED EXECUTION LOOP.
     // Builds on DEVICE-CONFIRMED R10.3 long-task recovery.
@@ -35976,6 +35979,12 @@ routed.forEach {
                 start = false,
                 name = "AyanaR10_6CrossLaneAcceptance"
             ) {
+                val testFileName =
+                    "ayana_durable_goals_r10_6_acceptance.json"
+
+                var acceptanceStore: AyanaDurableGoalStore? = null
+                var acceptanceGoalId: String? = null
+                var cleanupVerified = false
                 var finalRestore: JSONObject? = null
 
                 try {
@@ -35992,6 +36001,39 @@ routed.forEach {
                         } catch (_: Exception) {
                             false
                         }
+
+                    // R10.6.1: Android Goal checkpoints require a real goal_id.
+                    // Use isolated acceptance storage so this test cannot pause/replace
+                    // any production durable goal owned by the user.
+                    val isolatedStore =
+                        AyanaDurableGoalStore(
+                            context = applicationContext,
+                            storageFileName = testFileName
+                        )
+
+                    isolatedStore.clearAcceptanceStorage()
+                    acceptanceStore = isolatedStore
+
+                    val durableAcceptance =
+                        isolatedStore.startGoal(
+                            command =
+                                "R10.6 acceptance: preserve one verified objective across Agent Core, Android Goal and Multi-App lanes without authority expansion or replay",
+                            source = "r10_6_acceptance",
+                            mode = AyanaDurableGoalStore.MODE_ANDROID_GOAL,
+                            safeAutoResume = false
+                        )
+
+                    acceptanceGoalId =
+                        durableAcceptance
+                            .optString("id")
+                            .trim()
+                            .takeIf { it.isNotBlank() }
+
+                    if (acceptanceGoalId == null) {
+                        throw IllegalStateException(
+                            "R10.6 isolated durable acceptance goal_id was not created"
+                        )
+                    }
 
                     val initialScreen =
                         try {
@@ -36030,6 +36072,44 @@ routed.forEach {
                         )
 
                     val objectiveIdBefore = continuity.objectiveId()
+
+                    val durableStartSnapshotPersisted =
+                        isolatedStore.checkpoint(
+                            acceptanceGoalId,
+                            JSONObject()
+                                .put(
+                                    "adaptive_execution_loop",
+                                    adaptiveLoop.persistenceSnapshot()
+                                )
+                                .put(
+                                    "cross_lane_continuity",
+                                    continuity.persistenceSnapshot(adaptiveLoop)
+                                )
+                                .put(
+                                    "adaptive_lane",
+                                    continuity.currentLane()
+                                )
+                                .put(
+                                    "adaptive_revision",
+                                    adaptiveLoop.currentRevision()
+                                )
+                                .put(
+                                    "adaptive_authority",
+                                    adaptiveLoop.authorityContext()
+                                )
+                                .put("safe_auto_resume", false)
+                                .put(
+                                    "last_checkpoint",
+                                    "r10_6_cross_lane_started"
+                                )
+                        ) != null
+
+                    if (!durableStartSnapshotPersisted) {
+                        throw IllegalStateException(
+                            "R10.6 initial isolated durable snapshot was not persisted"
+                        )
+                    }
+
                     var browserOpenDispatchCount = 0
 
                     // ---------------------------------------------------------
@@ -36147,9 +36227,10 @@ routed.forEach {
 
                     val androidResult =
                         if (androidProposal.optBoolean("allowed", false)) {
-                            executeAgentTool(
-                                name = "execute_android_goal",
-                                arguments = JSONObject(androidArgs.toString())
+                            executeAndroidGoal(
+                                arguments = JSONObject(androidArgs.toString()),
+                                checkpointStore = isolatedStore,
+                                checkpointGoalId = acceptanceGoalId
                             )
                         } else {
                             JSONObject()
@@ -36417,12 +36498,57 @@ routed.forEach {
                     // ---------------------------------------------------------
                     // 5) Persist/restore the same objective after lane transitions.
                     // ---------------------------------------------------------
-                    val loopSnapshot = adaptiveLoop.persistenceSnapshot()
-                    val continuitySnapshot =
-                        continuity.persistenceSnapshot(adaptiveLoop)
                     val revisionBeforeRestore = adaptiveLoop.currentRevision()
                     val prefixBeforeRestore = adaptiveLoop.verifiedStepCount()
                     val transitionsBeforeRestore = continuity.laneTransitionCount()
+
+                    val durableCrossLaneSnapshotPersisted =
+                        isolatedStore.checkpoint(
+                            acceptanceGoalId,
+                            JSONObject()
+                                .put(
+                                    "adaptive_execution_loop",
+                                    adaptiveLoop.persistenceSnapshot()
+                                )
+                                .put(
+                                    "cross_lane_continuity",
+                                    continuity.persistenceSnapshot(adaptiveLoop)
+                                )
+                                .put(
+                                    "adaptive_lane",
+                                    continuity.currentLane()
+                                )
+                                .put(
+                                    "adaptive_revision",
+                                    adaptiveLoop.currentRevision()
+                                )
+                                .put(
+                                    "adaptive_authority",
+                                    adaptiveLoop.authorityContext()
+                                )
+                                .put("safe_auto_resume", false)
+                                .put(
+                                    "last_checkpoint",
+                                    "r10_6_cross_lane_pre_restore"
+                                )
+                        ) != null
+
+                    val durableCrossLaneState =
+                        if (durableCrossLaneSnapshotPersisted) {
+                            isolatedStore.getById(
+                                acceptanceGoalId.orEmpty()
+                            )
+                        } else {
+                            null
+                        }
+
+                    val loopSnapshot =
+                        durableCrossLaneState
+                            ?.optJSONObject("adaptive_execution_loop")
+
+                    val continuitySnapshot =
+                        durableCrossLaneState
+                            ?.optJSONObject("cross_lane_continuity")
 
                     adaptiveLoop =
                         AyanaAdaptiveExecutionLoop.restore(
@@ -36446,7 +36572,11 @@ routed.forEach {
                         )
 
                     val recoveryContinuityVerified =
-                        continuity.objectiveId() == objectiveIdBefore &&
+                        durableCrossLaneSnapshotPersisted &&
+                            durableCrossLaneState != null &&
+                            loopSnapshot != null &&
+                            continuitySnapshot != null &&
+                            continuity.objectiveId() == objectiveIdBefore &&
                             continuity.currentLane() ==
                             AyanaCrossLaneAdaptiveContinuity.LANE_MULTI_APP &&
                             continuity.laneTransitionCount() ==
@@ -36629,6 +36759,7 @@ routed.forEach {
                             verified =
                                 coordinatorSelfTest &&
                                     adaptiveSelfTest &&
+                                    durableStartSnapshotPersisted &&
                                     agentRecord.optBoolean("verified", false) &&
                                     androidSwitchPreserved &&
                                     androidRecord.optBoolean("verified", false) &&
@@ -36652,9 +36783,10 @@ routed.forEach {
                                 "agent=$agentVerified; android=$androidVerified; browser=$browserVerified; visual=$visualVerified; youtube=$youtubeVerified; restore=$restoreVerified"
                         )
 
-                    val accepted =
+                    val acceptanceCoreVerified =
                         coordinatorSelfTest &&
                             adaptiveSelfTest &&
+                            durableStartSnapshotPersisted &&
                             agentGate.optBoolean("allowed", false) &&
                             agentProposal.optBoolean("allowed", false) &&
                             agentRecord.optBoolean("verified", false) &&
@@ -36684,6 +36816,57 @@ routed.forEach {
                             adaptiveLoop.canDeclareSuccess() &&
                             restoreVerified
 
+                    val durableFinalCheckpointPersisted =
+                        isolatedStore.checkpoint(
+                            acceptanceGoalId,
+                            JSONObject()
+                                .put(
+                                    "adaptive_execution_loop",
+                                    adaptiveLoop.persistenceSnapshot()
+                                )
+                                .put(
+                                    "cross_lane_continuity",
+                                    continuity.persistenceSnapshot(adaptiveLoop)
+                                )
+                                .put(
+                                    "adaptive_lane",
+                                    continuity.currentLane()
+                                )
+                                .put(
+                                    "adaptive_revision",
+                                    adaptiveLoop.currentRevision()
+                                )
+                                .put(
+                                    "adaptive_authority",
+                                    adaptiveLoop.authorityContext()
+                                )
+                                .put(
+                                    "terminal_verified",
+                                    adaptiveLoop.canDeclareSuccess()
+                                )
+                                .put("safe_auto_resume", false)
+                                .put(
+                                    "last_checkpoint",
+                                    "r10_6_cross_lane_terminal"
+                                )
+                        ) != null
+
+                    val accepted =
+                        acceptanceCoreVerified &&
+                            durableFinalCheckpointPersisted
+
+                    if (accepted) {
+                        isolatedStore.markCompleted(
+                            acceptanceGoalId,
+                            "R10.6 cross-lane adaptive continuity verified"
+                        )
+                    } else {
+                        isolatedStore.markFailed(
+                            acceptanceGoalId,
+                            "R10.6 cross-lane acceptance failed verification"
+                        )
+                    }
+
                     val evidence =
                         JSONObject()
                             .put(
@@ -36696,6 +36879,26 @@ routed.forEach {
                             )
                             .put("objective_id", objectiveIdBefore)
                             .put("objective_id_preserved", objectiveIdPreserved)
+                            .put(
+                                "isolated_durable_goal_id_present",
+                                !acceptanceGoalId.isNullOrBlank()
+                            )
+                            .put(
+                                "durable_start_snapshot_persisted",
+                                durableStartSnapshotPersisted
+                            )
+                            .put(
+                                "durable_cross_lane_snapshot_persisted",
+                                durableCrossLaneSnapshotPersisted
+                            )
+                            .put(
+                                "durable_final_checkpoint_persisted",
+                                durableFinalCheckpointPersisted
+                            )
+                            .put(
+                                "production_durable_goal_store_touched",
+                                false
+                            )
                             .put(
                                 "final_execution_lane",
                                 continuity.currentLane()
@@ -36783,6 +36986,14 @@ routed.forEach {
                     }
                 } catch (error: Exception) {
                     try {
+                        acceptanceStore?.markFailed(
+                            acceptanceGoalId,
+                            "R10.6.1 acceptance exception: ${error.message ?: error.javaClass.simpleName}"
+                        )
+                    } catch (_: Exception) {
+                    }
+
+                    try {
                         finalRestore =
                             restoreAyanaAfterAppIntegrationProbe(
                                 pageKey = originalPage,
@@ -36843,6 +37054,30 @@ routed.forEach {
                             )
                         } catch (_: Exception) {
                         }
+                    }
+
+                    try {
+                        val cleanupStore =
+                            acceptanceStore
+                                ?: AyanaDurableGoalStore(
+                                    context = applicationContext,
+                                    storageFileName = testFileName
+                                )
+
+                        cleanupStore.clearAcceptanceStorage()
+                        cleanupVerified = true
+                    } catch (_: Exception) {
+                        cleanupVerified = false
+                    }
+
+                    if (!cleanupVerified) {
+                        commandHistoryStore.addEvent(
+                            activeCommandHistoryId,
+                            state = "r10_6_acceptance_cleanup_warning",
+                            message =
+                                "R10.6 isolated acceptance storage cleanup не подтверждён",
+                            details = "storage=$testFileName"
+                        )
                     }
 
                     if (Thread.currentThread() === currentAgentThread) {
@@ -46543,7 +46778,8 @@ return ""
     private fun persistAndroidGoalCheckpoint(
         goalId: String?,
         checkpoint: JSONObject,
-        historyMessage: String
+        historyMessage: String,
+        store: AyanaDurableGoalStore = durableGoalStore
     ): Boolean {
 
         if (goalId.isNullOrBlank()) {
@@ -46558,7 +46794,7 @@ return ""
 
         return try {
             val saved =
-                durableGoalStore
+                store
                     .checkpointAndroidStep(
                         goalId,
                         checkpoint
@@ -50618,7 +50854,9 @@ private fun isSemanticActionResultVerified(
     }
 
     private fun executeAndroidGoal(
-        arguments: JSONObject
+        arguments: JSONObject,
+        checkpointStore: AyanaDurableGoalStore = durableGoalStore,
+        checkpointGoalId: String? = currentDurableGoalId
     ): JSONObject {
 
         val compiled =
@@ -50739,12 +50977,12 @@ private fun isSemanticActionResultVerified(
             activeCommandToken
 
         val durableId =
-            currentDurableGoalId
+            checkpointGoalId
 
         if (durableId != null) {
             val planSaved =
                 try {
-                    durableGoalStore
+                    checkpointStore
                         .attachAndroidPlan(
                             id = durableId,
                             arguments = normalizedArguments,
@@ -50853,7 +51091,8 @@ private fun isSemanticActionResultVerified(
                             persistAndroidGoalCheckpoint(
                                 goalId = durableId,
                                 checkpoint = checkpoint,
-                                historyMessage = "Android checkpoint"
+                                historyMessage = "Android checkpoint",
+                                store = checkpointStore
                             )
                         }
                 )
@@ -56059,9 +56298,9 @@ state
         private const val MASTER_STATUS_MANUAL_REQUIRED =
             "MANUAL_REQUIRED"
 
-        // R10.6 CROSS-LANE ADAPTIVE CONTINUITY RELEASE TRUTH.
+        // R10.6.1 CROSS-LANE ADAPTIVE CONTINUITY RELEASE TRUTH.
         private const val AYANA_VOICE_SERVICE_RELEASE =
-            "v12.39.0 / R10.6 CROSS-LANE ADAPTIVE CONTINUITY"
+            "v12.39.1 / R10.6.1 DURABLE GOAL BINDING FIX"
 
         private const val AYANA_PERSONAL_SEARCH_ENGINE_RELEASE =
             "v1.5.1 IMAGE COVERAGE TRUTH + R10.2 UNIFIED SEARCH CONTRACT v1.0"
@@ -56076,10 +56315,10 @@ state
             "R10.5 GENERALIZED LIVE ADAPTIVE AUTONOMY — DEVICE-CONFIRMED ACCEPTED"
 
         private const val AYANA_CURRENT_FEATURE_RELEASE =
-            "R10.6 CROSS-LANE ADAPTIVE CONTINUITY — PENDING DEVICE CONFIRMATION"
+            "R10.6.1 CROSS-LANE ADAPTIVE CONTINUITY — PENDING DEVICE CONFIRMATION"
 
         private const val AYANA_RELEASE_LINEAGE =
-            "Android v12.21.0 / R7.9 truth-hardening + R8.0 multi-attachment + R8.1–R8.4 accepted Personal Global Search stack + R8.5–R8.5.4 capability/evidence truth + R9.0 autonomous agent foundation + R9.0.1 history live-refresh proof fix + R9.0.2 diagnostic reconciliation/history refresh fix + R9.0.3 TTS health reconciliation + R9.1 IME perception/active telemetry truth + R9.2 autonomous recovery/long-task reconciliation + R9.2.1 adaptive hypothesis reconciliation + R9.3 app integration framework + R9.3.1 screen health reconciliation + R9.3.2 history latency recovery reconciliation + R9.3.3 informational terminal reconciliation + R9.3.4 app integration device acceptance + R9.4 multi-app task orchestration + R9.4.1 screen ownership union reconciliation + R9.5 verified result transfer between app steps + R9.5.1 partial marker provenance reconciliation + R9.5.2 bounded marker observation + R9.5.3 verified action result transfer + R9.6 verified semantic observation fallback + R9.6.1 visual fallback acceptance truth + R9.7 structured screen reading + R9.7.1 conversation routing/terminal truth + R9.7.2 structured router conversation precedence + R9.7.3 action morphology/terminal truth + R9.8 generic verified result transfer + R9.8.1 master full acceptance/diagnostic engine + R9.9 reversible action journal/verified undo + R9.9.1 brightness verified undo device acceptance + R9.9.2 opt-in low-battery controlled proactivity + R10.0 unified screen intelligence + R10.1 local self-diagnostics/self-audit + R10.2 personal search expansion + R10.3 long autonomous tasks/recovery + R10.4 adaptive verified execution loop + R10.5 generalized live adaptive autonomy + R10.6 cross-lane adaptive continuity"
+            "Android v12.21.0 / R7.9 truth-hardening + R8.0 multi-attachment + R8.1–R8.4 accepted Personal Global Search stack + R8.5–R8.5.4 capability/evidence truth + R9.0 autonomous agent foundation + R9.0.1 history live-refresh proof fix + R9.0.2 diagnostic reconciliation/history refresh fix + R9.0.3 TTS health reconciliation + R9.1 IME perception/active telemetry truth + R9.2 autonomous recovery/long-task reconciliation + R9.2.1 adaptive hypothesis reconciliation + R9.3 app integration framework + R9.3.1 screen health reconciliation + R9.3.2 history latency recovery reconciliation + R9.3.3 informational terminal reconciliation + R9.3.4 app integration device acceptance + R9.4 multi-app task orchestration + R9.4.1 screen ownership union reconciliation + R9.5 verified result transfer between app steps + R9.5.1 partial marker provenance reconciliation + R9.5.2 bounded marker observation + R9.5.3 verified action result transfer + R9.6 verified semantic observation fallback + R9.6.1 visual fallback acceptance truth + R9.7 structured screen reading + R9.7.1 conversation routing/terminal truth + R9.7.2 structured router conversation precedence + R9.7.3 action morphology/terminal truth + R9.8 generic verified result transfer + R9.8.1 master full acceptance/diagnostic engine + R9.9 reversible action journal/verified undo + R9.9.1 brightness verified undo device acceptance + R9.9.2 opt-in low-battery controlled proactivity + R10.0 unified screen intelligence + R10.1 local self-diagnostics/self-audit + R10.2 personal search expansion + R10.3 long autonomous tasks/recovery + R10.4 adaptive verified execution loop + R10.5 generalized live adaptive autonomy + R10.6 cross-lane adaptive continuity + R10.6.1 durable goal binding fix"
 
         // AyanaCommandHistoryStore v2.8 keeps up to 4k chars inline and stores longer
         // results out-of-line. Self-review intentionally remains inline so copied History
