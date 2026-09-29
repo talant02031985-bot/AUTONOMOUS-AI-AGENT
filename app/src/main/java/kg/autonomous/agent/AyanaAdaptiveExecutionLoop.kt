@@ -6,7 +6,7 @@ import java.security.MessageDigest
 import java.util.Locale
 
 /**
- * AYANA R10.4 Adaptive Execution Loop v1.0.
+ * AYANA R10.5 Adaptive Execution Loop v1.1.
  *
  * Purpose:
  * - give the existing stepwise Agent Core / local Android execution loop one explicit,
@@ -33,8 +33,40 @@ class AyanaAdaptiveExecutionLoop private constructor(
     private var unresolvedSideEffect: Boolean,
     private var terminalVerified: Boolean,
     private var terminalEvidence: String,
-    private var proposalSequence: Int
+    private var proposalSequence: Int,
+    private var executionLane: String,
+    private var authorityContext: String
 ) {
+
+    fun bindExecutionContext(
+        lane: String,
+        authority: String
+    ): JSONObject {
+        executionLane =
+            lane
+                .trim()
+                .lowercase(Locale.ROOT)
+                .replace(Regex("[^a-z0-9_\\-]+"), "_")
+                .trim('_')
+                .take(MAX_SHORT_CHARS)
+                .ifBlank { "unknown" }
+
+        authorityContext =
+            authority
+                .trim()
+                .replace(Regex("\\s+"), " ")
+                .take(MAX_EVIDENCE_CHARS)
+
+        return JSONObject()
+            .put("execution_lane", executionLane)
+            .put("authority_context", authorityContext)
+            .put("revision", revision)
+            .put("verified_prefix_count", verifiedSteps.length())
+    }
+
+    fun executionLane(): String = executionLane
+
+    fun authorityContext(): String = authorityContext
 
     fun propose(
         toolName: String,
@@ -111,6 +143,8 @@ class AyanaAdaptiveExecutionLoop private constructor(
                 .put("before_state", cleanState.take(MAX_FINGERPRINT_CHARS))
                 .put("may_mutate", mayMutate)
                 .put("authority_source", authoritySource.take(MAX_SHORT_CHARS))
+                .put("execution_lane", executionLane)
+                .put("authority_context", authorityContext.take(MAX_EVIDENCE_CHARS))
                 .put("proposed_at_ms", System.currentTimeMillis())
 
         status = STATUS_ACTIVE
@@ -178,6 +212,14 @@ class AyanaAdaptiveExecutionLoop private constructor(
                     .put("before_state", beforeState)
                     .put("after_state", afterState)
                     .put("may_mutate", mayMutate)
+                    .put("execution_lane", executionLane)
+                    .put(
+                        "authority_source",
+                        proposal?.optString("authority_source")
+                            ?.take(MAX_SHORT_CHARS)
+                            .orEmpty()
+                    )
+                    .put("authority_context", authorityContext.take(MAX_EVIDENCE_CHARS))
                     .put("action_dispatched", actionDispatched)
                     .put("action_committed", actionCommitted)
                     .put("evidence", evidence.take(MAX_EVIDENCE_CHARS))
@@ -220,6 +262,14 @@ class AyanaAdaptiveExecutionLoop private constructor(
                 .put("before_state", beforeState)
                 .put("after_state", afterState)
                 .put("may_mutate", mayMutate)
+                .put("execution_lane", executionLane)
+                .put(
+                    "authority_source",
+                    proposal?.optString("authority_source")
+                        ?.take(MAX_SHORT_CHARS)
+                        .orEmpty()
+                )
+                .put("authority_context", authorityContext.take(MAX_EVIDENCE_CHARS))
                 .put("action_dispatched", actionDispatched)
                 .put("action_committed", actionCommitted)
                 .put("reconciliation_complete", reconciliationComplete)
@@ -293,6 +343,8 @@ class AyanaAdaptiveExecutionLoop private constructor(
                 .put("state_fingerprint", currentStateFingerprint)
                 .put("verified_prefix_count", verifiedSteps.length())
                 .put("failed_transition_count", failedTransitions.length())
+                .put("execution_lane", executionLane)
+                .put("authority_context", authorityContext.take(MAX_EVIDENCE_CHARS))
                 .put("at_ms", System.currentTimeMillis())
         )
 
@@ -394,6 +446,8 @@ class AyanaAdaptiveExecutionLoop private constructor(
                 .put("objective", objective.take(MAX_OBJECTIVE_CHARS))
                 .put("revision", revision)
                 .put("status", status)
+                .put("execution_lane", executionLane)
+                .put("authority_context", authorityContext.take(MAX_EVIDENCE_CHARS))
                 .put("current_state_fingerprint", currentStateFingerprint)
                 .put(
                     "current_proposal",
@@ -422,6 +476,8 @@ class AyanaAdaptiveExecutionLoop private constructor(
             .put("objective", objective.take(600))
             .put("revision", revision)
             .put("status", status)
+            .put("execution_lane", executionLane)
+            .put("authority_context", authorityContext.take(600))
             .put("current_state_fingerprint", currentStateFingerprint)
             .put("current_proposal", currentProposal?.let { boundedJson(it, 900) } ?: JSONObject.NULL)
             .put("verified_steps", boundedArray(verifiedSteps, 6))
@@ -437,7 +493,7 @@ class AyanaAdaptiveExecutionLoop private constructor(
     }
 
     fun compactSummary(): String =
-        "adaptive_loop=v$VERSION; revision=$revision; status=$status; " +
+        "adaptive_loop=v$VERSION; lane=$executionLane; revision=$revision; status=$status; " +
             "verified=${verifiedSteps.length()}; failed=${failedTransitions.length()}; " +
             "replans=${replans.length()}; unresolved_side_effect=$unresolvedSideEffect; " +
             "terminal_verified=$terminalVerified"
@@ -455,6 +511,7 @@ class AyanaAdaptiveExecutionLoop private constructor(
             .put("replan_count", replans.length())
             .put("unresolved_side_effect", unresolvedSideEffect)
             .put("terminal_verified", terminalVerified)
+            .put("execution_lane", executionLane)
 
     private fun decision(
         allowed: Boolean,
@@ -468,6 +525,7 @@ class AyanaAdaptiveExecutionLoop private constructor(
             .put("signature", signature)
             .put("verified_prefix_count", verifiedSteps.length())
             .put("unresolved_side_effect", unresolvedSideEffect)
+            .put("execution_lane", executionLane)
 
     private fun hasVerifiedTransition(
         signature: String,
@@ -504,7 +562,7 @@ class AyanaAdaptiveExecutionLoop private constructor(
     }
 
     companion object {
-        const val VERSION = "1.0"
+        const val VERSION = "1.1"
         const val MAX_REVISIONS = 3
 
         const val STATUS_ACTIVE = "ACTIVE"
@@ -541,7 +599,9 @@ class AyanaAdaptiveExecutionLoop private constructor(
 
         fun create(
             objective: String,
-            stateFingerprint: String = ""
+            stateFingerprint: String = "",
+            executionLane: String = "agent_core",
+            authorityContext: String = "registered_capability_authority"
         ): AyanaAdaptiveExecutionLoop =
             AyanaAdaptiveExecutionLoop(
                 objective = objective.trim().take(MAX_OBJECTIVE_CHARS),
@@ -556,20 +616,35 @@ class AyanaAdaptiveExecutionLoop private constructor(
                 unresolvedSideEffect = false,
                 terminalVerified = false,
                 terminalEvidence = "",
-                proposalSequence = 0
+                proposalSequence = 0,
+                executionLane = executionLane.trim().ifBlank { "agent_core" }.take(MAX_SHORT_CHARS),
+                authorityContext = authorityContext.trim().take(MAX_EVIDENCE_CHARS)
             )
 
         fun restore(
             snapshot: JSONObject?,
-            fallbackObjective: String
+            fallbackObjective: String,
+            fallbackExecutionLane: String = "agent_core",
+            fallbackAuthorityContext: String = "registered_capability_authority"
         ): AyanaAdaptiveExecutionLoop {
             if (snapshot == null || snapshot.length() == 0) {
-                return create(fallbackObjective)
+                return create(
+                    objective = fallbackObjective,
+                    executionLane = fallbackExecutionLane,
+                    authorityContext = fallbackAuthorityContext
+                )
             }
 
             val version = snapshot.optString("version")
-            if (version.isNotBlank() && version != VERSION) {
-                return create(fallbackObjective)
+            if (
+                version.isNotBlank() &&
+                version !in setOf("1.0", VERSION)
+            ) {
+                return create(
+                    objective = fallbackObjective,
+                    executionLane = fallbackExecutionLane,
+                    authorityContext = fallbackAuthorityContext
+                )
             }
 
             return AyanaAdaptiveExecutionLoop(
@@ -620,7 +695,15 @@ class AyanaAdaptiveExecutionLoop private constructor(
                 unresolvedSideEffect = snapshot.optBoolean("unresolved_side_effect", false),
                 terminalVerified = snapshot.optBoolean("terminal_verified", false),
                 terminalEvidence = snapshot.optString("terminal_evidence").take(MAX_EVIDENCE_CHARS),
-                proposalSequence = snapshot.optInt("proposal_sequence", 0).coerceAtLeast(0)
+                proposalSequence = snapshot.optInt("proposal_sequence", 0).coerceAtLeast(0),
+                executionLane =
+                    snapshot.optString("execution_lane", fallbackExecutionLane)
+                        .ifBlank { fallbackExecutionLane }
+                        .take(MAX_SHORT_CHARS),
+                authorityContext =
+                    snapshot.optString("authority_context", fallbackAuthorityContext)
+                        .ifBlank { fallbackAuthorityContext }
+                        .take(MAX_EVIDENCE_CHARS)
             )
         }
 
@@ -765,6 +848,41 @@ class AyanaAdaptiveExecutionLoop private constructor(
             if (!uncertain.hasUnresolvedSideEffect()) return false
             if (uncertain.beginReplan("try another click", "state-X").optBoolean("allowed", true)) return false
             if (uncertain.markTerminal(true, "pretend done").optBoolean("allowed", true)) return false
+
+            val laneBound =
+                create(
+                    objective = "lane test",
+                    stateFingerprint = "lane-state",
+                    executionLane = "multi_app",
+                    authorityContext = "app_integration_registry"
+                )
+
+            if (laneBound.executionLane() != "multi_app") return false
+
+            laneBound.bindExecutionContext(
+                lane = "android_goal",
+                authority = "goal_compiler+registered_executor"
+            )
+
+            if (laneBound.executionLane() != "android_goal") return false
+
+            val backwardSnapshot =
+                laneBound.persistenceSnapshot()
+                    .put("version", "1.0")
+                    .apply {
+                        remove("execution_lane")
+                        remove("authority_context")
+                    }
+
+            val backwardRestored =
+                restore(
+                    snapshot = backwardSnapshot,
+                    fallbackObjective = "lane test",
+                    fallbackExecutionLane = "agent_core",
+                    fallbackAuthorityContext = "registered_capability_authority"
+                )
+
+            if (backwardRestored.executionLane() != "agent_core") return false
 
             return true
         }
