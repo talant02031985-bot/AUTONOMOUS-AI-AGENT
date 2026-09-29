@@ -6,7 +6,13 @@ import java.security.MessageDigest
 import java.util.Locale
 
 /**
- * AYANA Dynamic Goal Planner v1.0 — R10.9 DYNAMIC GOAL DECOMPOSITION + PLANNER CONTRACT.
+ * AYANA Dynamic Goal Planner v1.1 — R10.11 PRODUCTION VERIFIED FAILURE REPLAN.
+ *
+ * R10.11 adds a bounded, contract-validated alternative suffix builder for verified
+ * production failures. It never retries an identical failed transition and never changes
+ * an already VERIFIED prefix. The only built-in alternative in v1.1 is a YouTube-search
+ * recovery route: open YouTube through the registered Android Goal executor, then search
+ * the already verified title. All candidates still pass the same compile() contract.
  *
  * Pure planning/policy component. It never dispatches Android actions and never grants
  * execution authority. It converts a bounded free-form objective into a candidate DAG,
@@ -120,7 +126,7 @@ class AyanaDynamicGoalPlanner private constructor(
         "dynamic_planner=v$VERSION; source=$sourceValue; subgoals=${subgoalsValue.size}; fingerprint=$fingerprintValue"
 
     companion object {
-        const val VERSION = "1.0"
+        const val VERSION = "1.1"
         const val SNAPSHOT_VERSION = 1
 
         const val EXEC_DEVICE_STATE = "get_device_state"
@@ -383,6 +389,134 @@ class AyanaDynamicGoalPlanner private constructor(
                 .put("subgoals", subgoals)
         }
 
+        /**
+         * R10.11 bounded alternative suffix proposal after a VERIFIED failure.
+         *
+         * This method never grants a new executor or authority. It only builds a candidate
+         * from the same executor registry and is still passed through compile(). The current
+         * v1.1 alternative is intentionally narrow: when youtube_search fails without an
+         * unresolved side effect, the revised suffix first opens YouTube through the
+         * registered Android Goal lane and then performs the same verified-result search.
+         * The old failed youtube subgoal and any unresolved descendants are replaced; the
+         * prefix before the failed step is copied byte-for-byte at the planner-contract level.
+         */
+        fun alternativeProposalAfterVerifiedFailure(
+            objective: String,
+            current: AyanaDynamicGoalPlanner,
+            failedSubgoalId: String,
+            failureReason: String = ""
+        ): JSONObject {
+            val failedId = normalizeId(failedSubgoalId)
+            val currentSubgoals = current.subgoals()
+            val failedIndex = currentSubgoals.indexOfFirst { it.id == failedId }
+
+            if (failedIndex < 0) {
+                return JSONObject()
+                    .put("supported", false)
+                    .put("reason", "failed_subgoal_not_in_current_plan")
+                    .put("objective", objective.trim().take(MAX_OBJECTIVE_CHARS))
+            }
+
+            val failed = currentSubgoals[failedIndex]
+            if (failed.executor != EXEC_YOUTUBE_SEARCH) {
+                return JSONObject()
+                    .put("supported", false)
+                    .put("reason", "no_registered_verified_failure_alternative")
+                    .put("failed_subgoal_id", failedId)
+                    .put("failed_executor", failed.executor)
+                    .put("objective", objective.trim().take(MAX_OBJECTIVE_CHARS))
+            }
+
+            val failedArgs = current.argumentsFor(failed.id)
+            val inputKey = normalizeId(failedArgs.optString("input_result_key"))
+            if (inputKey.isBlank()) {
+                return JSONObject()
+                    .put("supported", false)
+                    .put("reason", "failed_youtube_input_result_missing")
+                    .put("objective", objective.trim().take(MAX_OBJECTIVE_CHARS))
+            }
+
+            val producer =
+                currentSubgoals.firstOrNull { it.resultKey == inputKey }
+                    ?: return JSONObject()
+                        .put("supported", false)
+                        .put("reason", "failed_youtube_result_producer_missing")
+                        .put("objective", objective.trim().take(MAX_OBJECTIVE_CHARS))
+
+            val revised = JSONArray()
+
+            // Preserve the planner prefix before the failed step exactly.
+            for (index in 0 until failedIndex) {
+                revised.put(plannedSubgoalJson(currentSubgoals[index]))
+            }
+
+            val openRecoveryId = uniqueRecoveryId(currentSubgoals, "open_youtube_recovery")
+            val searchRecoveryId = uniqueRecoveryId(currentSubgoals, "youtube_search_recovered")
+
+            revised.put(
+                planItem(
+                    id = openRecoveryId,
+                    title = "Open YouTube before recovered verified-title search",
+                    executor = EXEC_ANDROID_GOAL,
+                    dependencies = listOf(producer.id),
+                    arguments =
+                        JSONObject()
+                            .put("type", "open_app")
+                            .put("app", "YouTube")
+                            .put("max_actions", 2)
+                )
+            )
+
+            revised.put(
+                planItem(
+                    id = searchRecoveryId,
+                    title = "Search verified title in YouTube after verified app launch",
+                    executor = EXEC_YOUTUBE_SEARCH,
+                    dependencies = listOf(producer.id, openRecoveryId),
+                    arguments = JSONObject().put("input_result_key", inputKey)
+                )
+            )
+
+            // Preserve later unresolved intent where it is safe, replacing references to the
+            // failed YouTube step with the recovered search step. Do not copy descendants that
+            // depend on other unresolved nodes removed by this bounded revision.
+            val prefixIds = mutableSetOf<String>()
+            for (index in 0 until failedIndex) prefixIds.add(currentSubgoals[index].id)
+            prefixIds.add(openRecoveryId)
+            prefixIds.add(searchRecoveryId)
+
+            for (index in failedIndex + 1 until currentSubgoals.size) {
+                val old = currentSubgoals[index]
+                val mappedDeps = old.dependencies.map {
+                    if (it == failed.id) searchRecoveryId else it
+                }
+                if (mappedDeps.all { it in prefixIds }) {
+                    revised.put(
+                        planItem(
+                            id = old.id,
+                            title = old.title,
+                            executor = old.executor,
+                            dependencies = mappedDeps,
+                            resultKey = old.resultKey,
+                            arguments = current.argumentsFor(old.id),
+                            required = old.required
+                        )
+                    )
+                    prefixIds.add(old.id)
+                }
+            }
+
+            return JSONObject()
+                .put("supported", true)
+                .put("reason", "registered_verified_failure_alternative")
+                .put("source", "r10_11_verified_failure_replan")
+                .put("objective", objective.trim().take(MAX_OBJECTIVE_CHARS))
+                .put("failed_subgoal_id", failed.id)
+                .put("failed_executor", failed.executor)
+                .put("failure_reason", failureReason.take(300))
+                .put("subgoals", revised)
+        }
+
         fun validateProposal(
             objective: String,
             proposal: JSONObject?
@@ -553,7 +687,7 @@ class AyanaDynamicGoalPlanner private constructor(
 
         fun restore(snapshot: JSONObject?): AyanaDynamicGoalPlanner {
             require(snapshot != null) { "dynamic_planner_snapshot_required" }
-            require(snapshot.optString("version") == VERSION) {
+            require(snapshot.optString("version") in setOf("1.0", VERSION)) {
                 "unsupported_dynamic_planner_version"
             }
             require(snapshot.optInt("snapshot_version", -1) == SNAPSHOT_VERSION) {
@@ -616,14 +750,55 @@ class AyanaDynamicGoalPlanner private constructor(
                     restored.planFingerprint() == planner.planFingerprint() &&
                         restored.subgoalCount() == planner.subgoalCount()
 
+                val alternativeProposal =
+                    alternativeProposalAfterVerifiedFailure(
+                        objective = objective,
+                        current = planner,
+                        failedSubgoalId = "youtube_search",
+                        failureReason = "self_test_verified_failure"
+                    )
+                val alternativePlanner = compile(objective, alternativeProposal)
+                val alternativeOk =
+                    alternativeProposal.optBoolean("supported", false) &&
+                        alternativePlanner.planFingerprint() != planner.planFingerprint() &&
+                        alternativePlanner.subgoals().any { it.id.startsWith("open_youtube_recovery") } &&
+                        alternativePlanner.subgoals().any { it.id.startsWith("youtube_search_recovered") } &&
+                        alternativePlanner.subgoals().none { it.id == "youtube_search" }
+
                 localOk &&
                     unknownBlocked &&
                     authorityBlocked &&
                     cycleBlocked &&
-                    restoreOk
+                    restoreOk &&
+                    alternativeOk
             } catch (_: Throwable) {
                 false
             }
+        }
+
+        private fun plannedSubgoalJson(subgoal: PlannedSubgoal): JSONObject =
+            JSONObject()
+                .put("id", subgoal.id)
+                .put("title", subgoal.title)
+                .put("executor", subgoal.executor)
+                .put("lane", subgoal.lane)
+                .put("authority", subgoal.authority)
+                .put("dependencies", JSONArray(subgoal.dependencies))
+                .put("result_key", subgoal.resultKey)
+                .put("required", subgoal.required)
+                .put("arguments", JSONObject(subgoal.arguments.toString()))
+
+        private fun uniqueRecoveryId(
+            existing: List<PlannedSubgoal>,
+            base: String
+        ): String {
+            val ids = existing.map { it.id }.toSet()
+            if (base !in ids) return base
+            for (index in 2..20) {
+                val candidate = "${base}_$index"
+                if (candidate !in ids) return candidate
+            }
+            throw IllegalArgumentException("recovery_subgoal_id_space_exhausted:$base")
         }
 
         private fun planItem(
