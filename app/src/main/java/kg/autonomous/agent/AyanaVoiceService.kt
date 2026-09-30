@@ -63,6 +63,16 @@ import kotlin.math.abs
 
 class AyanaVoiceService : Service() {
 
+    // AYANA v12.46.1 / R10.13.1 POST-PROCESS READINESS + NAVIGATION RECONCILIATION.
+    // Builds on the R10.13 device run that already proved real PID/process-epoch change
+    // and disk-only restore, but exposed a post-process startup race before Accessibility
+    // / foreground evidence became usable.
+    // - a bounded readiness barrier runs before the first resumed suffix dispatch;
+    // - Accessibility + usable foreground evidence must be live before external navigation;
+    // - a dispatched-but-not-yet-verified navigation is reconciled without redispatch;
+    // - uncertain side effects remain fail-closed if reconciliation cannot prove foreground;
+    // - no change to capability authority, planner DAG semantics, ORB, visualizer or UI.
+    //
     // AYANA v12.46.0 / R10.13 FULL PROCESS-DEATH RECOVERY.
     // Builds on DEVICE-CONFIRMED R10.12 Natural Lifecycle Recovery.
     // - R10.13 requires a real Linux/Android app-process identity change, not merely Service recreation;
@@ -10179,6 +10189,158 @@ if (
         } catch (_: Exception) {
             ""
         }
+
+    private fun waitForR10_13PostProcessRuntimeReadiness(
+        commandToken: Long,
+        timeoutMs: Long = R10_13_POST_PROCESS_READINESS_TIMEOUT_MS
+    ): JSONObject {
+        val startedAt = SystemClock.elapsedRealtime()
+        val deadline = startedAt + timeoutMs
+        var attempts = 0
+        var accessibilityReady = false
+        var screenEvidenceReady = false
+        var foregroundPackage = ""
+        var lastScreenStatus = ""
+
+        do {
+            if (
+                isCommandCancelled(commandToken) ||
+                commandToken != activeCommandToken ||
+                cancelRequested ||
+                shuttingDown
+            ) {
+                break
+            }
+
+            attempts++
+            accessibilityReady = AgentAccessibilityService.instance != null
+
+            if (accessibilityReady) {
+                try {
+                    val screen = screenIntelligence.getScreenState()
+                    lastScreenStatus = screen.optString("content_status")
+                    foregroundPackage =
+                        screen.optString("effective_foreground_package").trim()
+                            .ifBlank {
+                                screen.optString("interaction_package").trim()
+                            }
+                            .ifBlank {
+                                screen.optString("package").trim()
+                            }
+
+                    screenEvidenceReady =
+                        screen.optBoolean("success", false) &&
+                            foregroundPackage.isNotBlank()
+                } catch (_: Exception) {
+                    screenEvidenceReady = false
+                }
+            }
+
+            if (accessibilityReady && screenEvidenceReady) {
+                val waited = SystemClock.elapsedRealtime() - startedAt
+                return JSONObject()
+                    .put("verified", true)
+                    .put("accessibility_ready", true)
+                    .put("screen_evidence_ready", true)
+                    .put("foreground_package", foregroundPackage)
+                    .put("screen_status", lastScreenStatus)
+                    .put("attempts", attempts)
+                    .put("waited_ms", waited)
+                    .put("reason", "post_process_runtime_ready")
+            }
+
+            try {
+                Thread.sleep(R10_13_POST_PROCESS_READINESS_POLL_MS)
+            } catch (_: InterruptedException) {
+                break
+            }
+        } while (SystemClock.elapsedRealtime() < deadline)
+
+        return JSONObject()
+            .put("verified", false)
+            .put("accessibility_ready", accessibilityReady)
+            .put("screen_evidence_ready", screenEvidenceReady)
+            .put("foreground_package", foregroundPackage)
+            .put("screen_status", lastScreenStatus)
+            .put("attempts", attempts)
+            .put("waited_ms", SystemClock.elapsedRealtime() - startedAt)
+            .put("reason", "post_process_runtime_not_ready")
+    }
+
+    private fun reconcileR10_13DispatchedNavigation(
+        rawResult: JSONObject,
+        commandToken: Long
+    ): JSONObject {
+        val result = JSONObject(rawResult.toString())
+
+        if (
+            result.optBoolean("verified", false) ||
+            !result.optBoolean("action_dispatched", false)
+        ) {
+            return result
+                .put("r10_13_reconciliation_attempted", false)
+                .put("reconciliation_complete", result.optBoolean("verified", false))
+        }
+
+        val expectedPackage = result.optString("target_package").trim()
+        if (expectedPackage.isBlank()) {
+            return result
+                .put("r10_13_reconciliation_attempted", false)
+                .put("reconciliation_complete", false)
+        }
+
+        val startedAt = SystemClock.elapsedRealtime()
+        val deadline = startedAt + R10_13_POST_PROCESS_RECONCILE_TIMEOUT_MS
+        var observed = result.optString("observed_package").trim()
+        var attempts = 0
+
+        do {
+            if (
+                isCommandCancelled(commandToken) ||
+                commandToken != activeCommandToken ||
+                cancelRequested ||
+                shuttingDown
+            ) {
+                break
+            }
+
+            attempts++
+            observed = currentForegroundPackage()
+            if (observed == expectedPackage) {
+                val waited = SystemClock.elapsedRealtime() - startedAt
+                return result
+                    .put("success", true)
+                    .put("verified", true)
+                    .put("terminal_status", "SUCCESS")
+                    .put("observed_package", observed)
+                    .put("action_committed", false)
+                    .put("reconciliation_complete", true)
+                    .put("r10_13_reconciliation_attempted", true)
+                    .put("r10_13_reconciliation_verified", true)
+                    .put("r10_13_reconciliation_waited_ms", waited)
+                    .put("r10_13_reconciliation_attempts", attempts)
+                    .put("message", "Navigation foreground confirmed during post-process reconciliation without redispatch.")
+            }
+
+            try {
+                Thread.sleep(R10_13_POST_PROCESS_RECONCILE_POLL_MS)
+            } catch (_: InterruptedException) {
+                break
+            }
+        } while (SystemClock.elapsedRealtime() < deadline)
+
+        return result
+            .put("success", false)
+            .put("verified", false)
+            .put("action_committed", false)
+            .put("reconciliation_complete", false)
+            .put("r10_13_reconciliation_attempted", true)
+            .put("r10_13_reconciliation_verified", false)
+            .put("r10_13_reconciliation_waited_ms", SystemClock.elapsedRealtime() - startedAt)
+            .put("r10_13_reconciliation_attempts", attempts)
+            .put("observed_package", observed)
+            .put("reason", "post_process_navigation_foreground_not_reconciled")
+    }
 
     private fun waitForForegroundPackage(
         expectedPackage: String,
@@ -36986,6 +37148,41 @@ routed.forEach {
                                 message = "R10.13 подтвердил новый процесс и disk-only auto-resume",
                                 details = lifecycleRestore.toString().take(2400)
                             )
+
+                            val readiness =
+                                waitForR10_13PostProcessRuntimeReadiness(
+                                    commandToken = commandToken
+                                )
+
+                            runtimeContext
+                                .put("r10_13_post_process_readiness_verified", readiness.optBoolean("verified", false))
+                                .put("r10_13_post_process_accessibility_ready", readiness.optBoolean("accessibility_ready", false))
+                                .put("r10_13_post_process_screen_evidence_ready", readiness.optBoolean("screen_evidence_ready", false))
+                                .put("r10_13_post_process_readiness_waited_ms", readiness.optLong("waited_ms", 0L))
+                                .put("r10_13_post_process_readiness_attempts", readiness.optInt("attempts", 0))
+
+                            commandHistoryStore.addEvent(
+                                activeCommandHistoryId,
+                                state =
+                                    if (readiness.optBoolean("verified", false)) {
+                                        "r10_13_post_process_runtime_ready"
+                                    } else {
+                                        "r10_13_post_process_runtime_not_ready"
+                                    },
+                                message =
+                                    if (readiness.optBoolean("verified", false)) {
+                                        "R10.13 новый process дождался Accessibility/foreground evidence перед suffix dispatch"
+                                    } else {
+                                        "R10.13 остановлен до dispatch: post-process runtime readiness не подтверждена"
+                                    },
+                                details = readiness.toString().take(1800)
+                            )
+
+                            if (!readiness.optBoolean("verified", false)) {
+                                throw IllegalStateException(
+                                    "R10.13 post-process runtime readiness not verified"
+                                )
+                            }
                         }
 
                         if (runtimeContext.optBoolean("r10_12_acceptance", false)) {
@@ -38299,6 +38496,9 @@ routed.forEach {
                         runtimeContext.optBoolean("r10_13_process_epoch_recreated", false) &&
                         runtimeContext.optBoolean("r10_13_disk_only_restore_verified", false) &&
                         runtimeContext.optBoolean("r10_13_background_auto_resume", false) &&
+                        runtimeContext.optBoolean("r10_13_post_process_readiness_verified", false) &&
+                        runtimeContext.optBoolean("r10_13_post_process_accessibility_ready", false) &&
+                        runtimeContext.optBoolean("r10_13_post_process_screen_evidence_ready", false) &&
                         runtimeContext.optBoolean("r10_13_verified_prefix_preserved_after_process_death", false) &&
                         runtimeContext.optBoolean("r10_13_plan_revision_preserved_after_process_death", false) &&
                         runtimeContext.optBoolean("r10_13_adaptive_revision_preserved_after_process_death", false) &&
@@ -38488,6 +38688,34 @@ routed.forEach {
             .put(
                 "disk_only_restore_verified",
                 runtimeContext.optBoolean("r10_13_disk_only_restore_verified", false)
+            )
+            .put(
+                "post_process_readiness_verified",
+                runtimeContext.optBoolean("r10_13_post_process_readiness_verified", false)
+            )
+            .put(
+                "post_process_accessibility_ready",
+                runtimeContext.optBoolean("r10_13_post_process_accessibility_ready", false)
+            )
+            .put(
+                "post_process_screen_evidence_ready",
+                runtimeContext.optBoolean("r10_13_post_process_screen_evidence_ready", false)
+            )
+            .put(
+                "post_process_readiness_waited_ms",
+                runtimeContext.optLong("r10_13_post_process_readiness_waited_ms", 0L)
+            )
+            .put(
+                "navigation_reconciliation_attempted",
+                runtimeContext.optBoolean("r10_13_navigation_reconciliation_attempted", false)
+            )
+            .put(
+                "navigation_reconciliation_verified",
+                runtimeContext.optBoolean("r10_13_navigation_reconciliation_verified", false)
+            )
+            .put(
+                "navigation_reconciliation_waited_ms",
+                runtimeContext.optLong("r10_13_navigation_reconciliation_waited_ms", 0L)
             )
             .put(
                 "verified_prefix_preserved_after_process_death",
@@ -38845,14 +39073,41 @@ routed.forEach {
                             "youtube_input_partial_result_not_verified"
                         )
                 } else {
-                    executeAppIntegrationAction(
-                        appKey = AyanaAppIntegrationRegistry.APP_YOUTUBE,
-                        actionKey = AyanaAppIntegrationRegistry.ACTION_SEARCH,
-                        payload =
-                            partial
-                                .optString("value")
-                                .trim()
-                    )
+                    val rawResult =
+                        executeAppIntegrationAction(
+                            appKey = AyanaAppIntegrationRegistry.APP_YOUTUBE,
+                            actionKey = AyanaAppIntegrationRegistry.ACTION_SEARCH,
+                            payload =
+                                partial
+                                    .optString("value")
+                                    .trim()
+                        )
+
+                    if (
+                        runtimeContext.optBoolean("r10_13_acceptance", false) &&
+                        runtimeContext.optBoolean("r10_13_lifecycle_restore_verified", false) &&
+                        rawResult.optBoolean("action_dispatched", false) &&
+                        !rawResult.optBoolean("verified", false)
+                    ) {
+                        val reconciled =
+                            reconcileR10_13DispatchedNavigation(
+                                rawResult = rawResult,
+                                commandToken = commandToken
+                            )
+
+                        runtimeContext
+                            .put("r10_13_navigation_reconciliation_attempted", reconciled.optBoolean("r10_13_reconciliation_attempted", false))
+                            .put("r10_13_navigation_reconciliation_verified", reconciled.optBoolean("r10_13_reconciliation_verified", false))
+                            .put("r10_13_navigation_reconciliation_waited_ms", reconciled.optLong("r10_13_reconciliation_waited_ms", 0L))
+
+                        reconciled
+                    } else {
+                        rawResult
+                            .put(
+                                "reconciliation_complete",
+                                rawResult.optBoolean("verified", false)
+                            )
+                    }
                 }
             }
 
@@ -65129,7 +65384,7 @@ state
 
         // R10.13 FULL PROCESS-DEATH RECOVERY RELEASE TRUTH.
         private const val AYANA_VOICE_SERVICE_RELEASE =
-            "v12.46.0 / R10.13 FULL PROCESS-DEATH RECOVERY"
+            "v12.46.1 / R10.13.1 POST-PROCESS READINESS + RECONCILIATION"
 
         private const val AYANA_PERSONAL_SEARCH_ENGINE_RELEASE =
             "v1.5.1 IMAGE COVERAGE TRUTH + R10.2 UNIFIED SEARCH CONTRACT v1.0"
@@ -65144,10 +65399,10 @@ state
             "R10.12 NATURAL LIFECYCLE RECOVERY + BACKGROUND CONTINUATION — DEVICE-CONFIRMED ACCEPTED"
 
         private const val AYANA_CURRENT_FEATURE_RELEASE =
-            "R10.13 FULL PROCESS-DEATH RECOVERY — PENDING DEVICE CONFIRMATION"
+            "R10.13.1 FULL PROCESS-DEATH RECOVERY HARDENING — PENDING DEVICE CONFIRMATION"
 
         private const val AYANA_RELEASE_LINEAGE =
-            "Android v12.21.0 / R7.9 truth-hardening + R8.0 multi-attachment + R8.1–R8.4 accepted Personal Global Search stack + R8.5–R8.5.4 capability/evidence truth + R9.0 autonomous agent foundation + R9.0.1 history live-refresh proof fix + R9.0.2 diagnostic reconciliation/history refresh fix + R9.0.3 TTS health reconciliation + R9.1 IME perception/active telemetry truth + R9.2 autonomous recovery/long-task reconciliation + R9.2.1 adaptive hypothesis reconciliation + R9.3 app integration framework + R9.3.1 screen health reconciliation + R9.3.2 history latency recovery reconciliation + R9.3.3 informational terminal reconciliation + R9.3.4 app integration device acceptance + R9.4 multi-app task orchestration + R9.4.1 screen ownership union reconciliation + R9.5 verified result transfer between app steps + R9.5.1 partial marker provenance reconciliation + R9.5.2 bounded marker observation + R9.5.3 verified action result transfer + R9.6 verified semantic observation fallback + R9.6.1 visual fallback acceptance truth + R9.7 structured screen reading + R9.7.1 conversation routing/terminal truth + R9.7.2 structured router conversation precedence + R9.7.3 action morphology/terminal truth + R9.8 generic verified result transfer + R9.8.1 master full acceptance/diagnostic engine + R9.9 reversible action journal/verified undo + R9.9.1 brightness verified undo device acceptance + R9.9.2 opt-in low-battery controlled proactivity + R10.0 unified screen intelligence + R10.1 local self-diagnostics/self-audit + R10.2 personal search expansion + R10.3 long autonomous tasks/recovery + R10.4 adaptive verified execution loop + R10.5 generalized live adaptive autonomy + R10.6 cross-lane adaptive continuity + R10.6.1 durable goal binding fix + R10.7 cross-lane durable recovery continuity + R10.7.1 isolated acceptance cleanup hardening + R10.8 general-purpose long autonomous objectives + R10.9 dynamic goal decomposition/planner contract + R10.10 adaptive planner production path + R10.11 production replan/durable recovery + R10.12 natural lifecycle recovery/background continuation + R10.13 full process-death recovery"
+            "Android v12.21.0 / R7.9 truth-hardening + R8.0 multi-attachment + R8.1–R8.4 accepted Personal Global Search stack + R8.5–R8.5.4 capability/evidence truth + R9.0 autonomous agent foundation + R9.0.1 history live-refresh proof fix + R9.0.2 diagnostic reconciliation/history refresh fix + R9.0.3 TTS health reconciliation + R9.1 IME perception/active telemetry truth + R9.2 autonomous recovery/long-task reconciliation + R9.2.1 adaptive hypothesis reconciliation + R9.3 app integration framework + R9.3.1 screen health reconciliation + R9.3.2 history latency recovery reconciliation + R9.3.3 informational terminal reconciliation + R9.3.4 app integration device acceptance + R9.4 multi-app task orchestration + R9.4.1 screen ownership union reconciliation + R9.5 verified result transfer between app steps + R9.5.1 partial marker provenance reconciliation + R9.5.2 bounded marker observation + R9.5.3 verified action result transfer + R9.6 verified semantic observation fallback + R9.6.1 visual fallback acceptance truth + R9.7 structured screen reading + R9.7.1 conversation routing/terminal truth + R9.7.2 structured router conversation precedence + R9.7.3 action morphology/terminal truth + R9.8 generic verified result transfer + R9.8.1 master full acceptance/diagnostic engine + R9.9 reversible action journal/verified undo + R9.9.1 brightness verified undo device acceptance + R9.9.2 opt-in low-battery controlled proactivity + R10.0 unified screen intelligence + R10.1 local self-diagnostics/self-audit + R10.2 personal search expansion + R10.3 long autonomous tasks/recovery + R10.4 adaptive verified execution loop + R10.5 generalized live adaptive autonomy + R10.6 cross-lane adaptive continuity + R10.6.1 durable goal binding fix + R10.7 cross-lane durable recovery continuity + R10.7.1 isolated acceptance cleanup hardening + R10.8 general-purpose long autonomous objectives + R10.9 dynamic goal decomposition/planner contract + R10.10 adaptive planner production path + R10.11 production replan/durable recovery + R10.12 natural lifecycle recovery/background continuation + R10.13 full process-death recovery + R10.13.1 post-process readiness/reconciliation"
 
         // AyanaCommandHistoryStore v2.8 keeps up to 4k chars inline and stores longer
         // results out-of-line. Self-review intentionally remains inline so copied History
@@ -65620,6 +65875,23 @@ const val ACTION_START =
 
         private const val LIFECYCLE_VERIFY_POLL_MS =
             60L
+
+        // R10.13.1: a freshly recreated process can start VoiceService before the
+        // separately bound AccessibilityService and foreground evidence are ready.
+        // Never dispatch the first recovered external navigation through that race.
+        private const val R10_13_POST_PROCESS_READINESS_TIMEOUT_MS =
+            45_000L
+
+        private const val R10_13_POST_PROCESS_READINESS_POLL_MS =
+            250L
+
+        // If the explicit navigation was already accepted by Android but the first
+        // foreground proof timed out, reconcile the SAME dispatch. No redispatch.
+        private const val R10_13_POST_PROCESS_RECONCILE_TIMEOUT_MS =
+            15_000L
+
+        private const val R10_13_POST_PROCESS_RECONCILE_POLL_MS =
+            120L
 
         private const val FOREGROUND_APP_SENTINEL =
             "__ayana_foreground_app__"
