@@ -63,7 +63,10 @@ import kotlin.math.abs
 
 class AyanaVoiceService : Service() {
 
-    // AYANA v12.46.2 / R10.13.2 PROCESS-DEATH CORE RECOVERY PROOF CORRECTION.
+    // AYANA v12.47.0 / R10.14 PERCEPTION PROCESS ISOLATION + CROSS-PROCESS ACCESSIBILITY BRIDGE.
+    // R10.14 keeps the R10.13.2 full process-death core baseline and isolates Android
+    // Accessibility/perception in :perception. Main-process Screen Intelligence consumes
+    // the same verified screen/action contract over same-UID IPC; no authority is expanded.
     // Builds on the R10.13 device run that already proved real PID/process-epoch change
     // and disk-only restore, but exposed a post-process startup race before Accessibility
     // / foreground evidence became usable.
@@ -1001,6 +1004,12 @@ class AyanaVoiceService : Service() {
         )
     }
 
+    private val perceptionBridge by lazy {
+        AyanaPerceptionBridgeClient(
+            applicationContext
+        )
+    }
+
     private val screenIntelligence by lazy {
         AyanaScreenIntelligence(
             applicationContext
@@ -1084,23 +1093,7 @@ class AyanaVoiceService : Service() {
                         shouldCancel: () -> Boolean
                     ): JSONObject {
 
-                        val accessibility =
-                            AgentAccessibilityService
-                                .instance
-
-                        if (accessibility == null) {
-return JSONObject()
-                                .put("success", false)
-                                .put("verified", false)
-                                .put("terminal_status", "UNSUPPORTED")
-                                .put("reason", "accessibility_unavailable")
-                                .put(
-                                    "message",
-                                    "Служба специальных возможностей AYANA недоступна"
-                                )
-                        }
-
-                        return accessibility
+                        return perceptionBridge
                             .removeRecentTaskByLabel(
                                 targetLabel = targetLabel,
                                 sourcePackage = sourcePackage,
@@ -1168,10 +1161,13 @@ return JSONObject()
                     }
 
                     override fun pressHome(): Boolean =
-                        AgentAccessibilityService
-                            .instance
-                            ?.pressHome() ==
-                            true
+                        try {
+                            perceptionBridge
+                                .pressHome()
+                                .optBoolean("success", false)
+                        } catch (_: Throwable) {
+                            false
+                        }
                 },
             shouldCancel = {
                 cancelRequested ||
@@ -4748,6 +4744,21 @@ originalCommand
                 return
             }
 
+        // R10.14 PERCEPTION PROCESS ISOLATION + CROSS-PROCESS ACCESSIBILITY ACCEPTANCE.
+        // The main AYANA process is killed after verified Browser/visual producer work while
+        // AgentAccessibilityService remains alive in :perception. The recovered objective must
+        // reconnect to the same perception PID/epoch and complete an external YouTube suffix.
+        if (
+            isR10_14PerceptionProcessIsolationAcceptanceCommand(
+                routingNormalized
+            )
+        ) {
+            runR10_14PerceptionProcessIsolationAcceptance(
+                silent = silent
+            )
+            return
+        }
+
         // R10.13 FULL PROCESS-DEATH RECOVERY ACCEPTANCE.
         // Persists a safe production objective after verified Browser/visual work, then kills
         // the AYANA app process. START_STICKY/system restart must create a new PID/process epoch
@@ -7416,7 +7427,7 @@ if (
             best
                 ?: return false
 
-        return AgentAccessibilityService
+        return perceptionBridge
             .attestVerifiedForegroundOwner(
                 ownerPackage = "com.android.settings",
                 windowId = provenWindow.optInt("window_id", -1),
@@ -7504,7 +7515,7 @@ if (
                     -1
                 )
 
-            AgentAccessibilityService
+            perceptionBridge
                 .attestVerifiedForegroundOwner(
                     ownerPackage = "com.android.settings",
                     windowId = windowId,
@@ -7645,7 +7656,7 @@ if (
                         -1
                     )
 
-                AgentAccessibilityService
+                perceptionBridge
                     .attestVerifiedForegroundOwner(
                         ownerPackage =
                             "com.android.settings",
@@ -8142,7 +8153,7 @@ if (
                 val settingsWindowId =
                     window.optInt("window_id", -1)
 
-                AgentAccessibilityService
+                perceptionBridge
                     .attestVerifiedForegroundOwner(
                         ownerPackage = "com.android.settings",
                         windowId = settingsWindowId,
@@ -10213,27 +10224,19 @@ if (
             }
 
             attempts++
-            accessibilityReady = AgentAccessibilityService.instance != null
-
-            if (accessibilityReady) {
-                try {
-                    val screen = screenIntelligence.getScreenState()
-                    lastScreenStatus = screen.optString("content_status")
-                    foregroundPackage =
-                        screen.optString("effective_foreground_package").trim()
-                            .ifBlank {
-                                screen.optString("interaction_package").trim()
-                            }
-                            .ifBlank {
-                                screen.optString("package").trim()
-                            }
-
-                    screenEvidenceReady =
-                        screen.optBoolean("success", false) &&
-                            foregroundPackage.isNotBlank()
-                } catch (_: Exception) {
-                    screenEvidenceReady = false
-                }
+            try {
+                val bridge = perceptionBridge.status()
+                accessibilityReady =
+                    bridge.optBoolean("accessibility_connected", false)
+                lastScreenStatus = bridge.optString("content_status")
+                foregroundPackage =
+                    bridge.optString("effective_foreground_package").trim()
+                screenEvidenceReady =
+                    bridge.optBoolean("screen_evidence_available", false) &&
+                        foregroundPackage.isNotBlank()
+            } catch (_: Exception) {
+                accessibilityReady = false
+                screenEvidenceReady = false
             }
 
             if (accessibilityReady && screenEvidenceReady) {
@@ -36749,13 +36752,23 @@ routed.forEach {
         automaticRecovery: Boolean,
         initialRuntimeContext: JSONObject? = null
     ) {
-        val r10_13Session =
-            initialRuntimeContext?.optBoolean("r10_13_acceptance", false) == true ||
+        val r10_14Session =
+            initialRuntimeContext?.optBoolean("r10_14_acceptance", false) == true ||
                 resumeGoal
                     ?.optJSONObject("dynamic_planner_runtime_context")
-                    ?.optBoolean("r10_13_acceptance", false) == true
+                    ?.optBoolean("r10_14_acceptance", false) == true
+
+        val r10_13Session =
+            !r10_14Session &&
+                (
+                    initialRuntimeContext?.optBoolean("r10_13_acceptance", false) == true ||
+                        resumeGoal
+                            ?.optJSONObject("dynamic_planner_runtime_context")
+                            ?.optBoolean("r10_13_acceptance", false) == true
+                )
 
         val r10_12Session =
+            !r10_14Session &&
             !r10_13Session &&
                 (
                     initialRuntimeContext?.optBoolean("r10_12_acceptance", false) == true ||
@@ -36765,6 +36778,7 @@ routed.forEach {
                 )
 
         val r10_11Session =
+            !r10_14Session &&
             !r10_13Session &&
             !r10_12Session &&
                 (
@@ -36777,6 +36791,10 @@ routed.forEach {
         executionPhase(
             phase =
                 when {
+                    r10_14Session && resumeGoal != null ->
+                        "r10_14_perception_process_isolation_resume"
+                    r10_14Session ->
+                        "r10_14_perception_process_isolation"
                     r10_13Session && resumeGoal != null ->
                         "r10_13_full_process_death_recovery_resume"
                     r10_13Session ->
@@ -36796,6 +36814,8 @@ routed.forEach {
                 },
             executor =
                 when {
+                    r10_14Session ->
+                        "perception_bridge_v1+process_death_recovery_v1_1+dynamic_goal_planner_v1_1+long_objective_v1_1"
                     r10_13Session ->
                         "process_death_recovery_v1_1+dynamic_goal_planner_v1_1+long_objective_v1_1"
                     r10_12Session ->
@@ -37040,6 +37060,162 @@ routed.forEach {
                         ) {
                             throw IllegalStateException(
                                 "R10.10 persisted planner/continuity state failed recovery verification"
+                            )
+                        }
+
+                        if (runtimeContext.optBoolean("r10_14_acceptance", false)) {
+                            val lifecycleRestore =
+                                lifecycleRecoveryCoordinator.verifyRestoredLifecycle(
+                                    goal = goalSnapshot,
+                                    currentServiceInstanceId = serviceInstanceId,
+                                    currentProcessId = android.os.Process.myPid(),
+                                    currentProcessEpochId = processEpochId
+                                )
+
+                            val preVerified =
+                                runtimeContext.optInt("r10_14_pre_death_verified_prefix", -1)
+                            val prePlanRevision =
+                                runtimeContext.optInt("r10_14_pre_death_plan_revision", -1)
+                            val preAdaptiveRevision =
+                                runtimeContext.optInt("r10_14_pre_death_adaptive_revision", -1)
+                            val prePartialFingerprint =
+                                runtimeContext.optString("r10_14_pre_death_partial_fingerprint")
+                            val restoredPartial =
+                                longObjective.partialResult("page_title")
+
+                            val browserReplayProbe =
+                                longObjective.beginSubgoal(
+                                    subgoalId = "open_example",
+                                    lane = AyanaCrossLaneAdaptiveContinuity.LANE_MULTI_APP,
+                                    authority = AyanaCrossLaneAdaptiveContinuity.AUTH_MULTI_APP
+                                )
+                            val visualReplayProbe =
+                                longObjective.beginSubgoal(
+                                    subgoalId = "read_title",
+                                    lane = AyanaCrossLaneAdaptiveContinuity.LANE_MULTI_APP,
+                                    authority = AyanaCrossLaneAdaptiveContinuity.AUTH_MULTI_APP
+                                )
+
+                            val browserReplayBlocked =
+                                !browserReplayProbe.optBoolean("allowed", true) &&
+                                    browserReplayProbe.optString("reason") ==
+                                    "verified_subgoal_replay_blocked"
+                            val visualReplayBlocked =
+                                !visualReplayProbe.optBoolean("allowed", true) &&
+                                    visualReplayProbe.optString("reason") ==
+                                    "verified_subgoal_replay_blocked"
+
+                            val bridgeStatus =
+                                try {
+                                    perceptionBridge.status()
+                                } catch (_: Throwable) {
+                                    JSONObject()
+                                }
+
+                            val originPerceptionPid =
+                                runtimeContext.optInt("r10_14_origin_perception_process_id", -1)
+                            val restoredPerceptionPid =
+                                bridgeStatus.optInt("perception_process_id", -1)
+                            val originPerceptionEpoch =
+                                runtimeContext.optString("r10_14_origin_perception_process_epoch_id")
+                            val restoredPerceptionEpoch =
+                                bridgeStatus.optString("perception_process_epoch_id")
+                            val perceptionProcessSurvived =
+                                originPerceptionPid > 0 &&
+                                    restoredPerceptionPid == originPerceptionPid &&
+                                    originPerceptionEpoch.isNotBlank() &&
+                                    restoredPerceptionEpoch == originPerceptionEpoch
+
+                            val expectedBrowserPackage =
+                                runtimeContext.optString("browser_package").trim()
+                            val observedForegroundPackage =
+                                bridgeStatus.optString("effective_foreground_package").trim()
+                            val crossProcessScreenEvidenceVerified =
+                                bridgeStatus.optBoolean("accessibility_connected", false) &&
+                                    bridgeStatus.optBoolean("screen_evidence_available", false) &&
+                                    expectedBrowserPackage.isNotBlank() &&
+                                    observedForegroundPackage == expectedBrowserPackage
+
+                            val diskOnlyRestoreVerified =
+                                lifecycleRestore.optBoolean("verified", false) &&
+                                    lifecycleRestore.optBoolean("process_recreated", false) &&
+                                    lifecycleRestore.optBoolean("process_epoch_recreated", false) &&
+                                    automaticRecovery
+
+                            runtimeContext
+                                .put("r10_14_lifecycle_restore_verified",
+                                    lifecycleRestore.optBoolean("verified", false))
+                                .put("r10_14_service_instance_recreated",
+                                    lifecycleRestore.optBoolean("service_instance_recreated", false))
+                                .put("r10_14_process_recreated",
+                                    lifecycleRestore.optBoolean("process_recreated", false))
+                                .put("r10_14_process_epoch_recreated",
+                                    lifecycleRestore.optBoolean("process_epoch_recreated", false))
+                                .put("r10_14_current_service_instance_id", serviceInstanceId)
+                                .put("r10_14_current_process_id", android.os.Process.myPid())
+                                .put("r10_14_current_process_epoch_id", processEpochId)
+                                .put("r10_14_disk_only_restore_verified", diskOnlyRestoreVerified)
+                                .put("r10_14_restored_perception_process_id", restoredPerceptionPid)
+                                .put("r10_14_restored_perception_process_epoch_id", restoredPerceptionEpoch)
+                                .put("r10_14_perception_process_survived_main_process_death", perceptionProcessSurvived)
+                                .put("r10_14_bridge_reconnected_after_process_death",
+                                    bridgeStatus.optBoolean("success", false))
+                                .put("r10_14_accessibility_continuity_verified",
+                                    bridgeStatus.optBoolean("accessibility_connected", false))
+                                .put("r10_14_cross_process_screen_evidence_verified", crossProcessScreenEvidenceVerified)
+                                .put("r10_14_observed_foreground_package_after_process_death", observedForegroundPackage)
+                                .put("r10_14_verified_prefix_preserved_after_process_death",
+                                    preVerified >= 0 &&
+                                        longObjective.verifiedSubgoalCount() == preVerified)
+                                .put("r10_14_plan_revision_preserved_after_process_death",
+                                    prePlanRevision >= 0 &&
+                                        longObjective.planRevision() == prePlanRevision)
+                                .put("r10_14_adaptive_revision_preserved_after_process_death",
+                                    preAdaptiveRevision >= 0 &&
+                                        adaptiveLoop.currentRevision() == preAdaptiveRevision)
+                                .put("r10_14_partial_result_preserved_after_process_death",
+                                    prePartialFingerprint.isNotBlank() &&
+                                        restoredPartial.optBoolean("available", false) &&
+                                        restoredPartial.optBoolean("verified", false) &&
+                                        restoredPartial.optString("fingerprint") == prePartialFingerprint)
+                                .put("r10_14_browser_replay_blocked_after_process_death", browserReplayBlocked)
+                                .put("r10_14_visual_replay_blocked_after_process_death", visualReplayBlocked)
+                                .put("r10_14_background_auto_resume", automaticRecovery)
+                                .put("r10_14_external_ui_continuation_proven", false)
+
+                            if (
+                                !lifecycleRestore.optBoolean("verified", false) ||
+                                !lifecycleRestore.optBoolean("process_recreated", false) ||
+                                !lifecycleRestore.optBoolean("process_epoch_recreated", false) ||
+                                !diskOnlyRestoreVerified ||
+                                !perceptionProcessSurvived ||
+                                !bridgeStatus.optBoolean("accessibility_connected", false) ||
+                                !crossProcessScreenEvidenceVerified ||
+                                !runtimeContext.optBoolean("r10_14_verified_prefix_preserved_after_process_death", false) ||
+                                !runtimeContext.optBoolean("r10_14_plan_revision_preserved_after_process_death", false) ||
+                                !runtimeContext.optBoolean("r10_14_adaptive_revision_preserved_after_process_death", false) ||
+                                !runtimeContext.optBoolean("r10_14_partial_result_preserved_after_process_death", false) ||
+                                !browserReplayBlocked ||
+                                !visualReplayBlocked ||
+                                !automaticRecovery
+                            ) {
+                                throw IllegalStateException(
+                                    "R10.14 perception/process-death restore verification failed"
+                                )
+                            }
+
+                            commandHistoryStore.addEvent(
+                                activeCommandHistoryId,
+                                state = "r10_14_perception_bridge_restore_verified",
+                                message = "R10.14 подтвердил новый main process и живой :perception bridge",
+                                details =
+                                    JSONObject()
+                                        .put("lifecycle", lifecycleRestore)
+                                        .put("bridge", bridgeStatus)
+                                        .put("perception_process_survived", perceptionProcessSurvived)
+                                        .put("cross_process_screen_evidence_verified", crossProcessScreenEvidenceVerified)
+                                        .toString()
+                                        .take(3200)
                             )
                         }
 
@@ -37443,11 +37619,23 @@ routed.forEach {
                     if (result.optBoolean("process_death_handoff_required", false)) {
                         val handoffGoalId =
                             result.optString("goal_id").trim()
+                        val r10_14Handoff =
+                            result.optBoolean("r10_14_acceptance", false)
 
                         commandHistoryStore.addEvent(
                             activeCommandHistoryId,
-                            state = "r10_13_process_death_requested",
-                            message = "R10.13 запускает полную остановку текущего AYANA process",
+                            state =
+                                if (r10_14Handoff) {
+                                    "r10_14_main_process_death_requested"
+                                } else {
+                                    "r10_13_process_death_requested"
+                                },
+                            message =
+                                if (r10_14Handoff) {
+                                    "R10.14 останавливает main AYANA process; :perception должен остаться жив"
+                                } else {
+                                    "R10.13 запускает полную остановку текущего AYANA process"
+                                },
                             details =
                                 "goal_id=$handoffGoalId; service_instance=$serviceInstanceId; " +
                                     "process_id=${android.os.Process.myPid()}; process_epoch=$processEpochId"
@@ -37510,12 +37698,17 @@ routed.forEach {
                             result.optBoolean("verified", false) &&
                             result.optBoolean("terminal_verified", false)
 
+                    val r10_14Result =
+                        result.optBoolean("r10_14_acceptance", false)
                     val r10_13Result =
-                        result.optBoolean("r10_13_acceptance", false)
+                        !r10_14Result &&
+                            result.optBoolean("r10_13_acceptance", false)
                     val r10_12Result =
+                        !r10_14Result &&
                         !r10_13Result &&
                             result.optBoolean("r10_12_acceptance", false)
                     val r10_11Result =
+                        !r10_14Result &&
                         !r10_13Result &&
                         !r10_12Result &&
                             result.optBoolean("r10_11_acceptance", false)
@@ -37524,6 +37717,8 @@ routed.forEach {
                         durableGoalStore.markCompleted(
                             goalId,
                             when {
+                                r10_14Result ->
+                                    "R10.14 perception-process isolation verified ${result.optInt("verified_subgoal_count", 0)}/${result.optInt("subgoal_count", 0)}"
                                 r10_13Result ->
                                     "R10.13 full process-death recovery verified ${result.optInt("verified_subgoal_count", 0)}/${result.optInt("subgoal_count", 0)}"
                                 r10_12Result ->
@@ -37540,6 +37735,8 @@ routed.forEach {
                             result.optString(
                                 "reason",
                                 when {
+                                    r10_14Result ->
+                                        "R10.14 perception-process isolation stopped fail-closed"
                                     r10_13Result ->
                                         "R10.13 full process-death recovery stopped fail-closed"
                                     r10_12Result ->
@@ -37557,6 +37754,10 @@ routed.forEach {
                         activeCommandHistoryId,
                         state =
                             when {
+                                r10_14Result && success ->
+                                    "r10_14_perception_process_isolation_verified"
+                                r10_14Result ->
+                                    "r10_14_perception_process_isolation_not_verified"
                                 r10_13Result && success ->
                                     "r10_13_full_process_death_recovery_verified"
                                 r10_13Result ->
@@ -37576,6 +37777,10 @@ routed.forEach {
                             },
                         message =
                             when {
+                                r10_14Result && success ->
+                                    "R10.14 perception process пережил смерть main process; внешний UI suffix продолжен через IPC"
+                                r10_14Result ->
+                                    "R10.14 perception-process isolation не прошёл все gates"
                                 r10_13Result && success ->
                                     "R10.13 full process-death recovery + disk-only continuation подтверждён"
                                 r10_13Result ->
@@ -37607,6 +37812,10 @@ routed.forEach {
                         respondAndResume(
                             text =
                                 when {
+                                    r10_14Result && success ->
+                                        "R10.14 подтверждён: :perception пережил полную смерть main AYANA process, новый process восстановил objective с диска и продолжил внешний UI suffix через cross-process Accessibility без replay Browser/visual."
+                                    r10_14Result ->
+                                        "R10.14 выполнен fail-closed: cross-process perception continuity не подтверждена по всем обязательным gates."
                                     r10_13Result && success ->
                                         "R10.13 подтверждён: production objective пережил полную смену AYANA process и автоматически продолжил только незавершённый suffix из durable disk state без replay Browser/visual."
                                     r10_13Result ->
@@ -38139,6 +38348,133 @@ routed.forEach {
 
             if (
                 verified &&
+                runtimeContext.optBoolean("r10_14_acceptance", false) &&
+                subgoal.id == "read_title" &&
+                !runtimeContext.optBoolean("r10_14_process_death_requested", false)
+            ) {
+                val partial =
+                    longObjective.partialResult("page_title")
+
+                val bridgeStatus =
+                    try {
+                        perceptionBridge.status()
+                    } catch (_: Throwable) {
+                        JSONObject()
+                    }
+
+                val perceptionPid =
+                    bridgeStatus.optInt("perception_process_id", -1)
+                val perceptionEpoch =
+                    bridgeStatus.optString("perception_process_epoch_id")
+                val expectedBrowserPackage =
+                    runtimeContext.optString("browser_package").trim()
+                val observedBrowserPackage =
+                    bridgeStatus.optString("effective_foreground_package").trim()
+
+                val perceptionReady =
+                    bridgeStatus.optBoolean("success", false) &&
+                        bridgeStatus.optBoolean("accessibility_connected", false) &&
+                        bridgeStatus.optBoolean("screen_evidence_available", false) &&
+                        perceptionPid > 0 &&
+                        perceptionPid != android.os.Process.myPid() &&
+                        perceptionEpoch.isNotBlank() &&
+                        expectedBrowserPackage.isNotBlank() &&
+                        observedBrowserPackage == expectedBrowserPackage
+
+                if (!perceptionReady) {
+                    lastFailure = "r10_14_perception_bridge_not_ready_before_process_death"
+                    break
+                }
+
+                runtimeContext
+                    .put("r10_14_process_death_requested", true)
+                    .put("r10_14_origin_service_instance_id", serviceInstanceId)
+                    .put("r10_14_origin_process_id", android.os.Process.myPid())
+                    .put("r10_14_origin_process_epoch_id", processEpochId)
+                    .put("r10_14_origin_perception_process_id", perceptionPid)
+                    .put("r10_14_origin_perception_process_epoch_id", perceptionEpoch)
+                    .put("r10_14_pre_death_verified_prefix", longObjective.verifiedSubgoalCount())
+                    .put("r10_14_pre_death_plan_revision", longObjective.planRevision())
+                    .put("r10_14_pre_death_adaptive_revision", adaptiveLoop.currentRevision())
+                    .put("r10_14_pre_death_browser_dispatch_count", browserDispatchCount)
+                    .put("r10_14_pre_death_visual_read_count", visualReadCount)
+                    .put("r10_14_pre_death_partial_fingerprint", partial.optString("fingerprint"))
+                    .put("r10_14_pre_death_checkpoint_persisted", false)
+                    .put("r10_14_pre_death_cross_process_screen_evidence_verified", true)
+
+                val processCheckpoint =
+                    r10_10BuildProductionPlannerCheckpoint(
+                        planner = planner,
+                        longObjective = longObjective,
+                        adaptiveLoop = adaptiveLoop,
+                        continuity = continuity,
+                        runtimeContext = runtimeContext,
+                        checkpointTag = "r10_14_pre_process_death",
+                        safeAutoResume = true,
+                        stepInFlight = false,
+                        lastStepId = subgoal.id,
+                        lastExecutor = subgoal.executor
+                    )
+
+                val processPersisted =
+                    durableGoalStore.checkpoint(
+                        goalId,
+                        processCheckpoint
+                    ) != null
+
+                if (!processPersisted) {
+                    lastFailure = "r10_14_pre_death_checkpoint_failed"
+                    break
+                }
+
+                runtimeContext.put("r10_14_pre_death_checkpoint_persisted", true)
+
+                val proofCheckpoint =
+                    r10_10BuildProductionPlannerCheckpoint(
+                        planner = planner,
+                        longObjective = longObjective,
+                        adaptiveLoop = adaptiveLoop,
+                        continuity = continuity,
+                        runtimeContext = runtimeContext,
+                        checkpointTag = "r10_14_process_death_handoff_ready",
+                        safeAutoResume = true,
+                        stepInFlight = false,
+                        lastStepId = subgoal.id,
+                        lastExecutor = subgoal.executor
+                    )
+
+                if (durableGoalStore.checkpoint(goalId, proofCheckpoint) == null) {
+                    lastFailure = "r10_14_handoff_proof_checkpoint_failed"
+                    break
+                }
+
+                durableStepCheckpointCount += 2
+                runtimeContext.put("r10_11_durable_checkpoint_count", durableStepCheckpointCount)
+
+                commandHistoryStore.addEvent(
+                    activeCommandHistoryId,
+                    state = "r10_14_process_death_handoff_ready",
+                    message = "R10.14 сохранил production objective; :perception остаётся жив при kill main process",
+                    details =
+                        "goal_id=$goalId; main_pid=${android.os.Process.myPid()}; main_epoch=$processEpochId; " +
+                            "perception_pid=$perceptionPid; perception_epoch=$perceptionEpoch; " +
+                            "verified=${longObjective.verifiedSubgoalCount()}; browser_dispatch=$browserDispatchCount; visual_read=$visualReadCount"
+                )
+
+                return JSONObject()
+                    .put("production_dynamic_planner", true)
+                    .put("r10_14_acceptance", true)
+                    .put("process_death_handoff_required", true)
+                    .put("goal_id", goalId)
+                    .put("success", false)
+                    .put("verified", false)
+                    .put("terminal_verified", false)
+                    .put("reason", "r10_14_process_death_handoff")
+                    .put("blind_replay_allowed", false)
+            }
+
+            if (
+                verified &&
                 runtimeContext.optBoolean("r10_13_acceptance", false) &&
                 subgoal.id == "read_title" &&
                 !runtimeContext.optBoolean("r10_13_process_death_requested", false)
@@ -38430,12 +38766,17 @@ routed.forEach {
             terminalVerified &&
                 finalCheckpointPersisted
 
+        val r10_14Acceptance =
+            runtimeContext.optBoolean("r10_14_acceptance", false)
         val r10_13Acceptance =
-            runtimeContext.optBoolean("r10_13_acceptance", false)
+            !r10_14Acceptance &&
+                runtimeContext.optBoolean("r10_13_acceptance", false)
         val r10_12Acceptance =
+            !r10_14Acceptance &&
             !r10_13Acceptance &&
                 runtimeContext.optBoolean("r10_12_acceptance", false)
         val r10_11Acceptance =
+            !r10_14Acceptance &&
             !r10_13Acceptance &&
             !r10_12Acceptance &&
                 runtimeContext.optBoolean("r10_11_acceptance", false)
@@ -38468,6 +38809,42 @@ routed.forEach {
                         runtimeContext.optBoolean("r10_11_verified_prefix_replay_blocked_after_restart", false) &&
                         browserDispatchCount == 1 &&
                         visualReadCount == 1 &&
+                        terminalLedgerConverged &&
+                        !adaptiveLoop.hasUnresolvedSideEffect()
+                )
+
+        val r10_14AcceptanceOk =
+            !r10_14Acceptance ||
+                (
+                    baseSuccess &&
+                        runtimeContext.optBoolean("r10_14_lifecycle_restore_verified", false) &&
+                        runtimeContext.optBoolean("r10_14_service_instance_recreated", false) &&
+                        runtimeContext.optBoolean("r10_14_process_recreated", false) &&
+                        runtimeContext.optBoolean("r10_14_process_epoch_recreated", false) &&
+                        runtimeContext.optBoolean("r10_14_disk_only_restore_verified", false) &&
+                        runtimeContext.optBoolean("r10_14_background_auto_resume", false) &&
+                        runtimeContext.optBoolean("r10_14_perception_process_survived_main_process_death", false) &&
+                        runtimeContext.optBoolean("r10_14_bridge_reconnected_after_process_death", false) &&
+                        runtimeContext.optBoolean("r10_14_accessibility_continuity_verified", false) &&
+                        runtimeContext.optBoolean("r10_14_cross_process_screen_evidence_verified", false) &&
+                        runtimeContext.optBoolean("r10_14_verified_prefix_preserved_after_process_death", false) &&
+                        runtimeContext.optBoolean("r10_14_plan_revision_preserved_after_process_death", false) &&
+                        runtimeContext.optBoolean("r10_14_adaptive_revision_preserved_after_process_death", false) &&
+                        runtimeContext.optBoolean("r10_14_partial_result_preserved_after_process_death", false) &&
+                        runtimeContext.optBoolean("r10_14_browser_replay_blocked_after_process_death", false) &&
+                        runtimeContext.optBoolean("r10_14_visual_replay_blocked_after_process_death", false) &&
+                        runtimeContext.optBoolean("r10_14_process_death_requested", false) &&
+                        runtimeContext.optBoolean("r10_14_post_death_youtube_verified", false) &&
+                        runtimeContext.optBoolean("r10_14_cross_process_foreground_after_youtube_verified", false) &&
+                        runtimeContext.optBoolean("r10_14_perception_process_still_same_after_youtube", false) &&
+                        runtimeContext.optBoolean("r10_14_external_ui_continuation_proven", false) &&
+                        browserDispatchCount ==
+                            runtimeContext.optInt("r10_14_pre_death_browser_dispatch_count", -1) &&
+                        visualReadCount ==
+                            runtimeContext.optInt("r10_14_pre_death_visual_read_count", -1) &&
+                        browserDispatchCount == 1 &&
+                        visualReadCount == 1 &&
+                        longObjective.verifiedSubgoalCount() == longObjective.subgoalCount() &&
                         terminalLedgerConverged &&
                         !adaptiveLoop.hasUnresolvedSideEffect()
                 )
@@ -38532,13 +38909,15 @@ routed.forEach {
             baseSuccess &&
                 r10_11AcceptanceOk &&
                 r10_12AcceptanceOk &&
-                r10_13AcceptanceOk
+                r10_13AcceptanceOk &&
+                r10_14AcceptanceOk
 
         return JSONObject()
             .put("production_dynamic_planner", true)
             .put(
                 "production_route",
                 when {
+                    r10_14Acceptance -> "r10_14"
                     r10_13Acceptance -> "r10_13"
                     r10_12Acceptance -> "r10_12"
                     r10_11Acceptance -> "r10_11"
@@ -38648,32 +39027,138 @@ routed.forEach {
                 "visual_replayed_after_restart",
                 r10_11Acceptance && visualReadCount != 1
             )
+            .put("r10_14_acceptance", r10_14Acceptance)
+            .put("perception_bridge_version", AyanaPerceptionBridgeContract.VERSION)
+            .put(
+                "perception_process_isolated",
+                r10_14Acceptance &&
+                    runtimeContext.optInt("r10_14_origin_perception_process_id", -1) > 0 &&
+                    runtimeContext.optInt("r10_14_origin_perception_process_id", -1) !=
+                        runtimeContext.optInt("r10_14_origin_process_id", -1)
+            )
+            .put(
+                "perception_process_survived_main_process_death",
+                runtimeContext.optBoolean("r10_14_perception_process_survived_main_process_death", false)
+            )
+            .put(
+                "bridge_reconnected_after_process_death",
+                runtimeContext.optBoolean("r10_14_bridge_reconnected_after_process_death", false)
+            )
+            .put(
+                "accessibility_continuity_verified",
+                runtimeContext.optBoolean("r10_14_accessibility_continuity_verified", false)
+            )
+            .put(
+                "cross_process_screen_evidence_verified",
+                runtimeContext.optBoolean("r10_14_cross_process_screen_evidence_verified", false)
+            )
+            .put(
+                "cross_process_foreground_after_youtube_verified",
+                runtimeContext.optBoolean("r10_14_cross_process_foreground_after_youtube_verified", false)
+            )
+            .put(
+                "external_ui_continuation_proven_r10_14",
+                runtimeContext.optBoolean("r10_14_external_ui_continuation_proven", false)
+            )
+            .put(
+                "origin_perception_process_id",
+                runtimeContext.optInt("r10_14_origin_perception_process_id", -1)
+            )
+            .put(
+                "restored_perception_process_id",
+                runtimeContext.optInt("r10_14_restored_perception_process_id", -1)
+            )
+            .put(
+                "origin_perception_process_epoch_id",
+                runtimeContext.optString("r10_14_origin_perception_process_epoch_id")
+            )
+            .put(
+                "restored_perception_process_epoch_id",
+                runtimeContext.optString("r10_14_restored_perception_process_epoch_id")
+            )
+            .put(
+                "r10_14_process_recreated",
+                runtimeContext.optBoolean("r10_14_process_recreated", false)
+            )
+            .put(
+                "r10_14_process_epoch_recreated",
+                runtimeContext.optBoolean("r10_14_process_epoch_recreated", false)
+            )
+            .put(
+                "r10_14_disk_only_restore_verified",
+                runtimeContext.optBoolean("r10_14_disk_only_restore_verified", false)
+            )
+            .put(
+                "r10_14_verified_prefix_preserved_after_process_death",
+                runtimeContext.optBoolean("r10_14_verified_prefix_preserved_after_process_death", false)
+            )
+            .put(
+                "r10_14_partial_result_preserved_after_process_death",
+                runtimeContext.optBoolean("r10_14_partial_result_preserved_after_process_death", false)
+            )
+            .put(
+                "r10_14_browser_replay_blocked_after_process_death",
+                runtimeContext.optBoolean("r10_14_browser_replay_blocked_after_process_death", false)
+            )
+            .put(
+                "r10_14_visual_replay_blocked_after_process_death",
+                runtimeContext.optBoolean("r10_14_visual_replay_blocked_after_process_death", false)
+            )
+            .put(
+                "r10_14_navigation_reconciliation_attempted",
+                runtimeContext.optBoolean("r10_14_navigation_reconciliation_attempted", false)
+            )
+            .put(
+                "r10_14_navigation_reconciliation_verified",
+                runtimeContext.optBoolean("r10_14_navigation_reconciliation_verified", false)
+            )
             .put("r10_13_acceptance", r10_13Acceptance)
             .put(
                 "process_death_requested",
-                runtimeContext.optBoolean("r10_13_process_death_requested", false)
+                if (r10_14Acceptance) {
+                    runtimeContext.optBoolean("r10_14_process_death_requested", false)
+                } else {
+                    runtimeContext.optBoolean("r10_13_process_death_requested", false)
+                }
             )
             .put(
                 "full_process_death_verified",
-                runtimeContext.optBoolean("r10_13_lifecycle_restore_verified", false) &&
-                    runtimeContext.optBoolean("r10_13_process_recreated", false) &&
-                    runtimeContext.optBoolean("r10_13_process_epoch_recreated", false)
+                if (r10_14Acceptance) {
+                    runtimeContext.optBoolean("r10_14_lifecycle_restore_verified", false) &&
+                        runtimeContext.optBoolean("r10_14_process_recreated", false) &&
+                        runtimeContext.optBoolean("r10_14_process_epoch_recreated", false)
+                } else {
+                    runtimeContext.optBoolean("r10_13_lifecycle_restore_verified", false) &&
+                        runtimeContext.optBoolean("r10_13_process_recreated", false) &&
+                        runtimeContext.optBoolean("r10_13_process_epoch_recreated", false)
+                }
             )
             .put(
                 "process_recreated",
-                if (r10_13Acceptance) {
-                    runtimeContext.optBoolean("r10_13_process_recreated", false)
-                } else {
-                    runtimeContext.optBoolean("r10_12_process_recreated", false)
+                when {
+                    r10_14Acceptance ->
+                        runtimeContext.optBoolean("r10_14_process_recreated", false)
+                    r10_13Acceptance ->
+                        runtimeContext.optBoolean("r10_13_process_recreated", false)
+                    else ->
+                        runtimeContext.optBoolean("r10_12_process_recreated", false)
                 }
             )
             .put(
                 "process_epoch_recreated",
-                runtimeContext.optBoolean("r10_13_process_epoch_recreated", false)
+                if (r10_14Acceptance) {
+                    runtimeContext.optBoolean("r10_14_process_epoch_recreated", false)
+                } else {
+                    runtimeContext.optBoolean("r10_13_process_epoch_recreated", false)
+                }
             )
             .put(
                 "disk_only_restore_verified",
-                runtimeContext.optBoolean("r10_13_disk_only_restore_verified", false)
+                if (r10_14Acceptance) {
+                    runtimeContext.optBoolean("r10_14_disk_only_restore_verified", false)
+                } else {
+                    runtimeContext.optBoolean("r10_13_disk_only_restore_verified", false)
+                }
             )
             .put(
                 "post_process_readiness_verified",
@@ -38705,7 +39190,11 @@ routed.forEach {
             )
             .put(
                 "external_ui_continuation_proven",
-                runtimeContext.optBoolean("r10_13_external_ui_continuation_proven", false)
+                if (r10_14Acceptance) {
+                    runtimeContext.optBoolean("r10_14_external_ui_continuation_proven", false)
+                } else {
+                    runtimeContext.optBoolean("r10_13_external_ui_continuation_proven", false)
+                }
             )
             .put(
                 "navigation_reconciliation_attempted",
@@ -38721,55 +39210,107 @@ routed.forEach {
             )
             .put(
                 "verified_prefix_preserved_after_process_death",
-                runtimeContext.optBoolean("r10_13_verified_prefix_preserved_after_process_death", false)
+                if (r10_14Acceptance) {
+                    runtimeContext.optBoolean("r10_14_verified_prefix_preserved_after_process_death", false)
+                } else {
+                    runtimeContext.optBoolean("r10_13_verified_prefix_preserved_after_process_death", false)
+                }
             )
             .put(
                 "plan_revision_preserved_after_process_death",
-                runtimeContext.optBoolean("r10_13_plan_revision_preserved_after_process_death", false)
+                if (r10_14Acceptance) {
+                    runtimeContext.optBoolean("r10_14_plan_revision_preserved_after_process_death", false)
+                } else {
+                    runtimeContext.optBoolean("r10_13_plan_revision_preserved_after_process_death", false)
+                }
             )
             .put(
                 "adaptive_revision_preserved_after_process_death",
-                runtimeContext.optBoolean("r10_13_adaptive_revision_preserved_after_process_death", false)
+                if (r10_14Acceptance) {
+                    runtimeContext.optBoolean("r10_14_adaptive_revision_preserved_after_process_death", false)
+                } else {
+                    runtimeContext.optBoolean("r10_13_adaptive_revision_preserved_after_process_death", false)
+                }
             )
             .put(
                 "partial_result_preserved_after_process_death",
-                runtimeContext.optBoolean("r10_13_partial_result_preserved_after_process_death", false)
+                if (r10_14Acceptance) {
+                    runtimeContext.optBoolean("r10_14_partial_result_preserved_after_process_death", false)
+                } else {
+                    runtimeContext.optBoolean("r10_13_partial_result_preserved_after_process_death", false)
+                }
             )
             .put(
                 "browser_replay_blocked_after_process_death",
-                runtimeContext.optBoolean("r10_13_browser_replay_blocked_after_process_death", false)
+                if (r10_14Acceptance) {
+                    runtimeContext.optBoolean("r10_14_browser_replay_blocked_after_process_death", false)
+                } else {
+                    runtimeContext.optBoolean("r10_13_browser_replay_blocked_after_process_death", false)
+                }
             )
             .put(
                 "visual_replay_blocked_after_process_death",
-                runtimeContext.optBoolean("r10_13_visual_replay_blocked_after_process_death", false)
+                if (r10_14Acceptance) {
+                    runtimeContext.optBoolean("r10_14_visual_replay_blocked_after_process_death", false)
+                } else {
+                    runtimeContext.optBoolean("r10_13_visual_replay_blocked_after_process_death", false)
+                }
             )
             .put(
                 "origin_process_id",
-                runtimeContext.optInt("r10_13_origin_process_id", -1)
+                if (r10_14Acceptance) {
+                    runtimeContext.optInt("r10_14_origin_process_id", -1)
+                } else {
+                    runtimeContext.optInt("r10_13_origin_process_id", -1)
+                }
             )
             .put(
                 "restored_process_id",
-                runtimeContext.optInt("r10_13_current_process_id", -1)
+                if (r10_14Acceptance) {
+                    runtimeContext.optInt("r10_14_current_process_id", -1)
+                } else {
+                    runtimeContext.optInt("r10_13_current_process_id", -1)
+                }
             )
             .put(
                 "origin_process_epoch_id",
-                runtimeContext.optString("r10_13_origin_process_epoch_id")
+                if (r10_14Acceptance) {
+                    runtimeContext.optString("r10_14_origin_process_epoch_id")
+                } else {
+                    runtimeContext.optString("r10_13_origin_process_epoch_id")
+                }
             )
             .put(
                 "restored_process_epoch_id",
-                runtimeContext.optString("r10_13_current_process_epoch_id")
+                if (r10_14Acceptance) {
+                    runtimeContext.optString("r10_14_current_process_epoch_id")
+                } else {
+                    runtimeContext.optString("r10_13_current_process_epoch_id")
+                }
             )
             .put(
                 "service_instance_recreated_after_process_death",
-                runtimeContext.optBoolean("r10_13_service_instance_recreated", false)
+                if (r10_14Acceptance) {
+                    runtimeContext.optBoolean("r10_14_service_instance_recreated", false)
+                } else {
+                    runtimeContext.optBoolean("r10_13_service_instance_recreated", false)
+                }
             )
             .put(
                 "origin_process_service_instance_id",
-                runtimeContext.optString("r10_13_origin_service_instance_id")
+                if (r10_14Acceptance) {
+                    runtimeContext.optString("r10_14_origin_service_instance_id")
+                } else {
+                    runtimeContext.optString("r10_13_origin_service_instance_id")
+                }
             )
             .put(
                 "restored_process_service_instance_id",
-                runtimeContext.optString("r10_13_current_service_instance_id")
+                if (r10_14Acceptance) {
+                    runtimeContext.optString("r10_14_current_service_instance_id")
+                } else {
+                    runtimeContext.optString("r10_13_current_service_instance_id")
+                }
             )
             .put("r10_12_acceptance", r10_12Acceptance)
             .put(
@@ -38786,10 +39327,13 @@ routed.forEach {
             )
             .put(
                 "background_auto_resume",
-                if (r10_13Acceptance) {
-                    runtimeContext.optBoolean("r10_13_background_auto_resume", false)
-                } else {
-                    runtimeContext.optBoolean("r10_12_background_auto_resume", false)
+                when {
+                    r10_14Acceptance ->
+                        runtimeContext.optBoolean("r10_14_background_auto_resume", false)
+                    r10_13Acceptance ->
+                        runtimeContext.optBoolean("r10_13_background_auto_resume", false)
+                    else ->
+                        runtimeContext.optBoolean("r10_12_background_auto_resume", false)
                 }
             )
             .put(
@@ -38835,6 +39379,7 @@ routed.forEach {
             .put(
                 "acceptance_ok",
                 when {
+                    r10_14Acceptance -> r10_14AcceptanceOk
                     r10_13Acceptance -> r10_13AcceptanceOk
                     r10_12Acceptance -> r10_12AcceptanceOk
                     else -> r10_11AcceptanceOk
@@ -39085,30 +39630,103 @@ routed.forEach {
                                     .trim()
                         )
 
+                    val navigationResult =
+                        if (
+                            (
+                                runtimeContext.optBoolean("r10_14_acceptance", false) &&
+                                    runtimeContext.optBoolean("r10_14_lifecycle_restore_verified", false)
+                                ) ||
+                            (
+                                runtimeContext.optBoolean("r10_13_acceptance", false) &&
+                                    runtimeContext.optBoolean("r10_13_lifecycle_restore_verified", false)
+                                )
+                        ) {
+                            if (
+                                rawResult.optBoolean("action_dispatched", false) &&
+                                !rawResult.optBoolean("verified", false)
+                            ) {
+                                reconcileR10_13DispatchedNavigation(
+                                    rawResult = rawResult,
+                                    commandToken = commandToken
+                                )
+                            } else {
+                                JSONObject(rawResult.toString())
+                                    .put(
+                                        "reconciliation_complete",
+                                        rawResult.optBoolean("verified", false)
+                                    )
+                                    .put("r10_13_reconciliation_attempted", false)
+                                    .put("r10_13_reconciliation_verified", rawResult.optBoolean("verified", false))
+                                    .put("r10_13_reconciliation_waited_ms", 0L)
+                            }
+                        } else {
+                            JSONObject(rawResult.toString())
+                                .put(
+                                    "reconciliation_complete",
+                                    rawResult.optBoolean("verified", false)
+                                )
+                        }
+
+                    if (runtimeContext.optBoolean("r10_13_acceptance", false)) {
+                        runtimeContext
+                            .put("r10_13_navigation_reconciliation_attempted", navigationResult.optBoolean("r10_13_reconciliation_attempted", false))
+                            .put("r10_13_navigation_reconciliation_verified", navigationResult.optBoolean("r10_13_reconciliation_verified", false))
+                            .put("r10_13_navigation_reconciliation_waited_ms", navigationResult.optLong("r10_13_reconciliation_waited_ms", 0L))
+                    }
+
                     if (
-                        runtimeContext.optBoolean("r10_13_acceptance", false) &&
-                        runtimeContext.optBoolean("r10_13_lifecycle_restore_verified", false) &&
-                        rawResult.optBoolean("action_dispatched", false) &&
-                        !rawResult.optBoolean("verified", false)
+                        runtimeContext.optBoolean("r10_14_acceptance", false) &&
+                        runtimeContext.optBoolean("r10_14_lifecycle_restore_verified", false)
                     ) {
-                        val reconciled =
-                            reconcileR10_13DispatchedNavigation(
-                                rawResult = rawResult,
-                                commandToken = commandToken
-                            )
+                        val bridgeStatus =
+                            try {
+                                perceptionBridge.status()
+                            } catch (_: Throwable) {
+                                JSONObject()
+                            }
+
+                        val expectedPackage =
+                            navigationResult.optString("target_package").trim()
+                        val observedPackage =
+                            bridgeStatus.optString("effective_foreground_package").trim()
+                        val originPerceptionPid =
+                            runtimeContext.optInt("r10_14_origin_perception_process_id", -1)
+                        val restoredPerceptionPid =
+                            bridgeStatus.optInt("perception_process_id", -1)
+                        val originPerceptionEpoch =
+                            runtimeContext.optString("r10_14_origin_perception_process_epoch_id")
+                        val restoredPerceptionEpoch =
+                            bridgeStatus.optString("perception_process_epoch_id")
+
+                        val samePerceptionProcess =
+                            originPerceptionPid > 0 &&
+                                restoredPerceptionPid == originPerceptionPid &&
+                                originPerceptionEpoch.isNotBlank() &&
+                                restoredPerceptionEpoch == originPerceptionEpoch
+
+                        val externalUiVerified =
+                            navigationResult.optBoolean("verified", false) &&
+                                bridgeStatus.optBoolean("accessibility_connected", false) &&
+                                bridgeStatus.optBoolean("screen_evidence_available", false) &&
+                                expectedPackage.isNotBlank() &&
+                                observedPackage == expectedPackage &&
+                                samePerceptionProcess
 
                         runtimeContext
-                            .put("r10_13_navigation_reconciliation_attempted", reconciled.optBoolean("r10_13_reconciliation_attempted", false))
-                            .put("r10_13_navigation_reconciliation_verified", reconciled.optBoolean("r10_13_reconciliation_verified", false))
-                            .put("r10_13_navigation_reconciliation_waited_ms", reconciled.optLong("r10_13_reconciliation_waited_ms", 0L))
+                            .put("r10_14_navigation_reconciliation_attempted", navigationResult.optBoolean("r10_13_reconciliation_attempted", false))
+                            .put("r10_14_navigation_reconciliation_verified", navigationResult.optBoolean("r10_13_reconciliation_verified", false))
+                            .put("r10_14_navigation_reconciliation_waited_ms", navigationResult.optLong("r10_13_reconciliation_waited_ms", 0L))
+                            .put("r10_14_post_death_youtube_verified", navigationResult.optBoolean("verified", false))
+                            .put("r10_14_cross_process_foreground_after_youtube_verified", externalUiVerified)
+                            .put("r10_14_perception_process_still_same_after_youtube", samePerceptionProcess)
+                            .put("r10_14_external_ui_continuation_proven", externalUiVerified)
 
-                        reconciled
+                        navigationResult
+                            .put("cross_process_perception_verified", externalUiVerified)
+                            .put("perception_process_id", restoredPerceptionPid)
+                            .put("perception_process_epoch_id", restoredPerceptionEpoch)
                     } else {
-                        rawResult
-                            .put(
-                                "reconciliation_complete",
-                                rawResult.optBoolean("verified", false)
-                            )
+                        navigationResult
                     }
                 }
             }
@@ -39760,6 +40378,165 @@ routed.forEach {
     }
 
 
+
+    private fun isR10_14PerceptionProcessIsolationAcceptanceCommand(
+        command: String
+    ): Boolean {
+        val normalized =
+            command
+                .lowercase(Locale.ROOT)
+                .replace('ё', 'е')
+                .replace(Regex("\\s+"), " ")
+                .trim()
+                .removePrefix("аяна ")
+                .trim()
+
+        return normalized in
+            setOf(
+                "проверь изоляцию восприятия после смерти процесса",
+                "проверь восприятие после смерти процесса",
+                "проверь cross-process accessibility",
+                "проверь perception process isolation",
+                "проверь r10.14"
+            )
+    }
+
+    private fun runR10_14PerceptionProcessIsolationAcceptance(
+        silent: Boolean
+    ) {
+        val objective =
+            "сначала проверь состояние устройства, открой AYANA AI, затем открой Example Domain в браузере, прочитай заголовок страницы, найди этот заголовок в YouTube и в конце снова проверь состояние устройства"
+
+        if (!AyanaLifecycleRecoveryCoordinator().selfTest()) {
+            respondAndResume(
+                text = "R10.14 остановлен: lifecycle recovery self-test не подтверждён.",
+                silent = silent,
+                success = false,
+                technical =
+                    JSONObject()
+                        .put("r10_14_acceptance", true)
+                        .put("acceptance_ok", false)
+                        .put("lifecycle_recovery_self_test", false)
+                        .toString()
+            )
+            return
+        }
+
+        val bridgeStatus =
+            try {
+                perceptionBridge.status()
+            } catch (error: Throwable) {
+                JSONObject()
+                    .put("success", false)
+                    .put("error", error.message ?: error.javaClass.simpleName)
+            }
+
+        val perceptionPid =
+            bridgeStatus.optInt("perception_process_id", -1)
+        val perceptionEpoch =
+            bridgeStatus.optString("perception_process_epoch_id")
+        val bridgePreflightOk =
+            bridgeStatus.optBoolean("success", false) &&
+                bridgeStatus.optBoolean("accessibility_connected", false) &&
+                bridgeStatus.optBoolean("screen_evidence_available", false) &&
+                perceptionPid > 0 &&
+                perceptionPid != android.os.Process.myPid() &&
+                perceptionEpoch.isNotBlank()
+
+        if (!bridgePreflightOk) {
+            respondAndResume(
+                text = "R10.14 остановлен: отдельный perception process/Accessibility bridge не подтверждён.",
+                silent = silent,
+                success = false,
+                technical =
+                    JSONObject()
+                        .put("r10_14_acceptance", true)
+                        .put("acceptance_ok", false)
+                        .put("perception_bridge_version", AyanaPerceptionBridgeContract.VERSION)
+                        .put("main_process_id", android.os.Process.myPid())
+                        .put("bridge_status", bridgeStatus)
+                        .toString()
+            )
+            return
+        }
+
+        val proposal =
+            try {
+                AyanaDynamicGoalPlanner.localProposal(objective)
+            } catch (error: Throwable) {
+                respondAndResume(
+                    text = "R10.14 остановлен: production plan не сформирован.",
+                    silent = silent,
+                    success = false,
+                    technical =
+                        JSONObject()
+                            .put("r10_14_acceptance", true)
+                            .put("acceptance_ok", false)
+                            .put("reason", error.message ?: error.javaClass.simpleName)
+                            .toString()
+                )
+                return
+            }
+
+        val planner =
+            try {
+                AyanaDynamicGoalPlanner.compile(
+                    objective = objective,
+                    proposal = proposal
+                )
+            } catch (error: Throwable) {
+                respondAndResume(
+                    text = "R10.14 остановлен: production plan не прошёл contract validation.",
+                    silent = silent,
+                    success = false,
+                    technical =
+                        JSONObject()
+                            .put("r10_14_acceptance", true)
+                            .put("acceptance_ok", false)
+                            .put("reason", error.message ?: error.javaClass.simpleName)
+                            .toString()
+                )
+                return
+            }
+
+        if (planner.subgoalCount() != 6) {
+            respondAndResume(
+                text = "R10.14 остановлен: неожиданный production DAG.",
+                silent = silent,
+                success = false,
+                technical =
+                    JSONObject()
+                        .put("r10_14_acceptance", true)
+                        .put("acceptance_ok", false)
+                        .put("subgoal_count", planner.subgoalCount())
+                        .toString()
+            )
+            return
+        }
+
+        val runtimeContext =
+            JSONObject()
+                .put("r10_14_acceptance", true)
+                .put("r10_14_process_death_requested", false)
+                .put("r10_14_pre_death_checkpoint_persisted", false)
+                .put("r10_14_user_stop_requested", false)
+                .put("r10_14_origin_service_instance_id", serviceInstanceId)
+                .put("r10_14_origin_process_id", android.os.Process.myPid())
+                .put("r10_14_origin_process_epoch_id", processEpochId)
+                .put("r10_14_origin_perception_process_id", perceptionPid)
+                .put("r10_14_origin_perception_process_epoch_id", perceptionEpoch)
+                .put("r10_14_bridge_preflight_verified", true)
+                .put("r10_14_external_ui_continuation_proven", false)
+
+        startR10_10ProductionDynamicPlannerWorker(
+            command = objective,
+            silent = silent,
+            planner = planner,
+            resumeGoal = null,
+            automaticRecovery = false,
+            initialRuntimeContext = runtimeContext
+        )
+    }
 
     private fun scheduleR10_13ProcessDeath() {
         val appContext = applicationContext
@@ -65388,9 +66165,9 @@ state
         private const val MASTER_STATUS_MANUAL_REQUIRED =
             "MANUAL_REQUIRED"
 
-        // R10.13 FULL PROCESS-DEATH RECOVERY RELEASE TRUTH.
+        // R10.14 PERCEPTION PROCESS ISOLATION RELEASE TRUTH.
         private const val AYANA_VOICE_SERVICE_RELEASE =
-            "v12.46.2 / R10.13.2 PROCESS-DEATH CORE RECOVERY"
+            "v12.47.0 / R10.14 PERCEPTION PROCESS ISOLATION + CROSS-PROCESS ACCESSIBILITY BRIDGE"
 
         private const val AYANA_PERSONAL_SEARCH_ENGINE_RELEASE =
             "v1.5.1 IMAGE COVERAGE TRUTH + R10.2 UNIFIED SEARCH CONTRACT v1.0"
@@ -65402,13 +66179,13 @@ state
             "v11.1.10 Multi-Attachment"
 
         private const val AYANA_ACCEPTED_FEATURE_CHECKPOINT =
-            "R10.12 NATURAL LIFECYCLE RECOVERY + BACKGROUND CONTINUATION — DEVICE-CONFIRMED ACCEPTED"
+            "R10.13.2 FULL PROCESS-DEATH CORE RECOVERY — DEVICE-CONFIRMED ACCEPTED"
 
         private const val AYANA_CURRENT_FEATURE_RELEASE =
-            "R10.13.2 FULL PROCESS-DEATH CORE RECOVERY — PENDING DEVICE CONFIRMATION"
+            "R10.14 PERCEPTION PROCESS ISOLATION + CROSS-PROCESS ACCESSIBILITY BRIDGE — PENDING DEVICE CONFIRMATION"
 
         private const val AYANA_RELEASE_LINEAGE =
-            "Android v12.21.0 / R7.9 truth-hardening + R8.0 multi-attachment + R8.1–R8.4 accepted Personal Global Search stack + R8.5–R8.5.4 capability/evidence truth + R9.0 autonomous agent foundation + R9.0.1 history live-refresh proof fix + R9.0.2 diagnostic reconciliation/history refresh fix + R9.0.3 TTS health reconciliation + R9.1 IME perception/active telemetry truth + R9.2 autonomous recovery/long-task reconciliation + R9.2.1 adaptive hypothesis reconciliation + R9.3 app integration framework + R9.3.1 screen health reconciliation + R9.3.2 history latency recovery reconciliation + R9.3.3 informational terminal reconciliation + R9.3.4 app integration device acceptance + R9.4 multi-app task orchestration + R9.4.1 screen ownership union reconciliation + R9.5 verified result transfer between app steps + R9.5.1 partial marker provenance reconciliation + R9.5.2 bounded marker observation + R9.5.3 verified action result transfer + R9.6 verified semantic observation fallback + R9.6.1 visual fallback acceptance truth + R9.7 structured screen reading + R9.7.1 conversation routing/terminal truth + R9.7.2 structured router conversation precedence + R9.7.3 action morphology/terminal truth + R9.8 generic verified result transfer + R9.8.1 master full acceptance/diagnostic engine + R9.9 reversible action journal/verified undo + R9.9.1 brightness verified undo device acceptance + R9.9.2 opt-in low-battery controlled proactivity + R10.0 unified screen intelligence + R10.1 local self-diagnostics/self-audit + R10.2 personal search expansion + R10.3 long autonomous tasks/recovery + R10.4 adaptive verified execution loop + R10.5 generalized live adaptive autonomy + R10.6 cross-lane adaptive continuity + R10.6.1 durable goal binding fix + R10.7 cross-lane durable recovery continuity + R10.7.1 isolated acceptance cleanup hardening + R10.8 general-purpose long autonomous objectives + R10.9 dynamic goal decomposition/planner contract + R10.10 adaptive planner production path + R10.11 production replan/durable recovery + R10.12 natural lifecycle recovery/background continuation + R10.13 full process-death recovery + R10.13.1 post-process readiness/reconciliation + R10.13.2 process-death core recovery proof correction"
+            "Android v12.21.0 / R7.9 truth-hardening + R8.0 multi-attachment + R8.1–R8.4 accepted Personal Global Search stack + R8.5–R8.5.4 capability/evidence truth + R9.0 autonomous agent foundation + R9.0.1 history live-refresh proof fix + R9.0.2 diagnostic reconciliation/history refresh fix + R9.0.3 TTS health reconciliation + R9.1 IME perception/active telemetry truth + R9.2 autonomous recovery/long-task reconciliation + R9.2.1 adaptive hypothesis reconciliation + R9.3 app integration framework + R9.3.1 screen health reconciliation + R9.3.2 history latency recovery reconciliation + R9.3.3 informational terminal reconciliation + R9.3.4 app integration device acceptance + R9.4 multi-app task orchestration + R9.4.1 screen ownership union reconciliation + R9.5 verified result transfer between app steps + R9.5.1 partial marker provenance reconciliation + R9.5.2 bounded marker observation + R9.5.3 verified action result transfer + R9.6 verified semantic observation fallback + R9.6.1 visual fallback acceptance truth + R9.7 structured screen reading + R9.7.1 conversation routing/terminal truth + R9.7.2 structured router conversation precedence + R9.7.3 action morphology/terminal truth + R9.8 generic verified result transfer + R9.8.1 master full acceptance/diagnostic engine + R9.9 reversible action journal/verified undo + R9.9.1 brightness verified undo device acceptance + R9.9.2 opt-in low-battery controlled proactivity + R10.0 unified screen intelligence + R10.1 local self-diagnostics/self-audit + R10.2 personal search expansion + R10.3 long autonomous tasks/recovery + R10.4 adaptive verified execution loop + R10.5 generalized live adaptive autonomy + R10.6 cross-lane adaptive continuity + R10.6.1 durable goal binding fix + R10.7 cross-lane durable recovery continuity + R10.7.1 isolated acceptance cleanup hardening + R10.8 general-purpose long autonomous objectives + R10.9 dynamic goal decomposition/planner contract + R10.10 adaptive planner production path + R10.11 production replan/durable recovery + R10.12 natural lifecycle recovery/background continuation + R10.13 full process-death recovery + R10.13.1 post-process readiness/reconciliation + R10.13.2 process-death core recovery proof correction + R10.14 perception process isolation/cross-process accessibility bridge"
 
         // AyanaCommandHistoryStore v2.8 keeps up to 4k chars inline and stores longer
         // results out-of-line. Self-review intentionally remains inline so copied History
