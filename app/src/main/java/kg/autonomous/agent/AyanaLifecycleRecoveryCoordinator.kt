@@ -4,7 +4,7 @@ import org.json.JSONObject
 import java.util.Locale
 
 /**
- * AYANA R10.13 Lifecycle / Process-Death Recovery Coordinator v1.1.
+ * AYANA R10.14.2 Lifecycle / Process-Death Recovery Coordinator v1.2.
  *
  * Pure policy/audit layer. It never kills/restarts Android components and never
  * dispatches tools. VoiceService owns lifecycle/process operations and execution.
@@ -13,9 +13,9 @@ import java.util.Locale
  * - safe production dynamic goals may auto-resume after verified Service recreation;
  * - user stop/cancel, confirmation, in-flight and unresolved-side-effect boundaries fail closed.
  *
- * R10.13 extension:
- * - a full process-death acceptance is valid only when BOTH PID and process-epoch change;
- * - service recreation alone can never satisfy the R10.13 process-death gate;
+ * R10.13/R10.14 process-death extension:
+ * - a full process-death acceptance (R10.13 or R10.14) is valid only when BOTH PID and process-epoch change;
+ * - service recreation alone can never satisfy an R10.13/R10.14 process-death gate;
  * - the pre-death checkpoint must be persisted before process termination;
  * - continuation remains blind-replay forbidden and must originate from durable state.
  */
@@ -72,32 +72,47 @@ class AyanaLifecycleRecoveryCoordinator {
 
         if (
             runtime.optBoolean("r10_12_user_stop_requested", false) ||
-            runtime.optBoolean("r10_13_user_stop_requested", false)
+            runtime.optBoolean("r10_13_user_stop_requested", false) ||
+            runtime.optBoolean("r10_14_user_stop_requested", false)
         ) {
             return decision(false, "user_stop_marker")
         }
 
-        val r10_13Acceptance = runtime.optBoolean("r10_13_acceptance", false)
+        val r10_14Acceptance = runtime.optBoolean("r10_14_acceptance", false)
+        val r10_13Acceptance =
+            !r10_14Acceptance && runtime.optBoolean("r10_13_acceptance", false)
         val r10_12Acceptance =
-            !r10_13Acceptance && runtime.optBoolean("r10_12_acceptance", false)
+            !r10_14Acceptance &&
+                !r10_13Acceptance &&
+                runtime.optBoolean("r10_12_acceptance", false)
+
+        val processDeathAcceptance =
+            r10_14Acceptance || r10_13Acceptance
+
+        val processDeathPrefix =
+            if (r10_14Acceptance) {
+                "r10_14"
+            } else {
+                "r10_13"
+            }
 
         val originServiceInstanceId =
-            if (r10_13Acceptance) {
-                runtime.optString("r10_13_origin_service_instance_id").trim()
+            if (processDeathAcceptance) {
+                runtime.optString("${processDeathPrefix}_origin_service_instance_id").trim()
             } else {
                 runtime.optString("r10_12_origin_service_instance_id").trim()
             }
 
         val originProcessId =
-            if (r10_13Acceptance) {
-                runtime.optInt("r10_13_origin_process_id", -1)
+            if (processDeathAcceptance) {
+                runtime.optInt("${processDeathPrefix}_origin_process_id", -1)
             } else {
                 runtime.optInt("r10_12_origin_process_id", -1)
             }
 
         val originProcessEpochId =
-            if (r10_13Acceptance) {
-                runtime.optString("r10_13_origin_process_epoch_id").trim()
+            if (processDeathAcceptance) {
+                runtime.optString("${processDeathPrefix}_origin_process_epoch_id").trim()
             } else {
                 runtime.optString("r10_12_origin_process_epoch_id").trim()
             }
@@ -117,7 +132,7 @@ class AyanaLifecycleRecoveryCoordinator {
                 currentProcessEpochId.isNotBlank() &&
                 originProcessEpochId != currentProcessEpochId
 
-        if (r10_13Acceptance && (!processRecreated || !processEpochRecreated)) {
+        if (processDeathAcceptance && (!processRecreated || !processEpochRecreated)) {
             return decision(false, "process_identity_not_recreated")
                 .put("status", status)
                 .put("service_instance_recreated", serviceRecreated)
@@ -129,7 +144,8 @@ class AyanaLifecycleRecoveryCoordinator {
                 .put("origin_process_id", originProcessId)
                 .put("current_process_epoch_id", currentProcessEpochId)
                 .put("origin_process_epoch_id", originProcessEpochId)
-                .put("r10_13_acceptance", true)
+                .put("r10_13_acceptance", r10_13Acceptance)
+                .put("r10_14_acceptance", r10_14Acceptance)
         }
 
         if (r10_12Acceptance && !serviceRecreated) {
@@ -154,6 +170,7 @@ class AyanaLifecycleRecoveryCoordinator {
             .put("origin_process_epoch_id", originProcessEpochId)
             .put("r10_12_acceptance", r10_12Acceptance)
             .put("r10_13_acceptance", r10_13Acceptance)
+            .put("r10_14_acceptance", r10_14Acceptance)
             .put("blind_replay_allowed", false)
     }
 
@@ -181,28 +198,39 @@ class AyanaLifecycleRecoveryCoordinator {
                 ?.optJSONObject("dynamic_planner_runtime_context")
                 ?: JSONObject()
 
-        val r10_13Acceptance = runtime.optBoolean("r10_13_acceptance", false)
+        val r10_14Acceptance = runtime.optBoolean("r10_14_acceptance", false)
+        val r10_13Acceptance =
+            !r10_14Acceptance && runtime.optBoolean("r10_13_acceptance", false)
+        val processDeathAcceptance =
+            r10_14Acceptance || r10_13Acceptance
+        val processDeathPrefix =
+            if (r10_14Acceptance) {
+                "r10_14"
+            } else {
+                "r10_13"
+            }
+
         val requested =
-            if (r10_13Acceptance) {
-                runtime.optBoolean("r10_13_process_death_requested", false)
+            if (processDeathAcceptance) {
+                runtime.optBoolean("${processDeathPrefix}_process_death_requested", false)
             } else {
                 runtime.optBoolean("r10_12_service_recreation_requested", false)
             }
         val checkpointPersisted =
-            if (r10_13Acceptance) {
-                runtime.optBoolean("r10_13_pre_death_checkpoint_persisted", false)
+            if (processDeathAcceptance) {
+                runtime.optBoolean("${processDeathPrefix}_pre_death_checkpoint_persisted", false)
             } else {
                 runtime.optBoolean("r10_12_pre_recreation_checkpoint_persisted", false)
             }
         val preVerified =
-            if (r10_13Acceptance) {
-                runtime.optInt("r10_13_pre_death_verified_prefix", -1)
+            if (processDeathAcceptance) {
+                runtime.optInt("${processDeathPrefix}_pre_death_verified_prefix", -1)
             } else {
                 runtime.optInt("r10_12_pre_recreation_verified_prefix", -1)
             }
 
         val identityVerified =
-            if (r10_13Acceptance) {
+            if (processDeathAcceptance) {
                 decision.optBoolean("process_recreated", false) &&
                     decision.optBoolean("process_epoch_recreated", false)
             } else {
@@ -220,7 +248,7 @@ class AyanaLifecycleRecoveryCoordinator {
             .put(
                 "reason",
                 if (verified) {
-                    if (r10_13Acceptance) {
+                    if (processDeathAcceptance) {
                         "full_process_death_recovery_verified"
                     } else {
                         "service_lifecycle_recreation_verified"
@@ -230,7 +258,7 @@ class AyanaLifecycleRecoveryCoordinator {
                 }
             )
             .put("pre_recreation_verified_prefix", preVerified)
-            .put("disk_only_restore_required", r10_13Acceptance)
+            .put("disk_only_restore_required", processDeathAcceptance)
             .put("blind_replay_allowed", false)
     }
 
@@ -289,6 +317,28 @@ class AyanaLifecycleRecoveryCoordinator {
                 JSONObject(baseGoal.toString())
                     .put("dynamic_planner_runtime_context", r10_13Runtime)
 
+            val r10_14Runtime =
+                JSONObject()
+                    .put("r10_14_acceptance", true)
+                    .put("r10_14_process_death_requested", true)
+                    .put("r10_14_pre_death_checkpoint_persisted", true)
+                    .put("r10_14_pre_death_verified_prefix", 4)
+                    .put("r10_14_origin_service_instance_id", "service-A")
+                    .put("r10_14_origin_process_id", 100)
+                    .put("r10_14_origin_process_epoch_id", "process-A")
+
+            val r10_14Goal =
+                JSONObject(baseGoal.toString())
+                    .put("dynamic_planner_runtime_context", r10_14Runtime)
+
+            val r10_14FullProcess =
+                verifyRestoredLifecycle(
+                    goal = r10_14Goal,
+                    currentServiceInstanceId = "service-B",
+                    currentProcessId = 200,
+                    currentProcessEpochId = "process-B"
+                )
+
             val fullProcess =
                 verifyRestoredLifecycle(
                     goal = r10_13Goal,
@@ -329,6 +379,11 @@ class AyanaLifecycleRecoveryCoordinator {
                 fullProcess.optBoolean("verified", false) &&
                 fullProcess.optBoolean("process_recreated", false) &&
                 fullProcess.optBoolean("process_epoch_recreated", false) &&
+                r10_14FullProcess.optBoolean("verified", false) &&
+                r10_14FullProcess.optBoolean("process_recreated", false) &&
+                r10_14FullProcess.optBoolean("process_epoch_recreated", false) &&
+                r10_14FullProcess.optBoolean("r10_14_acceptance", false) &&
+                r10_14FullProcess.optBoolean("disk_only_restore_required", false) &&
                 !pidOnly.optBoolean("verified", true) &&
                 !epochOnly.optBoolean("verified", true) &&
                 !userStop.optBoolean("allowed", true)
@@ -354,6 +409,6 @@ class AyanaLifecycleRecoveryCoordinator {
             .lowercase(Locale.ROOT)
 
     companion object {
-        const val VERSION = "1.1"
+        const val VERSION = "1.2"
     }
 }
