@@ -63,7 +63,7 @@ import kotlin.math.abs
 
 class AyanaVoiceService : Service() {
 
-    // AYANA v12.47.2 / R10.14.2 LIFECYCLE PROFILE FIX.
+    // AYANA v12.47.3 / R10.14.3 HISTORY RECOVERY RECONCILIATION.
     // R10.14 keeps the R10.13.2 full process-death core baseline and isolates Android
     // Accessibility/perception in :perception. Main-process Screen Intelligence consumes
     // the same verified screen/action contract over same-UID IPC; no authority is expanded.
@@ -37023,6 +37023,22 @@ routed.forEach {
                                 ?.let { JSONObject(it.toString()) }
                             ?: JSONObject()
 
+                    if (
+                        runtimeContext
+                            .optString("origin_command_history_id")
+                            .isBlank()
+                    ) {
+                        activeCommandHistoryId
+                            ?.trim()
+                            ?.takeIf { it.isNotBlank() }
+                            ?.let { historyId ->
+                                runtimeContext.put(
+                                    "origin_command_history_id",
+                                    historyId
+                                )
+                            }
+                    }
+
                     if (resumeGoal != null) {
                         val persistedPlanner =
                             AyanaDynamicGoalPlanner.restore(
@@ -38471,6 +38487,14 @@ routed.forEach {
 
                 durableStepCheckpointCount += 2
                 runtimeContext.put("r10_11_durable_checkpoint_count", durableStepCheckpointCount)
+
+                commandHistoryStore.addEvent(
+                    activeCommandHistoryId,
+                    state = "history_recovery_origin_persisted",
+                    message = "Исходная history-запись сохранена в durable recovery context",
+                    details =
+                        "goal_id=$goalId; origin_history_id=${runtimeContext.optString("origin_command_history_id")}"
+                )
 
                 commandHistoryStore.addEvent(
                     activeCommandHistoryId,
@@ -54608,6 +54632,92 @@ STATE_SUCCESS
         )
     }
 
+    private fun adoptRecoveredCommandHistoryIfAvailable(
+        goal: JSONObject,
+        silent: Boolean
+    ): Boolean {
+
+        if (activeCommandHistoryId != null) {
+            return true
+        }
+
+        val originHistoryId =
+            goal
+                .optJSONObject("dynamic_planner_runtime_context")
+                ?.optString("origin_command_history_id")
+                .orEmpty()
+                .trim()
+
+        if (originHistoryId.isBlank()) {
+            return false
+        }
+
+        val originStillRunning =
+            try {
+                commandHistoryStore
+                    .recent(120)
+                    .any { record ->
+                        record.optString("id") == originHistoryId &&
+                            record.optString("status") ==
+                                AyanaCommandHistoryStore.STATUS_RUNNING
+                    }
+            } catch (_: Throwable) {
+                false
+            }
+
+        if (!originStillRunning) {
+            return false
+        }
+
+        stopSherpaListening()
+
+        listenMode =
+            ListenMode.BUSY
+
+        cancelRequested =
+            false
+
+        activeCommandToken =
+            ++commandGeneration
+
+        activeCommandHistoryId =
+            originHistoryId
+
+        beginExecutionSession(
+            objective =
+                goal.optString("command")
+                    .ifBlank {
+                        "Продолжаю активную цель"
+                    },
+            source =
+                if (silent) {
+                    "text"
+                } else {
+                    "voice"
+                },
+            lane = "durable_goal_control",
+            executor = "durable_goal_executor"
+        )
+
+        commandHistoryStore.addEvent(
+            originHistoryId,
+            state = "history_recovery_reconciled",
+            message = "Recovered execution привязан к исходной записи истории",
+            details =
+                "goal_id=${goal.optString("id")}; " +
+                    "origin_history_id=$originHistoryId; " +
+                    "new_process_id=${android.os.Process.myPid()}; " +
+                    "service_instance=$serviceInstanceId"
+        )
+
+        broadcastStatus(
+            "Продолжаю активную цель",
+            STATE_THINKING
+        )
+
+        return true
+    }
+
     private fun resumeDurableGoal(
         silent: Boolean,
         explicitConfirmation: Boolean,
@@ -54749,6 +54859,11 @@ STATE_SUCCESS
         ) {
             return
         }
+
+        adoptRecoveredCommandHistoryIfAvailable(
+            goal = goal,
+            silent = silent
+        )
 
         prepareDurableControlHistory(
             if (explicitConfirmation) {
@@ -66186,9 +66301,9 @@ state
         private const val MASTER_STATUS_MANUAL_REQUIRED =
             "MANUAL_REQUIRED"
 
-        // R10.14.2 LIFECYCLE PROFILE RELEASE TRUTH.
+        // R10.14.3 HISTORY RECOVERY RECONCILIATION RELEASE TRUTH.
         private const val AYANA_VOICE_SERVICE_RELEASE =
-            "v12.47.2 / R10.14.2 LIFECYCLE PROFILE FIX"
+            "v12.47.3 / R10.14.3 HISTORY RECOVERY RECONCILIATION"
 
         private const val AYANA_PERSONAL_SEARCH_ENGINE_RELEASE =
             "v1.5.1 IMAGE COVERAGE TRUTH + R10.2 UNIFIED SEARCH CONTRACT v1.0"
@@ -66200,13 +66315,13 @@ state
             "v11.1.10 Multi-Attachment"
 
         private const val AYANA_ACCEPTED_FEATURE_CHECKPOINT =
-            "R10.13.2 FULL PROCESS-DEATH CORE RECOVERY — DEVICE-CONFIRMED ACCEPTED"
+            "R10.14.2 PERCEPTION PROCESS ISOLATION + CROSS-PROCESS ACCESSIBILITY CONTINUITY — DEVICE-CONFIRMED ACCEPTED"
 
         private const val AYANA_CURRENT_FEATURE_RELEASE =
-            "R10.14.2 PERCEPTION PROCESS ISOLATION + LIFECYCLE PROFILE FIX — PENDING DEVICE CONFIRMATION"
+            "R10.14.3 HISTORY RECOVERY RECONCILIATION — PENDING DEVICE CONFIRMATION"
 
         private const val AYANA_RELEASE_LINEAGE =
-            "Android v12.21.0 / R7.9 truth-hardening + R8.0 multi-attachment + R8.1–R8.4 accepted Personal Global Search stack + R8.5–R8.5.4 capability/evidence truth + R9.0 autonomous agent foundation + R9.0.1 history live-refresh proof fix + R9.0.2 diagnostic reconciliation/history refresh fix + R9.0.3 TTS health reconciliation + R9.1 IME perception/active telemetry truth + R9.2 autonomous recovery/long-task reconciliation + R9.2.1 adaptive hypothesis reconciliation + R9.3 app integration framework + R9.3.1 screen health reconciliation + R9.3.2 history latency recovery reconciliation + R9.3.3 informational terminal reconciliation + R9.3.4 app integration device acceptance + R9.4 multi-app task orchestration + R9.4.1 screen ownership union reconciliation + R9.5 verified result transfer between app steps + R9.5.1 partial marker provenance reconciliation + R9.5.2 bounded marker observation + R9.5.3 verified action result transfer + R9.6 verified semantic observation fallback + R9.6.1 visual fallback acceptance truth + R9.7 structured screen reading + R9.7.1 conversation routing/terminal truth + R9.7.2 structured router conversation precedence + R9.7.3 action morphology/terminal truth + R9.8 generic verified result transfer + R9.8.1 master full acceptance/diagnostic engine + R9.9 reversible action journal/verified undo + R9.9.1 brightness verified undo device acceptance + R9.9.2 opt-in low-battery controlled proactivity + R10.0 unified screen intelligence + R10.1 local self-diagnostics/self-audit + R10.2 personal search expansion + R10.3 long autonomous tasks/recovery + R10.4 adaptive verified execution loop + R10.5 generalized live adaptive autonomy + R10.6 cross-lane adaptive continuity + R10.6.1 durable goal binding fix + R10.7 cross-lane durable recovery continuity + R10.7.1 isolated acceptance cleanup hardening + R10.8 general-purpose long autonomous objectives + R10.9 dynamic goal decomposition/planner contract + R10.10 adaptive planner production path + R10.11 production replan/durable recovery + R10.12 natural lifecycle recovery/background continuation + R10.13 full process-death recovery + R10.13.1 post-process readiness/reconciliation + R10.13.2 process-death core recovery proof correction + R10.14 perception process isolation/cross-process accessibility bridge + R10.14.1 cross-process visual evidence fix + R10.14.2 lifecycle profile/self-diagnostic truth"
+            "Android v12.21.0 / R7.9 truth-hardening + R8.0 multi-attachment + R8.1–R8.4 accepted Personal Global Search stack + R8.5–R8.5.4 capability/evidence truth + R9.0 autonomous agent foundation + R9.0.1 history live-refresh proof fix + R9.0.2 diagnostic reconciliation/history refresh fix + R9.0.3 TTS health reconciliation + R9.1 IME perception/active telemetry truth + R9.2 autonomous recovery/long-task reconciliation + R9.2.1 adaptive hypothesis reconciliation + R9.3 app integration framework + R9.3.1 screen health reconciliation + R9.3.2 history latency recovery reconciliation + R9.3.3 informational terminal reconciliation + R9.3.4 app integration device acceptance + R9.4 multi-app task orchestration + R9.4.1 screen ownership union reconciliation + R9.5 verified result transfer between app steps + R9.5.1 partial marker provenance reconciliation + R9.5.2 bounded marker observation + R9.5.3 verified action result transfer + R9.6 verified semantic observation fallback + R9.6.1 visual fallback acceptance truth + R9.7 structured screen reading + R9.7.1 conversation routing/terminal truth + R9.7.2 structured router conversation precedence + R9.7.3 action morphology/terminal truth + R9.8 generic verified result transfer + R9.8.1 master full acceptance/diagnostic engine + R9.9 reversible action journal/verified undo + R9.9.1 brightness verified undo device acceptance + R9.9.2 opt-in low-battery controlled proactivity + R10.0 unified screen intelligence + R10.1 local self-diagnostics/self-audit + R10.2 personal search expansion + R10.3 long autonomous tasks/recovery + R10.4 adaptive verified execution loop + R10.5 generalized live adaptive autonomy + R10.6 cross-lane adaptive continuity + R10.6.1 durable goal binding fix + R10.7 cross-lane durable recovery continuity + R10.7.1 isolated acceptance cleanup hardening + R10.8 general-purpose long autonomous objectives + R10.9 dynamic goal decomposition/planner contract + R10.10 adaptive planner production path + R10.11 production replan/durable recovery + R10.12 natural lifecycle recovery/background continuation + R10.13 full process-death recovery + R10.13.1 post-process readiness/reconciliation + R10.13.2 process-death core recovery proof correction + R10.14 perception process isolation/cross-process accessibility bridge + R10.14.1 cross-process visual evidence fix + R10.14.2 lifecycle profile/self-diagnostic truth + R10.14.3 history recovery reconciliation"
 
         // AyanaCommandHistoryStore v2.8 keeps up to 4k chars inline and stores longer
         // results out-of-line. Self-review intentionally remains inline so copied History
