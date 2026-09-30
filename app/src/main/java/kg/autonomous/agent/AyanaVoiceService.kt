@@ -1,6 +1,7 @@
 package kg.autonomous.agent
 
 import android.Manifest
+import android.app.AlarmManager
 import android.app.Notification
 import android.app.NotificationChannel
 import android.app.NotificationManager
@@ -62,6 +63,17 @@ import kotlin.math.abs
 
 class AyanaVoiceService : Service() {
 
+    // AYANA v12.46.0 / R10.13 FULL PROCESS-DEATH RECOVERY.
+    // Builds on DEVICE-CONFIRMED R10.12 Natural Lifecycle Recovery.
+    // - R10.13 requires a real Linux/Android app-process identity change, not merely Service recreation;
+    // - PID + process-epoch are persisted before the process-death handoff and both must change;
+    // - recovery begins from production DurableGoalStore after a fresh process creates new coordinators;
+    // - verified prefix, planner/adaptive revisions and partial-result provenance survive disk-only restore;
+    // - Browser/visual verified producer work remains replay-blocked after process death;
+    // - user stop/cancel, in-flight, confirmation and unresolved-side-effect boundaries still fail closed;
+    // - terminal truth remains converged across long-objective + adaptive ledgers.
+    // No new action authority. ORB/visualizer remain untouched.
+    //
     // AYANA v12.45.0 / R10.12 NATURAL LIFECYCLE RECOVERY + BACKGROUND CONTINUATION.
     // Builds on DEVICE-CONFIRMED R10.11 Production Replan + Durable Recovery.
     // - production dynamic objectives can cross a real Android Service recreation boundary;
@@ -1262,15 +1274,18 @@ return JSONObject()
         )
     }
 
-    // R10.12 NATURAL LIFECYCLE RECOVERY. Pure policy only: Android lifecycle
-    // operations remain in VoiceService; this coordinator only validates whether
-    // a production dynamic goal is safe to continue after a real Service recreation.
+    // R10.13 LIFECYCLE / PROCESS-DEATH RECOVERY. Pure policy only: Android lifecycle
+    // and process operations remain in VoiceService; this coordinator validates whether
+    // a production dynamic goal is safe to continue after Service or full process recreation.
     private val lifecycleRecoveryCoordinator by lazy {
         AyanaLifecycleRecoveryCoordinator()
     }
 
     private val serviceInstanceId: String =
         UUID.randomUUID().toString()
+
+    private val processEpochId: String
+        get() = PROCESS_EPOCH_ID
 
     // R10.4 ADAPTIVE VERIFIED EXECUTION LOOP. The loop object itself is created per
     // objective inside askAyana(); this class-level note keeps the architecture explicit:
@@ -4722,6 +4737,21 @@ originalCommand
                 )
                 return
             }
+
+        // R10.13 FULL PROCESS-DEATH RECOVERY ACCEPTANCE.
+        // Persists a safe production objective after verified Browser/visual work, then kills
+        // the AYANA app process. START_STICKY/system restart must create a new PID/process epoch
+        // and recover only from durable disk state without replaying VERIFIED producer work.
+        if (
+            isR10_13FullProcessDeathRecoveryAcceptanceCommand(
+                routingNormalized
+            )
+        ) {
+            runR10_13FullProcessDeathRecoveryAcceptance(
+                silent = silent
+            )
+            return
+        }
 
         // R10.12 NATURAL LIFECYCLE RECOVERY + BACKGROUND CONTINUATION ACCEPTANCE.
         // Persists a safe production objective after verified Browser/visual work, then
@@ -30573,6 +30603,45 @@ AyanaAcceptanceTestEngine.PROBE_NOTIFICATION_ROUTING ->
                     .put("blind_replay_allowed", false)
         )
 
+        val fullProcessDeathRecoveryContractOk =
+            try {
+                AyanaLifecycleRecoveryCoordinator().selfTest() &&
+                    isR10_13FullProcessDeathRecoveryAcceptanceCommand(
+                        "проверь полное восстановление после смерти процесса"
+                    ) &&
+                    !isR10_13FullProcessDeathRecoveryAcceptanceCommand(
+                        "открой YouTube"
+                    )
+            } catch (_: Exception) {
+                false
+            }
+
+        add(
+            id = "R10-FOUND-029",
+            title = "R10.13 full process-death recovery / disk-only continuation contract",
+            critical = true,
+            ok = fullProcessDeathRecoveryContractOk,
+            message =
+                if (fullProcessDeathRecoveryContractOk) {
+                    "R10.13 requires changed PID + process epoch, persisted safe checkpoint, disk-only planner restore, replay-free VERIFIED prefix and converged terminal truth."
+                } else {
+                    "R10.13 full process-death recovery contract self-test failed."
+                },
+            evidence =
+                JSONObject()
+                    .put("lifecycle_recovery_version", AyanaLifecycleRecoveryCoordinator.VERSION)
+                    .put("pid_change_required", true)
+                    .put("process_epoch_change_required", true)
+                    .put("service_recreation_alone_sufficient", false)
+                    .put("disk_only_restore_required", true)
+                    .put("safe_auto_resume_checkpoint_required", true)
+                    .put("verified_browser_replay_allowed", false)
+                    .put("verified_visual_replay_allowed", false)
+                    .put("user_stop_reinterpreted_as_recovery", false)
+                    .put("terminal_ledger_convergence_required", true)
+                    .put("blind_replay_allowed", false)
+        )
+
         return tests
     }
 
@@ -36518,13 +36587,23 @@ routed.forEach {
         automaticRecovery: Boolean,
         initialRuntimeContext: JSONObject? = null
     ) {
-        val r10_12Session =
-            initialRuntimeContext?.optBoolean("r10_12_acceptance", false) == true ||
+        val r10_13Session =
+            initialRuntimeContext?.optBoolean("r10_13_acceptance", false) == true ||
                 resumeGoal
                     ?.optJSONObject("dynamic_planner_runtime_context")
-                    ?.optBoolean("r10_12_acceptance", false) == true
+                    ?.optBoolean("r10_13_acceptance", false) == true
+
+        val r10_12Session =
+            !r10_13Session &&
+                (
+                    initialRuntimeContext?.optBoolean("r10_12_acceptance", false) == true ||
+                        resumeGoal
+                            ?.optJSONObject("dynamic_planner_runtime_context")
+                            ?.optBoolean("r10_12_acceptance", false) == true
+                )
 
         val r10_11Session =
+            !r10_13Session &&
             !r10_12Session &&
                 (
                     initialRuntimeContext?.optBoolean("r10_11_acceptance", false) == true ||
@@ -36536,6 +36615,10 @@ routed.forEach {
         executionPhase(
             phase =
                 when {
+                    r10_13Session && resumeGoal != null ->
+                        "r10_13_full_process_death_recovery_resume"
+                    r10_13Session ->
+                        "r10_13_full_process_death_recovery"
                     r10_12Session && resumeGoal != null ->
                         "r10_12_natural_lifecycle_recovery_resume"
                     r10_12Session ->
@@ -36551,8 +36634,10 @@ routed.forEach {
                 },
             executor =
                 when {
+                    r10_13Session ->
+                        "process_death_recovery_v1_1+dynamic_goal_planner_v1_1+long_objective_v1_1"
                     r10_12Session ->
-                        "lifecycle_recovery_v1+dynamic_goal_planner_v1_1+long_objective_v1_1"
+                        "lifecycle_recovery_v1_1+dynamic_goal_planner_v1_1+long_objective_v1_1"
                     r10_11Session ->
                         "dynamic_goal_planner_v1_1+long_objective_v1_1+durable_recovery"
                     else ->
@@ -36796,12 +36881,120 @@ routed.forEach {
                             )
                         }
 
+                        if (runtimeContext.optBoolean("r10_13_acceptance", false)) {
+                            val lifecycleRestore =
+                                lifecycleRecoveryCoordinator.verifyRestoredLifecycle(
+                                    goal = goalSnapshot,
+                                    currentServiceInstanceId = serviceInstanceId,
+                                    currentProcessId = android.os.Process.myPid(),
+                                    currentProcessEpochId = processEpochId
+                                )
+
+                            val preVerified =
+                                runtimeContext.optInt("r10_13_pre_death_verified_prefix", -1)
+                            val prePlanRevision =
+                                runtimeContext.optInt("r10_13_pre_death_plan_revision", -1)
+                            val preAdaptiveRevision =
+                                runtimeContext.optInt("r10_13_pre_death_adaptive_revision", -1)
+                            val prePartialFingerprint =
+                                runtimeContext.optString("r10_13_pre_death_partial_fingerprint")
+                            val restoredPartial =
+                                longObjective.partialResult("page_title")
+
+                            val browserReplayProbe =
+                                longObjective.beginSubgoal(
+                                    subgoalId = "open_example",
+                                    lane = AyanaCrossLaneAdaptiveContinuity.LANE_MULTI_APP,
+                                    authority = AyanaCrossLaneAdaptiveContinuity.AUTH_MULTI_APP
+                                )
+                            val visualReplayProbe =
+                                longObjective.beginSubgoal(
+                                    subgoalId = "read_title",
+                                    lane = AyanaCrossLaneAdaptiveContinuity.LANE_MULTI_APP,
+                                    authority = AyanaCrossLaneAdaptiveContinuity.AUTH_MULTI_APP
+                                )
+
+                            val browserReplayBlocked =
+                                !browserReplayProbe.optBoolean("allowed", true) &&
+                                    browserReplayProbe.optString("reason") ==
+                                    "verified_subgoal_replay_blocked"
+                            val visualReplayBlocked =
+                                !visualReplayProbe.optBoolean("allowed", true) &&
+                                    visualReplayProbe.optString("reason") ==
+                                    "verified_subgoal_replay_blocked"
+
+                            val diskOnlyRestoreVerified =
+                                lifecycleRestore.optBoolean("verified", false) &&
+                                    lifecycleRestore.optBoolean("process_recreated", false) &&
+                                    lifecycleRestore.optBoolean("process_epoch_recreated", false) &&
+                                    automaticRecovery
+
+                            runtimeContext
+                                .put("r10_13_lifecycle_restore_verified",
+                                    lifecycleRestore.optBoolean("verified", false))
+                                .put("r10_13_service_instance_recreated",
+                                    lifecycleRestore.optBoolean("service_instance_recreated", false))
+                                .put("r10_13_process_recreated",
+                                    lifecycleRestore.optBoolean("process_recreated", false))
+                                .put("r10_13_process_epoch_recreated",
+                                    lifecycleRestore.optBoolean("process_epoch_recreated", false))
+                                .put("r10_13_current_service_instance_id", serviceInstanceId)
+                                .put("r10_13_current_process_id", android.os.Process.myPid())
+                                .put("r10_13_current_process_epoch_id", processEpochId)
+                                .put("r10_13_disk_only_restore_verified", diskOnlyRestoreVerified)
+                                .put("r10_13_verified_prefix_preserved_after_process_death",
+                                    preVerified >= 0 &&
+                                        longObjective.verifiedSubgoalCount() == preVerified)
+                                .put("r10_13_plan_revision_preserved_after_process_death",
+                                    prePlanRevision >= 0 &&
+                                        longObjective.planRevision() == prePlanRevision)
+                                .put("r10_13_adaptive_revision_preserved_after_process_death",
+                                    preAdaptiveRevision >= 0 &&
+                                        adaptiveLoop.currentRevision() == preAdaptiveRevision)
+                                .put("r10_13_partial_result_preserved_after_process_death",
+                                    prePartialFingerprint.isNotBlank() &&
+                                        restoredPartial.optBoolean("available", false) &&
+                                        restoredPartial.optBoolean("verified", false) &&
+                                        restoredPartial.optString("fingerprint") == prePartialFingerprint)
+                                .put("r10_13_browser_replay_blocked_after_process_death",
+                                    browserReplayBlocked)
+                                .put("r10_13_visual_replay_blocked_after_process_death",
+                                    visualReplayBlocked)
+                                .put("r10_13_background_auto_resume", automaticRecovery)
+
+                            if (
+                                !lifecycleRestore.optBoolean("verified", false) ||
+                                !lifecycleRestore.optBoolean("process_recreated", false) ||
+                                !lifecycleRestore.optBoolean("process_epoch_recreated", false) ||
+                                !diskOnlyRestoreVerified ||
+                                !runtimeContext.optBoolean("r10_13_verified_prefix_preserved_after_process_death", false) ||
+                                !runtimeContext.optBoolean("r10_13_plan_revision_preserved_after_process_death", false) ||
+                                !runtimeContext.optBoolean("r10_13_adaptive_revision_preserved_after_process_death", false) ||
+                                !runtimeContext.optBoolean("r10_13_partial_result_preserved_after_process_death", false) ||
+                                !browserReplayBlocked ||
+                                !visualReplayBlocked ||
+                                !automaticRecovery
+                            ) {
+                                throw IllegalStateException(
+                                    "R10.13 full process-death restore/replay verification failed"
+                                )
+                            }
+
+                            commandHistoryStore.addEvent(
+                                activeCommandHistoryId,
+                                state = "r10_13_process_death_restore_verified",
+                                message = "R10.13 подтвердил новый процесс и disk-only auto-resume",
+                                details = lifecycleRestore.toString().take(2400)
+                            )
+                        }
+
                         if (runtimeContext.optBoolean("r10_12_acceptance", false)) {
                             val lifecycleRestore =
                                 lifecycleRecoveryCoordinator.verifyRestoredLifecycle(
                                     goal = goalSnapshot,
                                     currentServiceInstanceId = serviceInstanceId,
-                                    currentProcessId = android.os.Process.myPid()
+                                    currentProcessId = android.os.Process.myPid(),
+                                    currentProcessEpochId = processEpochId
                                 )
 
                             val preVerified =
@@ -37064,6 +37257,23 @@ routed.forEach {
                             automaticRecovery = automaticRecovery
                         )
 
+                    if (result.optBoolean("process_death_handoff_required", false)) {
+                        val handoffGoalId =
+                            result.optString("goal_id").trim()
+
+                        commandHistoryStore.addEvent(
+                            activeCommandHistoryId,
+                            state = "r10_13_process_death_requested",
+                            message = "R10.13 запускает полную остановку текущего AYANA process",
+                            details =
+                                "goal_id=$handoffGoalId; service_instance=$serviceInstanceId; " +
+                                    "process_id=${android.os.Process.myPid()}; process_epoch=$processEpochId"
+                        )
+
+                        scheduleR10_13ProcessDeath()
+                        return@thread
+                    }
+
                     if (result.optBoolean("service_recreation_handoff_required", false)) {
                         val handoffGoalId =
                             result.optString("goal_id").trim()
@@ -37117,9 +37327,13 @@ routed.forEach {
                             result.optBoolean("verified", false) &&
                             result.optBoolean("terminal_verified", false)
 
+                    val r10_13Result =
+                        result.optBoolean("r10_13_acceptance", false)
                     val r10_12Result =
-                        result.optBoolean("r10_12_acceptance", false)
+                        !r10_13Result &&
+                            result.optBoolean("r10_12_acceptance", false)
                     val r10_11Result =
+                        !r10_13Result &&
                         !r10_12Result &&
                             result.optBoolean("r10_11_acceptance", false)
 
@@ -37127,6 +37341,8 @@ routed.forEach {
                         durableGoalStore.markCompleted(
                             goalId,
                             when {
+                                r10_13Result ->
+                                    "R10.13 full process-death recovery verified ${result.optInt("verified_subgoal_count", 0)}/${result.optInt("subgoal_count", 0)}"
                                 r10_12Result ->
                                     "R10.12 natural lifecycle recovery verified ${result.optInt("verified_subgoal_count", 0)}/${result.optInt("subgoal_count", 0)}"
                                 r10_11Result ->
@@ -37141,6 +37357,8 @@ routed.forEach {
                             result.optString(
                                 "reason",
                                 when {
+                                    r10_13Result ->
+                                        "R10.13 full process-death recovery stopped fail-closed"
                                     r10_12Result ->
                                         "R10.12 lifecycle recovery stopped fail-closed"
                                     r10_11Result ->
@@ -37156,6 +37374,10 @@ routed.forEach {
                         activeCommandHistoryId,
                         state =
                             when {
+                                r10_13Result && success ->
+                                    "r10_13_full_process_death_recovery_verified"
+                                r10_13Result ->
+                                    "r10_13_full_process_death_recovery_not_verified"
                                 r10_12Result && success ->
                                     "r10_12_natural_lifecycle_recovery_verified"
                                 r10_12Result ->
@@ -37171,6 +37393,10 @@ routed.forEach {
                             },
                         message =
                             when {
+                                r10_13Result && success ->
+                                    "R10.13 full process-death recovery + disk-only continuation подтверждён"
+                                r10_13Result ->
+                                    "R10.13 process-death recovery не прошёл все gates"
                                 r10_12Result && success ->
                                     "R10.12 real Service lifecycle recovery + background continuation подтверждён"
                                 r10_12Result ->
@@ -37198,6 +37424,10 @@ routed.forEach {
                         respondAndResume(
                             text =
                                 when {
+                                    r10_13Result && success ->
+                                        "R10.13 подтверждён: production objective пережил полную смену AYANA process и автоматически продолжил только незавершённый suffix из durable disk state без replay Browser/visual."
+                                    r10_13Result ->
+                                        "R10.13 выполнен fail-closed: полное process-death recovery не подтверждено по всем обязательным gates."
                                     r10_12Result && success ->
                                         "R10.12 подтверждён: production objective пережил реальное пересоздание Android Service и автоматически продолжил только незавершённый suffix без replay Browser/visual."
                                     r10_12Result ->
@@ -37726,6 +37956,97 @@ routed.forEach {
 
             if (
                 verified &&
+                runtimeContext.optBoolean("r10_13_acceptance", false) &&
+                subgoal.id == "read_title" &&
+                !runtimeContext.optBoolean("r10_13_process_death_requested", false)
+            ) {
+                val partial =
+                    longObjective.partialResult("page_title")
+
+                runtimeContext
+                    .put("r10_13_process_death_requested", true)
+                    .put("r10_13_origin_service_instance_id", serviceInstanceId)
+                    .put("r10_13_origin_process_id", android.os.Process.myPid())
+                    .put("r10_13_origin_process_epoch_id", processEpochId)
+                    .put("r10_13_pre_death_verified_prefix", longObjective.verifiedSubgoalCount())
+                    .put("r10_13_pre_death_plan_revision", longObjective.planRevision())
+                    .put("r10_13_pre_death_adaptive_revision", adaptiveLoop.currentRevision())
+                    .put("r10_13_pre_death_browser_dispatch_count", browserDispatchCount)
+                    .put("r10_13_pre_death_visual_read_count", visualReadCount)
+                    .put("r10_13_pre_death_partial_fingerprint", partial.optString("fingerprint"))
+                    .put("r10_13_pre_death_checkpoint_persisted", false)
+
+                val processCheckpoint =
+                    r10_10BuildProductionPlannerCheckpoint(
+                        planner = planner,
+                        longObjective = longObjective,
+                        adaptiveLoop = adaptiveLoop,
+                        continuity = continuity,
+                        runtimeContext = runtimeContext,
+                        checkpointTag = "r10_13_pre_process_death",
+                        safeAutoResume = true,
+                        stepInFlight = false,
+                        lastStepId = subgoal.id,
+                        lastExecutor = subgoal.executor
+                    )
+
+                val processPersisted =
+                    durableGoalStore.checkpoint(
+                        goalId,
+                        processCheckpoint
+                    ) != null
+
+                if (!processPersisted) {
+                    lastFailure = "r10_13_pre_death_checkpoint_failed"
+                    break
+                }
+
+                runtimeContext.put("r10_13_pre_death_checkpoint_persisted", true)
+                val proofCheckpoint =
+                    r10_10BuildProductionPlannerCheckpoint(
+                        planner = planner,
+                        longObjective = longObjective,
+                        adaptiveLoop = adaptiveLoop,
+                        continuity = continuity,
+                        runtimeContext = runtimeContext,
+                        checkpointTag = "r10_13_process_death_handoff_ready",
+                        safeAutoResume = true,
+                        stepInFlight = false,
+                        lastStepId = subgoal.id,
+                        lastExecutor = subgoal.executor
+                    )
+
+                if (durableGoalStore.checkpoint(goalId, proofCheckpoint) == null) {
+                    lastFailure = "r10_13_handoff_proof_checkpoint_failed"
+                    break
+                }
+
+                durableStepCheckpointCount += 2
+                runtimeContext.put("r10_11_durable_checkpoint_count", durableStepCheckpointCount)
+
+                commandHistoryStore.addEvent(
+                    activeCommandHistoryId,
+                    state = "r10_13_process_death_handoff_ready",
+                    message = "R10.13 сохранил production objective перед полной остановкой process",
+                    details =
+                        "goal_id=$goalId; process_id=${android.os.Process.myPid()}; process_epoch=$processEpochId; " +
+                            "verified=${longObjective.verifiedSubgoalCount()}; browser_dispatch=$browserDispatchCount; visual_read=$visualReadCount"
+                )
+
+                return JSONObject()
+                    .put("production_dynamic_planner", true)
+                    .put("r10_13_acceptance", true)
+                    .put("process_death_handoff_required", true)
+                    .put("goal_id", goalId)
+                    .put("success", false)
+                    .put("verified", false)
+                    .put("terminal_verified", false)
+                    .put("reason", "process_death_handoff")
+                    .put("blind_replay_allowed", false)
+            }
+
+            if (
+                verified &&
                 runtimeContext.optBoolean("r10_12_acceptance", false) &&
                 subgoal.id == "read_title" &&
                 !runtimeContext.optBoolean("r10_12_service_recreation_requested", false)
@@ -37737,6 +38058,7 @@ routed.forEach {
                     .put("r10_12_service_recreation_requested", true)
                     .put("r10_12_origin_service_instance_id", serviceInstanceId)
                     .put("r10_12_origin_process_id", android.os.Process.myPid())
+                    .put("r10_12_origin_process_epoch_id", processEpochId)
                     .put("r10_12_pre_recreation_verified_prefix", longObjective.verifiedSubgoalCount())
                     .put("r10_12_pre_recreation_plan_revision", longObjective.planRevision())
                     .put("r10_12_pre_recreation_adaptive_revision", adaptiveLoop.currentRevision())
@@ -37925,9 +38247,13 @@ routed.forEach {
             terminalVerified &&
                 finalCheckpointPersisted
 
+        val r10_13Acceptance =
+            runtimeContext.optBoolean("r10_13_acceptance", false)
         val r10_12Acceptance =
-            runtimeContext.optBoolean("r10_12_acceptance", false)
+            !r10_13Acceptance &&
+                runtimeContext.optBoolean("r10_12_acceptance", false)
         val r10_11Acceptance =
+            !r10_13Acceptance &&
             !r10_12Acceptance &&
                 runtimeContext.optBoolean("r10_11_acceptance", false)
         val adaptiveTerminalRecorded =
@@ -37963,6 +38289,34 @@ routed.forEach {
                         !adaptiveLoop.hasUnresolvedSideEffect()
                 )
 
+        val r10_13AcceptanceOk =
+            !r10_13Acceptance ||
+                (
+                    baseSuccess &&
+                        runtimeContext.optBoolean("r10_13_lifecycle_restore_verified", false) &&
+                        runtimeContext.optBoolean("r10_13_service_instance_recreated", false) &&
+                        runtimeContext.optBoolean("r10_13_process_recreated", false) &&
+                        runtimeContext.optBoolean("r10_13_process_epoch_recreated", false) &&
+                        runtimeContext.optBoolean("r10_13_disk_only_restore_verified", false) &&
+                        runtimeContext.optBoolean("r10_13_background_auto_resume", false) &&
+                        runtimeContext.optBoolean("r10_13_verified_prefix_preserved_after_process_death", false) &&
+                        runtimeContext.optBoolean("r10_13_plan_revision_preserved_after_process_death", false) &&
+                        runtimeContext.optBoolean("r10_13_adaptive_revision_preserved_after_process_death", false) &&
+                        runtimeContext.optBoolean("r10_13_partial_result_preserved_after_process_death", false) &&
+                        runtimeContext.optBoolean("r10_13_browser_replay_blocked_after_process_death", false) &&
+                        runtimeContext.optBoolean("r10_13_visual_replay_blocked_after_process_death", false) &&
+                        runtimeContext.optBoolean("r10_13_process_death_requested", false) &&
+                        browserDispatchCount ==
+                            runtimeContext.optInt("r10_13_pre_death_browser_dispatch_count", -1) &&
+                        visualReadCount ==
+                            runtimeContext.optInt("r10_13_pre_death_visual_read_count", -1) &&
+                        browserDispatchCount == 1 &&
+                        visualReadCount == 1 &&
+                        longObjective.verifiedSubgoalCount() == longObjective.subgoalCount() &&
+                        terminalLedgerConverged &&
+                        !adaptiveLoop.hasUnresolvedSideEffect()
+                )
+
         val r10_12AcceptanceOk =
             !r10_12Acceptance ||
                 (
@@ -37991,13 +38345,15 @@ routed.forEach {
         val success =
             baseSuccess &&
                 r10_11AcceptanceOk &&
-                r10_12AcceptanceOk
+                r10_12AcceptanceOk &&
+                r10_13AcceptanceOk
 
         return JSONObject()
             .put("production_dynamic_planner", true)
             .put(
                 "production_route",
                 when {
+                    r10_13Acceptance -> "r10_13"
                     r10_12Acceptance -> "r10_12"
                     r10_11Acceptance -> "r10_11"
                     else -> "r10_10"
@@ -38106,6 +38462,85 @@ routed.forEach {
                 "visual_replayed_after_restart",
                 r10_11Acceptance && visualReadCount != 1
             )
+            .put("r10_13_acceptance", r10_13Acceptance)
+            .put(
+                "process_death_requested",
+                runtimeContext.optBoolean("r10_13_process_death_requested", false)
+            )
+            .put(
+                "full_process_death_verified",
+                runtimeContext.optBoolean("r10_13_lifecycle_restore_verified", false) &&
+                    runtimeContext.optBoolean("r10_13_process_recreated", false) &&
+                    runtimeContext.optBoolean("r10_13_process_epoch_recreated", false)
+            )
+            .put(
+                "process_recreated",
+                if (r10_13Acceptance) {
+                    runtimeContext.optBoolean("r10_13_process_recreated", false)
+                } else {
+                    runtimeContext.optBoolean("r10_12_process_recreated", false)
+                }
+            )
+            .put(
+                "process_epoch_recreated",
+                runtimeContext.optBoolean("r10_13_process_epoch_recreated", false)
+            )
+            .put(
+                "disk_only_restore_verified",
+                runtimeContext.optBoolean("r10_13_disk_only_restore_verified", false)
+            )
+            .put(
+                "verified_prefix_preserved_after_process_death",
+                runtimeContext.optBoolean("r10_13_verified_prefix_preserved_after_process_death", false)
+            )
+            .put(
+                "plan_revision_preserved_after_process_death",
+                runtimeContext.optBoolean("r10_13_plan_revision_preserved_after_process_death", false)
+            )
+            .put(
+                "adaptive_revision_preserved_after_process_death",
+                runtimeContext.optBoolean("r10_13_adaptive_revision_preserved_after_process_death", false)
+            )
+            .put(
+                "partial_result_preserved_after_process_death",
+                runtimeContext.optBoolean("r10_13_partial_result_preserved_after_process_death", false)
+            )
+            .put(
+                "browser_replay_blocked_after_process_death",
+                runtimeContext.optBoolean("r10_13_browser_replay_blocked_after_process_death", false)
+            )
+            .put(
+                "visual_replay_blocked_after_process_death",
+                runtimeContext.optBoolean("r10_13_visual_replay_blocked_after_process_death", false)
+            )
+            .put(
+                "origin_process_id",
+                runtimeContext.optInt("r10_13_origin_process_id", -1)
+            )
+            .put(
+                "restored_process_id",
+                runtimeContext.optInt("r10_13_current_process_id", -1)
+            )
+            .put(
+                "origin_process_epoch_id",
+                runtimeContext.optString("r10_13_origin_process_epoch_id")
+            )
+            .put(
+                "restored_process_epoch_id",
+                runtimeContext.optString("r10_13_current_process_epoch_id")
+            )
+            .put(
+                "service_instance_recreated_after_process_death",
+                runtimeContext.optBoolean("r10_13_service_instance_recreated", false)
+            )
+            .put(
+                "origin_process_service_instance_id",
+                runtimeContext.optString("r10_13_origin_service_instance_id")
+            )
+            .put(
+                "restored_process_service_instance_id",
+                runtimeContext.optString("r10_13_current_service_instance_id")
+            )
             .put("r10_12_acceptance", r10_12Acceptance)
             .put(
                 "service_recreation_requested",
@@ -38116,12 +38551,16 @@ routed.forEach {
                 runtimeContext.optBoolean("r10_12_service_instance_recreated", false)
             )
             .put(
-                "process_recreated",
+                "service_recreation_process_changed",
                 runtimeContext.optBoolean("r10_12_process_recreated", false)
             )
             .put(
                 "background_auto_resume",
-                runtimeContext.optBoolean("r10_12_background_auto_resume", false)
+                if (r10_13Acceptance) {
+                    runtimeContext.optBoolean("r10_13_background_auto_resume", false)
+                } else {
+                    runtimeContext.optBoolean("r10_12_background_auto_resume", false)
+                }
             )
             .put(
                 "lifecycle_restore_verified",
@@ -38165,7 +38604,11 @@ routed.forEach {
             )
             .put(
                 "acceptance_ok",
-                if (r10_12Acceptance) r10_12AcceptanceOk else r10_11AcceptanceOk
+                when {
+                    r10_13Acceptance -> r10_13AcceptanceOk
+                    r10_12Acceptance -> r10_12AcceptanceOk
+                    else -> r10_11AcceptanceOk
+                }
             )
             .put("goal_id", goalId)
             .put("reason", lastFailure)
@@ -39061,6 +39504,188 @@ routed.forEach {
 
 
 
+    private fun scheduleR10_13ProcessDeath() {
+        val appContext = applicationContext
+
+        thread(
+            start = true,
+            name = "AyanaR10_13ProcessDeath"
+        ) {
+            try {
+                val restartIntent =
+                    Intent(
+                        appContext,
+                        AyanaVoiceService::class.java
+                    ).apply {
+                        action = ACTION_START
+                    }
+
+                val restartPendingIntent =
+                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                        PendingIntent.getForegroundService(
+                            appContext,
+                            101013,
+                            restartIntent,
+                            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+                        )
+                    } else {
+                        PendingIntent.getService(
+                            appContext,
+                            101013,
+                            restartIntent,
+                            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+                        )
+                    }
+
+                val alarmManager =
+                    appContext.getSystemService(Context.ALARM_SERVICE) as AlarmManager
+
+                val triggerAt =
+                    SystemClock.elapsedRealtime() + 1_500L
+
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+                    alarmManager.setAndAllowWhileIdle(
+                        AlarmManager.ELAPSED_REALTIME_WAKEUP,
+                        triggerAt,
+                        restartPendingIntent
+                    )
+                } else {
+                    alarmManager.set(
+                        AlarmManager.ELAPSED_REALTIME_WAKEUP,
+                        triggerAt,
+                        restartPendingIntent
+                    )
+                }
+
+                Thread.sleep(300L)
+
+                // Deliberately kill the entire AYANA app process. No Service stop/shutdown
+                // path is used, so user-stop semantics cannot be confused with recovery.
+                android.os.Process.killProcess(android.os.Process.myPid())
+            } catch (_: Throwable) {
+                // The persisted goal remains safe/recoverable. If process termination itself
+                // fails, R10.13's PID + process-epoch gates will fail closed on any resume.
+            }
+        }
+    }
+
+    private fun isR10_13FullProcessDeathRecoveryAcceptanceCommand(
+        command: String
+    ): Boolean {
+        val normalized =
+            command
+                .lowercase(Locale.ROOT)
+                .replace('ё', 'е')
+                .replace(Regex("\\s+"), " ")
+                .trim()
+                .removePrefix("аяна ")
+                .trim()
+
+        return normalized in
+            setOf(
+                "проверь полное восстановление после смерти процесса",
+                "проверь восстановление после смерти процесса",
+                "проверь process death recovery",
+                "проверь full process death recovery",
+                "проверь r10.13"
+            )
+    }
+
+    private fun runR10_13FullProcessDeathRecoveryAcceptance(
+        silent: Boolean
+    ) {
+        val objective =
+            "сначала проверь состояние устройства, открой AYANA AI, затем открой Example Domain в браузере, прочитай заголовок страницы, найди этот заголовок в YouTube и в конце снова проверь состояние устройства"
+
+        if (!AyanaLifecycleRecoveryCoordinator().selfTest()) {
+            respondAndResume(
+                text = "R10.13 остановлен: process-death recovery self-test не подтверждён.",
+                silent = silent,
+                success = false,
+                technical =
+                    JSONObject()
+                        .put("r10_13_acceptance", true)
+                        .put("acceptance_ok", false)
+                        .put("lifecycle_recovery_self_test", false)
+                        .toString()
+            )
+            return
+        }
+
+        val proposal =
+            try {
+                AyanaDynamicGoalPlanner.localProposal(objective)
+            } catch (error: Throwable) {
+                respondAndResume(
+                    text = "R10.13 остановлен: production plan не сформирован.",
+                    silent = silent,
+                    success = false,
+                    technical =
+                        JSONObject()
+                            .put("r10_13_acceptance", true)
+                            .put("acceptance_ok", false)
+                            .put("reason", error.message ?: error.javaClass.simpleName)
+                            .toString()
+                )
+                return
+            }
+
+        val planner =
+            try {
+                AyanaDynamicGoalPlanner.compile(
+                    objective = objective,
+                    proposal = proposal
+                )
+            } catch (error: Throwable) {
+                respondAndResume(
+                    text = "R10.13 остановлен: production plan не прошёл contract validation.",
+                    silent = silent,
+                    success = false,
+                    technical =
+                        JSONObject()
+                            .put("r10_13_acceptance", true)
+                            .put("acceptance_ok", false)
+                            .put("reason", error.message ?: error.javaClass.simpleName)
+                            .toString()
+                )
+                return
+            }
+
+        if (planner.subgoalCount() != 6) {
+            respondAndResume(
+                text = "R10.13 остановлен: неожиданный production DAG.",
+                silent = silent,
+                success = false,
+                technical =
+                    JSONObject()
+                        .put("r10_13_acceptance", true)
+                        .put("acceptance_ok", false)
+                        .put("subgoal_count", planner.subgoalCount())
+                        .toString()
+            )
+            return
+        }
+
+        val runtimeContext =
+            JSONObject()
+                .put("r10_13_acceptance", true)
+                .put("r10_13_process_death_requested", false)
+                .put("r10_13_pre_death_checkpoint_persisted", false)
+                .put("r10_13_user_stop_requested", false)
+                .put("r10_13_origin_service_instance_id", serviceInstanceId)
+                .put("r10_13_origin_process_id", android.os.Process.myPid())
+                .put("r10_13_origin_process_epoch_id", processEpochId)
+
+        startR10_10ProductionDynamicPlannerWorker(
+            command = objective,
+            silent = silent,
+            planner = planner,
+            resumeGoal = null,
+            automaticRecovery = false,
+            initialRuntimeContext = runtimeContext
+        )
+    }
+
     private fun scheduleR10_12ServiceRecreation() {
         val appContext = applicationContext
 
@@ -39205,6 +39830,7 @@ routed.forEach {
                 .put("r10_12_user_stop_requested", false)
                 .put("r10_12_origin_service_instance_id", serviceInstanceId)
                 .put("r10_12_origin_process_id", android.os.Process.myPid())
+                .put("r10_12_origin_process_epoch_id", processEpochId)
 
         startR10_10ProductionDynamicPlannerWorker(
             command = objective,
@@ -52810,7 +53436,8 @@ STATE_SUCCESS
                         .evaluateAutomaticResume(
                             goal = goal,
                             currentServiceInstanceId = serviceInstanceId,
-                            currentProcessId = android.os.Process.myPid()
+                            currentProcessId = android.os.Process.myPid(),
+                            currentProcessEpochId = processEpochId
                         )
                 } catch (_: Exception) {
                     JSONObject()
@@ -64500,9 +65127,9 @@ state
         private const val MASTER_STATUS_MANUAL_REQUIRED =
             "MANUAL_REQUIRED"
 
-        // R10.12 NATURAL LIFECYCLE RECOVERY + BACKGROUND CONTINUATION RELEASE TRUTH.
+        // R10.13 FULL PROCESS-DEATH RECOVERY RELEASE TRUTH.
         private const val AYANA_VOICE_SERVICE_RELEASE =
-            "v12.45.0 / R10.12 NATURAL LIFECYCLE RECOVERY + BACKGROUND CONTINUATION"
+            "v12.46.0 / R10.13 FULL PROCESS-DEATH RECOVERY"
 
         private const val AYANA_PERSONAL_SEARCH_ENGINE_RELEASE =
             "v1.5.1 IMAGE COVERAGE TRUTH + R10.2 UNIFIED SEARCH CONTRACT v1.0"
@@ -64514,13 +65141,13 @@ state
             "v11.1.10 Multi-Attachment"
 
         private const val AYANA_ACCEPTED_FEATURE_CHECKPOINT =
-            "R10.11 PRODUCTION REPLAN + DURABLE RECOVERY — DEVICE-CONFIRMED ACCEPTED"
+            "R10.12 NATURAL LIFECYCLE RECOVERY + BACKGROUND CONTINUATION — DEVICE-CONFIRMED ACCEPTED"
 
         private const val AYANA_CURRENT_FEATURE_RELEASE =
-            "R10.12 NATURAL LIFECYCLE RECOVERY + BACKGROUND CONTINUATION — PENDING DEVICE CONFIRMATION"
+            "R10.13 FULL PROCESS-DEATH RECOVERY — PENDING DEVICE CONFIRMATION"
 
         private const val AYANA_RELEASE_LINEAGE =
-            "Android v12.21.0 / R7.9 truth-hardening + R8.0 multi-attachment + R8.1–R8.4 accepted Personal Global Search stack + R8.5–R8.5.4 capability/evidence truth + R9.0 autonomous agent foundation + R9.0.1 history live-refresh proof fix + R9.0.2 diagnostic reconciliation/history refresh fix + R9.0.3 TTS health reconciliation + R9.1 IME perception/active telemetry truth + R9.2 autonomous recovery/long-task reconciliation + R9.2.1 adaptive hypothesis reconciliation + R9.3 app integration framework + R9.3.1 screen health reconciliation + R9.3.2 history latency recovery reconciliation + R9.3.3 informational terminal reconciliation + R9.3.4 app integration device acceptance + R9.4 multi-app task orchestration + R9.4.1 screen ownership union reconciliation + R9.5 verified result transfer between app steps + R9.5.1 partial marker provenance reconciliation + R9.5.2 bounded marker observation + R9.5.3 verified action result transfer + R9.6 verified semantic observation fallback + R9.6.1 visual fallback acceptance truth + R9.7 structured screen reading + R9.7.1 conversation routing/terminal truth + R9.7.2 structured router conversation precedence + R9.7.3 action morphology/terminal truth + R9.8 generic verified result transfer + R9.8.1 master full acceptance/diagnostic engine + R9.9 reversible action journal/verified undo + R9.9.1 brightness verified undo device acceptance + R9.9.2 opt-in low-battery controlled proactivity + R10.0 unified screen intelligence + R10.1 local self-diagnostics/self-audit + R10.2 personal search expansion + R10.3 long autonomous tasks/recovery + R10.4 adaptive verified execution loop + R10.5 generalized live adaptive autonomy + R10.6 cross-lane adaptive continuity + R10.6.1 durable goal binding fix + R10.7 cross-lane durable recovery continuity + R10.7.1 isolated acceptance cleanup hardening + R10.8 general-purpose long autonomous objectives + R10.9 dynamic goal decomposition/planner contract + R10.10 adaptive planner production path + R10.11 production replan/durable recovery + R10.12 natural lifecycle recovery/background continuation"
+            "Android v12.21.0 / R7.9 truth-hardening + R8.0 multi-attachment + R8.1–R8.4 accepted Personal Global Search stack + R8.5–R8.5.4 capability/evidence truth + R9.0 autonomous agent foundation + R9.0.1 history live-refresh proof fix + R9.0.2 diagnostic reconciliation/history refresh fix + R9.0.3 TTS health reconciliation + R9.1 IME perception/active telemetry truth + R9.2 autonomous recovery/long-task reconciliation + R9.2.1 adaptive hypothesis reconciliation + R9.3 app integration framework + R9.3.1 screen health reconciliation + R9.3.2 history latency recovery reconciliation + R9.3.3 informational terminal reconciliation + R9.3.4 app integration device acceptance + R9.4 multi-app task orchestration + R9.4.1 screen ownership union reconciliation + R9.5 verified result transfer between app steps + R9.5.1 partial marker provenance reconciliation + R9.5.2 bounded marker observation + R9.5.3 verified action result transfer + R9.6 verified semantic observation fallback + R9.6.1 visual fallback acceptance truth + R9.7 structured screen reading + R9.7.1 conversation routing/terminal truth + R9.7.2 structured router conversation precedence + R9.7.3 action morphology/terminal truth + R9.8 generic verified result transfer + R9.8.1 master full acceptance/diagnostic engine + R9.9 reversible action journal/verified undo + R9.9.1 brightness verified undo device acceptance + R9.9.2 opt-in low-battery controlled proactivity + R10.0 unified screen intelligence + R10.1 local self-diagnostics/self-audit + R10.2 personal search expansion + R10.3 long autonomous tasks/recovery + R10.4 adaptive verified execution loop + R10.5 generalized live adaptive autonomy + R10.6 cross-lane adaptive continuity + R10.6.1 durable goal binding fix + R10.7 cross-lane durable recovery continuity + R10.7.1 isolated acceptance cleanup hardening + R10.8 general-purpose long autonomous objectives + R10.9 dynamic goal decomposition/planner contract + R10.10 adaptive planner production path + R10.11 production replan/durable recovery + R10.12 natural lifecycle recovery/background continuation + R10.13 full process-death recovery"
 
         // AyanaCommandHistoryStore v2.8 keeps up to 4k chars inline and stores longer
         // results out-of-line. Self-review intentionally remains inline so copied History
@@ -65176,6 +65803,9 @@ const val ACTION_START =
                 "музык",
                 "видео"
             )
+
+        private val PROCESS_EPOCH_ID: String =
+            UUID.randomUUID().toString()
 
         const val STATE_LISTENING =
             "listening"
