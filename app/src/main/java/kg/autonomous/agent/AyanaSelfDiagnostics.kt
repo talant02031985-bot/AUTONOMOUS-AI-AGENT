@@ -6,7 +6,13 @@ import org.json.JSONObject
 import java.util.Locale
 
 /**
- * AYANA Self-Diagnostics v4.3 — OWN-APP SCREEN OWNERSHIP UNION STABILIZATION.
+ * AYANA Self-Diagnostics v4.4 — CROSS-PROCESS ACCESSIBILITY TRUTH.
+ *
+ * v4.4 preserves v4.3 health-state truth and makes Accessibility diagnostics
+ * R10.14-aware: when the main process has no process-local AccessibilityService
+ * instance, the diagnostic verifies the isolated :perception process through
+ * AyanaPerceptionBridge instead of reporting a false FAIL. Screen-health fields
+ * use the same verified bridge snapshot as a bounded fallback.
  *
  * v4.3 preserves v4.2 health-state truth and fixes a transient ownership race:
  * a bounded own-app screen retry may start when EITHER the primary package OR
@@ -212,9 +218,52 @@ class AyanaSelfDiagnostics(
             }
         )
 
-        val accessibility =
+        val localAccessibility =
             runtime.optBoolean(
                 "accessibility_connected",
+                false
+            )
+
+        val perceptionBridge =
+            AyanaPerceptionBridgeClient(
+                appContext
+            )
+
+        val perceptionBridgeStatus =
+            if (localAccessibility) {
+                JSONObject()
+            } else {
+                try {
+                    perceptionBridge.status()
+                } catch (_: Throwable) {
+                    JSONObject()
+                }
+            }
+
+        val bridgeAccessibility =
+            perceptionBridgeStatus.optBoolean(
+                "accessibility_connected",
+                false
+            )
+
+        val accessibility =
+            localAccessibility ||
+                bridgeAccessibility
+
+        val crossProcessScreen =
+            if (!localAccessibility && bridgeAccessibility) {
+                try {
+                    perceptionBridge.getScreenState()
+                } catch (_: Throwable) {
+                    JSONObject()
+                }
+            } else {
+                JSONObject()
+            }
+
+        val crossProcessScreenUsable =
+            crossProcessScreen.optBoolean(
+                "success",
                 false
             )
 
@@ -227,48 +276,101 @@ class AyanaSelfDiagnostics(
                 STATUS_FAIL
             },
             "Управление экраном AYANA",
-            if (accessibility) {
-                "Сервис подключён"
-            } else {
-                "Сервис специальных возможностей не подключён"
+            when {
+                localAccessibility ->
+                    "Сервис подключён"
+
+                bridgeAccessibility ->
+                    "Сервис подключён через изолированный perception process"
+
+                else ->
+                    "Сервис специальных возможностей не подключён"
             }
         )
 
         val screenSnapshotOk =
-            runtime.optBoolean(
-                "screen_snapshot_ok",
-                false
-            )
+            if (crossProcessScreenUsable) {
+                true
+            } else {
+                runtime.optBoolean(
+                    "screen_snapshot_ok",
+                    false
+                )
+            }
 
         val screenWindows =
-            runtime.optInt(
-                "screen_window_count",
-                -1
-            )
+            if (crossProcessScreenUsable) {
+                crossProcessScreen.optInt(
+                    "window_count",
+                    crossProcessScreen.optInt(
+                        "raw_window_count",
+                        -1
+                    )
+                )
+            } else {
+                runtime.optInt(
+                    "screen_window_count",
+                    -1
+                )
+            }
 
         val screenText =
-            runtime.optInt(
-                "screen_visible_text_count",
-                -1
-            )
+            if (crossProcessScreenUsable) {
+                crossProcessScreen.optInt(
+                    "primary_readable_text_count",
+                    crossProcessScreen.optInt(
+                        "readable_text_count",
+                        -1
+                    )
+                )
+            } else {
+                runtime.optInt(
+                    "screen_visible_text_count",
+                    -1
+                )
+            }
 
         val screenContentState =
-            runtime.optString(
-                "screen_primary_content_state",
-                "unknown"
-            )
+            if (crossProcessScreenUsable) {
+                crossProcessScreen.optString(
+                    "primary_content_state",
+                    crossProcessScreen.optString(
+                        "content_status",
+                        "unknown"
+                    )
+                )
+            } else {
+                runtime.optString(
+                    "screen_primary_content_state",
+                    "unknown"
+                )
+            }
 
         val screenPrimaryText =
-            runtime.optInt(
-                "screen_primary_readable_text_count",
-                -1
-            )
+            if (crossProcessScreenUsable) {
+                crossProcessScreen.optInt(
+                    "primary_readable_text_count",
+                    -1
+                )
+            } else {
+                runtime.optInt(
+                    "screen_primary_readable_text_count",
+                    -1
+                )
+            }
 
         val screenLatency =
-            runtime.optLong(
-                "screen_snapshot_latency_ms",
-                -1L
-            )
+            if (crossProcessScreenUsable) {
+                crossProcessScreen.optLong(
+                    "snapshot_latency_ms",
+                    -1L
+                )
+            } else {
+                runtime.optLong(
+                    "screen_snapshot_latency_ms",
+                    -1L
+                )
+            }
 
         val externalScreenFresh =
             runtime.optBoolean(
