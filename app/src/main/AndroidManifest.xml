@@ -7,14 +7,6 @@
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MICROPHONE" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
-
-    <!-- R8.2 Personal Global Search: photo-library visibility with Android 14+ partial-access truth. -->
-    <uses-permission
-        android:name="android.permission.READ_EXTERNAL_STORAGE"
-        android:maxSdkVersion="32" />
-    <uses-permission android:name="android.permission.READ_MEDIA_IMAGES" />
-    <uses-permission android:name="android.permission.READ_MEDIA_VISUAL_USER_SELECTED" />
-
     <uses-permission android:name="android.permission.SCHEDULE_EXACT_ALARM" />
     <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
     <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW" />
@@ -75,6 +67,7 @@
             android:name=".AgentAccessibilityService"
             android:permission="android.permission.BIND_ACCESSIBILITY_SERVICE"
             android:exported="true"
+            android:process=":perception"
             android:label="AYANA AI">
 
             <intent-filter>
@@ -86,6 +79,19 @@
                 android:resource="@xml/accessibility_service_config" />
 
         </service>
+
+        <!-- R10.14: Accessibility/perception survives death of the main AYANA process. -->
+        <provider
+            android:name=".AyanaPerceptionBridgeProvider"
+            android:authorities="kg.autonomous.agent.perception.bridge"
+            android:exported="false"
+            android:process=":perception" />
+
+        <!-- Reverse same-UID bridge for AYANA's factual in-process MainActivity View tree. -->
+        <provider
+            android:name=".AyanaOwnAppBridgeProvider"
+            android:authorities="kg.autonomous.agent.ownapp.bridge"
+            android:exported="false" />
 
         <receiver
             android:name=".AyanaReminderReceiver"
