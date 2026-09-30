@@ -19,7 +19,7 @@ import kotlin.math.max
 import kotlin.math.roundToInt
 
 /**
- * AYANA R9.6 Visual Screen Evidence v1.0.
+ * AYANA R10.14.1 Visual Screen Evidence v1.1 — CROSS-PROCESS CAPTURE.
  *
  * Read-only screenshot bridge for verified semantic fallback.
  * It does not interpret pixels and does not authorize actions.
@@ -41,6 +41,10 @@ class AyanaVisualScreenEvidence(
 
     private val appContext =
         context.applicationContext
+
+    private val perceptionBridge by lazy {
+        AyanaPerceptionBridgeClient(appContext)
+    }
 
     fun captureVerifiedExternalWindow(
         expectedPackage: String,
@@ -67,7 +71,30 @@ class AyanaVisualScreenEvidence(
 
         val service =
             AgentAccessibilityService.instance
-                ?: return failure("accessibility_service_unavailable")
+
+        if (service == null) {
+            if (perceptionBridge.isLocalPerceptionProcess()) {
+                return failure("accessibility_service_unavailable")
+                    .put("cross_process_visual_capture", false)
+            }
+
+            return try {
+                perceptionBridge
+                    .captureVerifiedExternalWindow(
+                        expectedPackage = cleanPackage,
+                        timeoutMs = timeoutMs
+                    )
+                    .put("visual_screen_evidence_version", VERSION)
+                    .put("cross_process_visual_capture", true)
+            } catch (error: Throwable) {
+                failure("cross_process_visual_capture_failed")
+                    .put(
+                        "detail",
+                        (error.message ?: error.javaClass.simpleName).take(240)
+                    )
+                    .put("cross_process_visual_capture", true)
+            }
+        }
 
         val before =
             try {
@@ -682,7 +709,7 @@ class AyanaVisualScreenEvidence(
             .put("visual_screen_evidence_version", VERSION)
 
     companion object {
-        const val VERSION = "1.0"
+        const val VERSION = "1.1"
 
         private const val MULTIMODAL_CACHE_DIR =
             "ayana_multimodal"
