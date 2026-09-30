@@ -32,7 +32,7 @@ import java.util.UUID
  * - No new action authority is introduced. IPC only transports existing verified operations.
  */
 object AyanaPerceptionBridgeContract {
-    const val VERSION = "1.0"
+    const val VERSION = "1.1"
 
     const val PERCEPTION_AUTHORITY = "kg.autonomous.agent.perception.bridge"
     const val OWN_APP_AUTHORITY = "kg.autonomous.agent.ownapp.bridge"
@@ -42,6 +42,7 @@ object AyanaPerceptionBridgeContract {
 
     const val METHOD_STATUS = "status"
     const val METHOD_SCREEN_STATE = "screen_state"
+    const val METHOD_CAPTURE_VERIFIED_EXTERNAL_WINDOW = "capture_verified_external_window"
     const val METHOD_CLICK = "click"
     const val METHOD_INPUT_TEXT = "input_text"
     const val METHOD_SCROLL = "scroll"
@@ -79,6 +80,12 @@ class AyanaPerceptionBridgeProvider : ContentProvider() {
         )
     }
 
+    private val visualScreenEvidence by lazy {
+        AyanaVisualScreenEvidence(
+            requireNotNull(context).applicationContext
+        )
+    }
+
     override fun onCreate(): Boolean = true
 
     override fun call(
@@ -101,6 +108,15 @@ class AyanaPerceptionBridgeProvider : ContentProvider() {
 
                     AyanaPerceptionBridgeContract.METHOD_SCREEN_STATE ->
                         screenIntelligence.getScreenState()
+
+                    AyanaPerceptionBridgeContract.METHOD_CAPTURE_VERIFIED_EXTERNAL_WINDOW ->
+                        visualScreenEvidence.captureVerifiedExternalWindow(
+                            expectedPackage = args.optString("expected_package"),
+                            timeoutMs = args.optLong("timeout_ms", 2_500L)
+                        )
+                            .put("cross_process_visual_capture", true)
+                            .put("visual_capture_process_id", Process.myPid())
+                            .put("visual_capture_process_epoch_id", perceptionProcessEpochId)
 
                     AyanaPerceptionBridgeContract.METHOD_CLICK ->
                         screenIntelligence.click(
@@ -448,6 +464,17 @@ class AyanaPerceptionBridgeClient(
         call(
             AyanaPerceptionBridgeContract.METHOD_SCREEN_STATE,
             JSONObject()
+        )
+
+    fun captureVerifiedExternalWindow(
+        expectedPackage: String,
+        timeoutMs: Long
+    ): JSONObject =
+        call(
+            AyanaPerceptionBridgeContract.METHOD_CAPTURE_VERIFIED_EXTERNAL_WINDOW,
+            JSONObject()
+                .put("expected_package", expectedPackage)
+                .put("timeout_ms", timeoutMs)
         )
 
     fun click(
