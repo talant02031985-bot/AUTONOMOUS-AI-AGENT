@@ -4,29 +4,28 @@ import org.json.JSONObject
 import java.util.Locale
 
 /**
- * AYANA R10.12 Natural Lifecycle Recovery Coordinator v1.0.
+ * AYANA R10.13 Lifecycle / Process-Death Recovery Coordinator v1.1.
  *
- * Pure policy/audit layer for production dynamic objectives crossing a real
- * Android Service lifecycle recreation. It never starts/stops services and never
- * dispatches tools. VoiceService owns lifecycle operations and execution.
+ * Pure policy/audit layer. It never kills/restarts Android components and never
+ * dispatches tools. VoiceService owns lifecycle/process operations and execution.
  *
- * Contract:
- * - automatic lifecycle continuation is allowed only for production dynamic goals;
- * - cancelled/failed/completed/confirmation-bound goals never auto-resume;
- * - in-flight or unresolved-side-effect boundaries never auto-resume;
- * - safe_auto_resume must be explicitly persisted before lifecycle handoff;
- * - service instance identity must change before an R10.12 acceptance can claim
- *   real Service recreation;
- * - process identity is recorded separately and is never inferred from a service
- *   object recreation;
- * - user cancellation/stop can never be reinterpreted as process interruption.
+ * R10.12 contract retained:
+ * - safe production dynamic goals may auto-resume after verified Service recreation;
+ * - user stop/cancel, confirmation, in-flight and unresolved-side-effect boundaries fail closed.
+ *
+ * R10.13 extension:
+ * - a full process-death acceptance is valid only when BOTH PID and process-epoch change;
+ * - service recreation alone can never satisfy the R10.13 process-death gate;
+ * - the pre-death checkpoint must be persisted before process termination;
+ * - continuation remains blind-replay forbidden and must originate from durable state.
  */
 class AyanaLifecycleRecoveryCoordinator {
 
     fun evaluateAutomaticResume(
         goal: JSONObject?,
         currentServiceInstanceId: String,
-        currentProcessId: Int
+        currentProcessId: Int,
+        currentProcessEpochId: String = ""
     ): JSONObject {
         if (goal == null || goal.length() == 0) {
             return decision(false, "goal_missing")
@@ -71,16 +70,37 @@ class AyanaLifecycleRecoveryCoordinator {
             goal.optJSONObject("dynamic_planner_runtime_context")
                 ?: JSONObject()
 
-        if (runtime.optBoolean("r10_12_user_stop_requested", false)) {
+        if (
+            runtime.optBoolean("r10_12_user_stop_requested", false) ||
+            runtime.optBoolean("r10_13_user_stop_requested", false)
+        ) {
             return decision(false, "user_stop_marker")
         }
 
+        val r10_13Acceptance = runtime.optBoolean("r10_13_acceptance", false)
+        val r10_12Acceptance =
+            !r10_13Acceptance && runtime.optBoolean("r10_12_acceptance", false)
+
         val originServiceInstanceId =
-            runtime.optString("r10_12_origin_service_instance_id").trim()
+            if (r10_13Acceptance) {
+                runtime.optString("r10_13_origin_service_instance_id").trim()
+            } else {
+                runtime.optString("r10_12_origin_service_instance_id").trim()
+            }
+
         val originProcessId =
-            runtime.optInt("r10_12_origin_process_id", -1)
-        val acceptance =
-            runtime.optBoolean("r10_12_acceptance", false)
+            if (r10_13Acceptance) {
+                runtime.optInt("r10_13_origin_process_id", -1)
+            } else {
+                runtime.optInt("r10_12_origin_process_id", -1)
+            }
+
+        val originProcessEpochId =
+            if (r10_13Acceptance) {
+                runtime.optString("r10_13_origin_process_epoch_id").trim()
+            } else {
+                runtime.optString("r10_12_origin_process_epoch_id").trim()
+            }
 
         val serviceRecreated =
             originServiceInstanceId.isNotBlank() &&
@@ -92,34 +112,63 @@ class AyanaLifecycleRecoveryCoordinator {
                 currentProcessId > 0 &&
                 originProcessId != currentProcessId
 
-        if (acceptance && !serviceRecreated) {
+        val processEpochRecreated =
+            originProcessEpochId.isNotBlank() &&
+                currentProcessEpochId.isNotBlank() &&
+                originProcessEpochId != currentProcessEpochId
+
+        if (r10_13Acceptance && (!processRecreated || !processEpochRecreated)) {
+            return decision(false, "process_identity_not_recreated")
+                .put("status", status)
+                .put("service_instance_recreated", serviceRecreated)
+                .put("process_recreated", processRecreated)
+                .put("process_epoch_recreated", processEpochRecreated)
+                .put("current_service_instance_id", currentServiceInstanceId)
+                .put("origin_service_instance_id", originServiceInstanceId)
+                .put("current_process_id", currentProcessId)
+                .put("origin_process_id", originProcessId)
+                .put("current_process_epoch_id", currentProcessEpochId)
+                .put("origin_process_epoch_id", originProcessEpochId)
+                .put("r10_13_acceptance", true)
+        }
+
+        if (r10_12Acceptance && !serviceRecreated) {
             return decision(false, "service_instance_not_recreated")
+                .put("status", status)
                 .put("service_instance_recreated", false)
                 .put("process_recreated", processRecreated)
+                .put("process_epoch_recreated", processEpochRecreated)
+                .put("r10_12_acceptance", true)
         }
 
         return decision(true, "lifecycle_auto_resume_contract_verified")
             .put("status", status)
             .put("service_instance_recreated", serviceRecreated)
             .put("process_recreated", processRecreated)
+            .put("process_epoch_recreated", processEpochRecreated)
             .put("current_service_instance_id", currentServiceInstanceId)
             .put("origin_service_instance_id", originServiceInstanceId)
             .put("current_process_id", currentProcessId)
             .put("origin_process_id", originProcessId)
-            .put("acceptance", acceptance)
+            .put("current_process_epoch_id", currentProcessEpochId)
+            .put("origin_process_epoch_id", originProcessEpochId)
+            .put("r10_12_acceptance", r10_12Acceptance)
+            .put("r10_13_acceptance", r10_13Acceptance)
             .put("blind_replay_allowed", false)
     }
 
     fun verifyRestoredLifecycle(
         goal: JSONObject?,
         currentServiceInstanceId: String,
-        currentProcessId: Int
+        currentProcessId: Int,
+        currentProcessEpochId: String = ""
     ): JSONObject {
         val decision =
             evaluateAutomaticResume(
                 goal = goal,
                 currentServiceInstanceId = currentServiceInstanceId,
-                currentProcessId = currentProcessId
+                currentProcessId = currentProcessId,
+                currentProcessEpochId = currentProcessEpochId
             )
 
         if (!decision.optBoolean("allowed", false)) {
@@ -132,45 +181,62 @@ class AyanaLifecycleRecoveryCoordinator {
                 ?.optJSONObject("dynamic_planner_runtime_context")
                 ?: JSONObject()
 
+        val r10_13Acceptance = runtime.optBoolean("r10_13_acceptance", false)
         val requested =
-            runtime.optBoolean("r10_12_service_recreation_requested", false)
+            if (r10_13Acceptance) {
+                runtime.optBoolean("r10_13_process_death_requested", false)
+            } else {
+                runtime.optBoolean("r10_12_service_recreation_requested", false)
+            }
         val checkpointPersisted =
-            runtime.optBoolean("r10_12_pre_recreation_checkpoint_persisted", false)
+            if (r10_13Acceptance) {
+                runtime.optBoolean("r10_13_pre_death_checkpoint_persisted", false)
+            } else {
+                runtime.optBoolean("r10_12_pre_recreation_checkpoint_persisted", false)
+            }
         val preVerified =
-            runtime.optInt("r10_12_pre_recreation_verified_prefix", -1)
+            if (r10_13Acceptance) {
+                runtime.optInt("r10_13_pre_death_verified_prefix", -1)
+            } else {
+                runtime.optInt("r10_12_pre_recreation_verified_prefix", -1)
+            }
+
+        val identityVerified =
+            if (r10_13Acceptance) {
+                decision.optBoolean("process_recreated", false) &&
+                    decision.optBoolean("process_epoch_recreated", false)
+            } else {
+                decision.optBoolean("service_instance_recreated", false)
+            }
 
         val verified =
             requested &&
                 checkpointPersisted &&
                 preVerified >= 0 &&
-                decision.optBoolean("service_instance_recreated", false)
+                identityVerified
 
         return JSONObject(decision.toString())
             .put("verified", verified)
             .put(
                 "reason",
                 if (verified) {
-                    "service_lifecycle_recreation_verified"
+                    if (r10_13Acceptance) {
+                        "full_process_death_recovery_verified"
+                    } else {
+                        "service_lifecycle_recreation_verified"
+                    }
                 } else {
                     "lifecycle_restore_evidence_incomplete"
                 }
             )
             .put("pre_recreation_verified_prefix", preVerified)
+            .put("disk_only_restore_required", r10_13Acceptance)
             .put("blind_replay_allowed", false)
     }
 
     fun selfTest(): Boolean {
         return try {
-            val runtime =
-                JSONObject()
-                    .put("r10_12_acceptance", true)
-                    .put("r10_12_service_recreation_requested", true)
-                    .put("r10_12_pre_recreation_checkpoint_persisted", true)
-                    .put("r10_12_pre_recreation_verified_prefix", 4)
-                    .put("r10_12_origin_service_instance_id", "service-A")
-                    .put("r10_12_origin_process_id", 100)
-
-            val goal =
+            val baseGoal =
                 JSONObject()
                     .put("production_dynamic_planner", true)
                     .put("status", "recovery_pending")
@@ -186,44 +252,86 @@ class AyanaLifecycleRecoveryCoordinator {
                         "cross_lane_continuity",
                         JSONObject().put("unresolved_side_effect", false)
                     )
-                    .put("dynamic_planner_runtime_context", runtime)
 
-            val allowed =
+            val r10_12Runtime =
+                JSONObject()
+                    .put("r10_12_acceptance", true)
+                    .put("r10_12_service_recreation_requested", true)
+                    .put("r10_12_pre_recreation_checkpoint_persisted", true)
+                    .put("r10_12_pre_recreation_verified_prefix", 4)
+                    .put("r10_12_origin_service_instance_id", "service-A")
+                    .put("r10_12_origin_process_id", 100)
+                    .put("r10_12_origin_process_epoch_id", "process-A")
+
+            val r10_12Goal =
+                JSONObject(baseGoal.toString())
+                    .put("dynamic_planner_runtime_context", r10_12Runtime)
+
+            val serviceOnly =
                 verifyRestoredLifecycle(
-                    goal = goal,
+                    goal = r10_12Goal,
                     currentServiceInstanceId = "service-B",
-                    currentProcessId = 100
+                    currentProcessId = 100,
+                    currentProcessEpochId = "process-A"
                 )
 
-            val sameInstance =
+            val r10_13Runtime =
+                JSONObject()
+                    .put("r10_13_acceptance", true)
+                    .put("r10_13_process_death_requested", true)
+                    .put("r10_13_pre_death_checkpoint_persisted", true)
+                    .put("r10_13_pre_death_verified_prefix", 4)
+                    .put("r10_13_origin_service_instance_id", "service-A")
+                    .put("r10_13_origin_process_id", 100)
+                    .put("r10_13_origin_process_epoch_id", "process-A")
+
+            val r10_13Goal =
+                JSONObject(baseGoal.toString())
+                    .put("dynamic_planner_runtime_context", r10_13Runtime)
+
+            val fullProcess =
                 verifyRestoredLifecycle(
-                    goal = goal,
-                    currentServiceInstanceId = "service-A",
-                    currentProcessId = 100
-                )
-
-            val inFlight =
-                evaluateAutomaticResume(
-                    goal = JSONObject(goal.toString())
-                        .put("step_in_flight", true),
+                    goal = r10_13Goal,
                     currentServiceInstanceId = "service-B",
-                    currentProcessId = 100
+                    currentProcessId = 200,
+                    currentProcessEpochId = "process-B"
                 )
 
-            val cancelled =
-                evaluateAutomaticResume(
-                    goal = JSONObject(goal.toString())
-                        .put("status", "cancelled"),
+            val pidOnly =
+                verifyRestoredLifecycle(
+                    goal = r10_13Goal,
                     currentServiceInstanceId = "service-B",
-                    currentProcessId = 100
+                    currentProcessId = 200,
+                    currentProcessEpochId = "process-A"
                 )
 
-            allowed.optBoolean("verified", false) &&
-                allowed.optBoolean("service_instance_recreated", false) &&
-                !allowed.optBoolean("process_recreated", true) &&
-                !sameInstance.optBoolean("verified", true) &&
-                !inFlight.optBoolean("allowed", true) &&
-                !cancelled.optBoolean("allowed", true)
+            val epochOnly =
+                verifyRestoredLifecycle(
+                    goal = r10_13Goal,
+                    currentServiceInstanceId = "service-B",
+                    currentProcessId = 100,
+                    currentProcessEpochId = "process-B"
+                )
+
+            val userStop =
+                evaluateAutomaticResume(
+                    goal = JSONObject(r10_13Goal.toString()).also {
+                        it.optJSONObject("dynamic_planner_runtime_context")
+                            ?.put("r10_13_user_stop_requested", true)
+                    },
+                    currentServiceInstanceId = "service-B",
+                    currentProcessId = 200,
+                    currentProcessEpochId = "process-B"
+                )
+
+            serviceOnly.optBoolean("verified", false) &&
+                !serviceOnly.optBoolean("process_recreated", true) &&
+                fullProcess.optBoolean("verified", false) &&
+                fullProcess.optBoolean("process_recreated", false) &&
+                fullProcess.optBoolean("process_epoch_recreated", false) &&
+                !pidOnly.optBoolean("verified", true) &&
+                !epochOnly.optBoolean("verified", true) &&
+                !userStop.optBoolean("allowed", true)
         } catch (_: Throwable) {
             false
         }
@@ -246,6 +354,6 @@ class AyanaLifecycleRecoveryCoordinator {
             .lowercase(Locale.ROOT)
 
     companion object {
-        const val VERSION = "1.0"
+        const val VERSION = "1.1"
     }
 }
