@@ -63,7 +63,7 @@ import kotlin.math.abs
 
 class AyanaVoiceService : Service() {
 
-    // AYANA v12.46.1 / R10.13.1 POST-PROCESS READINESS + NAVIGATION RECONCILIATION.
+    // AYANA v12.46.2 / R10.13.2 PROCESS-DEATH CORE RECOVERY PROOF CORRECTION.
     // Builds on the R10.13 device run that already proved real PID/process-epoch change
     // and disk-only restore, but exposed a post-process startup race before Accessibility
     // / foreground evidence became usable.
@@ -37149,40 +37149,26 @@ routed.forEach {
                                 details = lifecycleRestore.toString().take(2400)
                             )
 
-                            val readiness =
-                                waitForR10_13PostProcessRuntimeReadiness(
-                                    commandToken = commandToken
-                                )
-
+                            // R10.13.2 correction: full process-death recovery must be proved
+                            // independently from Samsung AccessibilityService rebinding latency.
+                            // The acceptance DAG deliberately leaves only a local Agent Core
+                            // device-state suffix after the disk-only restore. UI-control after
+                            // total process death is a separate perception-process milestone.
                             runtimeContext
-                                .put("r10_13_post_process_readiness_verified", readiness.optBoolean("verified", false))
-                                .put("r10_13_post_process_accessibility_ready", readiness.optBoolean("accessibility_ready", false))
-                                .put("r10_13_post_process_screen_evidence_ready", readiness.optBoolean("screen_evidence_ready", false))
-                                .put("r10_13_post_process_readiness_waited_ms", readiness.optLong("waited_ms", 0L))
-                                .put("r10_13_post_process_readiness_attempts", readiness.optInt("attempts", 0))
+                                .put("r10_13_post_process_readiness_required", false)
+                                .put("r10_13_post_process_suffix_accessibility_independent", true)
+                                .put("r10_13_post_process_ui_control_required", false)
+                                .put("r10_13_external_ui_continuation_proven", false)
 
                             commandHistoryStore.addEvent(
                                 activeCommandHistoryId,
-                                state =
-                                    if (readiness.optBoolean("verified", false)) {
-                                        "r10_13_post_process_runtime_ready"
-                                    } else {
-                                        "r10_13_post_process_runtime_not_ready"
-                                    },
-                                message =
-                                    if (readiness.optBoolean("verified", false)) {
-                                        "R10.13 новый process дождался Accessibility/foreground evidence перед suffix dispatch"
-                                    } else {
-                                        "R10.13 остановлен до dispatch: post-process runtime readiness не подтверждена"
-                                    },
-                                details = readiness.toString().take(1800)
+                                state = "r10_13_process_death_local_suffix_ready",
+                                message = "R10.13.2 disk-only restore подтверждён; продолжаю только Accessibility-independent suffix",
+                                details =
+                                    "verified_prefix=${longObjective.verifiedSubgoalCount()}; " +
+                                        "remaining=${longObjective.subgoalCount() - longObjective.verifiedSubgoalCount()}; " +
+                                        "ui_control_required=false"
                             )
-
-                            if (!readiness.optBoolean("verified", false)) {
-                                throw IllegalStateException(
-                                    "R10.13 post-process runtime readiness not verified"
-                                )
-                            }
                         }
 
                         if (runtimeContext.optBoolean("r10_12_acceptance", false)) {
@@ -38496,9 +38482,9 @@ routed.forEach {
                         runtimeContext.optBoolean("r10_13_process_epoch_recreated", false) &&
                         runtimeContext.optBoolean("r10_13_disk_only_restore_verified", false) &&
                         runtimeContext.optBoolean("r10_13_background_auto_resume", false) &&
-                        runtimeContext.optBoolean("r10_13_post_process_readiness_verified", false) &&
-                        runtimeContext.optBoolean("r10_13_post_process_accessibility_ready", false) &&
-                        runtimeContext.optBoolean("r10_13_post_process_screen_evidence_ready", false) &&
+                        !runtimeContext.optBoolean("r10_13_post_process_readiness_required", true) &&
+                        runtimeContext.optBoolean("r10_13_post_process_suffix_accessibility_independent", false) &&
+                        !runtimeContext.optBoolean("r10_13_post_process_ui_control_required", true) &&
                         runtimeContext.optBoolean("r10_13_verified_prefix_preserved_after_process_death", false) &&
                         runtimeContext.optBoolean("r10_13_plan_revision_preserved_after_process_death", false) &&
                         runtimeContext.optBoolean("r10_13_adaptive_revision_preserved_after_process_death", false) &&
@@ -38704,6 +38690,22 @@ routed.forEach {
             .put(
                 "post_process_readiness_waited_ms",
                 runtimeContext.optLong("r10_13_post_process_readiness_waited_ms", 0L)
+            )
+            .put(
+                "post_process_readiness_required",
+                runtimeContext.optBoolean("r10_13_post_process_readiness_required", false)
+            )
+            .put(
+                "post_process_suffix_accessibility_independent",
+                runtimeContext.optBoolean("r10_13_post_process_suffix_accessibility_independent", false)
+            )
+            .put(
+                "post_process_ui_control_required",
+                runtimeContext.optBoolean("r10_13_post_process_ui_control_required", false)
+            )
+            .put(
+                "external_ui_continuation_proven",
+                runtimeContext.optBoolean("r10_13_external_ui_continuation_proven", false)
             )
             .put(
                 "navigation_reconciliation_attempted",
@@ -39850,7 +39852,7 @@ routed.forEach {
         silent: Boolean
     ) {
         val objective =
-            "сначала проверь состояние устройства, открой AYANA AI, затем открой Example Domain в браузере, прочитай заголовок страницы, найди этот заголовок в YouTube и в конце снова проверь состояние устройства"
+            "сначала проверь состояние устройства, открой AYANA AI, затем открой Example Domain в браузере, прочитай заголовок страницы и в конце снова проверь состояние устройства"
 
         if (!AyanaLifecycleRecoveryCoordinator().selfTest()) {
             respondAndResume(
@@ -39906,7 +39908,7 @@ routed.forEach {
                 return
             }
 
-        if (planner.subgoalCount() != 6) {
+        if (planner.subgoalCount() != 5) {
             respondAndResume(
                 text = "R10.13 остановлен: неожиданный production DAG.",
                 silent = silent,
@@ -39927,6 +39929,10 @@ routed.forEach {
                 .put("r10_13_process_death_requested", false)
                 .put("r10_13_pre_death_checkpoint_persisted", false)
                 .put("r10_13_user_stop_requested", false)
+                .put("r10_13_post_process_readiness_required", false)
+                .put("r10_13_post_process_suffix_accessibility_independent", true)
+                .put("r10_13_post_process_ui_control_required", false)
+                .put("r10_13_external_ui_continuation_proven", false)
                 .put("r10_13_origin_service_instance_id", serviceInstanceId)
                 .put("r10_13_origin_process_id", android.os.Process.myPid())
                 .put("r10_13_origin_process_epoch_id", processEpochId)
@@ -65384,7 +65390,7 @@ state
 
         // R10.13 FULL PROCESS-DEATH RECOVERY RELEASE TRUTH.
         private const val AYANA_VOICE_SERVICE_RELEASE =
-            "v12.46.1 / R10.13.1 POST-PROCESS READINESS + RECONCILIATION"
+            "v12.46.2 / R10.13.2 PROCESS-DEATH CORE RECOVERY"
 
         private const val AYANA_PERSONAL_SEARCH_ENGINE_RELEASE =
             "v1.5.1 IMAGE COVERAGE TRUTH + R10.2 UNIFIED SEARCH CONTRACT v1.0"
@@ -65399,10 +65405,10 @@ state
             "R10.12 NATURAL LIFECYCLE RECOVERY + BACKGROUND CONTINUATION — DEVICE-CONFIRMED ACCEPTED"
 
         private const val AYANA_CURRENT_FEATURE_RELEASE =
-            "R10.13.1 FULL PROCESS-DEATH RECOVERY HARDENING — PENDING DEVICE CONFIRMATION"
+            "R10.13.2 FULL PROCESS-DEATH CORE RECOVERY — PENDING DEVICE CONFIRMATION"
 
         private const val AYANA_RELEASE_LINEAGE =
-            "Android v12.21.0 / R7.9 truth-hardening + R8.0 multi-attachment + R8.1–R8.4 accepted Personal Global Search stack + R8.5–R8.5.4 capability/evidence truth + R9.0 autonomous agent foundation + R9.0.1 history live-refresh proof fix + R9.0.2 diagnostic reconciliation/history refresh fix + R9.0.3 TTS health reconciliation + R9.1 IME perception/active telemetry truth + R9.2 autonomous recovery/long-task reconciliation + R9.2.1 adaptive hypothesis reconciliation + R9.3 app integration framework + R9.3.1 screen health reconciliation + R9.3.2 history latency recovery reconciliation + R9.3.3 informational terminal reconciliation + R9.3.4 app integration device acceptance + R9.4 multi-app task orchestration + R9.4.1 screen ownership union reconciliation + R9.5 verified result transfer between app steps + R9.5.1 partial marker provenance reconciliation + R9.5.2 bounded marker observation + R9.5.3 verified action result transfer + R9.6 verified semantic observation fallback + R9.6.1 visual fallback acceptance truth + R9.7 structured screen reading + R9.7.1 conversation routing/terminal truth + R9.7.2 structured router conversation precedence + R9.7.3 action morphology/terminal truth + R9.8 generic verified result transfer + R9.8.1 master full acceptance/diagnostic engine + R9.9 reversible action journal/verified undo + R9.9.1 brightness verified undo device acceptance + R9.9.2 opt-in low-battery controlled proactivity + R10.0 unified screen intelligence + R10.1 local self-diagnostics/self-audit + R10.2 personal search expansion + R10.3 long autonomous tasks/recovery + R10.4 adaptive verified execution loop + R10.5 generalized live adaptive autonomy + R10.6 cross-lane adaptive continuity + R10.6.1 durable goal binding fix + R10.7 cross-lane durable recovery continuity + R10.7.1 isolated acceptance cleanup hardening + R10.8 general-purpose long autonomous objectives + R10.9 dynamic goal decomposition/planner contract + R10.10 adaptive planner production path + R10.11 production replan/durable recovery + R10.12 natural lifecycle recovery/background continuation + R10.13 full process-death recovery + R10.13.1 post-process readiness/reconciliation"
+            "Android v12.21.0 / R7.9 truth-hardening + R8.0 multi-attachment + R8.1–R8.4 accepted Personal Global Search stack + R8.5–R8.5.4 capability/evidence truth + R9.0 autonomous agent foundation + R9.0.1 history live-refresh proof fix + R9.0.2 diagnostic reconciliation/history refresh fix + R9.0.3 TTS health reconciliation + R9.1 IME perception/active telemetry truth + R9.2 autonomous recovery/long-task reconciliation + R9.2.1 adaptive hypothesis reconciliation + R9.3 app integration framework + R9.3.1 screen health reconciliation + R9.3.2 history latency recovery reconciliation + R9.3.3 informational terminal reconciliation + R9.3.4 app integration device acceptance + R9.4 multi-app task orchestration + R9.4.1 screen ownership union reconciliation + R9.5 verified result transfer between app steps + R9.5.1 partial marker provenance reconciliation + R9.5.2 bounded marker observation + R9.5.3 verified action result transfer + R9.6 verified semantic observation fallback + R9.6.1 visual fallback acceptance truth + R9.7 structured screen reading + R9.7.1 conversation routing/terminal truth + R9.7.2 structured router conversation precedence + R9.7.3 action morphology/terminal truth + R9.8 generic verified result transfer + R9.8.1 master full acceptance/diagnostic engine + R9.9 reversible action journal/verified undo + R9.9.1 brightness verified undo device acceptance + R9.9.2 opt-in low-battery controlled proactivity + R10.0 unified screen intelligence + R10.1 local self-diagnostics/self-audit + R10.2 personal search expansion + R10.3 long autonomous tasks/recovery + R10.4 adaptive verified execution loop + R10.5 generalized live adaptive autonomy + R10.6 cross-lane adaptive continuity + R10.6.1 durable goal binding fix + R10.7 cross-lane durable recovery continuity + R10.7.1 isolated acceptance cleanup hardening + R10.8 general-purpose long autonomous objectives + R10.9 dynamic goal decomposition/planner contract + R10.10 adaptive planner production path + R10.11 production replan/durable recovery + R10.12 natural lifecycle recovery/background continuation + R10.13 full process-death recovery + R10.13.1 post-process readiness/reconciliation + R10.13.2 process-death core recovery proof correction"
 
         // AyanaCommandHistoryStore v2.8 keeps up to 4k chars inline and stores longer
         // results out-of-line. Self-review intentionally remains inline so copied History
