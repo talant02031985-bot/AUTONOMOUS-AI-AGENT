@@ -8,7 +8,6 @@ import android.graphics.Rect
 import android.os.Build
 import android.os.Bundle
 import android.os.SystemClock
-import android.provider.Settings
 import android.view.accessibility.AccessibilityEvent
 import android.view.accessibility.AccessibilityNodeInfo
 import android.view.accessibility.AccessibilityWindowInfo
@@ -21,15 +20,12 @@ import kotlin.math.max
 class AgentAccessibilityService :
     AccessibilityService() {
 
-    // AYANA Accessibility v7.2 — IME UNDERLAY FOREGROUND FUSION.
-    // Samsung Keyboard / other configured IME surfaces are transient input overlays,
-    // not application ownership transitions. v7.2 keeps v7.1 verified-owner truth but
-    // excludes a proven IME surface from foreground ownership and primary app selection.
-    // Package identity alone is never sufficient for application-typed windows: class
-    // and/or panel geometry must also agree. Full-screen settings/apps remain eligible.
-    // No package/content is fabricated.
-    //
-    // AYANA Accessibility v7.1 — VERIFIED FOREGROUND FUSION + OWNER HANDOFF CONTINUITY.
+    // AYANA Accessibility v7.1 — R10.14 CROSS-PROCESS OWN-APP BRIDGE + VERIFIED FOREGROUND OWNER HANDOFF.
+    // v7.1 moves this AccessibilityService into the dedicated :perception process.
+    // MainActivity remains in the default AYANA process, so own-app semantic View truth is
+    // obtained through AyanaOwnAppBridgeClient instead of process-local static references.
+    // External Accessibility semantics, sticky foreground-owner truth, Samsung Settings recovery,
+    // Recents safety and destructive-dispatch callbacks remain unchanged.
     // v7.0 preserves v6.9 generic ownership/evidence guards and adds one explicit truth handoff:
     // when an upper execution layer has already VERIFIED a package-owned external surface from
     // same-window Accessibility/semantic evidence, it can commit that proven package as the
@@ -88,6 +84,10 @@ class AgentAccessibilityService :
     // freeform, PiP, popup/dialog, Recents and overlay scenarios. The only Recents
     // exception is the dedicated v5.4 task-removal routine above, with its own
     // strict label identity, topology guards and post-action verification.
+
+    private val ownAppBridge by lazy {
+        AyanaOwnAppBridgeClient(applicationContext)
+    }
 
     data class NodeMatch(
         val node: AccessibilityNodeInfo,
@@ -216,14 +216,6 @@ class AgentAccessibilityService :
     @Volatile
     private var lastForegroundSnapshotRecoveryKey =
         ""
-
-    @Volatile
-    private var cachedInputMethodPackage =
-        ""
-
-    @Volatile
-    private var cachedInputMethodPackageAtElapsed =
-        0L
 
     @Volatile
     private var lastScrollEventState:
@@ -3048,8 +3040,8 @@ class AgentAccessibilityService :
         // that same factual View hierarchy instead of falling through to a sparse
         // Accessibility shell or coordinate guess.
         if (shouldUseOwnAppSemanticBridge()) {
-            return MainActivity
-                .performOwnAppSemanticClick(
+            return ownAppBridge
+                .performClick(
                     target
                 )
         }
@@ -3329,8 +3321,8 @@ class AgentAccessibilityService :
         // MainActivity's in-process semantic snapshot. Exact-value verification still
         // occurs in AyanaScreenIntelligence after this dispatch.
         if (shouldUseOwnAppSemanticBridge()) {
-            return MainActivity
-                .performOwnAppSemanticSetText(
+            return ownAppBridge
+                .performSetText(
                     target = target,
                     text = text
                 )
@@ -4657,8 +4649,8 @@ class AgentAccessibilityService :
         if (ownAppBridgeActive) {
             val ownAppSnapshot =
                 try {
-                    MainActivity
-                        .buildOwnAppSemanticSnapshot(
+                    ownAppBridge
+                        .buildSnapshot(
                             maxNodes = maxNodes,
                             maxChars = maxChars
                         )
@@ -4984,16 +4976,6 @@ class AgentAccessibilityService :
             interactionContexts
                 .map { it.contextId }
                 .toSet()
-
-        val inputMethodContexts =
-            allContexts
-                .filter(::isInputMethodContext)
-
-        val inputMethodPackage =
-            inputMethodContexts
-                .firstOrNull()
-                ?.packageName
-                .orEmpty()
 
         val primary =
             primaryWindowContext(
@@ -5361,48 +5343,6 @@ class AgentAccessibilityService :
             primaryContentState == "readable" ||
                 primaryContentState == "partial"
 
-        // v7.1 effective foreground truth:
-        // a real external application window always wins directly. Sticky owner
-        // evidence is allowed to override only AYANA's own package, which prevents
-        // the floating overlay/MainActivity package from masking a verified external
-        // foreground surface without letting stale ownership replace app A with app B.
-        val primaryPackage =
-            primary
-                ?.packageName
-                .orEmpty()
-                .trim()
-
-        val stickyForegroundOwnerPackage =
-            lastForegroundOwnerPackage
-                .takeUnless { owner ->
-                    ownAppBridgeActive &&
-                        owner.isNotBlank() &&
-                        isConfiguredInputMethodPackage(owner)
-                }
-                .orEmpty()
-
-        val effectiveForegroundPackage =
-            when {
-                primaryPackage.isNotBlank() &&
-                    primaryPackage != packageName ->
-                    primaryPackage
-
-                stickyForegroundOwnerPackage.isNotBlank() &&
-                    stickyForegroundOwnerPackage != packageName ->
-                    stickyForegroundOwnerPackage
-
-                primaryPackage.isNotBlank() ->
-                    primaryPackage
-
-                else ->
-                    stickyForegroundOwnerPackage
-            }
-
-        val ayanaOwnWindowSuppressedForForeground =
-            primaryPackage == packageName &&
-                effectiveForegroundPackage.isNotBlank() &&
-                effectiveForegroundPackage != packageName
-
         return JSONObject()
             .put("success", true)
             .put("snapshot_success", true)
@@ -5422,7 +5362,7 @@ class AgentAccessibilityService :
             .put("primary_live_readable_text_count", primaryLiveReadableTextCount)
             .put("primary_evidence_readable_text_count", primaryEvidenceReadableTextCount)
             .put("primary_node_count", primaryNodeCount)
-            .put("window_context_mode", "v7_2_ime_underlay_foreground_fusion")
+            .put("window_context_mode", "v7_0_verified_owner_handoff")
             .put("window_count", allContexts.size)
             .put("raw_window_count", safeWindowCount())
             .put("readable_window_count", readableWindowCount)
@@ -5441,25 +5381,8 @@ class AgentAccessibilityService :
             .put("event_class", lastEventClass)
             .put("event_window_id", lastEventWindowId)
             .put("foreground_owner_package", lastForegroundOwnerPackage)
-            .put(
-                "foreground_owner_ime_suppressed",
-                lastForegroundOwnerPackage.isNotBlank() &&
-                    stickyForegroundOwnerPackage.isBlank()
-            )
             .put("foreground_owner_window_id", lastForegroundOwnerWindowId)
             .put("foreground_owner_source", lastForegroundOwnerSource)
-            .put("effective_foreground_package", effectiveForegroundPackage)
-            .put("input_method_visible", inputMethodContexts.isNotEmpty())
-            .put("input_method_package", inputMethodPackage)
-            .put("input_method_context_count", inputMethodContexts.size)
-            .put(
-                "ayana_own_window_suppressed_for_foreground",
-                ayanaOwnWindowSuppressedForForeground
-            )
-            .put(
-                "foreground_fusion_mode",
-                "external_primary_else_verified_owner_over_own_app_ime_excluded"
-            )
             .put(
                 "foreground_owner_age_ms",
                 if (lastForegroundOwnerTime > 0L) {
@@ -5479,41 +5402,6 @@ class AgentAccessibilityService :
                 (SystemClock.elapsedRealtime() - snapshotStartedAt)
                     .coerceAtLeast(0L)
             )
-    }
-
-    /**
-     * Read-only foreground package resolver for upper-layer verifiers.
-     * It follows the same v7.1 fusion rule as buildScreenSnapshot().
-     */
-    fun effectiveForegroundPackage():
-        String {
-
-        val primary =
-            primaryWindowContext(
-                resolveWindowContexts()
-            )
-
-        val primaryPackage =
-            primary
-                ?.packageName
-                .orEmpty()
-                .trim()
-
-        return when {
-            primaryPackage.isNotBlank() &&
-                primaryPackage != packageName ->
-                primaryPackage
-
-            lastForegroundOwnerPackage.isNotBlank() &&
-                lastForegroundOwnerPackage != packageName ->
-                lastForegroundOwnerPackage
-
-            primaryPackage.isNotBlank() ->
-                primaryPackage
-
-            else ->
-                lastForegroundOwnerPackage
-        }
     }
 
     fun screenSignature():
@@ -5897,15 +5785,6 @@ class AgentAccessibilityService :
             )
         }
 
-        // When AYANA's own activity is still window-focused, an event from the
-        // configured IME is a keyboard surface, not an application ownership handoff.
-        if (
-            MainActivity.isOwnAppSemanticBridgeActive() &&
-            isConfiguredInputMethodPackage(eventPackage)
-        ) {
-            return false
-        }
-
         val eventWindowId =
             try {
                 event.windowId
@@ -5957,30 +5836,6 @@ class AgentAccessibilityService :
                     ""
                 }
 
-            val matchingBounds =
-                Rect().also { bounds ->
-                    try {
-                        matchingWindow.getBoundsInScreen(bounds)
-                    } catch (_: Exception) {
-                    }
-                }
-
-            val eventClassName =
-                event.className
-                    ?.toString()
-                    .orEmpty()
-
-            if (
-                isInputMethodSurface(
-                    packageNameValue = eventPackage,
-                    classNameValue = eventClassName,
-                    type = type,
-                    bounds = matchingBounds
-                )
-            ) {
-                return false
-            }
-
             if (
                 type == AccessibilityWindowInfo.TYPE_APPLICATION &&
                 (active || focused) &&
@@ -6011,38 +5866,6 @@ class AgentAccessibilityService :
             event.eventType == AccessibilityEvent.TYPE_WINDOWS_CHANGED
         ) {
             return false
-        }
-
-        if (
-            isConfiguredInputMethodPackage(eventPackage)
-        ) {
-            val eventSource =
-                try { event.source } catch (_: Exception) { null }
-
-            if (eventSource != null) {
-                val eventBounds =
-                    Rect().also { bounds ->
-                        try {
-                            highestUsableEventRoot(eventSource)
-                                .getBoundsInScreen(bounds)
-                        } catch (_: Exception) {
-                            try {
-                                eventSource.getBoundsInScreen(bounds)
-                            } catch (_: Exception) {
-                            }
-                        }
-                    }
-
-                if (
-                    hasInputMethodPanelGeometry(eventBounds) ||
-                    classHintAllowedForBounds(
-                        className = event.className?.toString().orEmpty(),
-                        bounds = eventBounds
-                    )
-                ) {
-                    return false
-                }
-            }
         }
 
         val source =
@@ -6118,8 +5941,8 @@ class AgentAccessibilityService :
     private fun shouldUseOwnAppSemanticBridge(): Boolean {
 
         if (
-            !MainActivity
-                .isOwnAppSemanticBridgeActive()
+            !ownAppBridge
+                .isActive()
         ) {
             return false
         }
@@ -6130,8 +5953,7 @@ class AgentAccessibilityService :
 
         if (
             ownerPackage.isNotBlank() &&
-            ownerPackage != packageName &&
-            !isConfiguredInputMethodPackage(ownerPackage)
+            ownerPackage != packageName
         ) {
             return false
         }
@@ -6148,7 +5970,6 @@ class AgentAccessibilityService :
                 context.packageName.isNotBlank() &&
                     context.packageName != packageName &&
                     context.type == AccessibilityWindowInfo.TYPE_APPLICATION &&
-                    !isInputMethodContext(context) &&
                     (context.focused || context.active)
             }
 
@@ -6862,164 +6683,6 @@ class AgentAccessibilityService :
             .sortedByDescending { it.rank }
     }
 
-    /**
-     * R9.1 / v7.2 IME truth. TYPE_INPUT_METHOD is definitive. Some Samsung One UI
-     * builds expose Honeyboard as TYPE_APPLICATION, so application-typed windows
-     * are classified as IME only when the configured/default IME package matches
-     * and keyboard-like class or bottom-panel geometry also agrees.
-     */
-    private fun configuredInputMethodPackage(): String {
-        val now = SystemClock.elapsedRealtime()
-        val cached = cachedInputMethodPackage
-        val age =
-            (now - cachedInputMethodPackageAtElapsed)
-                .coerceAtLeast(0L)
-
-        if (
-            cached.isNotBlank() &&
-            age <= INPUT_METHOD_PACKAGE_CACHE_TTL_MS
-        ) {
-            return cached
-        }
-
-        val resolved =
-            try {
-                Settings.Secure
-                    .getString(
-                        contentResolver,
-                        Settings.Secure.DEFAULT_INPUT_METHOD
-                    )
-                    .orEmpty()
-                    .substringBefore('/')
-                    .trim()
-            } catch (_: Exception) {
-                ""
-            }
-
-        cachedInputMethodPackage = resolved
-        cachedInputMethodPackageAtElapsed = now
-        return resolved
-    }
-
-    private fun isConfiguredInputMethodPackage(
-        candidate: String
-    ): Boolean {
-        val clean = candidate.trim()
-        if (clean.isBlank()) {
-            return false
-        }
-
-        val configured = configuredInputMethodPackage()
-        if (
-            configured.isNotBlank() &&
-            clean == configured
-        ) {
-            return true
-        }
-
-        // Device-proven fallback for Galaxy Tab / Samsung Keyboard when the secure
-        // setting is transiently unavailable. Classification still additionally
-        // requires input-surface evidence, so package identity alone is not enough.
-        return configured.isBlank() &&
-            clean == SAMSUNG_HONEYBOARD_PACKAGE
-    }
-
-    private fun hasInputMethodClassHint(
-        className: String
-    ): Boolean {
-        val normalized =
-            className
-                .lowercase(Locale.ROOT)
-
-        return listOf(
-            "inputmethodservice",
-            "inputmethod",
-            "softinputwindow",
-            "softinput",
-            "keyboardview",
-            "inputview",
-            "extractedit"
-        ).any(normalized::contains)
-    }
-
-    private fun hasInputMethodPanelGeometry(
-        bounds: Rect
-    ): Boolean {
-        val screenWidth =
-            resources.displayMetrics.widthPixels
-                .coerceAtLeast(1)
-        val screenHeight =
-            resources.displayMetrics.heightPixels
-                .coerceAtLeast(1)
-        val width = bounds.width().coerceAtLeast(0)
-        val height = bounds.height().coerceAtLeast(0)
-
-        if (width <= 1 || height <= 1) {
-            return false
-        }
-
-        val widthRatio = width.toDouble() / screenWidth.toDouble()
-        val heightRatio = height.toDouble() / screenHeight.toDouble()
-        val bottomAnchored =
-            bounds.bottom >= (screenHeight * 0.78).toInt()
-
-        return bottomAnchored &&
-            widthRatio >= 0.35 &&
-            heightRatio in 0.12..0.78
-    }
-
-    private fun classHintAllowedForBounds(
-        className: String,
-        bounds: Rect
-    ): Boolean {
-        val screenHeight =
-            resources.displayMetrics.heightPixels
-                .coerceAtLeast(1)
-        val heightRatio =
-            bounds.height()
-                .coerceAtLeast(0)
-                .toDouble() /
-                screenHeight.toDouble()
-
-        return heightRatio in 0.08..0.82 &&
-            hasInputMethodClassHint(className)
-    }
-
-    private fun isInputMethodSurface(
-        packageNameValue: String,
-        classNameValue: String,
-        type: Int,
-        bounds: Rect
-    ): Boolean {
-        if (type == AccessibilityWindowInfo.TYPE_INPUT_METHOD) {
-            return true
-        }
-
-        if (!isConfiguredInputMethodPackage(packageNameValue)) {
-            return false
-        }
-
-        if (MainActivity.isOwnAppSemanticBridgeActive()) {
-            return true
-        }
-
-        return hasInputMethodPanelGeometry(bounds) ||
-            classHintAllowedForBounds(
-                className = classNameValue,
-                bounds = bounds
-            )
-    }
-
-    private fun isInputMethodContext(
-        context: WindowContext
-    ): Boolean =
-        isInputMethodSurface(
-            packageNameValue = context.packageName,
-            classNameValue = context.className,
-            type = context.type,
-            bounds = context.bounds
-        )
-
     private fun primaryWindowContext(
         contexts: List<WindowContext>
     ): WindowContext? {
@@ -7035,9 +6698,9 @@ class AgentAccessibilityService :
         // only when Android exposes nothing else.
         val usable =
             contexts
-                .filter { context ->
-                    !isInputMethodContext(context) &&
-                        context.packageName.isNotBlank()
+                .filter {
+                    it.type != AccessibilityWindowInfo.TYPE_INPUT_METHOD &&
+                        it.packageName.isNotBlank()
                 }
 
         return usable
@@ -7051,10 +6714,9 @@ class AgentAccessibilityService :
                 .maxByOrNull { it.rank }
             ?: usable.maxByOrNull { it.rank }
             ?: contexts
-                .filter { context ->
-                    !isInputMethodContext(context)
-                }
+                .filter { it.type != AccessibilityWindowInfo.TYPE_INPUT_METHOD }
                 .maxByOrNull { it.rank }
+            ?: contexts.maxByOrNull { it.rank }
     }
 
     private fun interactionWindowContexts(
@@ -9800,12 +9462,6 @@ class AgentAccessibilityService :
 
         private const val SETTINGS_PACKAGE =
             "com.android.settings"
-
-        private const val SAMSUNG_HONEYBOARD_PACKAGE =
-            "com.samsung.android.honeyboard"
-
-        private const val INPUT_METHOD_PACKAGE_CACHE_TTL_MS =
-            60_000L
 
         private const val ROOT_SEMANTIC_PROBE_NODE_LIMIT =
             48
