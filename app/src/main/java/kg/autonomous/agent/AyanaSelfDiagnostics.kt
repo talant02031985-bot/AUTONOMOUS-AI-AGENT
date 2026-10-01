@@ -6,7 +6,12 @@ import org.json.JSONObject
 import java.util.Locale
 
 /**
- * AYANA Self-Diagnostics v4.4 — CROSS-PROCESS ACCESSIBILITY TRUTH.
+ * AYANA Self-Diagnostics v4.5 — R10.15 CROSS-PROCESS ROUTE AUDIT.
+ *
+ * R10.15 makes process identity authoritative in diagnostics. Main-process telemetry can no
+ * longer claim local Accessibility health or suppress the bridge check. Diagnostics verify
+ * the same bridge version, distinct :perception PID and route contract used by production
+ * screen/action calls; stale process-local truth is ignored outside :perception.
  *
  * v4.4 preserves v4.3 health-state truth and makes Accessibility diagnostics
  * R10.14-aware: when the main process has no process-local AccessibilityService
@@ -218,7 +223,7 @@ class AyanaSelfDiagnostics(
             }
         )
 
-        val localAccessibility =
+        val localAccessibilityObserved =
             runtime.optBoolean(
                 "accessibility_connected",
                 false
@@ -229,15 +234,22 @@ class AyanaSelfDiagnostics(
                 appContext
             )
 
+        val runningInPerceptionProcess =
+            perceptionBridge.isLocalPerceptionProcess()
+
+        val localAccessibility =
+            runningInPerceptionProcess &&
+                localAccessibilityObserved
+
         val perceptionBridgeStatus =
-            if (localAccessibility) {
-                JSONObject()
-            } else {
+            if (!runningInPerceptionProcess) {
                 try {
                     perceptionBridge.status()
                 } catch (_: Throwable) {
                     JSONObject()
                 }
+            } else {
+                JSONObject()
             }
 
         val bridgeAccessibility =
@@ -246,12 +258,37 @@ class AyanaSelfDiagnostics(
                 false
             )
 
+        val bridgeRouteVerified =
+            perceptionBridgeStatus.optBoolean(
+                "perception_route_verified",
+                false
+            ) &&
+                perceptionBridgeStatus.optBoolean(
+                    "provider_process_separated",
+                    false
+                ) &&
+                perceptionBridgeStatus.optBoolean(
+                    "bridge_version_match",
+                    false
+                ) &&
+                perceptionBridgeStatus.optBoolean(
+                    "provider_is_perception_process",
+                    false
+                ) &&
+                perceptionBridgeStatus.optBoolean(
+                    "route_contract_verified",
+                    false
+                )
+
         val accessibility =
-            localAccessibility ||
-                bridgeAccessibility
+            if (runningInPerceptionProcess) {
+                localAccessibility
+            } else {
+                bridgeAccessibility && bridgeRouteVerified
+            }
 
         val crossProcessScreen =
-            if (!localAccessibility && bridgeAccessibility) {
+            if (!runningInPerceptionProcess && bridgeAccessibility && bridgeRouteVerified) {
                 try {
                     perceptionBridge.getScreenState()
                 } catch (_: Throwable) {
@@ -265,7 +302,11 @@ class AyanaSelfDiagnostics(
             crossProcessScreen.optBoolean(
                 "success",
                 false
-            )
+            ) &&
+                crossProcessScreen.optBoolean(
+                    "perception_route_verified",
+                    runningInPerceptionProcess
+                )
 
         addCheck(
             checks,
@@ -278,15 +319,39 @@ class AyanaSelfDiagnostics(
             "Управление экраном AYANA",
             when {
                 localAccessibility ->
-                    "Сервис подключён"
+                    "Сервис подключён локально внутри :perception"
+
+                bridgeAccessibility && bridgeRouteVerified ->
+                    "Сервис подтверждён через строгий cross-process bridge contract"
+
+                localAccessibilityObserved && !runningInPerceptionProcess ->
+                    "Обнаружена process-local Accessibility телеметрия в main process; она игнорируется как stale/недоверенная"
 
                 bridgeAccessibility ->
-                    "Сервис подключён через изолированный perception process"
+                    "Accessibility виден через bridge, но межпроцессный route contract не подтверждён"
 
                 else ->
                     "Сервис специальных возможностей не подключён"
             }
         )
+
+        if (!runningInPerceptionProcess) {
+            addCheck(
+                checks,
+                "perception_route_contract",
+                if (bridgeRouteVerified) {
+                    STATUS_PASS
+                } else {
+                    STATUS_FAIL
+                },
+                "Cross-process perception route",
+                if (bridgeRouteVerified) {
+                    "Bridge ${AyanaPerceptionBridgeContract.VERSION}; provider PID=${perceptionBridgeStatus.optInt("perception_process_id", -1)}; process=${perceptionBridgeStatus.optString("perception_process_name")}; direct main-process Accessibility fallback запрещён"
+                } else {
+                    "Строгий route contract не подтверждён: reason=${perceptionBridgeStatus.optString("reason")}; provider PID=${perceptionBridgeStatus.optInt("perception_process_id", -1)}; process=${perceptionBridgeStatus.optString("perception_process_name")}"
+                }
+            )
+        }
 
         val screenSnapshotOk =
             if (crossProcessScreenUsable) {
@@ -998,7 +1063,7 @@ class AyanaSelfDiagnostics(
                 screenStabilizationApplied
             )
             .put(
-                "screen_stabilization_initial_state",
+"screen_stabilization_initial_state",
                 initialScreenContentState
             )
             .put(
@@ -1509,6 +1574,9 @@ class AyanaSelfDiagnostics(
 
             "screen_intelligence" ->
                 "Если внешнее окно определяется, но текст отсутствует, Screen Perception остаётся WARNING/Нет данных; не ослабляйте strict verification ради PASS."
+
+            "perception_route_contract" ->
+                "Проверьте AndroidManifest :perception, AyanaPerceptionBridge version/PID contract и исключите прямой AgentAccessibilityService fallback из main process."
 
             "overlay" ->
                 "Разрешите AYANA отображение поверх других приложений, если нужен глобальный Orb."
