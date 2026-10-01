@@ -6,7 +6,14 @@ import org.json.JSONObject
 import java.util.Locale
 
 /**
- * AYANA Self-Diagnostics v4.6 — R10.16 PERCEPTION PROCESS RECOVERY AUDIT.
+ * AYANA Self-Diagnostics v4.7 — R10.17 SCREEN UNDERSTANDING 2.0 AUDIT.
+ *
+ * R10.17 keeps raw Accessibility coverage truth separate from semantic understanding truth.
+ * A `partial` raw snapshot is no longer automatically a WARNING when Screen Understanding
+ * Engine v2.0 proves that read-only understanding is sufficient. Visual evidence remains
+ * read-only and can never promote interaction authority. R10.16 recovery checks are preserved.
+ *
+ * Previous baseline: v4.6 — R10.16 PERCEPTION PROCESS RECOVERY AUDIT.
  *
  * R10.16 extends the accepted R10.15 route audit with provider-generation/rebind truth.
  * Diagnostics verify that read-only bridge recovery is available, provider epoch identity is
@@ -486,6 +493,51 @@ class AyanaSelfDiagnostics(
                 )
             }
 
+        val screenUnderstandingVersion =
+            if (crossProcessScreenUsable) {
+                crossProcessScreen.optString("screen_understanding_version")
+            } else {
+                runtime.optString("screen_understanding_version")
+            }
+
+        val screenUnderstandingStatus =
+            if (crossProcessScreenUsable) {
+                crossProcessScreen.optString("screen_understanding_status")
+            } else {
+                runtime.optString("screen_understanding_status", "")
+            }
+
+        val screenUnderstandingConfidence =
+            if (crossProcessScreenUsable) {
+                crossProcessScreen.optInt("screen_understanding_confidence", -1)
+            } else {
+                runtime.optInt("screen_understanding_confidence", -1)
+            }
+
+        val screenReadOnlyUnderstandingUsable =
+            if (crossProcessScreenUsable) {
+                crossProcessScreen.optBoolean("read_only_understanding_usable", false)
+            } else {
+                runtime.optBoolean("screen_read_only_understanding_usable", false)
+            }
+
+        val screenInteractionUnderstandingUsable =
+            if (crossProcessScreenUsable) {
+                crossProcessScreen.optBoolean("interaction_understanding_usable", false)
+            } else {
+                runtime.optBoolean("screen_interaction_understanding_usable", false)
+            }
+
+        val screenCoverageStatus =
+            if (crossProcessScreenUsable) {
+                crossProcessScreen.optString(
+                    "accessibility_coverage_status",
+                    screenContentState
+                )
+            } else {
+                screenContentState
+            }
+
         val externalScreenFresh =
             runtime.optBoolean(
                 "external_screen_evidence_fresh",
@@ -535,13 +587,16 @@ class AyanaSelfDiagnostics(
                     screenWindows <= 0 ->
                     STATUS_UNKNOWN
 
-                effectiveScreenContentState == "readable" &&
+                screenReadOnlyUnderstandingUsable &&
                     (
                         screenLatency < 0L ||
                             screenLatency <
                             SCREEN_LATENCY_WARNING_MS
                         ) ->
                     STATUS_PASS
+
+                screenReadOnlyUnderstandingUsable ->
+                    STATUS_WARNING
 
                 effectiveScreenContentState == "readable" ||
                     effectiveScreenContentState == "partial" ||
@@ -576,10 +631,17 @@ class AyanaSelfDiagnostics(
                     externalScreenContentState == "structure_only" ->
                     "Последняя внешняя проверка: $externalScreenPackage — структура окна доступна, но читаемый текст не подтверждён"
 
+                screenReadOnlyUnderstandingUsable &&
+                    screenCoverageStatus == "partial" ->
+                    "Accessibility coverage остаётся partial, но Screen Understanding $screenUnderstandingVersion подтверждает достаточное понимание: status=$screenUnderstandingStatus; confidence=$screenUnderstandingConfidence; text=$screenPrimaryText; interaction=$screenInteractionUnderstandingUsable"
+
+                screenReadOnlyUnderstandingUsable ->
+                    "Screen Understanding $screenUnderstandingVersion подтверждён: status=$screenUnderstandingStatus; confidence=$screenUnderstandingConfidence; coverage=$screenCoverageStatus; text=$screenPrimaryText; interaction=$screenInteractionUnderstandingUsable"
+
                 externalScreenFresh &&
                     externalScreenPackage.isNotBlank() &&
                     externalScreenContentState == "partial" ->
-                    "Последняя внешняя проверка: $externalScreenPackage — содержимое читается только частично"
+                    "Последняя внешняя проверка: $externalScreenPackage — raw coverage partial; Screen Understanding 2.0 evidence для этой записи отсутствует"
 
                 screenContentState == "readable" &&
                     screenLatency >= SCREEN_LATENCY_WARNING_MS ->
@@ -596,6 +658,30 @@ class AyanaSelfDiagnostics(
 
                 else ->
                     "Основное окно определено, но его содержимое сейчас недоступно для надёжного чтения"
+            }
+        )
+
+        addCheck(
+            checks,
+            "screen_understanding_2_0",
+            when {
+                !accessibility || !screenSnapshotOk -> STATUS_UNKNOWN
+                screenUnderstandingVersion == AyanaScreenUnderstandingEngine.VERSION &&
+                    screenReadOnlyUnderstandingUsable &&
+                    !crossProcessScreen.optBoolean("visual_grants_action_authority", false) -> STATUS_PASS
+                screenUnderstandingVersion == AyanaScreenUnderstandingEngine.VERSION -> STATUS_WARNING
+                else -> STATUS_UNKNOWN
+            },
+            "Screen Understanding 2.0",
+            when {
+                !accessibility || !screenSnapshotOk ->
+                    "Нет свежего screen snapshot для проверки understanding contract"
+                screenUnderstandingVersion != AyanaScreenUnderstandingEngine.VERSION ->
+                    "Screen Understanding Engine v2.0 не подтверждён; observed=$screenUnderstandingVersion"
+                screenReadOnlyUnderstandingUsable ->
+                    "status=$screenUnderstandingStatus; confidence=$screenUnderstandingConfidence; coverage=$screenCoverageStatus; read_only=true; interaction=$screenInteractionUnderstandingUsable; visual_action_authority=false"
+                else ->
+                    "Engine v2.0 активен, но текущего evidence недостаточно: status=$screenUnderstandingStatus; confidence=$screenUnderstandingConfidence; coverage=$screenCoverageStatus"
             }
         )
 
@@ -1622,7 +1708,10 @@ class AyanaSelfDiagnostics(
                 "Включите службу AYANA в специальных возможностях Android."
 
             "screen_intelligence" ->
-                "Если внешнее окно определяется, но текст отсутствует, Screen Perception остаётся WARNING/Нет данных; не ослабляйте strict verification ради PASS."
+                "Смотрите отдельно raw Accessibility coverage и Screen Understanding 2.0; не превращайте partial coverage в readable без доказательств."
+
+            "screen_understanding_2_0" ->
+                "Проверьте foreground truth, text/control evidence и visual read-only provenance. Visual evidence не должно давать action authority."
 
             "perception_route_contract" ->
                 "Проверьте AndroidManifest :perception, AyanaPerceptionBridge version/PID contract и исключите прямой AgentAccessibilityService fallback из main process."
