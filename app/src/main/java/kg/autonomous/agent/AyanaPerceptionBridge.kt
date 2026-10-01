@@ -17,7 +17,12 @@ import org.json.JSONObject
 import java.util.UUID
 
 /**
- * AYANA Perception Bridge v1.0 — R10.14 CROSS-PROCESS ACCESSIBILITY BRIDGE.
+ * AYANA Perception Bridge v1.2 — R10.15 GENERALIZED CROSS-PROCESS ROUTE CONTRACT.
+ *
+ * R10.15 makes the bridge a fail-closed process boundary, not an opportunistic fallback.
+ * Every main-process perception/action call must reach a distinct :perception PID using the
+ * exact bridge version. Same-process provider routing, version mismatch, or a bridge call
+ * originating from :perception is rejected. No action authority is added.
  *
  * Design goals:
  * - AgentAccessibilityService lives in :perception and remains alive when the main AYANA
@@ -32,7 +37,7 @@ import java.util.UUID
  * - No new action authority is introduced. IPC only transports existing verified operations.
  */
 object AyanaPerceptionBridgeContract {
-    const val VERSION = "1.1"
+    const val VERSION = "1.2"
 
     const val PERCEPTION_AUTHORITY = "kg.autonomous.agent.perception.bridge"
     const val OWN_APP_AUTHORITY = "kg.autonomous.agent.ownapp.bridge"
@@ -207,7 +212,10 @@ class AyanaPerceptionBridgeProvider : ContentProvider() {
                     JSONObject(result.toString())
                         .put("perception_bridge_version", AyanaPerceptionBridgeContract.VERSION)
                         .put("perception_process_id", Process.myPid())
+                        .put("perception_process_name", currentProcessName())
                         .put("perception_process_epoch_id", perceptionProcessEpochId)
+                        .put("main_process_direct_accessibility_allowed", false)
+                        .put("perception_local_accessibility_allowed", true)
                         .toString()
                 )
             }
@@ -221,7 +229,10 @@ class AyanaPerceptionBridgeProvider : ContentProvider() {
                     )
                         .put("perception_bridge_version", AyanaPerceptionBridgeContract.VERSION)
                         .put("perception_process_id", Process.myPid())
+                        .put("perception_process_name", currentProcessName())
                         .put("perception_process_epoch_id", perceptionProcessEpochId)
+                        .put("main_process_direct_accessibility_allowed", false)
+                        .put("perception_local_accessibility_allowed", true)
                         .toString()
                 )
             }
@@ -256,9 +267,23 @@ class AyanaPerceptionBridgeProvider : ContentProvider() {
             .put("effective_foreground_package", effectivePackage)
             .put("content_status", screen.optString("content_status"))
             .put("perception_process_id", Process.myPid())
+            .put("perception_process_name", currentProcessName())
             .put("perception_process_epoch_id", perceptionProcessEpochId)
             .put("perception_bridge_version", AyanaPerceptionBridgeContract.VERSION)
+            .put("route_contract", "cross_process_bridge_only_outside_perception")
+            .put("main_process_direct_accessibility_allowed", false)
+            .put("perception_local_accessibility_allowed", true)
+            .put("provider_is_perception_process", currentProcessName().endsWith(":perception"))
+            .put(
+                "route_contract_verified",
+                currentProcessName().endsWith(":perception") && accessibilityConnected
+            )
     }
+
+    private fun currentProcessName(): String =
+        AyanaPerceptionBridgeClient.currentProcessName(
+            requireNotNull(context).applicationContext
+        )
 
     private fun removeRecentTask(
         args: JSONObject,
@@ -593,6 +618,14 @@ class AyanaPerceptionBridgeClient(
         args: JSONObject,
         callbackBinder: IBinder? = null
     ): JSONObject {
+        if (isLocalPerceptionProcess()) {
+            return unavailable(
+                reason = "bridge_call_from_perception_process_blocked"
+            )
+                .put("perception_route", "local_perception_required")
+                .put("perception_route_verified", false)
+        }
+
         return try {
             val extras =
                 Bundle().apply {
@@ -624,8 +657,45 @@ class AyanaPerceptionBridgeClient(
             if (json.isBlank()) {
                 unavailable("empty_perception_bridge_response")
             } else {
-                JSONObject(json)
-                    .put("cross_process_perception", true)
+                val parsed = JSONObject(json)
+                val providerVersion =
+                    parsed.optString("perception_bridge_version").trim()
+                val providerPid =
+                    parsed.optInt("perception_process_id", -1)
+                val providerProcessName =
+                    parsed.optString("perception_process_name").trim()
+                val clientPid = Process.myPid()
+
+                if (providerVersion != AyanaPerceptionBridgeContract.VERSION) {
+                    unavailable(
+                        reason = "perception_bridge_version_mismatch",
+                        error = "provider=$providerVersion expected=${AyanaPerceptionBridgeContract.VERSION}"
+                    )
+                        .put("provider_process_id", providerPid)
+                        .put("provider_process_name", providerProcessName)
+                } else if (providerPid <= 0 || providerPid == clientPid) {
+                    unavailable(
+                        reason = "perception_bridge_not_cross_process",
+                        error = "client_pid=$clientPid provider_pid=$providerPid"
+                    )
+                        .put("provider_process_id", providerPid)
+                        .put("provider_process_name", providerProcessName)
+                } else if (!providerProcessName.endsWith(":perception")) {
+                    unavailable(
+                        reason = "perception_provider_process_name_invalid",
+                        error = providerProcessName.take(240)
+                    )
+                        .put("provider_process_id", providerPid)
+                        .put("provider_process_name", providerProcessName)
+                } else {
+                    parsed
+                        .put("cross_process_perception", true)
+                        .put("perception_route", "cross_process_bridge")
+                        .put("perception_route_verified", true)
+                        .put("client_process_id", clientPid)
+                        .put("provider_process_separated", true)
+                        .put("bridge_version_match", true)
+                }
             }
         } catch (error: Throwable) {
             unavailable(
@@ -647,6 +717,11 @@ class AyanaPerceptionBridgeClient(
             .put("error", error.take(300))
             .put("perception_bridge_version", AyanaPerceptionBridgeContract.VERSION)
             .put("cross_process_perception", true)
+            .put("perception_route", "cross_process_bridge")
+            .put("perception_route_verified", false)
+            .put("client_process_id", Process.myPid())
+            .put("provider_process_separated", false)
+            .put("bridge_version_match", false)
 
     companion object {
         fun currentProcessName(context: Context): String {
