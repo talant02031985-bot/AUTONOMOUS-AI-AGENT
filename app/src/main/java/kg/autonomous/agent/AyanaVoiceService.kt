@@ -63,6 +63,12 @@ import kotlin.math.abs
 
 class AyanaVoiceService : Service() {
 
+    // AYANA v12.50.3 / R10.18.3 APP INFO TARGET RECONCILIATION.
+    // Acceptance no longer crosses unrelated Samsung Settings panes. It uses the
+    // device-confirmed App Info -> Permissions surface for a real generic UI click.
+    // Production Universal UI Action Engine v1.1 is unchanged; this release corrects
+    // only the acceptance scenario and release metadata. ORB/visualizer/UI unchanged.
+    //
     // AYANA v12.50.2 / R10.18.2 LIVE TARGET AUTHORITY RECONCILIATION.
     // Fixes an over-strict R10.18.1 acceptance/preflight gate on sparse Samsung Settings
     // snapshots. Exact click targets may now delegate resolution to the already fail-closed
@@ -40589,54 +40595,69 @@ failedSubgoalId = subgoal.id,
                 try {
                     val localContractOk = universalUiActionEngine.selfTest()
 
-                    // R10.18.2 acceptance starts on a known harmless Settings surface.
-                    // The actual action under test is NOT the specialized navigator:
-                    // it is a generic Universal UI click on the exact visible Settings
-                    // target "Экран". Sparse serialized snapshots may delegate target
-                    // resolution to the live fail-closed native Accessibility query.
-                    val settingsAction = agentOpenSettings("apps")
-                    val settingsScreen =
+                    /*
+                     * R10.18.3 acceptance intentionally uses App Info -> Permissions.
+                     *
+                     * Why:
+                     * - YouTube is already a device-confirmed installed app in the AYANA baseline;
+                     * - agentOpenAppInfo() is setup only and verifies the external Settings owner;
+                     * - the actual action under test is generic Universal UI click("Разрешения");
+                     * - AgentAccessibilityService's native exact-text query was specifically
+                     *   designed for sparse One UI App Info panes where serialized descendants
+                     *   may omit rows such as Permissions;
+                     * - this avoids testing a target from another Samsung Settings pane.
+                     *
+                     * No destructive state is changed: opening Permissions is navigation only.
+                     */
+                    val appInfoAction =
+                        agentOpenAppInfo(
+                            "YouTube"
+                        )
+
+                    val appInfoScreen =
                         if (
-                            settingsAction.optBoolean("success", false) &&
-                            settingsAction.optBoolean("verified", false)
+                            appInfoAction.optBoolean("success", false) &&
+                            appInfoAction.optBoolean("verified", false)
                         ) {
                             try {
-                                Thread.sleep(180L)
+                                Thread.sleep(220L)
                             } catch (_: InterruptedException) {
                             }
+
                             screenIntelligence.getScreenState()
                         } else {
                             JSONObject()
                         }
 
-                    val settingsReady =
-                        settingsAction.optBoolean("success", false) &&
-                            settingsAction.optBoolean("verified", false) &&
-                            settingsScreen.optString("effective_foreground_package") == "com.android.settings" &&
-                            settingsScreen.optBoolean("foreground_truth_verified", false) &&
-                            !settingsScreen.optBoolean("foreground_truth_conflict", false) &&
-                            !settingsScreen.optBoolean("visual_grants_action_authority", true)
+                    val appInfoReady =
+                        appInfoAction.optBoolean("success", false) &&
+                            appInfoAction.optBoolean("verified", false) &&
+                            appInfoScreen.optString("effective_foreground_package") == "com.android.settings" &&
+                            appInfoScreen.optBoolean("foreground_truth_verified", false) &&
+                            !appInfoScreen.optBoolean("foreground_truth_conflict", false) &&
+                            !appInfoScreen.optBoolean("visual_grants_action_authority", true)
 
                     if (
-                        !settingsReady ||
+                        !appInfoReady ||
                         isCommandCancelled(commandToken) ||
                         commandToken != activeCommandToken
                     ) {
                         restore =
                             restoreAyanaAfterAppIntegrationProbe(
                                 pageKey = originalPage,
-                                stepKey = "r10.18.2-settings-preflight"
+                                stepKey = "r10.18.3-app-info-preflight"
                             )
 
                         val evidence =
                             JSONObject()
                                 .put("r10_18_acceptance", true)
-                                .put("r10_18_2_live_target_authority_reconciliation", true)
+                                .put("r10_18_3_app_info_target_reconciliation", true)
                                 .put("acceptance_ok", false)
-                                .put("stage", "settings_foreground_truth")
+                                .put("stage", "app_info_foreground_truth")
                                 .put("local_contract_self_test", localContractOk)
-                                .put("settings_ready", settingsReady)
-                                .put("settings_screen", settingsScreen)
+                                .put("app_info_ready", appInfoReady)
+                                .put("app_info_target_app", "YouTube")
+                                .put("app_info_screen", appInfoScreen)
                                 .put("restore_verified", restore.optBoolean("verified", false))
                                 .put("unresolved_side_effect", false)
 
@@ -40647,7 +40668,7 @@ failedSubgoalId = subgoal.id,
                                 !shuttingDown
                             ) {
                                 respondAndResume(
-                                    text = "R10.18.2 остановлен: foreground truth Samsung Settings не подтверждён.",
+                                    text = "R10.18.3 остановлен: App Info foreground truth не подтверждён.",
                                     silent = silent,
                                     success = false,
                                     technical = evidence.toString()
@@ -40657,8 +40678,8 @@ failedSubgoalId = subgoal.id,
                         return@thread
                     }
 
-                    val requestedTarget = "пункт Экран"
-                    val expectedTarget = "Экран"
+                    val requestedTarget = "пункт Разрешения"
+                    val expectedTarget = "Разрешения"
 
                     val action =
                         universalUiActionEngine.click(
@@ -40715,13 +40736,14 @@ failedSubgoalId = subgoal.id,
                             },
                         message =
                             if (actionOk) {
-                                "R10.18.2 подтвердил exact Settings target -> live Accessibility authority -> single dispatch -> fresh post-condition"
+                                "R10.18.3 подтвердил App Info -> Permissions через Universal UI Action Engine"
                             } else {
-                                "R10.18.2 universal UI action не подтверждён"
+                                "R10.18.3 universal UI action не подтверждён"
                             },
                         details =
                             JSONObject()
-                                .put("settings_ready", settingsReady)
+                                .put("app_info_ready", appInfoReady)
+                                .put("app_info_target_app", "YouTube")
                                 .put("requested_target", requestedTarget)
                                 .put("expected_target", expectedTarget)
                                 .put("action", action)
@@ -40735,26 +40757,27 @@ failedSubgoalId = subgoal.id,
                     restore =
                         restoreAyanaAfterAppIntegrationProbe(
                             pageKey = originalPage,
-                            stepKey = "r10.18.2-universal-ui-action"
+                            stepKey = "r10.18.3-universal-ui-action"
                         )
 
                     val accepted =
                         localContractOk &&
-                            settingsReady &&
+                            appInfoReady &&
                             actionOk &&
                             restore.optBoolean("verified", false)
 
                     val evidence =
                         JSONObject()
                             .put("r10_18_acceptance", true)
-                            .put("r10_18_2_live_target_authority_reconciliation", true)
+                            .put("r10_18_3_app_info_target_reconciliation", true)
                             .put("acceptance_ok", accepted)
                             .put("universal_ui_action_engine_version", AyanaUniversalUiActionEngine.VERSION)
                             .put("universal_ui_action_contract_version", AyanaUniversalUiActionEngine.CONTRACT_VERSION)
                             .put("screen_intelligence_version", AyanaScreenIntelligence.VERSION)
                             .put("screen_understanding_version", AyanaScreenUnderstandingEngine.VERSION)
                             .put("local_contract_self_test", localContractOk)
-                            .put("settings_foreground_truth_verified", settingsReady)
+                            .put("app_info_foreground_truth_verified", appInfoReady)
+                            .put("app_info_target_app", "YouTube")
                             .put("action_verified", actionOk)
                             .put("requested_target", requestedTarget)
                             .put("normalized_target", action.optString("normalized_target"))
@@ -40783,9 +40806,9 @@ failedSubgoalId = subgoal.id,
                             },
                         message =
                             if (accepted) {
-                                "R10.18.2 подтвердил Universal UI Action Engine через live exact Settings target"
+                                "R10.18.3 подтвердил Universal UI Action Engine на реальном App Info target"
                             } else {
-                                "R10.18.2 Universal UI Action Engine acceptance не подтверждён"
+                                "R10.18.3 Universal UI Action Engine acceptance не подтверждён"
                             },
                         details = evidence.toString().take(5200)
                     )
@@ -40799,16 +40822,17 @@ failedSubgoalId = subgoal.id,
                             if (accepted) {
                                 respondAndResume(
                                     text =
-                                        "R10.18.2 подтверждён: AYANA использовала live Accessibility authority для точного target, " +
-                                            "выполнила один универсальный UI dispatch, перечитала экран и подтвердила переход; " +
-                                            "visual action authority отсутствует, blind mutation retry запрещён.",
+                                        "R10.18 подтверждён: AYANA открыла App Info YouTube, " +
+                                            "универсально нашла и открыла «Разрешения», выполнила один UI dispatch, " +
+                                            "перечитала экран и подтвердила переход; visual action authority отсутствует, " +
+                                            "blind mutation retry запрещён.",
                                     silent = silent,
                                     success = true,
                                     technical = evidence.toString()
                                 )
                             } else {
                                 respondAndResume(
-                                    text = "R10.18.2 не прошёл acceptance. См. technical evidence в History.",
+                                    text = "R10.18.3 не прошёл acceptance. См. technical evidence в History.",
                                     silent = silent,
                                     success = false,
                                     technical = evidence.toString()
@@ -40821,7 +40845,7 @@ failedSubgoalId = subgoal.id,
                         restore =
                             restoreAyanaAfterAppIntegrationProbe(
                                 pageKey = originalPage,
-                                stepKey = "r10.18.2-exception-restore"
+                                stepKey = "r10.18.3-exception-restore"
                             )
                     } catch (_: Throwable) {
                     }
@@ -40829,9 +40853,9 @@ failedSubgoalId = subgoal.id,
                     val evidence =
                         JSONObject()
                             .put("r10_18_acceptance", true)
-                            .put("r10_18_2_live_target_authority_reconciliation", true)
+                            .put("r10_18_3_app_info_target_reconciliation", true)
                             .put("acceptance_ok", false)
-                            .put("reason", "r10_18_2_acceptance_exception")
+                            .put("reason", "r10_18_3_acceptance_exception")
                             .put("error", (error.message ?: error.javaClass.simpleName).take(600))
                             .put("restore_verified", restore.optBoolean("verified", false))
                             .put("unresolved_side_effect", false)
@@ -40843,7 +40867,7 @@ failedSubgoalId = subgoal.id,
                             !shuttingDown
                         ) {
                             respondAndResume(
-                                text = "R10.18.2 Universal UI Action Engine завершился ошибкой.",
+                                text = "R10.18.3 Universal UI Action Engine завершился ошибкой.",
                                 silent = silent,
                                 success = false,
                                 technical = evidence.toString()
@@ -67496,7 +67520,7 @@ state
 
         // R10.18 UNIVERSAL UI ACTION ENGINE RELEASE TRUTH.
         private const val AYANA_VOICE_SERVICE_RELEASE =
-            "v12.50.2 / R10.18.2 LIVE TARGET AUTHORITY RECONCILIATION"
+            "v12.50.3 / R10.18.3 APP INFO TARGET RECONCILIATION"
 
         private const val AYANA_PERSONAL_SEARCH_ENGINE_RELEASE =
             "v1.5.1 IMAGE COVERAGE TRUTH + R10.2 UNIFIED SEARCH CONTRACT v1.0"
@@ -67511,10 +67535,10 @@ state
             "R10.17.1 SCREEN INTELLIGENCE ACCEPTANCE ROUTING RECONCILIATION — DEVICE-CONFIRMED ACCEPTED"
 
         private const val AYANA_CURRENT_FEATURE_RELEASE =
-            "R10.18.2 LIVE TARGET AUTHORITY RECONCILIATION — PENDING DEVICE CONFIRMATION"
+            "R10.18.3 APP INFO TARGET RECONCILIATION — PENDING DEVICE CONFIRMATION"
 
         private const val AYANA_RELEASE_LINEAGE =
-            "Android v12.21.0 / R7.9 truth-hardening + R8.0 multi-attachment + R8.1–R8.4 accepted Personal Global Search stack + R8.5–R8.5.4 capability/evidence truth + R9.0 autonomous agent foundation + R9.0.1 history live-refresh proof fix + R9.0.2 diagnostic reconciliation/history refresh fix + R9.0.3 TTS health reconciliation + R9.1 IME perception/active telemetry truth + R9.2 autonomous recovery/long-task reconciliation + R9.2.1 adaptive hypothesis reconciliation + R9.3 app integration framework + R9.3.1 screen health reconciliation + R9.3.2 history latency recovery reconciliation + R9.3.3 informational terminal reconciliation + R9.3.4 app integration device acceptance + R9.4 multi-app task orchestration + R9.4.1 screen ownership union reconciliation + R9.5 verified result transfer between app steps + R9.5.1 partial marker provenance reconciliation + R9.5.2 bounded marker observation + R9.5.3 verified action result transfer + R9.6 verified semantic observation fallback + R9.6.1 visual fallback acceptance truth + R9.7 structured screen reading + R9.7.1 conversation routing/terminal truth + R9.7.2 structured router conversation precedence + R9.7.3 action morphology/terminal truth + R9.8 generic verified result transfer + R9.8.1 master full acceptance/diagnostic engine + R9.9 reversible action journal/verified undo + R9.9.1 brightness verified undo device acceptance + R9.9.2 opt-in low-battery controlled proactivity + R10.0 unified screen intelligence + R10.1 local self-diagnostics/self-audit + R10.2 personal search expansion + R10.3 long autonomous tasks/recovery + R10.4 adaptive verified execution loop + R10.5 generalized live adaptive autonomy + R10.6 cross-lane adaptive continuity + R10.6.1 durable goal binding fix + R10.7 cross-lane durable recovery continuity + R10.7.1 isolated acceptance cleanup hardening + R10.8 general-purpose long autonomous objectives + R10.9 dynamic goal decomposition/planner contract + R10.10 adaptive planner production path + R10.11 production replan/durable recovery + R10.12 natural lifecycle recovery/background continuation + R10.13 full process-death recovery + R10.13.1 post-process readiness/reconciliation + R10.13.2 process-death core recovery proof correction + R10.14 perception process isolation/cross-process accessibility bridge + R10.14.1 cross-process visual evidence fix + R10.14.2 lifecycle profile/self-diagnostic truth + R10.14.3 history recovery reconciliation + R10.15 generalized cross-process autonomy hardening + R10.15.1 self-diagnostics routing reconciliation + R10.16 perception process recovery/safe bridge rebind + R10.16.1 restart telemetry reconciliation + R10.17 screen intelligence 2.0 + R10.17.1 acceptance routing reconciliation + R10.18 universal UI action engine + R10.18.1 acceptance target reconciliation + R10.18.2 live target authority reconciliation"
+            "Android v12.21.0 / R7.9 truth-hardening + R8.0 multi-attachment + R8.1–R8.4 accepted Personal Global Search stack + R8.5–R8.5.4 capability/evidence truth + R9.0 autonomous agent foundation + R9.0.1 history live-refresh proof fix + R9.0.2 diagnostic reconciliation/history refresh fix + R9.0.3 TTS health reconciliation + R9.1 IME perception/active telemetry truth + R9.2 autonomous recovery/long-task reconciliation + R9.2.1 adaptive hypothesis reconciliation + R9.3 app integration framework + R9.3.1 screen health reconciliation + R9.3.2 history latency recovery reconciliation + R9.3.3 informational terminal reconciliation + R9.3.4 app integration device acceptance + R9.4 multi-app task orchestration + R9.4.1 screen ownership union reconciliation + R9.5 verified result transfer between app steps + R9.5.1 partial marker provenance reconciliation + R9.5.2 bounded marker observation + R9.5.3 verified action result transfer + R9.6 verified semantic observation fallback + R9.6.1 visual fallback acceptance truth + R9.7 structured screen reading + R9.7.1 conversation routing/terminal truth + R9.7.2 structured router conversation precedence + R9.7.3 action morphology/terminal truth + R9.8 generic verified result transfer + R9.8.1 master full acceptance/diagnostic engine + R9.9 reversible action journal/verified undo + R9.9.1 brightness verified undo device acceptance + R9.9.2 opt-in low-battery controlled proactivity + R10.0 unified screen intelligence + R10.1 local self-diagnostics/self-audit + R10.2 personal search expansion + R10.3 long autonomous tasks/recovery + R10.4 adaptive verified execution loop + R10.5 generalized live adaptive autonomy + R10.6 cross-lane adaptive continuity + R10.6.1 durable goal binding fix + R10.7 cross-lane durable recovery continuity + R10.7.1 isolated acceptance cleanup hardening + R10.8 general-purpose long autonomous objectives + R10.9 dynamic goal decomposition/planner contract + R10.10 adaptive planner production path + R10.11 production replan/durable recovery + R10.12 natural lifecycle recovery/background continuation + R10.13 full process-death recovery + R10.13.1 post-process readiness/reconciliation + R10.13.2 process-death core recovery proof correction + R10.14 perception process isolation/cross-process accessibility bridge + R10.14.1 cross-process visual evidence fix + R10.14.2 lifecycle profile/self-diagnostic truth + R10.14.3 history recovery reconciliation + R10.15 generalized cross-process autonomy hardening + R10.15.1 self-diagnostics routing reconciliation + R10.16 perception process recovery/safe bridge rebind + R10.16.1 restart telemetry reconciliation + R10.17 screen intelligence 2.0 + R10.17.1 acceptance routing reconciliation + R10.18 universal UI action engine + R10.18.1 acceptance target reconciliation + R10.18.2 live target authority reconciliation + R10.18.3 app info target reconciliation"
 
         // AyanaCommandHistoryStore v2.8 keeps up to 4k chars inline and stores longer
         // results out-of-line. Self-review intentionally remains inline so copied History
