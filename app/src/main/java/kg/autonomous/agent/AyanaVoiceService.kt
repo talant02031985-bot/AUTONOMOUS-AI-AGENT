@@ -40643,11 +40643,60 @@ failedSubgoalId = subgoal.id,
                         return@thread
                     }
 
-                    // Navigation-only semantic mutation. "пункт" is intentionally part of
-                    // the request so R10.18 proves role normalization before dispatch.
+                    // R10.18.1 ACCEPTANCE TARGET TRUTH.
+                    // The device acceptance must never demand a hard-coded app row that is
+                    // currently outside the observed Settings viewport. Pick one fresh,
+                    // actually observed app-label candidate from the verified Settings
+                    // snapshot, then prove role normalization -> one target dispatch ->
+                    // fresh post-condition. Production engine behavior is unchanged.
+                    val selectedTarget =
+                        r10_18SelectVisibleActionTarget(
+                            settingsScreen
+                        )
+
+                    if (selectedTarget.isBlank()) {
+                        restore =
+                            restoreAyanaAfterAppIntegrationProbe(
+                                pageKey = originalPage,
+                                stepKey = "r10.18-visible-target-selection"
+                            )
+
+                        val evidence =
+                            JSONObject()
+                                .put("r10_18_acceptance", true)
+                                .put("r10_18_1_acceptance_routing_reconciliation", true)
+                                .put("acceptance_ok", false)
+                                .put("stage", "visible_target_selection")
+                                .put("local_contract_self_test", localContractOk)
+                                .put("settings_ready", settingsReady)
+                                .put("visible_target_selected", false)
+                                .put("settings_screen", settingsScreen)
+                                .put("restore_verified", restore.optBoolean("verified", false))
+                                .put("unresolved_side_effect", false)
+
+                        mainHandler.post {
+                            if (
+                                commandToken == activeCommandToken &&
+                                !cancelRequested &&
+                                !shuttingDown
+                            ) {
+                                respondAndResume(
+                                    text = "R10.18 остановлен: на текущем участке списка приложений не найден наблюдаемый безопасный target для acceptance.",
+                                    silent = silent,
+                                    success = false,
+                                    technical = evidence.toString()
+                                )
+                            }
+                        }
+                        return@thread
+                    }
+
+                    val requestedTarget =
+                        "пункт $selectedTarget"
+
                     val action =
                         universalUiActionEngine.click(
-                            target = "пункт AYANA AI",
+                            target = requestedTarget,
                             confirmed = false
                         )
 
@@ -40656,14 +40705,17 @@ failedSubgoalId = subgoal.id,
                             ?: screenIntelligence.getScreenState()
 
                     val targetMarkerVerified =
-                        r10_18ScreenContainsText(after, "AYANA AI")
+                        r10_18ScreenContainsText(
+                            after,
+                            selectedTarget
+                        )
 
                     val actionOk =
                         action.optBoolean("success", false) &&
                             action.optBoolean("verified", false) &&
                             action.optBoolean("postcondition_verified", false) &&
                             action.optInt("dispatch_count", 0) == 1 &&
-                            action.optString("normalized_target") == "AYANA AI" &&
+                            action.optString("normalized_target") == selectedTarget &&
                             action.optString("role_hint") == "item" &&
                             !action.optBoolean("blind_retry_allowed", true) &&
                             action.optBoolean("mutation_blind_retry_blocked", false) &&
@@ -40683,7 +40735,7 @@ failedSubgoalId = subgoal.id,
                             },
                         message =
                             if (actionOk) {
-                                "R10.18 подтвердил semantic role -> single dispatch -> fresh post-condition"
+                                "R10.18.1 подтвердил observed target -> semantic role -> single dispatch -> fresh post-condition"
                             } else {
                                 "R10.18 universal UI action не подтверждён"
                             },
@@ -40711,6 +40763,7 @@ failedSubgoalId = subgoal.id,
                     val evidence =
                         JSONObject()
                             .put("r10_18_acceptance", true)
+                            .put("r10_18_1_acceptance_reconciliation", true)
                             .put("acceptance_ok", accepted)
                             .put("universal_ui_action_engine_version", AyanaUniversalUiActionEngine.VERSION)
                             .put("universal_ui_action_contract_version", AyanaUniversalUiActionEngine.CONTRACT_VERSION)
@@ -40719,7 +40772,9 @@ failedSubgoalId = subgoal.id,
                             .put("local_contract_self_test", localContractOk)
                             .put("settings_preflight_verified", settingsReady)
                             .put("action_verified", actionOk)
-                            .put("requested_target", "пункт AYANA AI")
+                            .put("requested_target", requestedTarget)
+                            .put("selected_visible_target", selectedTarget)
+                            .put("visible_target_selected", true)
                             .put("normalized_target", action.optString("normalized_target"))
                             .put("role_hint", action.optString("role_hint"))
                             .put("single_dispatch_verified", action.optInt("dispatch_count", 0) == 1)
@@ -40744,7 +40799,7 @@ failedSubgoalId = subgoal.id,
                             },
                         message =
                             if (accepted) {
-                                "R10.18 Universal UI Action Engine подтверждён на внешнем Samsung Settings UI"
+                                "R10.18.1 подтвердил Universal UI Action Engine на реально наблюдаемом target Samsung Settings"
                             } else {
                                 "R10.18 Universal UI Action Engine acceptance не подтверждён"
                             },
@@ -40760,7 +40815,7 @@ failedSubgoalId = subgoal.id,
                             if (accepted) {
                                 respondAndResume(
                                     text =
-                                        "R10.18 подтверждён: AYANA нормализовала semantic role, получила live Accessibility authority, " +
+                                        "R10.18.1 подтверждён: AYANA выбрала реально наблюдаемый target, нормализовала semantic role, получила live Accessibility authority, " +
                                             "выполнила один UI dispatch, перечитала экран и подтвердила результат; blind mutation retry запрещён.",
                                     silent = silent,
                                     success = true,
@@ -40815,6 +40870,52 @@ failedSubgoalId = subgoal.id,
         currentAgentThread = worker
         executionKernel.bindThread(worker)
         worker.start()
+    }
+
+    private fun r10_18SelectVisibleActionTarget(
+        screen: JSONObject
+    ): String {
+        val excluded =
+            setOf(
+                "приложения",
+                "настройки",
+                "поиск",
+                "назад",
+                "ещё",
+                "дополнительно"
+            )
+
+        val candidates = linkedSetOf<String>()
+
+        for (key in listOf("visible_text", "all_visible_text")) {
+            val values = screen.optJSONArray(key) ?: continue
+            for (index in 0 until values.length()) {
+                val clean =
+                    values
+                        .optString(index)
+                        .replace(Regex("\\s+"), " ")
+                        .trim()
+                        .trim('«', '»', '"', '\'', '“', '”')
+                        .take(100)
+
+                val normalized =
+                    clean
+                        .lowercase(Locale.ROOT)
+                        .replace('ё', 'е')
+
+                if (
+                    clean.isNotBlank() &&
+                    clean.length in 2..80 &&
+                    normalized !in excluded &&
+                    !normalized.startsWith("приложени") &&
+                    !normalized.startsWith("настройк")
+                ) {
+                    candidates.add(clean)
+                }
+            }
+        }
+
+        return candidates.firstOrNull().orEmpty()
     }
 
     private fun r10_18ScreenContainsText(
@@ -67455,7 +67556,7 @@ state
 
         // R10.18 UNIVERSAL UI ACTION ENGINE RELEASE TRUTH.
         private const val AYANA_VOICE_SERVICE_RELEASE =
-            "v12.50.0 / R10.18 UNIVERSAL UI ACTION ENGINE"
+            "v12.50.1 / R10.18.1 ACCEPTANCE TARGET RECONCILIATION"
 
         private const val AYANA_PERSONAL_SEARCH_ENGINE_RELEASE =
             "v1.5.1 IMAGE COVERAGE TRUTH + R10.2 UNIFIED SEARCH CONTRACT v1.0"
@@ -67470,10 +67571,10 @@ state
             "R10.17.1 SCREEN INTELLIGENCE ACCEPTANCE ROUTING RECONCILIATION — DEVICE-CONFIRMED ACCEPTED"
 
         private const val AYANA_CURRENT_FEATURE_RELEASE =
-            "R10.18 UNIVERSAL UI ACTION ENGINE — PENDING DEVICE CONFIRMATION"
+            "R10.18.1 ACCEPTANCE TARGET RECONCILIATION — PENDING DEVICE CONFIRMATION"
 
         private const val AYANA_RELEASE_LINEAGE =
-            "Android v12.21.0 / R7.9 truth-hardening + R8.0 multi-attachment + R8.1–R8.4 accepted Personal Global Search stack + R8.5–R8.5.4 capability/evidence truth + R9.0 autonomous agent foundation + R9.0.1 history live-refresh proof fix + R9.0.2 diagnostic reconciliation/history refresh fix + R9.0.3 TTS health reconciliation + R9.1 IME perception/active telemetry truth + R9.2 autonomous recovery/long-task reconciliation + R9.2.1 adaptive hypothesis reconciliation + R9.3 app integration framework + R9.3.1 screen health reconciliation + R9.3.2 history latency recovery reconciliation + R9.3.3 informational terminal reconciliation + R9.3.4 app integration device acceptance + R9.4 multi-app task orchestration + R9.4.1 screen ownership union reconciliation + R9.5 verified result transfer between app steps + R9.5.1 partial marker provenance reconciliation + R9.5.2 bounded marker observation + R9.5.3 verified action result transfer + R9.6 verified semantic observation fallback + R9.6.1 visual fallback acceptance truth + R9.7 structured screen reading + R9.7.1 conversation routing/terminal truth + R9.7.2 structured router conversation precedence + R9.7.3 action morphology/terminal truth + R9.8 generic verified result transfer + R9.8.1 master full acceptance/diagnostic engine + R9.9 reversible action journal/verified undo + R9.9.1 brightness verified undo device acceptance + R9.9.2 opt-in low-battery controlled proactivity + R10.0 unified screen intelligence + R10.1 local self-diagnostics/self-audit + R10.2 personal search expansion + R10.3 long autonomous tasks/recovery + R10.4 adaptive verified execution loop + R10.5 generalized live adaptive autonomy + R10.6 cross-lane adaptive continuity + R10.6.1 durable goal binding fix + R10.7 cross-lane durable recovery continuity + R10.7.1 isolated acceptance cleanup hardening + R10.8 general-purpose long autonomous objectives + R10.9 dynamic goal decomposition/planner contract + R10.10 adaptive planner production path + R10.11 production replan/durable recovery + R10.12 natural lifecycle recovery/background continuation + R10.13 full process-death recovery + R10.13.1 post-process readiness/reconciliation + R10.13.2 process-death core recovery proof correction + R10.14 perception process isolation/cross-process accessibility bridge + R10.14.1 cross-process visual evidence fix + R10.14.2 lifecycle profile/self-diagnostic truth + R10.14.3 history recovery reconciliation + R10.15 generalized cross-process autonomy hardening + R10.15.1 self-diagnostics routing reconciliation + R10.16 perception process recovery/safe bridge rebind + R10.16.1 restart telemetry reconciliation + R10.17 screen intelligence 2.0 + R10.17.1 acceptance routing reconciliation + R10.18 universal UI action engine"
+            "Android v12.21.0 / R7.9 truth-hardening + R8.0 multi-attachment + R8.1–R8.4 accepted Personal Global Search stack + R8.5–R8.5.4 capability/evidence truth + R9.0 autonomous agent foundation + R9.0.1 history live-refresh proof fix + R9.0.2 diagnostic reconciliation/history refresh fix + R9.0.3 TTS health reconciliation + R9.1 IME perception/active telemetry truth + R9.2 autonomous recovery/long-task reconciliation + R9.2.1 adaptive hypothesis reconciliation + R9.3 app integration framework + R9.3.1 screen health reconciliation + R9.3.2 history latency recovery reconciliation + R9.3.3 informational terminal reconciliation + R9.3.4 app integration device acceptance + R9.4 multi-app task orchestration + R9.4.1 screen ownership union reconciliation + R9.5 verified result transfer between app steps + R9.5.1 partial marker provenance reconciliation + R9.5.2 bounded marker observation + R9.5.3 verified action result transfer + R9.6 verified semantic observation fallback + R9.6.1 visual fallback acceptance truth + R9.7 structured screen reading + R9.7.1 conversation routing/terminal truth + R9.7.2 structured router conversation precedence + R9.7.3 action morphology/terminal truth + R9.8 generic verified result transfer + R9.8.1 master full acceptance/diagnostic engine + R9.9 reversible action journal/verified undo + R9.9.1 brightness verified undo device acceptance + R9.9.2 opt-in low-battery controlled proactivity + R10.0 unified screen intelligence + R10.1 local self-diagnostics/self-audit + R10.2 personal search expansion + R10.3 long autonomous tasks/recovery + R10.4 adaptive verified execution loop + R10.5 generalized live adaptive autonomy + R10.6 cross-lane adaptive continuity + R10.6.1 durable goal binding fix + R10.7 cross-lane durable recovery continuity + R10.7.1 isolated acceptance cleanup hardening + R10.8 general-purpose long autonomous objectives + R10.9 dynamic goal decomposition/planner contract + R10.10 adaptive planner production path + R10.11 production replan/durable recovery + R10.12 natural lifecycle recovery/background continuation + R10.13 full process-death recovery + R10.13.1 post-process readiness/reconciliation + R10.13.2 process-death core recovery proof correction + R10.14 perception process isolation/cross-process accessibility bridge + R10.14.1 cross-process visual evidence fix + R10.14.2 lifecycle profile/self-diagnostic truth + R10.14.3 history recovery reconciliation + R10.15 generalized cross-process autonomy hardening + R10.15.1 self-diagnostics routing reconciliation + R10.16 perception process recovery/safe bridge rebind + R10.16.1 restart telemetry reconciliation + R10.17 screen intelligence 2.0 + R10.17.1 acceptance routing reconciliation + R10.18 universal UI action engine + R10.18.1 acceptance target reconciliation"
 
         // AyanaCommandHistoryStore v2.8 keeps up to 4k chars inline and stores longer
         // results out-of-line. Self-review intentionally remains inline so copied History
