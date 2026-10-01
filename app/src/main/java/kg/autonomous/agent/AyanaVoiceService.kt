@@ -63,6 +63,15 @@ import kotlin.math.abs
 
 class AyanaVoiceService : Service() {
 
+    // AYANA v12.48.0 / R10.16 PERCEPTION PROCESS RECOVERY + SAFE REBIND.
+    // Builds on DEVICE-CONFIRMED R10.15.1. If the isolated :perception process dies
+    // while the main AYANA process remains alive, the bridge verifies a new provider PID
+    // and process epoch before read-only perception resumes. Read-only calls may perform
+    // one bounded rebind/retry; ambiguous mutating/destructive calls are never blindly
+    // replayed. Acceptance kills only :perception, proves main-process continuity, waits
+    // for Accessibility rebind, then verifies a fresh Screen Intelligence read through the
+    // new bridge generation. ORB/visualizer/UI unchanged.
+    //
     // AYANA v12.47.4 / R10.15.1 ROUTING RECONCILIATION.
     // Builds on DEVICE-CONFIRMED R10.15 GENERALIZED CROSS-PROCESS AUTONOMY HARDENING.
     // Natural self-diagnostics wording such as «проведи подробную самодиагностику»
@@ -1014,6 +1023,13 @@ private val miniOrbController by lazy {
     private val perceptionBridge by lazy {
         AyanaPerceptionBridgeClient(
             applicationContext
+        )
+    }
+
+    private val perceptionProcessRecoveryCoordinator by lazy {
+        AyanaPerceptionProcessRecoveryCoordinator(
+            context = applicationContext,
+            perceptionBridge = perceptionBridge
         )
     }
 
@@ -4749,6 +4765,20 @@ originalCommand
                 )
                 return
             }
+
+        // R10.16 PERCEPTION PROCESS RECOVERY + SAFE REBIND ACCEPTANCE.
+        // Kills only the isolated :perception process while main AYANA stays alive, then
+        // requires a new provider PID/epoch, Accessibility rebind and a fresh screen read.
+        if (
+            isR10_16PerceptionProcessRecoveryAcceptanceCommand(
+                routingNormalized
+            )
+        ) {
+            runR10_16PerceptionProcessRecoveryAcceptance(
+                silent = silent
+            )
+            return
+        }
 
         // R10.14 PERCEPTION PROCESS ISOLATION + CROSS-PROCESS ACCESSIBILITY ACCEPTANCE.
         // The main AYANA process is killed after verified Browser/visual producer work while
@@ -40427,6 +40457,310 @@ failedSubgoalId = subgoal.id,
 
 
 
+    private fun isR10_16PerceptionProcessRecoveryAcceptanceCommand(
+        command: String
+    ): Boolean {
+        val normalized =
+            command
+                .lowercase(Locale.ROOT)
+                .replace('ё', 'е')
+                .replace(Regex("\\s+"), " ")
+                .trim()
+                .removePrefix("аяна ")
+                .trim()
+
+        return normalized in
+            setOf(
+                "проверь восстановление процесса восприятия",
+                "проверь восстановление perception process",
+                "проверь perception process recovery",
+                "проверь safe rebind perception",
+                "проверь r10.16"
+            )
+    }
+
+    private fun runR10_16PerceptionProcessRecoveryAcceptance(
+        silent: Boolean
+    ) {
+        executionPhase(
+            phase = "r10_16_perception_process_recovery_acceptance",
+            executor = "perception_recovery_v1_0+perception_bridge_v1_3"
+        )
+
+        val commandToken = activeCommandToken
+
+        stopSherpaListening()
+        listenMode = ListenMode.BUSY
+
+        broadcastStatus(
+            "Проверяю восстановление процесса восприятия…",
+            STATE_EXECUTING
+        )
+
+        val worker =
+            thread(
+                start = false,
+                name = "AyanaR10_16PerceptionRecovery"
+            ) {
+                val mainPid = android.os.Process.myPid()
+
+                try {
+                    val preflight =
+                        perceptionBridge.awaitReady(
+                            timeoutMs = 3_000L
+                        )
+
+                    val policy =
+                        perceptionBridge.recoveryPolicySelfTest()
+
+                    val preflightOk =
+                        preflight.optBoolean("perception_rebind_ready", false) &&
+                            preflight.optBoolean("perception_route_verified", false) &&
+                            preflight.optBoolean("provider_process_separated", false) &&
+                            preflight.optBoolean("bridge_version_match", false) &&
+                            preflight.optBoolean("provider_epoch_verified", false) &&
+                            preflight.optBoolean("accessibility_connected", false) &&
+                            preflight.optBoolean("route_contract_verified", false) &&
+                            preflight.optInt("perception_process_id", -1) > 0 &&
+                            preflight.optInt("perception_process_id", -1) != mainPid
+
+                    val policyOk =
+                        policy.optBoolean("verified", false) &&
+                            policy.optBoolean("read_only_rebind_retry_supported", false) &&
+                            policy.optBoolean("mutation_blind_retry_blocked", false) &&
+                            policy.optBoolean("destructive_blind_retry_blocked", false) &&
+                            !policy.optBoolean("mutation_blind_retry_allowed", true)
+
+                    commandHistoryStore.addEvent(
+                        activeCommandHistoryId,
+                        state = "r10_16_perception_recovery_preflight",
+                        message =
+                            if (preflightOk && policyOk) {
+                                "R10.16 preflight подтверждён; :perception готов к controlled kill/rebind"
+                            } else {
+                                "R10.16 preflight не подтверждён"
+                            },
+                        details =
+                            JSONObject()
+                                .put("preflight", preflight)
+                                .put("policy", policy)
+                                .toString()
+                                .take(4200)
+                    )
+
+                    if (!preflightOk || !policyOk) {
+                        val evidence =
+                            JSONObject()
+                                .put("r10_16_acceptance", true)
+                                .put("acceptance_ok", false)
+                                .put("preflight_verified", preflightOk)
+                                .put("recovery_policy_verified", policyOk)
+                                .put("main_process_id", mainPid)
+                                .put("preflight", preflight)
+                                .put("recovery_policy", policy)
+                                .put("reason", "r10_16_preflight_failed")
+
+                        mainHandler.post {
+                            if (
+                                commandToken == activeCommandToken &&
+                                !cancelRequested &&
+                                !shuttingDown
+                            ) {
+                                respondAndResume(
+                                    text = "R10.16 остановлен до kill: perception recovery preflight не подтверждён.",
+                                    silent = silent,
+                                    success = false,
+                                    technical = evidence.toString()
+                                )
+                            }
+                        }
+                        return@thread
+                    }
+
+                    if (
+                        isCommandCancelled(commandToken) ||
+                        commandToken != activeCommandToken ||
+                        Thread.currentThread().isInterrupted ||
+                        shuttingDown
+                    ) {
+                        return@thread
+                    }
+
+                    val recovery =
+                        perceptionProcessRecoveryCoordinator
+                            .forceDeathAndAwaitRecovery(
+                                timeoutMs = 12_000L
+                            )
+
+                    val postScreen =
+                        if (recovery.optBoolean("verified", false)) {
+                            try {
+                                screenIntelligence.getScreenState()
+                            } catch (error: Throwable) {
+                                JSONObject()
+                                    .put("success", false)
+                                    .put("verified", false)
+                                    .put("reason", "post_recovery_screen_exception")
+                                    .put("error", error.message ?: error.javaClass.simpleName)
+                            }
+                        } else {
+                            JSONObject()
+                                .put("success", false)
+                                .put("verified", false)
+                                .put("reason", "recovery_not_verified")
+                        }
+
+                    val originPid =
+                        recovery.optInt("origin_perception_process_id", -1)
+                    val restoredPid =
+                        recovery.optInt("restored_perception_process_id", -1)
+                    val originEpoch =
+                        recovery.optString("origin_perception_process_epoch_id")
+                    val restoredEpoch =
+                        recovery.optString("restored_perception_process_epoch_id")
+
+                    val mainProcessSurvived =
+                        android.os.Process.myPid() == mainPid
+
+                    val postScreenVerified =
+                        postScreen.optBoolean("success", false) &&
+                            postScreen.optBoolean("perception_route_verified", false) &&
+                            postScreen.optBoolean("provider_process_separated", false) &&
+                            postScreen.optBoolean("bridge_version_match", false) &&
+                            postScreen.optBoolean("provider_epoch_verified", false) &&
+                            postScreen.optInt("perception_process_id", -1) == restoredPid &&
+                            postScreen.optString("perception_process_epoch_id") == restoredEpoch
+
+                    val accepted =
+                        recovery.optBoolean("success", false) &&
+                            recovery.optBoolean("verified", false) &&
+                            recovery.optBoolean("process_identity_changed", false) &&
+                            recovery.optBoolean("process_epoch_changed", false) &&
+                            recovery.optBoolean("accessibility_reconnected", false) &&
+                            recovery.optBoolean("route_contract_verified", false) &&
+                            mainProcessSurvived &&
+                            originPid > 0 &&
+                            restoredPid > 0 &&
+                            originPid != restoredPid &&
+                            originEpoch.isNotBlank() &&
+                            restoredEpoch.isNotBlank() &&
+                            originEpoch != restoredEpoch &&
+                            postScreenVerified &&
+                            policyOk
+
+                    val evidence =
+                        JSONObject()
+                            .put("r10_16_acceptance", true)
+                            .put("acceptance_ok", accepted)
+                            .put("perception_recovery_version", AyanaPerceptionProcessRecoveryCoordinator.VERSION)
+                            .put("perception_bridge_version", AyanaPerceptionBridgeContract.VERSION)
+                            .put("main_process_id", mainPid)
+                            .put("main_process_survived", mainProcessSurvived)
+                            .put("origin_perception_process_id", originPid)
+                            .put("restored_perception_process_id", restoredPid)
+                            .put("origin_perception_process_epoch_id", originEpoch)
+                            .put("restored_perception_process_epoch_id", restoredEpoch)
+                            .put("process_identity_changed", recovery.optBoolean("process_identity_changed", false))
+                            .put("process_epoch_changed", recovery.optBoolean("process_epoch_changed", false))
+                            .put("bridge_generation_advanced", recovery.optBoolean("bridge_generation_advanced", false))
+                            .put("accessibility_reconnected", recovery.optBoolean("accessibility_reconnected", false))
+                            .put("route_contract_verified", recovery.optBoolean("route_contract_verified", false))
+                            .put("post_recovery_screen_verified", postScreenVerified)
+                            .put("post_recovery_screen_package", postScreen.optString("effective_foreground_package"))
+                            .put("read_only_rebind_retry_supported", policy.optBoolean("read_only_rebind_retry_supported", false))
+                            .put("mutation_blind_retry_blocked", policy.optBoolean("mutation_blind_retry_blocked", false))
+                            .put("destructive_blind_retry_blocked", policy.optBoolean("destructive_blind_retry_blocked", false))
+                            .put("unresolved_side_effect", false)
+                            .put("orb_visual_implementation_changed", false)
+                            .put("recovery", recovery)
+
+                    commandHistoryStore.addEvent(
+                        activeCommandHistoryId,
+                        state =
+                            if (accepted) {
+                                "r10_16_perception_process_recovery_verified"
+                            } else {
+                                "r10_16_perception_process_recovery_failed"
+                            },
+                        message =
+                            if (accepted) {
+                                "R10.16 подтвердил restart :perception + safe bridge rebind без смерти main process"
+                            } else {
+                                "R10.16 perception process recovery не подтверждён"
+                            },
+                        details = evidence.toString().take(5200)
+                    )
+
+                    mainHandler.post {
+                        if (
+                            commandToken == activeCommandToken &&
+                            !cancelRequested &&
+                            !shuttingDown
+                        ) {
+                            if (accepted) {
+                                respondAndResume(
+                                    text =
+                                        "R10.16 подтверждён: :perception перезапущен, main AYANA остался жив, " +
+                                            "bridge переподключился к новому PID/epoch, Accessibility восстановлен, " +
+                                            "fresh screen read подтверждён; blind mutation replay запрещён.",
+                                    silent = silent,
+                                    success = true,
+                                    technical = evidence.toString()
+                                )
+                            } else {
+                                respondAndResume(
+                                    text = "R10.16 не прошёл acceptance. См. technical evidence в History.",
+                                    silent = silent,
+                                    success = false,
+                                    technical = evidence.toString()
+                                )
+                            }
+                        }
+                    }
+                } catch (error: Throwable) {
+                    val evidence =
+                        JSONObject()
+                            .put("r10_16_acceptance", true)
+                            .put("acceptance_ok", false)
+                            .put("main_process_id", mainPid)
+                            .put("main_process_survived", android.os.Process.myPid() == mainPid)
+                            .put("reason", "r10_16_acceptance_exception")
+                            .put("error", (error.message ?: error.javaClass.simpleName).take(500))
+                            .put("unresolved_side_effect", false)
+
+                    commandHistoryStore.addEvent(
+                        activeCommandHistoryId,
+                        state = "r10_16_perception_process_recovery_failed",
+                        message = "R10.16 acceptance exception",
+                        details = evidence.toString()
+                    )
+
+                    mainHandler.post {
+                        if (
+                            commandToken == activeCommandToken &&
+                            !cancelRequested &&
+                            !shuttingDown
+                        ) {
+                            respondAndResume(
+                                text = "R10.16 perception process recovery завершился ошибкой.",
+                                silent = silent,
+                                success = false,
+                                technical = evidence.toString()
+                            )
+                        }
+                    }
+                } finally {
+                    if (Thread.currentThread() === currentAgentThread) {
+                        currentAgentThread = null
+                    }
+                }
+            }
+
+        currentAgentThread = worker
+        executionKernel.bindThread(worker)
+        worker.start()
+    }
+
     private fun isR10_14PerceptionProcessIsolationAcceptanceCommand(
         command: String
     ): Boolean {
@@ -66314,13 +66648,13 @@ state
             "v11.1.10 Multi-Attachment"
 
         private const val AYANA_ACCEPTED_FEATURE_CHECKPOINT =
-            "R10.15 GENERALIZED CROSS-PROCESS AUTONOMY HARDENING — DEVICE-CONFIRMED ACCEPTED"
+            "R10.15.1 ROUTING RECONCILIATION — DEVICE-CONFIRMED ACCEPTED"
 
         private const val AYANA_CURRENT_FEATURE_RELEASE =
-            "R10.15.1 ROUTING RECONCILIATION — PENDING DEVICE CONFIRMATION"
+            "R10.16 PERCEPTION PROCESS RECOVERY + SAFE REBIND — PENDING DEVICE CONFIRMATION"
 
         private const val AYANA_RELEASE_LINEAGE =
-            "Android v12.21.0 / R7.9 truth-hardening + R8.0 multi-attachment + R8.1–R8.4 accepted Personal Global Search stack + R8.5–R8.5.4 capability/evidence truth + R9.0 autonomous agent foundation + R9.0.1 history live-refresh proof fix + R9.0.2 diagnostic reconciliation/history refresh fix + R9.0.3 TTS health reconciliation + R9.1 IME perception/active telemetry truth + R9.2 autonomous recovery/long-task reconciliation + R9.2.1 adaptive hypothesis reconciliation + R9.3 app integration framework + R9.3.1 screen health reconciliation + R9.3.2 history latency recovery reconciliation + R9.3.3 informational terminal reconciliation + R9.3.4 app integration device acceptance + R9.4 multi-app task orchestration + R9.4.1 screen ownership union reconciliation + R9.5 verified result transfer between app steps + R9.5.1 partial marker provenance reconciliation + R9.5.2 bounded marker observation + R9.5.3 verified action result transfer + R9.6 verified semantic observation fallback + R9.6.1 visual fallback acceptance truth + R9.7 structured screen reading + R9.7.1 conversation routing/terminal truth + R9.7.2 structured router conversation precedence + R9.7.3 action morphology/terminal truth + R9.8 generic verified result transfer + R9.8.1 master full acceptance/diagnostic engine + R9.9 reversible action journal/verified undo + R9.9.1 brightness verified undo device acceptance + R9.9.2 opt-in low-battery controlled proactivity + R10.0 unified screen intelligence + R10.1 local self-diagnostics/self-audit + R10.2 personal search expansion + R10.3 long autonomous tasks/recovery + R10.4 adaptive verified execution loop + R10.5 generalized live adaptive autonomy + R10.6 cross-lane adaptive continuity + R10.6.1 durable goal binding fix + R10.7 cross-lane durable recovery continuity + R10.7.1 isolated acceptance cleanup hardening + R10.8 general-purpose long autonomous objectives + R10.9 dynamic goal decomposition/planner contract + R10.10 adaptive planner production path + R10.11 production replan/durable recovery + R10.12 natural lifecycle recovery/background continuation + R10.13 full process-death recovery + R10.13.1 post-process readiness/reconciliation + R10.13.2 process-death core recovery proof correction + R10.14 perception process isolation/cross-process accessibility bridge + R10.14.1 cross-process visual evidence fix + R10.14.2 lifecycle profile/self-diagnostic truth + R10.14.3 history recovery reconciliation + R10.15 generalized cross-process autonomy hardening + R10.15.1 self-diagnostics routing reconciliation"
+            "Android v12.21.0 / R7.9 truth-hardening + R8.0 multi-attachment + R8.1–R8.4 accepted Personal Global Search stack + R8.5–R8.5.4 capability/evidence truth + R9.0 autonomous agent foundation + R9.0.1 history live-refresh proof fix + R9.0.2 diagnostic reconciliation/history refresh fix + R9.0.3 TTS health reconciliation + R9.1 IME perception/active telemetry truth + R9.2 autonomous recovery/long-task reconciliation + R9.2.1 adaptive hypothesis reconciliation + R9.3 app integration framework + R9.3.1 screen health reconciliation + R9.3.2 history latency recovery reconciliation + R9.3.3 informational terminal reconciliation + R9.3.4 app integration device acceptance + R9.4 multi-app task orchestration + R9.4.1 screen ownership union reconciliation + R9.5 verified result transfer between app steps + R9.5.1 partial marker provenance reconciliation + R9.5.2 bounded marker observation + R9.5.3 verified action result transfer + R9.6 verified semantic observation fallback + R9.6.1 visual fallback acceptance truth + R9.7 structured screen reading + R9.7.1 conversation routing/terminal truth + R9.7.2 structured router conversation precedence + R9.7.3 action morphology/terminal truth + R9.8 generic verified result transfer + R9.8.1 master full acceptance/diagnostic engine + R9.9 reversible action journal/verified undo + R9.9.1 brightness verified undo device acceptance + R9.9.2 opt-in low-battery controlled proactivity + R10.0 unified screen intelligence + R10.1 local self-diagnostics/self-audit + R10.2 personal search expansion + R10.3 long autonomous tasks/recovery + R10.4 adaptive verified execution loop + R10.5 generalized live adaptive autonomy + R10.6 cross-lane adaptive continuity + R10.6.1 durable goal binding fix + R10.7 cross-lane durable recovery continuity + R10.7.1 isolated acceptance cleanup hardening + R10.8 general-purpose long autonomous objectives + R10.9 dynamic goal decomposition/planner contract + R10.10 adaptive planner production path + R10.11 production replan/durable recovery + R10.12 natural lifecycle recovery/background continuation + R10.13 full process-death recovery + R10.13.1 post-process readiness/reconciliation + R10.13.2 process-death core recovery proof correction + R10.14 perception process isolation/cross-process accessibility bridge + R10.14.1 cross-process visual evidence fix + R10.14.2 lifecycle profile/self-diagnostic truth + R10.14.3 history recovery reconciliation + R10.15 generalized cross-process autonomy hardening + R10.15.1 self-diagnostics routing reconciliation + R10.16 perception process recovery/safe bridge rebind"
 
         // AyanaCommandHistoryStore v2.8 keeps up to 4k chars inline and stores longer
         // results out-of-line. Self-review intentionally remains inline so copied History
