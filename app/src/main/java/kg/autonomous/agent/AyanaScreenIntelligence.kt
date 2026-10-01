@@ -6,7 +6,15 @@ import org.json.JSONObject
 import java.util.Locale
 
 /**
- * AYANA Screen Intelligence v5.2 — R10.15 GENERALIZED CROSS-PROCESS AUTONOMY HARDENING.
+ * AYANA Screen Intelligence v6.0 — R10.17 SCREEN INTELLIGENCE 2.0.
+ *
+ * R10.17 separates raw Accessibility coverage truth from semantic understanding truth.
+ * A raw `partial` snapshot remains `partial`; Screen Understanding Engine v2.0 may still
+ * classify the same verified foreground as `verified_sufficient` for read-only reasoning.
+ * Verified visual/structured evidence can improve read-only understanding only and never
+ * grants action authority. Existing R10.15 strict process routing remains unchanged.
+ *
+ * Previous baseline: R10.15 GENERALIZED CROSS-PROCESS AUTONOMY HARDENING.
  *
  * R10.15 makes process identity authoritative for every screen/action route. Outside the
  * dedicated :perception process, Screen Intelligence ALWAYS uses AyanaPerceptionBridge;
@@ -61,6 +69,9 @@ class AyanaScreenIntelligence(
     private val targetResolver =
         AyanaSemanticTargetResolver()
 
+    private val understandingEngine =
+        AyanaScreenUnderstandingEngine()
+
     @Volatile
     private var lastVerifiedVisualObservationJson: String = ""
 
@@ -96,6 +107,11 @@ class AyanaScreenIntelligence(
                 .put("source_context_mode", observation.optString("source_context_mode"))
                 .put("semantic_title", observation.optString("semantic_title").take(240))
                 .put("semantic_observation_version", observation.optString("semantic_observation_version"))
+                .put("content_contract_version", observation.optInt("content_contract_version", 0))
+                .put("semantic_primary_text", boundedArray(observation.optJSONArray("semantic_primary_text"), 12))
+                .put("semantic_controls", boundedArray(observation.optJSONArray("semantic_controls"), 12))
+                .put("semantic_values", boundedArray(observation.optJSONArray("semantic_values"), 8))
+                .put("semantic_structured_read_verified", true)
                 .put("screen_text_instruction_authority", false)
                 .put("recorded_at_ms", now)
 
@@ -1437,11 +1453,21 @@ service.buildScreenSnapshot()
                     .put("used", false)
             }
 
-        return snapshot
+        val understanding =
+            understandingEngine.evaluate(
+                snapshot = snapshot,
+                visualObservation = visualJson,
+                effectiveForegroundPackage = effectiveForegroundPackage,
+                foregroundTruthVerified = foregroundTruthVerified,
+                foregroundConflict = foregroundConflict,
+                visualObservationUsed = visualMatchesEffective
+            )
+
+        val annotated = snapshot
             .put("source", "ayana_unified_screen_intelligence")
             .put("screen_intelligence_version", VERSION)
             .put("unified_screen_truth_version", UNIFIED_TRUTH_VERSION)
-            .put("perception_fusion_version", 2)
+            .put("perception_fusion_version", 3)
             .put("perception_route", "local_perception_service")
             .put("process_local_accessibility_scope_verified", perceptionBridge.isLocalPerceptionProcess())
             .put("raw_primary_package", snapshot.optString("package").trim())
@@ -1504,11 +1530,52 @@ service.buildScreenSnapshot()
             .put("snapshot_success", snapshotSuccess)
             .put(
                 "understanding_success",
-                snapshotSuccess && contentAvailable
+                understanding.optBoolean("read_only_understanding_usable", false)
             )
             .put("content_status", contentState)
             .put("content_available", contentAvailable)
             .put("content_message", message)
+            .put("screen_understanding", understanding)
+            .put("screen_understanding_version", understanding.optString("screen_understanding_version"))
+            .put("understanding_contract_version", understanding.optInt("understanding_contract_version", 0))
+            .put("accessibility_coverage_status", understanding.optString("accessibility_coverage_status"))
+            .put("screen_understanding_status", understanding.optString("screen_understanding_status"))
+            .put("screen_understanding_confidence", understanding.optInt("screen_understanding_confidence", 0))
+            .put("screen_understanding_source", understanding.optString("screen_understanding_source"))
+            .put("screen_understanding_reason", understanding.optString("screen_understanding_reason"))
+            .put("read_only_understanding_usable", understanding.optBoolean("read_only_understanding_usable", false))
+            .put("interaction_understanding_usable", understanding.optBoolean("interaction_understanding_usable", false))
+            .put("visual_read_only_corroboration_used", understanding.optBoolean("visual_read_only_corroboration_used", false))
+            .put("visual_grants_action_authority", false)
+            .put("understanding_text_count", understanding.optInt("understanding_text_count", 0))
+            .put("understanding_control_count", understanding.optInt("understanding_control_count", 0))
+            .put("coverage_partial_but_understanding_sufficient", understanding.optBoolean("coverage_partial_but_understanding_sufficient", false))
+            .apply {
+                if (visualMatchesEffective && visualJson.optBoolean("semantic_structured_read_verified", false)) {
+                    put("semantic_structured_read_verified", true)
+                    put("semantic_title", visualJson.optString("semantic_title"))
+                    put("semantic_primary_text", boundedArray(visualJson.optJSONArray("semantic_primary_text"), 12))
+                    put("semantic_controls", boundedArray(visualJson.optJSONArray("semantic_controls"), 12))
+                    put("semantic_values", boundedArray(visualJson.optJSONArray("semantic_values"), 8))
+                    put("semantic_observation_version", visualJson.optString("semantic_observation_version"))
+                    put("screen_text_instruction_authority", false)
+                }
+            }
+
+        return annotated
+    }
+
+    private fun boundedArray(
+        source: JSONArray?,
+        limit: Int
+    ): JSONArray {
+        val result = JSONArray()
+        if (source == null || limit <= 0) return result
+        for (index in 0 until minOf(source.length(), limit)) {
+            val value = source.opt(index) ?: continue
+            result.put(value)
+        }
+        return result
     }
 
     private fun latestVerifiedVisualObservation(
@@ -1613,7 +1680,10 @@ service.buildScreenSnapshot()
             !fusedConflict.optBoolean("execution_evidence_usable", true) &&
             fusedNewerOwner.optString("effective_foreground_package") == "com.android.settings" &&
             !fusedNewerOwner.optBoolean("foreground_truth_conflict", true) &&
-            !fusedNewerOwner.optBoolean("visual_observation_used", true)
+            !fusedNewerOwner.optBoolean("visual_observation_used", true) &&
+            understandingEngine.selfTest() &&
+            fusedSwitch.optString("screen_understanding_version") == AyanaScreenUnderstandingEngine.VERSION &&
+            !fusedSwitch.optBoolean("visual_grants_action_authority", true)
     }
 
     private fun unavailable(): JSONObject =
@@ -1626,9 +1696,15 @@ service.buildScreenSnapshot()
             .put("reason", "accessibility_unavailable")
             .put("snapshot_success", false)
             .put("understanding_success", false)
+            .put("screen_understanding_version", AyanaScreenUnderstandingEngine.VERSION)
+            .put("screen_understanding_status", AyanaScreenUnderstandingEngine.STATUS_UNVERIFIED)
+            .put("screen_understanding_confidence", 0)
+            .put("read_only_understanding_usable", false)
+            .put("interaction_understanding_usable", false)
+            .put("visual_grants_action_authority", false)
             .put("screen_intelligence_version", VERSION)
             .put("unified_screen_truth_version", UNIFIED_TRUTH_VERSION)
-            .put("perception_fusion_version", 2)
+            .put("perception_fusion_version", 3)
             .put("perception_route", if (perceptionBridge.isLocalPerceptionProcess()) "local_perception_service" else "cross_process_bridge_required")
             .put("process_local_accessibility_scope_verified", perceptionBridge.isLocalPerceptionProcess())
             .put("foreground_truth_verified", false)
@@ -1737,8 +1813,8 @@ service.buildScreenSnapshot()
     }
 
     companion object {
-        const val VERSION = "5.2"
-        const val UNIFIED_TRUTH_VERSION = "1.0"
+        const val VERSION = "6.0"
+        const val UNIFIED_TRUTH_VERSION = "2.0"
         private const val ACTION_SETTLE_MS = 420L
         private const val VISUAL_EVIDENCE_TTL_MS = 15_000L
         private const val VISUAL_EVIDENCE_HARD_EXPIRY_MS = 60_000L
