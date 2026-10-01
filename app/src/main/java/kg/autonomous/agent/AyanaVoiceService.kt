@@ -63,6 +63,16 @@ import kotlin.math.abs
 
 class AyanaVoiceService : Service() {
 
+    // AYANA v12.51.0 / R10.19 AUTONOMOUS MULTI-APP TASKS 2.0.
+    // Builds on DEVICE-CONFIRMED R10.18.3. The production Dynamic Goal Planner v1.2
+    // can now execute verified App Info navigation, R10.18 Universal UI exact-target
+    // clicks and Calendar DRAFT_ONLY as registered multi-app subgoals. The R10.19
+    // acceptance runs one eight-subgoal DAG across Browser -> YouTube -> Settings ->
+    // Calendar, transfers a verified Browser title to two downstream consumers, persists
+    // every planner step through the existing Durable Goal/Adaptive/Long Objective stack,
+    // restores AYANA, and still forbids blind mutation replay or visual action authority.
+    // ORB/visualizer/UI unchanged.
+    //
     // AYANA v12.50.3 / R10.18.3 APP INFO TARGET RECONCILIATION.
     // Acceptance no longer crosses unrelated Samsung Settings panes. It uses the
     // device-confirmed App Info -> Permissions surface for a real generic UI click.
@@ -4522,6 +4532,20 @@ originalCommand
                 return
             }
 
+
+        // R10.19 AUTONOMOUS MULTI-APP TASKS 2.0 ACCEPTANCE.
+        // Runs the production Dynamic Goal Planner with an eight-subgoal DAG across
+        // Browser -> YouTube -> App Info/Permissions -> Calendar DRAFT_ONLY.
+        if (
+            isR10_19AutonomousMultiAppAcceptanceCommand(
+                routingNormalized
+            )
+        ) {
+            runR10_19AutonomousMultiAppAcceptance(
+                silent = silent
+            )
+            return
+        }
 
         // R10.10 PRODUCTION DYNAMIC PLANNER.
         // This is a normal user-command route, not an acceptance shortcut. It may claim only
@@ -36871,13 +36895,23 @@ routed.forEach {
         automaticRecovery: Boolean,
         initialRuntimeContext: JSONObject? = null
     ) {
-        val r10_14Session =
-            initialRuntimeContext?.optBoolean("r10_14_acceptance", false) == true ||
+        val r10_19Session =
+            initialRuntimeContext?.optBoolean("r10_19_acceptance", false) == true ||
                 resumeGoal
                     ?.optJSONObject("dynamic_planner_runtime_context")
-                    ?.optBoolean("r10_14_acceptance", false) == true
+                    ?.optBoolean("r10_19_acceptance", false) == true
+
+        val r10_14Session =
+            !r10_19Session &&
+                (
+                    initialRuntimeContext?.optBoolean("r10_14_acceptance", false) == true ||
+                        resumeGoal
+                            ?.optJSONObject("dynamic_planner_runtime_context")
+                            ?.optBoolean("r10_14_acceptance", false) == true
+                )
 
         val r10_13Session =
+            !r10_19Session &&
             !r10_14Session &&
                 (
                     initialRuntimeContext?.optBoolean("r10_13_acceptance", false) == true ||
@@ -36887,6 +36921,7 @@ routed.forEach {
                 )
 
         val r10_12Session =
+            !r10_19Session &&
             !r10_14Session &&
             !r10_13Session &&
                 (
@@ -36897,6 +36932,7 @@ routed.forEach {
                 )
 
         val r10_11Session =
+            !r10_19Session &&
             !r10_14Session &&
             !r10_13Session &&
             !r10_12Session &&
@@ -36910,6 +36946,10 @@ routed.forEach {
         executionPhase(
             phase =
                 when {
+                    r10_19Session && resumeGoal != null ->
+                        "r10_19_autonomous_multi_app_tasks_2_0_resume"
+                    r10_19Session ->
+                        "r10_19_autonomous_multi_app_tasks_2_0_acceptance"
                     r10_14Session && resumeGoal != null ->
                         "r10_14_perception_process_isolation_resume"
                     r10_14Session ->
@@ -36933,16 +36973,18 @@ routed.forEach {
                 },
             executor =
                 when {
+                    r10_19Session ->
+                        "dynamic_goal_planner_v1_2+long_objective_v1_1+adaptive_loop_v1_1+universal_ui_action_engine_v1_1"
                     r10_14Session ->
-                        "perception_bridge_v1_1+process_death_recovery_v1_2+dynamic_goal_planner_v1_1+long_objective_v1_1"
+                        "perception_bridge_v1_1+process_death_recovery_v1_2+dynamic_goal_planner_v1_2+long_objective_v1_1"
                     r10_13Session ->
-                        "process_death_recovery_v1_2+dynamic_goal_planner_v1_1+long_objective_v1_1"
+                        "process_death_recovery_v1_2+dynamic_goal_planner_v1_2+long_objective_v1_1"
                     r10_12Session ->
-                        "lifecycle_recovery_v1_2+dynamic_goal_planner_v1_1+long_objective_v1_1"
+                        "lifecycle_recovery_v1_2+dynamic_goal_planner_v1_2+long_objective_v1_1"
                     r10_11Session ->
-                        "dynamic_goal_planner_v1_1+long_objective_v1_1+durable_recovery"
+                        "dynamic_goal_planner_v1_2+long_objective_v1_1+durable_recovery"
                     else ->
-                        "dynamic_goal_planner_v1_1+long_objective_v1_1"
+                        "dynamic_goal_planner_v1_2+long_objective_v1_1"
                 }
         )
 
@@ -37717,10 +37759,15 @@ routed.forEach {
                             continuity = continuity,
                             runtimeContext = runtimeContext,
                             checkpointTag =
-                                if (resumeGoal == null) {
-                                    "r10_10_production_started"
-                                } else {
-                                    "r10_10_production_recovered"
+                                when {
+                                    r10_19Session && resumeGoal == null ->
+                                        "r10_19_multi_app_started"
+                                    r10_19Session ->
+                                        "r10_19_multi_app_recovered"
+                                    resumeGoal == null ->
+                                        "r10_10_production_started"
+                                    else ->
+                                        "r10_10_production_recovered"
                                 },
                             safeAutoResume = true,
                             stepInFlight = false,
@@ -37743,16 +37790,26 @@ routed.forEach {
                     commandHistoryStore.addEvent(
                         activeCommandHistoryId,
                         state =
-                            if (resumeGoal == null) {
-                                "r10_10_production_plan_started"
-                            } else {
-                                "r10_10_production_plan_restored"
+                            when {
+                                r10_19Session && resumeGoal == null ->
+                                    "r10_19_production_multi_app_plan_started"
+                                r10_19Session ->
+                                    "r10_19_production_multi_app_plan_restored"
+                                resumeGoal == null ->
+                                    "r10_10_production_plan_started"
+                                else ->
+                                    "r10_10_production_plan_restored"
                             },
                         message =
-                            if (resumeGoal == null) {
-                                "R10.10 production planner принял проверенный DAG"
-                            } else {
-                                "R10.10 production planner восстановил проверенный DAG"
+                            when {
+                                r10_19Session && resumeGoal == null ->
+                                    "R10.19 production planner принял проверенный 8-step multi-app DAG"
+                                r10_19Session ->
+                                    "R10.19 production planner восстановил проверенный multi-app DAG"
+                                resumeGoal == null ->
+                                    "R10.10 production planner принял проверенный DAG"
+                                else ->
+                                    "R10.10 production planner восстановил проверенный DAG"
                             },
                         details =
                             "goal_id=${goalId.orEmpty()}; fingerprint=${planner.planFingerprint()}; " +
@@ -37854,16 +37911,22 @@ routed.forEach {
                             result.optBoolean("verified", false) &&
                             result.optBoolean("terminal_verified", false)
 
+                    val r10_19Result =
+                        result.optBoolean("r10_19_acceptance", false)
                     val r10_14Result =
-                        result.optBoolean("r10_14_acceptance", false)
+                        !r10_19Result &&
+                            result.optBoolean("r10_14_acceptance", false)
                     val r10_13Result =
+                        !r10_19Result &&
                         !r10_14Result &&
                             result.optBoolean("r10_13_acceptance", false)
                     val r10_12Result =
+                        !r10_19Result &&
                         !r10_14Result &&
                         !r10_13Result &&
                             result.optBoolean("r10_12_acceptance", false)
                     val r10_11Result =
+                        !r10_19Result &&
                         !r10_14Result &&
                         !r10_13Result &&
                         !r10_12Result &&
@@ -37873,6 +37936,8 @@ routed.forEach {
                         durableGoalStore.markCompleted(
                             goalId,
                             when {
+                                r10_19Result ->
+                                    "R10.19 autonomous multi-app tasks 2.0 verified ${result.optInt("verified_subgoal_count", 0)}/${result.optInt("subgoal_count", 0)}"
                                 r10_14Result ->
                                     "R10.14 perception-process isolation verified ${result.optInt("verified_subgoal_count", 0)}/${result.optInt("subgoal_count", 0)}"
                                 r10_13Result ->
@@ -37891,6 +37956,8 @@ routed.forEach {
                             result.optString(
                                 "reason",
                                 when {
+                                    r10_19Result ->
+                                        "R10.19 autonomous multi-app tasks 2.0 stopped fail-closed"
                                     r10_14Result ->
                                         "R10.14 perception-process isolation stopped fail-closed"
                                     r10_13Result ->
@@ -37910,6 +37977,10 @@ routed.forEach {
                         activeCommandHistoryId,
                         state =
                             when {
+                                r10_19Result && success ->
+                                    "r10_19_autonomous_multi_app_tasks_2_0_verified"
+                                r10_19Result ->
+                                    "r10_19_autonomous_multi_app_tasks_2_0_not_verified"
                                 r10_14Result && success ->
                                     "r10_14_perception_process_isolation_verified"
                                 r10_14Result ->
@@ -37933,6 +38004,10 @@ routed.forEach {
                             },
                         message =
                             when {
+                                r10_19Result && success ->
+                                    "R10.19 production multi-app chain Browser -> YouTube -> Settings -> Calendar подтверждена"
+                                r10_19Result ->
+                                    "R10.19 production multi-app chain остановлена fail-closed"
                                 r10_14Result && success ->
                                     "R10.14 perception process пережил смерть main process; внешний UI suffix продолжен через IPC"
                                 r10_14Result ->
@@ -37968,6 +38043,10 @@ routed.forEach {
                         respondAndResume(
                             text =
                                 when {
+                                    r10_19Result && success ->
+                                        "R10.19 подтверждён: 8/8 production subgoals VERIFIED. Browser title «${result.optString("r10_19_verified_title").take(80)}» передан по verified provenance в YouTube и Calendar DRAFT_ONLY; Universal UI шаг «Разрешения» подтверждён одним dispatch, AYANA восстановлена, blind mutation replay запрещён."
+                                    r10_19Result ->
+                                        "R10.19 выполнен fail-closed: автономная multi-app цепочка не прошла все обязательные verification gates."
                                     r10_14Result && success ->
                                         "R10.14 подтверждён: :perception пережил полную смерть main AYANA process, новый process восстановил objective с диска и продолжил внешний UI suffix через cross-process Accessibility без replay Browser/visual."
                                     r10_14Result ->
@@ -38397,6 +38476,37 @@ failedSubgoalId = subgoal.id,
                 } else {
                     ""
                 }
+
+            if (runtimeContext.optBoolean("r10_19_acceptance", false)) {
+                when (subgoal.executor) {
+                    AyanaDynamicGoalPlanner.EXEC_BROWSER_OPEN_URL ->
+                        runtimeContext.put("r10_19_browser_verified", verified)
+
+                    AyanaDynamicGoalPlanner.EXEC_STRUCTURED_SCREEN_READ ->
+                        runtimeContext
+                            .put("r10_19_structured_read_verified", verified)
+                            .put("r10_19_verified_title", resultValue.take(240))
+
+                    AyanaDynamicGoalPlanner.EXEC_YOUTUBE_SEARCH ->
+                        runtimeContext.put("r10_19_youtube_verified", verified)
+
+                    AyanaDynamicGoalPlanner.EXEC_APP_INFO ->
+                        runtimeContext.put("r10_19_app_info_step_verified", verified)
+
+                    AyanaDynamicGoalPlanner.EXEC_UNIVERSAL_UI_CLICK ->
+                        runtimeContext.put("r10_19_permissions_step_verified", verified)
+
+                    AyanaDynamicGoalPlanner.EXEC_CALENDAR_DRAFT ->
+                        runtimeContext.put("r10_19_calendar_step_verified", verified)
+                }
+
+                if (subgoal.id == "r10_19_device_state_before") {
+                    runtimeContext.put("r10_19_initial_device_state_verified", verified)
+                }
+                if (subgoal.id == "r10_19_device_state_after") {
+                    runtimeContext.put("r10_19_final_device_state_verified", verified)
+                }
+            }
 
             if (verified) {
                 longObjective.recordVerified(
@@ -38875,6 +38985,68 @@ failedSubgoalId = subgoal.id,
             currentState = afterState
         }
 
+        // R10.19 acceptance cleanup is deliberately outside the app-step graph.
+        // The Calendar step remains DRAFT_ONLY; after the final factual read AYANA is
+        // restored to the original page without inventing another planner mutation.
+        if (runtimeContext.optBoolean("r10_19_acceptance", false)) {
+            val originalPage =
+                runtimeContext
+                    .optString("r10_19_original_page")
+                    .trim()
+
+            val restore =
+                try {
+                    restoreAyanaAfterAppIntegrationProbe(
+                        pageKey = originalPage,
+                        stepKey = "r10.19-autonomous-multi-app"
+                    )
+                } catch (error: Throwable) {
+                    JSONObject()
+                        .put("success", false)
+                        .put("verified", false)
+                        .put("reason", "r10_19_restore_exception")
+                        .put(
+                            "error",
+                            (error.message ?: error.javaClass.simpleName)
+                                .take(600)
+                        )
+                }
+
+            val restoreVerified =
+                restore.optBoolean("success", false) &&
+                    restore.optBoolean(
+                        "verified",
+                        restore.optBoolean("success", false)
+                    )
+
+            runtimeContext
+                .put("r10_19_restore_verified", restoreVerified)
+                .put(
+                    "r10_19_restore_reason",
+                    restore.optString(
+                        "reason",
+                        restore.optString("message")
+                    )
+                )
+
+            commandHistoryStore.addEvent(
+                activeCommandHistoryId,
+                state =
+                    if (restoreVerified) {
+                        "r10_19_ayana_restore_verified"
+                    } else {
+                        "r10_19_ayana_restore_not_verified"
+                    },
+                message =
+                    if (restoreVerified) {
+                        "R10.19 вернул AYANA после production multi-app chain"
+                    } else {
+                        "R10.19 не смог подтвердить возврат AYANA после multi-app chain"
+                    },
+                details = restore.toString().take(1800)
+            )
+        }
+
         val longTerminal =
             longObjective.canDeclareSuccess()
 
@@ -38904,10 +39076,16 @@ failedSubgoalId = subgoal.id,
                 continuity = continuity,
                 runtimeContext = runtimeContext,
                 checkpointTag =
-                    if (terminalVerified) {
-                        "r10_10_production_terminal"
-                    } else {
-                        "r10_10_production_paused"
+                    when {
+                        runtimeContext.optBoolean("r10_19_acceptance", false) &&
+                            terminalVerified ->
+                            "r10_19_multi_app_terminal"
+                        runtimeContext.optBoolean("r10_19_acceptance", false) ->
+                            "r10_19_multi_app_paused"
+                        terminalVerified ->
+                            "r10_10_production_terminal"
+                        else ->
+                            "r10_10_production_paused"
                     },
                 safeAutoResume = false,
                 stepInFlight = false,
@@ -38930,16 +39108,22 @@ failedSubgoalId = subgoal.id,
             terminalVerified &&
                 finalCheckpointPersisted
 
+        val r10_19Acceptance =
+            runtimeContext.optBoolean("r10_19_acceptance", false)
         val r10_14Acceptance =
-            runtimeContext.optBoolean("r10_14_acceptance", false)
+            !r10_19Acceptance &&
+                runtimeContext.optBoolean("r10_14_acceptance", false)
         val r10_13Acceptance =
+            !r10_19Acceptance &&
             !r10_14Acceptance &&
                 runtimeContext.optBoolean("r10_13_acceptance", false)
         val r10_12Acceptance =
+            !r10_19Acceptance &&
             !r10_14Acceptance &&
             !r10_13Acceptance &&
                 runtimeContext.optBoolean("r10_12_acceptance", false)
         val r10_11Acceptance =
+            !r10_19Acceptance &&
             !r10_14Acceptance &&
             !r10_13Acceptance &&
             !r10_12Acceptance &&
@@ -38951,6 +39135,50 @@ failedSubgoalId = subgoal.id,
             terminalVerified &&
                 adaptiveTerminalRecorded &&
                 longTerminal
+        val r10_19VerifiedTitle =
+            runtimeContext
+                .optString("r10_19_verified_title")
+                .trim()
+
+        val r10_19AcceptanceOk =
+            !r10_19Acceptance ||
+                (
+                    baseSuccess &&
+                        runtimeContext.optBoolean("r10_19_local_contract_self_test", false) &&
+                        runtimeContext.optInt("r10_19_expected_subgoal_count", 0) == 8 &&
+                        longObjective.subgoalCount() == 8 &&
+                        longObjective.verifiedSubgoalCount() == 8 &&
+                        runtimeContext.optBoolean("r10_19_initial_device_state_verified", false) &&
+                        runtimeContext.optBoolean("r10_19_browser_verified", false) &&
+                        runtimeContext.optBoolean("r10_19_structured_read_verified", false) &&
+                        r10_19VerifiedTitle.equals("Example Domain", ignoreCase = true) &&
+                        runtimeContext.optBoolean("r10_19_youtube_input_verified", false) &&
+                        runtimeContext.optString("r10_19_youtube_input_fingerprint").isNotBlank() &&
+                        runtimeContext.optString("r10_19_youtube_input_value").trim() == r10_19VerifiedTitle &&
+                        runtimeContext.optBoolean("r10_19_youtube_verified", false) &&
+                        runtimeContext.optBoolean("r10_19_app_info_verified", false) &&
+                        runtimeContext.optBoolean("r10_19_app_info_step_verified", false) &&
+                        runtimeContext.optBoolean("r10_19_universal_ui_action_verified", false) &&
+                        runtimeContext.optBoolean("r10_19_permissions_step_verified", false) &&
+                        runtimeContext.optBoolean("r10_19_ui_single_dispatch_verified", false) &&
+                        runtimeContext.optBoolean("r10_19_ui_postcondition_verified", false) &&
+                        !runtimeContext.optBoolean("r10_19_ui_visual_action_authority", true) &&
+                        !runtimeContext.optBoolean("r10_19_ui_unresolved_side_effect", true) &&
+                        runtimeContext.optBoolean("r10_19_calendar_draft_verified", false) &&
+                        runtimeContext.optBoolean("r10_19_calendar_step_verified", false) &&
+                        runtimeContext.optBoolean("r10_19_calendar_draft_only", false) &&
+                        runtimeContext.optBoolean("r10_19_calendar_input_verified", false) &&
+                        runtimeContext.optString("r10_19_calendar_input_fingerprint").isNotBlank() &&
+                        runtimeContext.optString("r10_19_calendar_title").trim() == r10_19VerifiedTitle &&
+                        runtimeContext.optBoolean("r10_19_final_device_state_verified", false) &&
+                        runtimeContext.optBoolean("r10_19_restore_verified", false) &&
+                        longObjective.partialResultCount() >= 1 &&
+                        browserDispatchCount == 1 &&
+                        visualReadCount == 1 &&
+                        terminalLedgerConverged &&
+                        !adaptiveLoop.hasUnresolvedSideEffect()
+                )
+
         val r10_11AcceptanceOk =
             !r10_11Acceptance ||
                 (
@@ -39071,6 +39299,7 @@ failedSubgoalId = subgoal.id,
 
         val success =
             baseSuccess &&
+                r10_19AcceptanceOk &&
                 r10_11AcceptanceOk &&
                 r10_12AcceptanceOk &&
                 r10_13AcceptanceOk &&
@@ -39081,6 +39310,7 @@ failedSubgoalId = subgoal.id,
             .put(
                 "production_route",
                 when {
+                    r10_19Acceptance -> "r10_19"
                     r10_14Acceptance -> "r10_14"
                     r10_13Acceptance -> "r10_13"
                     r10_12Acceptance -> "r10_12"
@@ -39117,7 +39347,94 @@ failedSubgoalId = subgoal.id,
             .put("unresolved_side_effect", adaptiveLoop.hasUnresolvedSideEffect())
             .put("long_objective_terminal_ready", longTerminal)
             .put("adaptive_terminal_recorded", adaptiveTerminalRecorded)
-.put("terminal_ledger_converged", terminalLedgerConverged)
+            .put("terminal_ledger_converged", terminalLedgerConverged)
+            .put("r10_19_acceptance", r10_19Acceptance)
+            .put("r10_19_autonomous_multi_app_tasks_2_0", r10_19Acceptance)
+            .put("autonomous_multi_app_version", "2.0")
+            .put("r10_19_acceptance_ok", r10_19AcceptanceOk)
+            .put(
+                "r10_19_local_contract_self_test",
+                runtimeContext.optBoolean("r10_19_local_contract_self_test", false)
+            )
+            .put(
+                "r10_19_initial_device_state_verified",
+                runtimeContext.optBoolean("r10_19_initial_device_state_verified", false)
+            )
+            .put(
+                "r10_19_browser_verified",
+                runtimeContext.optBoolean("r10_19_browser_verified", false)
+            )
+            .put(
+                "r10_19_structured_read_verified",
+                runtimeContext.optBoolean("r10_19_structured_read_verified", false)
+            )
+            .put("r10_19_verified_result_key", "r10_19_page_title")
+            .put("r10_19_verified_title", r10_19VerifiedTitle)
+            .put(
+                "r10_19_youtube_input_verified",
+                runtimeContext.optBoolean("r10_19_youtube_input_verified", false)
+            )
+            .put(
+                "r10_19_youtube_input_fingerprint",
+                runtimeContext.optString("r10_19_youtube_input_fingerprint")
+            )
+            .put(
+                "r10_19_youtube_verified",
+                runtimeContext.optBoolean("r10_19_youtube_verified", false)
+            )
+            .put(
+                "r10_19_app_info_verified",
+                runtimeContext.optBoolean("r10_19_app_info_verified", false)
+            )
+            .put(
+                "r10_19_universal_ui_action_verified",
+                runtimeContext.optBoolean("r10_19_universal_ui_action_verified", false)
+            )
+            .put(
+                "r10_19_single_dispatch_verified",
+                runtimeContext.optBoolean("r10_19_ui_single_dispatch_verified", false)
+            )
+            .put(
+                "r10_19_postcondition_verified",
+                runtimeContext.optBoolean("r10_19_ui_postcondition_verified", false)
+            )
+            .put(
+                "visual_grants_action_authority",
+                runtimeContext.optBoolean("r10_19_ui_visual_action_authority", false)
+            )
+            .put(
+                "r10_19_ui_unresolved_side_effect",
+                runtimeContext.optBoolean("r10_19_ui_unresolved_side_effect", false)
+            )
+            .put(
+                "r10_19_calendar_draft_verified",
+                runtimeContext.optBoolean("r10_19_calendar_draft_verified", false)
+            )
+            .put(
+                "calendar_draft_only",
+                runtimeContext.optBoolean("r10_19_calendar_draft_only", false)
+            )
+            .put(
+                "r10_19_calendar_input_verified",
+                runtimeContext.optBoolean("r10_19_calendar_input_verified", false)
+            )
+            .put(
+                "r10_19_calendar_input_fingerprint",
+                runtimeContext.optString("r10_19_calendar_input_fingerprint")
+            )
+            .put(
+                "r10_19_final_device_state_verified",
+                runtimeContext.optBoolean("r10_19_final_device_state_verified", false)
+            )
+            .put(
+                "restore_verified",
+                runtimeContext.optBoolean("r10_19_restore_verified", false)
+            )
+            .put("universal_ui_action_engine_version", AyanaUniversalUiActionEngine.VERSION)
+            .put("universal_ui_action_contract_version", AyanaUniversalUiActionEngine.CONTRACT_VERSION)
+            .put("mutation_blind_retry_blocked", true)
+            .put("verified_result_fanout_consumers", 2)
+            .put("r10_19_acceptance_required_subgoals", 8)
             .put("r10_11_acceptance", r10_11Acceptance)
             .put(
                 "controlled_verified_failure_injected",
@@ -39543,6 +39860,7 @@ failedSubgoalId = subgoal.id,
             .put(
                 "acceptance_ok",
                 when {
+                    r10_19Acceptance -> r10_19AcceptanceOk
                     r10_14Acceptance -> r10_14AcceptanceOk
                     r10_13Acceptance -> r10_13AcceptanceOk
                     r10_12Acceptance -> r10_12AcceptanceOk
@@ -39775,6 +40093,12 @@ failedSubgoalId = subgoal.id,
                     !partial.optBoolean("available", false) ||
                     !partial.optBoolean("verified", false)
                 ) {
+                    if (runtimeContext.optBoolean("r10_19_acceptance", false)) {
+                        runtimeContext
+                            .put("r10_19_youtube_input_verified", false)
+                            .put("r10_19_youtube_input_fingerprint", "")
+                    }
+
                     JSONObject()
                         .put("success", false)
                         .put("verified", false)
@@ -39784,6 +40108,19 @@ failedSubgoalId = subgoal.id,
                             "youtube_input_partial_result_not_verified"
                         )
                 } else {
+                    if (runtimeContext.optBoolean("r10_19_acceptance", false)) {
+                        runtimeContext
+                            .put("r10_19_youtube_input_verified", true)
+                            .put(
+                                "r10_19_youtube_input_fingerprint",
+                                partial.optString("fingerprint")
+                            )
+                            .put(
+                                "r10_19_youtube_input_value",
+                                partial.optString("value").trim().take(240)
+                            )
+                    }
+
                     val rawResult =
                         executeAppIntegrationAction(
                             appKey = AyanaAppIntegrationRegistry.APP_YOUTUBE,
@@ -39895,6 +40232,158 @@ failedSubgoalId = subgoal.id,
                 }
             }
 
+            AyanaDynamicGoalPlanner.EXEC_APP_INFO -> {
+                val app =
+                    arguments
+                        .optString("app")
+                        .trim()
+
+                val raw =
+                    agentOpenAppInfo(
+                        app
+                    )
+
+                val verified =
+                    raw.optBoolean("success", false) &&
+                        raw.optBoolean("verified", false)
+
+                val dispatchObserved =
+                    verified ||
+                        raw
+                            .optString("message")
+                            .contains("Android принял переход", ignoreCase = true)
+
+                if (runtimeContext.optBoolean("r10_19_acceptance", false)) {
+                    runtimeContext
+                        .put("r10_19_app_info_verified", verified)
+                        .put("r10_19_app_info_target", app)
+                }
+
+                JSONObject(raw.toString())
+                    .put("action_dispatched", dispatchObserved)
+                    .put("action_committed", false)
+                    .put("reconciliation_complete", verified)
+                    .put(
+                        "message",
+                        raw.optString(
+                            "message",
+                            if (verified) {
+                                "App Info verified"
+                            } else {
+                                "App Info not verified"
+                            }
+                        )
+                    )
+            }
+
+            AyanaDynamicGoalPlanner.EXEC_UNIVERSAL_UI_CLICK -> {
+                val target =
+                    arguments
+                        .optString("target")
+                        .trim()
+
+                val result =
+                    universalUiActionEngine.click(
+                        target = target,
+                        confirmed = false
+                    )
+
+                val verified =
+                    result.optBoolean("success", false) &&
+                        result.optBoolean("verified", false) &&
+                        result.optBoolean("postcondition_verified", false)
+
+                if (runtimeContext.optBoolean("r10_19_acceptance", false)) {
+                    runtimeContext
+                        .put("r10_19_universal_ui_action_verified", verified)
+                        .put("r10_19_ui_single_dispatch_verified", result.optInt("dispatch_count", 0) == 1)
+                        .put("r10_19_ui_postcondition_verified", result.optBoolean("postcondition_verified", false))
+                        .put("r10_19_ui_visual_action_authority", result.optBoolean("visual_grants_action_authority", false))
+                        .put("r10_19_ui_unresolved_side_effect", result.optBoolean("unresolved_side_effect", false))
+                        .put("r10_19_ui_target", target)
+                }
+
+                result
+            }
+
+            AyanaDynamicGoalPlanner.EXEC_CALENDAR_DRAFT -> {
+                val inputKey =
+                    arguments
+                        .optString("input_result_key")
+                        .trim()
+
+                val partial =
+                    if (inputKey.isNotBlank()) {
+                        longObjective.partialResult(
+                            key = inputKey,
+                            consumerSubgoalId = subgoal.id
+                        )
+                    } else {
+                        JSONObject()
+                    }
+
+                val verifiedInput =
+                    inputKey.isBlank() ||
+                        (
+                            partial.optBoolean("available", false) &&
+                                partial.optBoolean("verified", false)
+                            )
+
+                if (!verifiedInput) {
+                    JSONObject()
+                        .put("success", false)
+                        .put("verified", false)
+                        .put("action_dispatched", false)
+                        .put("action_committed", false)
+                        .put("reconciliation_complete", true)
+                        .put("reason", "calendar_draft_input_partial_result_not_verified")
+                } else {
+                    val title =
+                        if (inputKey.isNotBlank()) {
+                            partial.optString("value").trim()
+                        } else {
+                            arguments.optString("title").trim()
+                        }
+
+                    if (title.isBlank()) {
+                        JSONObject()
+                            .put("success", false)
+                            .put("verified", false)
+                            .put("action_dispatched", false)
+                            .put("action_committed", false)
+                            .put("reconciliation_complete", true)
+                            .put("reason", "calendar_draft_title_empty")
+                    } else {
+                        val raw =
+                            executeAppIntegrationAction(
+                                appKey = AyanaAppIntegrationRegistry.APP_CALENDAR,
+                                actionKey = AyanaAppIntegrationRegistry.ACTION_CREATE_EVENT_DRAFT,
+                                payload = title
+                            )
+
+                        val verified =
+                            raw.optBoolean("success", false) &&
+                                raw.optBoolean("verified", false)
+
+                        if (runtimeContext.optBoolean("r10_19_acceptance", false)) {
+                            runtimeContext
+                                .put("r10_19_calendar_draft_verified", verified)
+                                .put("r10_19_calendar_draft_only", true)
+                                .put("r10_19_calendar_input_verified", verifiedInput)
+                                .put("r10_19_calendar_input_key", inputKey)
+                                .put("r10_19_calendar_input_fingerprint", partial.optString("fingerprint"))
+                                .put("r10_19_calendar_title", title.take(240))
+                        }
+
+                        JSONObject(raw.toString())
+                            .put("reconciliation_complete", verified)
+                            .put("verified_input", verifiedInput)
+                            .put("verified_input_key", inputKey)
+                            .put("verified_input_fingerprint", partial.optString("fingerprint"))
+                    }
+                }
+            }
+
             else -> {
                 JSONObject()
                     .put("success", false)
@@ -39929,6 +40418,15 @@ failedSubgoalId = subgoal.id,
 
             AyanaDynamicGoalPlanner.EXEC_YOUTUBE_SEARCH ->
                 "app_integration:youtube:search"
+
+            AyanaDynamicGoalPlanner.EXEC_APP_INFO ->
+                "android_settings:app_info"
+
+            AyanaDynamicGoalPlanner.EXEC_UNIVERSAL_UI_CLICK ->
+                "universal_ui_action:click"
+
+            AyanaDynamicGoalPlanner.EXEC_CALENDAR_DRAFT ->
+                "app_integration:calendar:create_event_draft"
 
             else ->
                 "unsupported_planner_executor"
@@ -39992,6 +40490,45 @@ failedSubgoalId = subgoal.id,
                         "payload",
                         partial.optString("value")
                     )
+            }
+
+            AyanaDynamicGoalPlanner.EXEC_APP_INFO ->
+                JSONObject()
+                    .put("app", plannerArguments.optString("app"))
+
+            AyanaDynamicGoalPlanner.EXEC_UNIVERSAL_UI_CLICK ->
+                JSONObject()
+                    .put("target", plannerArguments.optString("target"))
+                    .put("confirmed", false)
+                    .put("authority_source", "universal_ui_action_engine")
+
+            AyanaDynamicGoalPlanner.EXEC_CALENDAR_DRAFT -> {
+                val key =
+                    plannerArguments
+                        .optString("input_result_key")
+                        .trim()
+                val partial =
+                    if (key.isNotBlank()) {
+                        longObjective.partialResult(
+                            key = key,
+                            consumerSubgoalId = subgoalId
+                        )
+                    } else {
+                        JSONObject()
+                    }
+
+                JSONObject()
+                    .put("input_result_key", key)
+                    .put("verified_input_fingerprint", partial.optString("fingerprint"))
+                    .put(
+                        "payload",
+                        if (key.isNotBlank()) {
+                            partial.optString("value")
+                        } else {
+                            plannerArguments.optString("title")
+                        }
+                    )
+                    .put("commit_semantics", "DRAFT_ONLY")
             }
 
             else ->
@@ -40542,6 +41079,142 @@ failedSubgoalId = subgoal.id,
     }
 
 
+
+    private fun isR10_19AutonomousMultiAppAcceptanceCommand(
+        command: String
+    ): Boolean {
+        val normalized =
+            command
+                .lowercase(Locale.ROOT)
+                .replace('ё', 'е')
+                .replace(Regex("\\s+"), " ")
+                .trim()
+                .removePrefix("аяна ")
+                .trim()
+                .replace(Regex("\\br10\\s+19\\b"), "r10.19")
+
+        return normalized in
+            setOf(
+                "проверь автономные многошаговые задачи 2.0",
+                "проверь автономные многошаговые задачи 2 0",
+                "протестируй автономные многошаговые задачи 2.0",
+                "протестируй автономные многошаговые задачи 2 0",
+                "проверь autonomous multi-app tasks 2.0",
+                "проверь autonomous multi-app tasks 2 0",
+                "проверь r10.19"
+            )
+    }
+
+    private fun runR10_19AutonomousMultiAppAcceptance(
+        silent: Boolean
+    ) {
+        val objective =
+            "проверь автономные многошаговые задачи 2.0"
+
+        val localContractOk =
+            try {
+                AyanaDynamicGoalPlanner.selfTest() &&
+                    universalUiActionEngine.selfTest()
+            } catch (_: Throwable) {
+                false
+            }
+
+        val proposal =
+            try {
+                AyanaDynamicGoalPlanner.localProposal(objective)
+            } catch (error: Throwable) {
+                JSONObject()
+                    .put("supported", false)
+                    .put("reason", error.message ?: error.javaClass.simpleName)
+            }
+
+        val planner =
+            try {
+                AyanaDynamicGoalPlanner.compile(
+                    objective = objective,
+                    proposal = proposal
+                )
+            } catch (error: Throwable) {
+                commandHistoryStore.addEvent(
+                    activeCommandHistoryId,
+                    state = "r10_19_plan_validation_failed",
+                    message = "R10.19 acceptance DAG отклонён до dispatch",
+                    details = (error.message ?: error.javaClass.simpleName).take(900)
+                )
+
+                respondAndResume(
+                    text = "R10.19 остановлен до выполнения: acceptance DAG не прошёл локальную проверку.",
+                    silent = silent,
+                    success = false,
+                    terminalStatus = AyanaCommandHistoryStore.STATUS_BLOCKED,
+                    technical =
+                        JSONObject()
+                            .put("r10_19_acceptance", true)
+                            .put("acceptance_ok", false)
+                            .put("stage", "plan_validation")
+                            .put("local_contract_self_test", localContractOk)
+                            .put("dynamic_goal_planner_version", AyanaDynamicGoalPlanner.VERSION)
+                            .put("invalid_plan_dispatch_count", 0)
+                            .put("reason", error.message ?: error.javaClass.simpleName)
+                            .toString()
+                )
+                return
+            }
+
+        val requiredExecutors =
+            setOf(
+                AyanaDynamicGoalPlanner.EXEC_BROWSER_OPEN_URL,
+                AyanaDynamicGoalPlanner.EXEC_STRUCTURED_SCREEN_READ,
+                AyanaDynamicGoalPlanner.EXEC_YOUTUBE_SEARCH,
+                AyanaDynamicGoalPlanner.EXEC_APP_INFO,
+                AyanaDynamicGoalPlanner.EXEC_UNIVERSAL_UI_CLICK,
+                AyanaDynamicGoalPlanner.EXEC_CALENDAR_DRAFT
+            )
+
+        val plannerContractOk =
+            localContractOk &&
+                proposal.optBoolean("supported", false) &&
+                planner.subgoalCount() == 8 &&
+                planner.subgoals().map { it.executor }.containsAll(requiredExecutors)
+
+        if (!plannerContractOk) {
+            respondAndResume(
+                text = "R10.19 остановлен до выполнения: production multi-app contract не подтверждён.",
+                silent = silent,
+                success = false,
+                terminalStatus = AyanaCommandHistoryStore.STATUS_BLOCKED,
+                technical =
+                    JSONObject()
+                        .put("r10_19_acceptance", true)
+                        .put("acceptance_ok", false)
+                        .put("stage", "production_contract")
+                        .put("local_contract_self_test", localContractOk)
+                        .put("planner_supported", proposal.optBoolean("supported", false))
+                        .put("subgoal_count", planner.subgoalCount())
+                        .put("dynamic_goal_planner_version", AyanaDynamicGoalPlanner.VERSION)
+                        .put("invalid_plan_dispatch_count", 0)
+                        .toString()
+            )
+            return
+        }
+
+        startR10_10ProductionDynamicPlannerWorker(
+            command = objective,
+            silent = silent,
+            planner = planner,
+            resumeGoal = null,
+            automaticRecovery = false,
+            initialRuntimeContext =
+                JSONObject()
+                    .put("r10_19_acceptance", true)
+                    .put("r10_19_local_contract_self_test", true)
+                    .put("r10_19_expected_subgoal_count", 8)
+                    .put("r10_19_expected_transfer_key", "r10_19_page_title")
+                    .put("r10_19_ui_action_engine_version", AyanaUniversalUiActionEngine.VERSION)
+                    .put("r10_19_ui_action_contract_version", AyanaUniversalUiActionEngine.CONTRACT_VERSION)
+                    .put("r10_19_original_page", currentAyanaPageKeyForAppIntegrationProbe())
+        )
+    }
 
     private fun isR10_18UniversalUiActionAcceptanceCommand(
         command: String
@@ -67518,9 +68191,9 @@ state
         private const val MASTER_STATUS_MANUAL_REQUIRED =
             "MANUAL_REQUIRED"
 
-        // R10.18 UNIVERSAL UI ACTION ENGINE RELEASE TRUTH.
+        // R10.19 AUTONOMOUS MULTI-APP TASKS 2.0 RELEASE TRUTH.
         private const val AYANA_VOICE_SERVICE_RELEASE =
-            "v12.50.3 / R10.18.3 APP INFO TARGET RECONCILIATION"
+            "v12.51.0 / R10.19 AUTONOMOUS MULTI-APP TASKS 2.0"
 
         private const val AYANA_PERSONAL_SEARCH_ENGINE_RELEASE =
             "v1.5.1 IMAGE COVERAGE TRUTH + R10.2 UNIFIED SEARCH CONTRACT v1.0"
@@ -67532,13 +68205,13 @@ state
             "v11.1.10 Multi-Attachment"
 
         private const val AYANA_ACCEPTED_FEATURE_CHECKPOINT =
-            "R10.17.1 SCREEN INTELLIGENCE ACCEPTANCE ROUTING RECONCILIATION — DEVICE-CONFIRMED ACCEPTED"
+            "R10.18.3 UNIVERSAL UI ACTION ENGINE — DEVICE-CONFIRMED ACCEPTED"
 
         private const val AYANA_CURRENT_FEATURE_RELEASE =
-            "R10.18.3 APP INFO TARGET RECONCILIATION — PENDING DEVICE CONFIRMATION"
+            "R10.19 AUTONOMOUS MULTI-APP TASKS 2.0 — PENDING DEVICE CONFIRMATION"
 
         private const val AYANA_RELEASE_LINEAGE =
-            "Android v12.21.0 / R7.9 truth-hardening + R8.0 multi-attachment + R8.1–R8.4 accepted Personal Global Search stack + R8.5–R8.5.4 capability/evidence truth + R9.0 autonomous agent foundation + R9.0.1 history live-refresh proof fix + R9.0.2 diagnostic reconciliation/history refresh fix + R9.0.3 TTS health reconciliation + R9.1 IME perception/active telemetry truth + R9.2 autonomous recovery/long-task reconciliation + R9.2.1 adaptive hypothesis reconciliation + R9.3 app integration framework + R9.3.1 screen health reconciliation + R9.3.2 history latency recovery reconciliation + R9.3.3 informational terminal reconciliation + R9.3.4 app integration device acceptance + R9.4 multi-app task orchestration + R9.4.1 screen ownership union reconciliation + R9.5 verified result transfer between app steps + R9.5.1 partial marker provenance reconciliation + R9.5.2 bounded marker observation + R9.5.3 verified action result transfer + R9.6 verified semantic observation fallback + R9.6.1 visual fallback acceptance truth + R9.7 structured screen reading + R9.7.1 conversation routing/terminal truth + R9.7.2 structured router conversation precedence + R9.7.3 action morphology/terminal truth + R9.8 generic verified result transfer + R9.8.1 master full acceptance/diagnostic engine + R9.9 reversible action journal/verified undo + R9.9.1 brightness verified undo device acceptance + R9.9.2 opt-in low-battery controlled proactivity + R10.0 unified screen intelligence + R10.1 local self-diagnostics/self-audit + R10.2 personal search expansion + R10.3 long autonomous tasks/recovery + R10.4 adaptive verified execution loop + R10.5 generalized live adaptive autonomy + R10.6 cross-lane adaptive continuity + R10.6.1 durable goal binding fix + R10.7 cross-lane durable recovery continuity + R10.7.1 isolated acceptance cleanup hardening + R10.8 general-purpose long autonomous objectives + R10.9 dynamic goal decomposition/planner contract + R10.10 adaptive planner production path + R10.11 production replan/durable recovery + R10.12 natural lifecycle recovery/background continuation + R10.13 full process-death recovery + R10.13.1 post-process readiness/reconciliation + R10.13.2 process-death core recovery proof correction + R10.14 perception process isolation/cross-process accessibility bridge + R10.14.1 cross-process visual evidence fix + R10.14.2 lifecycle profile/self-diagnostic truth + R10.14.3 history recovery reconciliation + R10.15 generalized cross-process autonomy hardening + R10.15.1 self-diagnostics routing reconciliation + R10.16 perception process recovery/safe bridge rebind + R10.16.1 restart telemetry reconciliation + R10.17 screen intelligence 2.0 + R10.17.1 acceptance routing reconciliation + R10.18 universal UI action engine + R10.18.1 acceptance target reconciliation + R10.18.2 live target authority reconciliation + R10.18.3 app info target reconciliation"
+            "Android v12.21.0 / R7.9 truth-hardening + R8.0 multi-attachment + R8.1–R8.4 accepted Personal Global Search stack + R8.5–R8.5.4 capability/evidence truth + R9.0 autonomous agent foundation + R9.0.1 history live-refresh proof fix + R9.0.2 diagnostic reconciliation/history refresh fix + R9.0.3 TTS health reconciliation + R9.1 IME perception/active telemetry truth + R9.2 autonomous recovery/long-task reconciliation + R9.2.1 adaptive hypothesis reconciliation + R9.3 app integration framework + R9.3.1 screen health reconciliation + R9.3.2 history latency recovery reconciliation + R9.3.3 informational terminal reconciliation + R9.3.4 app integration device acceptance + R9.4 multi-app task orchestration + R9.4.1 screen ownership union reconciliation + R9.5 verified result transfer between app steps + R9.5.1 partial marker provenance reconciliation + R9.5.2 bounded marker observation + R9.5.3 verified action result transfer + R9.6 verified semantic observation fallback + R9.6.1 visual fallback acceptance truth + R9.7 structured screen reading + R9.7.1 conversation routing/terminal truth + R9.7.2 structured router conversation precedence + R9.7.3 action morphology/terminal truth + R9.8 generic verified result transfer + R9.8.1 master full acceptance/diagnostic engine + R9.9 reversible action journal/verified undo + R9.9.1 brightness verified undo device acceptance + R9.9.2 opt-in low-battery controlled proactivity + R10.0 unified screen intelligence + R10.1 local self-diagnostics/self-audit + R10.2 personal search expansion + R10.3 long autonomous tasks/recovery + R10.4 adaptive verified execution loop + R10.5 generalized live adaptive autonomy + R10.6 cross-lane adaptive continuity + R10.6.1 durable goal binding fix + R10.7 cross-lane durable recovery continuity + R10.7.1 isolated acceptance cleanup hardening + R10.8 general-purpose long autonomous objectives + R10.9 dynamic goal decomposition/planner contract + R10.10 adaptive planner production path + R10.11 production replan/durable recovery + R10.12 natural lifecycle recovery/background continuation + R10.13 full process-death recovery + R10.13.1 post-process readiness/reconciliation + R10.13.2 process-death core recovery proof correction + R10.14 perception process isolation/cross-process accessibility bridge + R10.14.1 cross-process visual evidence fix + R10.14.2 lifecycle profile/self-diagnostic truth + R10.14.3 history recovery reconciliation + R10.15 generalized cross-process autonomy hardening + R10.15.1 self-diagnostics routing reconciliation + R10.16 perception process recovery/safe bridge rebind + R10.16.1 restart telemetry reconciliation + R10.17 screen intelligence 2.0 + R10.17.1 acceptance routing reconciliation + R10.18 universal UI action engine + R10.18.1 acceptance target reconciliation + R10.18.2 live target authority reconciliation + R10.18.3 app info target reconciliation + R10.19 autonomous multi-app tasks 2.0"
 
         // AyanaCommandHistoryStore v2.8 keeps up to 4k chars inline and stores longer
         // results out-of-line. Self-review intentionally remains inline so copied History

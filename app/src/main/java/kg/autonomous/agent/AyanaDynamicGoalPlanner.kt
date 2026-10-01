@@ -6,13 +6,17 @@ import java.security.MessageDigest
 import java.util.Locale
 
 /**
- * AYANA Dynamic Goal Planner v1.1 — R10.11 PRODUCTION VERIFIED FAILURE REPLAN.
+ * AYANA Dynamic Goal Planner v1.2 — R10.19 AUTONOMOUS MULTI-APP TASKS 2.0.
  *
- * R10.11 adds a bounded, contract-validated alternative suffix builder for verified
- * production failures. It never retries an identical failed transition and never changes
- * an already VERIFIED prefix. The only built-in alternative in v1.1 is a YouTube-search
- * recovery route: open YouTube through the registered Android Goal executor, then search
- * the already verified title. All candidates still pass the same compile() contract.
+ * R10.19 keeps the R10.11 verified-failure suffix-replan contract and expands the
+ * registered production planner with three already-authorized runtime primitives:
+ * verified App Info navigation, Universal UI exact-target click, and Calendar DRAFT_ONLY.
+ * The planner itself still never dispatches Android actions or widens authority.
+ *
+ * The dedicated R10.19 acceptance DAG contains eight required subgoals across Browser,
+ * YouTube, Samsung Settings and Calendar. A verified Browser title is transferred to both
+ * YouTube search and Calendar draft, while the Settings click is executed only through the
+ * accepted R10.18 Universal UI Action Engine. All candidates still pass compile().
  *
  * Pure planning/policy component. It never dispatches Android actions and never grants
  * execution authority. It converts a bounded free-form objective into a candidate DAG,
@@ -126,7 +130,7 @@ class AyanaDynamicGoalPlanner private constructor(
         "dynamic_planner=v$VERSION; source=$sourceValue; subgoals=${subgoalsValue.size}; fingerprint=$fingerprintValue"
 
     companion object {
-        const val VERSION = "1.1"
+        const val VERSION = "1.2"
         const val SNAPSHOT_VERSION = 1
 
         const val EXEC_DEVICE_STATE = "get_device_state"
@@ -135,6 +139,9 @@ class AyanaDynamicGoalPlanner private constructor(
         const val EXEC_STRUCTURED_SCREEN_READ = "structured_screen_read"
         const val EXEC_PARTIAL_RESULT_CHECK = "partial_result_check"
         const val EXEC_YOUTUBE_SEARCH = "youtube_search"
+        const val EXEC_APP_INFO = "app_info"
+        const val EXEC_UNIVERSAL_UI_CLICK = "universal_ui_click"
+        const val EXEC_CALENDAR_DRAFT = "calendar_draft"
 
         private const val MAX_SUBGOALS = 12
         private const val MAX_DEPENDENCIES = 8
@@ -197,6 +204,33 @@ class AyanaDynamicGoalPlanner private constructor(
                         mayMutateRuntime = true,
                         mayProduceResult = false,
                         mayConsumeResult = true
+                    ),
+                EXEC_APP_INFO to
+                    ExecutorContract(
+                        executor = EXEC_APP_INFO,
+                        lane = AyanaCrossLaneAdaptiveContinuity.LANE_MULTI_APP,
+                        authority = AyanaCrossLaneAdaptiveContinuity.AUTH_MULTI_APP,
+                        mayMutateRuntime = true,
+                        mayProduceResult = false,
+                        mayConsumeResult = false
+                    ),
+                EXEC_UNIVERSAL_UI_CLICK to
+                    ExecutorContract(
+                        executor = EXEC_UNIVERSAL_UI_CLICK,
+                        lane = AyanaCrossLaneAdaptiveContinuity.LANE_MULTI_APP,
+                        authority = AyanaCrossLaneAdaptiveContinuity.AUTH_MULTI_APP,
+                        mayMutateRuntime = true,
+                        mayProduceResult = false,
+                        mayConsumeResult = false
+                    ),
+                EXEC_CALENDAR_DRAFT to
+                    ExecutorContract(
+                        executor = EXEC_CALENDAR_DRAFT,
+                        lane = AyanaCrossLaneAdaptiveContinuity.LANE_MULTI_APP,
+                        authority = AyanaCrossLaneAdaptiveContinuity.AUTH_MULTI_APP,
+                        mayMutateRuntime = true,
+                        mayProduceResult = false,
+                        mayConsumeResult = true
                     )
             )
 
@@ -214,6 +248,10 @@ class AyanaDynamicGoalPlanner private constructor(
                     .put("supported", false)
                     .put("reason", "objective_required")
                     .put("objective", cleanObjective)
+            }
+
+            if (isR10_19AcceptanceObjective(normalized)) {
+                return r10_19AcceptanceProposal(cleanObjective)
             }
 
             val mentionsState =
@@ -235,9 +273,40 @@ class AyanaDynamicGoalPlanner private constructor(
                 normalized.contains("заголов") ||
                     normalized.contains("title")
 
-            val mentionsYoutube =
+            val mentionsYoutubeApp =
                 normalized.contains("youtube") ||
                     normalized.contains("ютуб")
+
+            val mentionsYoutube =
+                mentionsYoutubeApp &&
+                    (
+                        normalized.contains("найди") ||
+                            normalized.contains("поиск") ||
+                            normalized.contains("search")
+                        )
+
+            val mentionsAppInfo =
+                (
+                    normalized.contains("информац") &&
+                        normalized.contains("прилож")
+                    ) ||
+                    normalized.contains("app info")
+
+            val mentionsPermissions =
+                normalized.contains("разрешен") ||
+                    normalized.contains("permissions")
+
+            val mentionsCalendar =
+                normalized.contains("календар") ||
+                    normalized.contains("calendar")
+
+            val mentionsCalendarDraft =
+                mentionsCalendar &&
+                    (
+                        normalized.contains("чернов") ||
+                            normalized.contains("draft") ||
+                            normalized.contains("событ")
+                        )
 
             val mentionsFinalState =
                 mentionsState &&
@@ -255,6 +324,9 @@ class AyanaDynamicGoalPlanner private constructor(
                     mentionsExample,
                     mentionsTitle,
                     mentionsYoutube,
+                    mentionsAppInfo,
+                    mentionsPermissions,
+                    mentionsCalendarDraft,
                     mentionsFinalState
                 ).count { it }
 
@@ -355,12 +427,82 @@ class AyanaDynamicGoalPlanner private constructor(
                 previousId = "youtube_search"
             }
 
+            if (mentionsAppInfo) {
+                if (!mentionsYoutubeApp) {
+                    return JSONObject()
+                        .put("supported", false)
+                        .put("reason", "app_info_target_not_locally_resolved")
+                        .put("objective", cleanObjective)
+                }
+
+                subgoals.put(
+                    planItem(
+                        id = "app_info_youtube",
+                        title = "Open verified App Info for YouTube",
+                        executor = EXEC_APP_INFO,
+                        dependencies = deps(previousId),
+                        arguments = JSONObject().put("app", "YouTube")
+                    )
+                )
+                previousId = "app_info_youtube"
+            }
+
+            if (mentionsPermissions) {
+                if (!mentionsAppInfo) {
+                    return JSONObject()
+                        .put("supported", false)
+                        .put("reason", "permissions_requires_verified_app_info")
+                        .put("objective", cleanObjective)
+                }
+
+                subgoals.put(
+                    planItem(
+                        id = "open_permissions",
+                        title = "Open Permissions through Universal UI Action Engine",
+                        executor = EXEC_UNIVERSAL_UI_CLICK,
+                        dependencies = listOf("app_info_youtube"),
+                        arguments =
+                            JSONObject()
+                                .put("target", "пункт Разрешения")
+                                .put("confirmed", false)
+                    )
+                )
+                previousId = "open_permissions"
+            }
+
+            if (mentionsCalendarDraft) {
+                if (!mentionsTitle) {
+                    return JSONObject()
+                        .put("supported", false)
+                        .put("reason", "calendar_draft_requires_verified_title_source")
+                        .put("objective", cleanObjective)
+                }
+
+                val calendarDependencies =
+                    mutableListOf("read_title")
+                if (previousId.isNotBlank() && previousId != "read_title") {
+                    calendarDependencies.add(previousId)
+                }
+
+                subgoals.put(
+                    planItem(
+                        id = "calendar_draft",
+                        title = "Open Calendar DRAFT_ONLY with verified title",
+                        executor = EXEC_CALENDAR_DRAFT,
+                        dependencies = calendarDependencies.distinct(),
+                        arguments = JSONObject().put("input_result_key", "page_title")
+                    )
+                )
+                previousId = "calendar_draft"
+            }
+
             if (mentionsFinalState) {
                 val finalDependencies = mutableListOf<String>()
-                if (mentionsTitle) finalDependencies.add("read_title")
-                if (mentionsYoutube) finalDependencies.add("youtube_search")
-                if (finalDependencies.isEmpty() && previousId.isNotBlank()) {
+                if (previousId.isNotBlank()) {
                     finalDependencies.add(previousId)
+                } else {
+                    if (mentionsTitle) finalDependencies.add("read_title")
+                    if (mentionsYoutube) finalDependencies.add("youtube_search")
                 }
                 subgoals.put(
                     planItem(
@@ -687,7 +829,7 @@ class AyanaDynamicGoalPlanner private constructor(
 
         fun restore(snapshot: JSONObject?): AyanaDynamicGoalPlanner {
             require(snapshot != null) { "dynamic_planner_snapshot_required" }
-            require(snapshot.optString("version") in setOf("1.0", VERSION)) {
+            require(snapshot.optString("version") in setOf("1.0", "1.1", VERSION)) {
                 "unsupported_dynamic_planner_version"
             }
             require(snapshot.optInt("snapshot_version", -1) == SNAPSHOT_VERSION) {
@@ -765,7 +907,40 @@ class AyanaDynamicGoalPlanner private constructor(
                         alternativePlanner.subgoals().any { it.id.startsWith("youtube_search_recovered") } &&
                         alternativePlanner.subgoals().none { it.id == "youtube_search" }
 
+                val r10_19Objective = "проверь автономные многошаговые задачи 2.0"
+                val r10_19Proposal = localProposal(r10_19Objective)
+                val r10_19Planner = compile(r10_19Objective, r10_19Proposal)
+                val r10_19Ok =
+                    r10_19Proposal.optBoolean("supported", false) &&
+                        r10_19Planner.subgoalCount() == 8 &&
+                        r10_19Planner.subgoals().map { it.executor }.containsAll(
+                            listOf(
+                                EXEC_BROWSER_OPEN_URL,
+                                EXEC_STRUCTURED_SCREEN_READ,
+                                EXEC_YOUTUBE_SEARCH,
+                                EXEC_APP_INFO,
+                                EXEC_UNIVERSAL_UI_CLICK,
+                                EXEC_CALENDAR_DRAFT
+                            )
+                        ) &&
+                        r10_19Planner.argumentsFor("r10_19_calendar_draft")
+                            .optString("input_result_key") == "r10_19_page_title"
+
+                val r10_19NaturalObjective =
+                    "Открой Example Domain в браузере, прочитай заголовок, найди его в YouTube, открой информацию о приложении YouTube и Разрешения, затем создай черновик события в календаре с этим заголовком."
+                val r10_19NaturalProposal = localProposal(r10_19NaturalObjective)
+                val r10_19NaturalPlanner =
+                    compile(r10_19NaturalObjective, r10_19NaturalProposal)
+                val r10_19NaturalOk =
+                    r10_19NaturalProposal.optBoolean("supported", false) &&
+                        r10_19NaturalPlanner.subgoals().any { it.executor == EXEC_UNIVERSAL_UI_CLICK } &&
+                        r10_19NaturalPlanner.subgoals().any { it.executor == EXEC_CALENDAR_DRAFT } &&
+                        r10_19NaturalPlanner.argumentsFor("calendar_draft")
+                            .optString("input_result_key") == "page_title"
+
                 localOk &&
+                    r10_19Ok &&
+                    r10_19NaturalOk &&
                     unknownBlocked &&
                     authorityBlocked &&
                     cycleBlocked &&
@@ -774,6 +949,105 @@ class AyanaDynamicGoalPlanner private constructor(
             } catch (_: Throwable) {
                 false
             }
+        }
+
+        private fun isR10_19AcceptanceObjective(normalized: String): Boolean =
+            normalized in
+                setOf(
+                    "проверь автономные многошаговые задачи 2.0",
+                    "проверь автономные многошаговые задачи 2 0",
+                    "протестируй автономные многошаговые задачи 2.0",
+                    "протестируй автономные многошаговые задачи 2 0",
+                    "проверь autonomous multi-app tasks 2.0",
+                    "проверь autonomous multi-app tasks 2 0",
+                    "проверь r10.19",
+                    "проверь r10 19"
+                )
+
+        private fun r10_19AcceptanceProposal(objective: String): JSONObject {
+            val subgoals = JSONArray()
+
+            subgoals.put(
+                planItem(
+                    id = "r10_19_device_state_before",
+                    title = "Read factual device state before multi-app execution",
+                    executor = EXEC_DEVICE_STATE,
+                    dependencies = emptyList(),
+                    arguments = JSONObject()
+                )
+            )
+            subgoals.put(
+                planItem(
+                    id = "r10_19_open_example",
+                    title = "Open Example Domain in Browser",
+                    executor = EXEC_BROWSER_OPEN_URL,
+                    dependencies = listOf("r10_19_device_state_before"),
+                    arguments = JSONObject().put("url", "https://example.com")
+                )
+            )
+            subgoals.put(
+                planItem(
+                    id = "r10_19_read_title",
+                    title = "Read verified Browser title",
+                    executor = EXEC_STRUCTURED_SCREEN_READ,
+                    dependencies = listOf("r10_19_open_example"),
+                    resultKey = "r10_19_page_title",
+                    arguments = JSONObject()
+                )
+            )
+            subgoals.put(
+                planItem(
+                    id = "r10_19_youtube_search",
+                    title = "Search the verified Browser title in YouTube",
+                    executor = EXEC_YOUTUBE_SEARCH,
+                    dependencies = listOf("r10_19_read_title"),
+                    arguments = JSONObject().put("input_result_key", "r10_19_page_title")
+                )
+            )
+            subgoals.put(
+                planItem(
+                    id = "r10_19_app_info_youtube",
+                    title = "Open verified App Info for YouTube",
+                    executor = EXEC_APP_INFO,
+                    dependencies = listOf("r10_19_youtube_search"),
+                    arguments = JSONObject().put("app", "YouTube")
+                )
+            )
+            subgoals.put(
+                planItem(
+                    id = "r10_19_permissions",
+                    title = "Open Permissions through Universal UI Action Engine",
+                    executor = EXEC_UNIVERSAL_UI_CLICK,
+                    dependencies = listOf("r10_19_app_info_youtube"),
+                    arguments = JSONObject().put("target", "пункт Разрешения").put("confirmed", false)
+                )
+            )
+            subgoals.put(
+                planItem(
+                    id = "r10_19_calendar_draft",
+                    title = "Open Calendar DRAFT_ONLY with verified Browser title",
+                    executor = EXEC_CALENDAR_DRAFT,
+                    dependencies = listOf("r10_19_read_title", "r10_19_permissions"),
+                    arguments = JSONObject().put("input_result_key", "r10_19_page_title")
+                )
+            )
+            subgoals.put(
+                planItem(
+                    id = "r10_19_device_state_after",
+                    title = "Read factual device state after multi-app execution",
+                    executor = EXEC_DEVICE_STATE,
+                    dependencies = listOf("r10_19_calendar_draft"),
+                    arguments = JSONObject()
+                )
+            )
+
+            return JSONObject()
+                .put("supported", true)
+                .put("reason", "r10_19_autonomous_multi_app_acceptance")
+                .put("planner_version", VERSION)
+                .put("source", "r10_19_local_acceptance_decomposer")
+                .put("objective", objective)
+                .put("subgoals", subgoals)
         }
 
         private fun plannedSubgoalJson(subgoal: PlannedSubgoal): JSONObject =
@@ -877,6 +1151,40 @@ class AyanaDynamicGoalPlanner private constructor(
                         "planner_input_result_key_required:$subgoalId"
                     }
                 }
+
+                EXEC_APP_INFO -> {
+                    val app = arguments.optString("app").trim()
+                    require(app.isNotBlank()) {
+                        "planner_app_info_app_required:$subgoalId"
+                    }
+                    require(app.length <= 160) {
+                        "planner_app_info_app_too_large:$subgoalId"
+                    }
+                }
+
+                EXEC_UNIVERSAL_UI_CLICK -> {
+                    val target = arguments.optString("target").trim()
+                    require(target.isNotBlank()) {
+                        "planner_ui_click_target_required:$subgoalId"
+                    }
+                    require(target.length <= 240) {
+                        "planner_ui_click_target_too_large:$subgoalId"
+                    }
+                    require(!arguments.optBoolean("confirmed", false)) {
+                        "planner_ui_click_cannot_preconfirm:$subgoalId"
+                    }
+                }
+
+                EXEC_CALENDAR_DRAFT -> {
+                    val inputKey = normalizeId(arguments.optString("input_result_key"))
+                    val staticTitle = arguments.optString("title").trim()
+                    require(inputKey.isNotBlank() || staticTitle.isNotBlank()) {
+                        "planner_calendar_draft_title_required:$subgoalId"
+                    }
+                    require(staticTitle.length <= 240) {
+                        "planner_calendar_draft_title_too_large:$subgoalId"
+                    }
+                }
             }
         }
 
@@ -942,6 +1250,15 @@ class AyanaDynamicGoalPlanner private constructor(
                 EXEC_PARTIAL_RESULT_CHECK,
                 EXEC_YOUTUBE_SEARCH ->
                     "input_result_key=${normalizeId(arguments.optString("input_result_key"))}"
+
+                EXEC_APP_INFO ->
+                    "app=${normalizeText(arguments.optString("app"))}"
+
+                EXEC_UNIVERSAL_UI_CLICK ->
+                    "target=${normalizeText(arguments.optString("target"))};confirmed=false"
+
+                EXEC_CALENDAR_DRAFT ->
+                    "input_result_key=${normalizeId(arguments.optString("input_result_key"))};title=${normalizeText(arguments.optString("title"))}"
 
                 else -> ""
             }
