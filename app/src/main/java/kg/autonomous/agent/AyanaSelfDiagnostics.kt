@@ -6,7 +6,12 @@ import org.json.JSONObject
 import java.util.Locale
 
 /**
- * AYANA Self-Diagnostics v4.5 — R10.15 CROSS-PROCESS ROUTE AUDIT.
+ * AYANA Self-Diagnostics v4.6 — R10.16 PERCEPTION PROCESS RECOVERY AUDIT.
+ *
+ * R10.16 extends the accepted R10.15 route audit with provider-generation/rebind truth.
+ * Diagnostics verify that read-only bridge recovery is available, provider epoch identity is
+ * present, and mutating/destructive calls explicitly forbid blind replay after ambiguous IPC
+ * loss. Diagnostics never kill/restart :perception themselves.
  *
  * R10.15 makes process identity authoritative in diagnostics. Main-process telemetry can no
  * longer claim local Accessibility health or suppress the bridge check. Diagnostics verify
@@ -272,6 +277,10 @@ class AyanaSelfDiagnostics(
                     false
                 ) &&
                 perceptionBridgeStatus.optBoolean(
+                    "provider_epoch_verified",
+                    false
+                ) &&
+                perceptionBridgeStatus.optBoolean(
                     "provider_is_perception_process",
                     false
                 ) &&
@@ -279,6 +288,28 @@ class AyanaSelfDiagnostics(
                     "route_contract_verified",
                     false
                 )
+
+        val perceptionRecoveryPolicy =
+            if (!runningInPerceptionProcess) {
+                try {
+                    perceptionBridge.recoveryPolicySelfTest()
+                } catch (_: Throwable) {
+                    JSONObject()
+                }
+            } else {
+                JSONObject()
+            }
+
+        val perceptionRecoveryContractVerified =
+            !runningInPerceptionProcess &&
+                perceptionBridgeStatus.optBoolean("provider_epoch_verified", false) &&
+                perceptionBridgeStatus.optLong("perception_bridge_generation", 0L) > 0L &&
+                perceptionBridgeStatus.optBoolean("read_only_rebind_retry_supported", false) &&
+                perceptionBridgeStatus.optBoolean("explicit_pre_dispatch_rebind_retry_supported", false) &&
+                !perceptionBridgeStatus.optBoolean("mutation_blind_retry_allowed", true) &&
+                perceptionRecoveryPolicy.optBoolean("verified", false) &&
+                perceptionRecoveryPolicy.optBoolean("mutation_blind_retry_blocked", false) &&
+                perceptionRecoveryPolicy.optBoolean("destructive_blind_retry_blocked", false)
 
         val accessibility =
             if (runningInPerceptionProcess) {
@@ -349,6 +380,24 @@ class AyanaSelfDiagnostics(
                     "Bridge ${AyanaPerceptionBridgeContract.VERSION}; provider PID=${perceptionBridgeStatus.optInt("perception_process_id", -1)}; process=${perceptionBridgeStatus.optString("perception_process_name")}; direct main-process Accessibility fallback запрещён"
                 } else {
                     "Строгий route contract не подтверждён: reason=${perceptionBridgeStatus.optString("reason")}; provider PID=${perceptionBridgeStatus.optInt("perception_process_id", -1)}; process=${perceptionBridgeStatus.optString("perception_process_name")}"
+                }
+            )
+        }
+
+        if (!runningInPerceptionProcess) {
+            addCheck(
+                checks,
+                "perception_recovery_contract",
+                if (perceptionRecoveryContractVerified) {
+                    STATUS_PASS
+                } else {
+                    STATUS_FAIL
+                },
+                "Perception process recovery",
+                if (perceptionRecoveryContractVerified) {
+                    "Bridge generation=${perceptionBridgeStatus.optLong("perception_bridge_generation", 0L)}; epoch=${perceptionBridgeStatus.optString("perception_process_epoch_id").take(12)}…; read-only rebind включён; blind mutation replay запрещён"
+                } else {
+                    "Recovery contract не подтверждён: bridge=${perceptionBridgeStatus.optString("perception_bridge_version")}; generation=${perceptionBridgeStatus.optLong("perception_bridge_generation", 0L)}; policy=${perceptionRecoveryPolicy.toString().take(400)}"
                 }
             )
         }
@@ -1577,6 +1626,9 @@ class AyanaSelfDiagnostics(
 
             "perception_route_contract" ->
                 "Проверьте AndroidManifest :perception, AyanaPerceptionBridge version/PID contract и исключите прямой AgentAccessibilityService fallback из main process."
+
+            "perception_recovery_contract" ->
+                "Проверьте AyanaPerceptionBridge v1.3 rebind policy, provider epoch/generation и запрет blind mutation replay."
 
             "overlay" ->
                 "Разрешите AYANA отображение поверх других приложений, если нужен глобальный Orb."
