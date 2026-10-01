@@ -6,7 +6,13 @@ import org.json.JSONObject
 import java.util.Locale
 
 /**
- * AYANA Screen Intelligence v5.1 — R10.14 CROSS-PROCESS PERCEPTION BRIDGE + UNIFIED SCREEN TRUTH.
+ * AYANA Screen Intelligence v5.2 — R10.15 GENERALIZED CROSS-PROCESS AUTONOMY HARDENING.
+ *
+ * R10.15 makes process identity authoritative for every screen/action route. Outside the
+ * dedicated :perception process, Screen Intelligence ALWAYS uses AyanaPerceptionBridge;
+ * a stale/accidental process-local AgentAccessibilityService singleton can never become a
+ * fallback. Inside :perception, only the local Accessibility service is accepted. Visual
+ * observation transfer follows the same rule and bridge failure is no longer hidden.
  *
  * R10.14 adds a same-UID cross-process perception bridge. AgentAccessibilityService may run
  * in the dedicated :perception process; this class preserves the exact public API and uses
@@ -93,35 +99,30 @@ class AyanaScreenIntelligence(
                 .put("screen_text_instruction_authority", false)
                 .put("recorded_at_ms", now)
 
-        lastVerifiedVisualObservationJson = compact.toString()
-        lastVerifiedVisualObservationAtMs = now
-
-        if (
-            AgentAccessibilityService.instance == null &&
-            !perceptionBridge.isLocalPerceptionProcess()
-        ) {
-            try {
+        if (!perceptionBridge.isLocalPerceptionProcess()) {
+            return try {
                 perceptionBridge.recordVerifiedVisualObservation(observation)
             } catch (_: Throwable) {
+                false
             }
         }
 
+        lastVerifiedVisualObservationJson = compact.toString()
+        lastVerifiedVisualObservationAtMs = now
         return true
     }
 
     fun clearVerifiedVisualObservation() {
-        lastVerifiedVisualObservationJson = ""
-        lastVerifiedVisualObservationAtMs = 0L
-
-        if (
-            AgentAccessibilityService.instance == null &&
-            !perceptionBridge.isLocalPerceptionProcess()
-        ) {
+        if (!perceptionBridge.isLocalPerceptionProcess()) {
             try {
                 perceptionBridge.clearVerifiedVisualObservation()
             } catch (_: Throwable) {
             }
+            return
         }
+
+        lastVerifiedVisualObservationJson = ""
+        lastVerifiedVisualObservationAtMs = 0L
     }
 
     fun effectiveForegroundPackage(): String =
@@ -130,25 +131,24 @@ class AyanaScreenIntelligence(
             .trim()
 
     fun getScreenState(): JSONObject {
-        val service = AgentAccessibilityService.instance
-
-        if (service != null) {
-            return currentSnapshot(
-                service = service,
-                compact = false
-            )
+        if (!perceptionBridge.isLocalPerceptionProcess()) {
+            return perceptionBridge
+                .getScreenState()
+                .put("screen_intelligence_version", VERSION)
+                .put("unified_screen_truth_version", UNIFIED_TRUTH_VERSION)
         }
 
-        if (perceptionBridge.isLocalPerceptionProcess()) {
-            return unavailable()
-                .put("cross_process_perception", false)
-                .put("reason", "perception_process_accessibility_unavailable")
-        }
+        val service =
+            AgentAccessibilityService.instance
+                ?: return unavailable()
+                    .put("cross_process_perception", false)
+                    .put("perception_route", "local_perception_service")
+                    .put("reason", "perception_process_accessibility_unavailable")
 
-        return perceptionBridge
-            .getScreenState()
-            .put("screen_intelligence_version", VERSION)
-            .put("unified_screen_truth_version", UNIFIED_TRUTH_VERSION)
+        return currentSnapshot(
+            service = service,
+            compact = false
+        )
     }
 
     fun click(
@@ -179,15 +179,18 @@ class AyanaScreenIntelligence(
                 )
         }
 
-        val service = AgentAccessibilityService.instance
-
-        if (service == null) {
-            if (perceptionBridge.isLocalPerceptionProcess()) return unavailable()
+        if (!perceptionBridge.isLocalPerceptionProcess()) {
             return perceptionBridge.click(
                 target = cleanTarget,
                 confirmed = confirmed
             )
         }
+
+        val service =
+            AgentAccessibilityService.instance
+                ?: return unavailable()
+                    .put("perception_route", "local_perception_service")
+                    .put("reason", "perception_process_accessibility_unavailable")
 
         val before = currentSnapshot(service)
         val beforeSignature = safeSignature(service)
@@ -365,15 +368,18 @@ class AyanaScreenIntelligence(
                 )
         }
 
-        val service = AgentAccessibilityService.instance
-
-        if (service == null) {
-            if (perceptionBridge.isLocalPerceptionProcess()) return unavailable()
+        if (!perceptionBridge.isLocalPerceptionProcess()) {
             return perceptionBridge.inputText(
                 target = target,
                 text = text
             )
         }
+
+        val service =
+            AgentAccessibilityService.instance
+                ?: return unavailable()
+                    .put("perception_route", "local_perception_service")
+                    .put("reason", "perception_process_accessibility_unavailable")
 
         val cleanTarget = target?.trim()?.takeIf { it.isNotBlank() }
         val before = currentSnapshot(service)
@@ -467,12 +473,15 @@ class AyanaScreenIntelligence(
         direction: String
     ): JSONObject {
 
-        val service = AgentAccessibilityService.instance
-
-        if (service == null) {
-            if (perceptionBridge.isLocalPerceptionProcess()) return unavailable()
+        if (!perceptionBridge.isLocalPerceptionProcess()) {
             return perceptionBridge.scroll(direction)
         }
+
+        val service =
+            AgentAccessibilityService.instance
+                ?: return unavailable()
+                    .put("perception_route", "local_perception_service")
+                    .put("reason", "perception_process_accessibility_unavailable")
 
         val before =
             currentSnapshot(service)
@@ -839,16 +848,19 @@ class AyanaScreenIntelligence(
                 )
         }
 
-        val service = AgentAccessibilityService.instance
-
-        if (service == null) {
-            if (perceptionBridge.isLocalPerceptionProcess()) return unavailable()
+        if (!perceptionBridge.isLocalPerceptionProcess()) {
             return perceptionBridge.tap(
                 x = x,
                 y = y,
                 confirmed = confirmed
             )
         }
+
+        val service =
+            AgentAccessibilityService.instance
+                ?: return unavailable()
+                    .put("perception_route", "local_perception_service")
+                    .put("reason", "perception_process_accessibility_unavailable")
 
         val before = currentSnapshot(service)
         val beforeSignature = safeSignature(service)
@@ -897,12 +909,15 @@ class AyanaScreenIntelligence(
     }
 
     fun pressBack(): JSONObject {
-        val service = AgentAccessibilityService.instance
-
-        if (service == null) {
-            if (perceptionBridge.isLocalPerceptionProcess()) return unavailable()
+        if (!perceptionBridge.isLocalPerceptionProcess()) {
             return perceptionBridge.pressBack()
         }
+
+        val service =
+            AgentAccessibilityService.instance
+                ?: return unavailable()
+                    .put("perception_route", "local_perception_service")
+                    .put("reason", "perception_process_accessibility_unavailable")
 
         val before = currentSnapshot(service)
         val beforeSignature = safeSignature(service)
@@ -938,12 +953,15 @@ class AyanaScreenIntelligence(
     }
 
     fun pressHome(): JSONObject {
-        val service = AgentAccessibilityService.instance
-
-        if (service == null) {
-            if (perceptionBridge.isLocalPerceptionProcess()) return unavailable()
+        if (!perceptionBridge.isLocalPerceptionProcess()) {
             return perceptionBridge.pressHome()
         }
+
+        val service =
+            AgentAccessibilityService.instance
+                ?: return unavailable()
+                    .put("perception_route", "local_perception_service")
+                    .put("reason", "perception_process_accessibility_unavailable")
 
         val before = currentSnapshot(service)
         val beforeSignature = safeSignature(service)
@@ -998,7 +1016,7 @@ class AyanaScreenIntelligence(
                     // Public screen reads keep the Accessibility service's default
                     // acquisition budget. This preserves the richer Agent Core /
                     // diagnostics perception path instead of globally shrinking it.
-                    service.buildScreenSnapshot()
+service.buildScreenSnapshot()
                 }
             } catch (_: Exception) {
                 JSONObject()
@@ -1424,6 +1442,8 @@ class AyanaScreenIntelligence(
             .put("screen_intelligence_version", VERSION)
             .put("unified_screen_truth_version", UNIFIED_TRUTH_VERSION)
             .put("perception_fusion_version", 2)
+            .put("perception_route", "local_perception_service")
+            .put("process_local_accessibility_scope_verified", perceptionBridge.isLocalPerceptionProcess())
             .put("raw_primary_package", snapshot.optString("package").trim())
             .put("raw_interaction_package", rawInteractionPackage)
             .put(
@@ -1609,6 +1629,8 @@ class AyanaScreenIntelligence(
             .put("screen_intelligence_version", VERSION)
             .put("unified_screen_truth_version", UNIFIED_TRUTH_VERSION)
             .put("perception_fusion_version", 2)
+            .put("perception_route", if (perceptionBridge.isLocalPerceptionProcess()) "local_perception_service" else "cross_process_bridge_required")
+            .put("process_local_accessibility_scope_verified", perceptionBridge.isLocalPerceptionProcess())
             .put("foreground_truth_verified", false)
             .put("foreground_truth_conflict", false)
             .put("foreground_truth_source", "unavailable")
@@ -1715,7 +1737,7 @@ class AyanaScreenIntelligence(
     }
 
     companion object {
-        const val VERSION = "5.1"
+        const val VERSION = "5.2"
         const val UNIFIED_TRUTH_VERSION = "1.0"
         private const val ACTION_SETTLE_MS = 420L
         private const val VISUAL_EVIDENCE_TTL_MS = 15_000L
