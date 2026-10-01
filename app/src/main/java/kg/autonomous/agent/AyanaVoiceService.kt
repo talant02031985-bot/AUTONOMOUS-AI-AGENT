@@ -63,6 +63,13 @@ import kotlin.math.abs
 
 class AyanaVoiceService : Service() {
 
+    // AYANA v12.49.1 / R10.17.1 SCREEN INTELLIGENCE ACCEPTANCE ROUTING RECONCILIATION.
+    // Builds on R10.17 candidate. normalizeRecognitionText() intentionally strips punctuation,
+    // so versioned acceptance phrases such as "2.0" and "R10.17" arrive at the deterministic
+    // router as "2 0" and "R10 17". This release canonicalizes those tokens only inside the
+    // R10.17 acceptance matcher. Production screen understanding/execution behavior is unchanged.
+    // ORB/visualizer/UI unchanged.
+    //
     // AYANA v12.49.0 / R10.17 SCREEN INTELLIGENCE 2.0.
     // Builds on DEVICE-CONFIRMED R10.16.1. Raw Accessibility coverage is now kept
     // separate from semantic understanding truth through AyanaScreenUnderstandingEngine v2.0.
@@ -40497,6 +40504,11 @@ failedSubgoalId = subgoal.id,
                 .trim()
                 .removePrefix("аяна ")
                 .trim()
+                // R10.17.1: the shared ASR/text normalizer removes dots before routing.
+                // Canonicalize only the known version tokens here so exact acceptance
+                // phrases cannot fall through to Agent Core.
+                .replace(Regex("\\b2\\s+0\\b"), "2.0")
+                .replace(Regex("\\br10\\s+17\\b"), "r10.17")
 
         return normalized in
             setOf(
@@ -67079,7 +67091,7 @@ state
 
         // R10.17 SCREEN INTELLIGENCE 2.0 RELEASE TRUTH.
         private const val AYANA_VOICE_SERVICE_RELEASE =
-            "v12.49.0 / R10.17 SCREEN INTELLIGENCE 2.0"
+            "v12.49.1 / R10.17.1 SCREEN INTELLIGENCE ACCEPTANCE ROUTING RECONCILIATION"
 
         private const val AYANA_PERSONAL_SEARCH_ENGINE_RELEASE =
             "v1.5.1 IMAGE COVERAGE TRUTH + R10.2 UNIFIED SEARCH CONTRACT v1.0"
@@ -67094,10 +67106,10 @@ state
             "R10.16.1 RESTART TELEMETRY RECONCILIATION — DEVICE-CONFIRMED ACCEPTED"
 
         private const val AYANA_CURRENT_FEATURE_RELEASE =
-            "R10.17 SCREEN INTELLIGENCE 2.0 — PENDING DEVICE CONFIRMATION"
+            "R10.17.1 SCREEN INTELLIGENCE ACCEPTANCE ROUTING RECONCILIATION — PENDING DEVICE CONFIRMATION"
 
         private const val AYANA_RELEASE_LINEAGE =
-            "Android v12.21.0 / R7.9 truth-hardening + R8.0 multi-attachment + R8.1–R8.4 accepted Personal Global Search stack + R8.5–R8.5.4 capability/evidence truth + R9.0 autonomous agent foundation + R9.0.1 history live-refresh proof fix + R9.0.2 diagnostic reconciliation/history refresh fix + R9.0.3 TTS health reconciliation + R9.1 IME perception/active telemetry truth + R9.2 autonomous recovery/long-task reconciliation + R9.2.1 adaptive hypothesis reconciliation + R9.3 app integration framework + R9.3.1 screen health reconciliation + R9.3.2 history latency recovery reconciliation + R9.3.3 informational terminal reconciliation + R9.3.4 app integration device acceptance + R9.4 multi-app task orchestration + R9.4.1 screen ownership union reconciliation + R9.5 verified result transfer between app steps + R9.5.1 partial marker provenance reconciliation + R9.5.2 bounded marker observation + R9.5.3 verified action result transfer + R9.6 verified semantic observation fallback + R9.6.1 visual fallback acceptance truth + R9.7 structured screen reading + R9.7.1 conversation routing/terminal truth + R9.7.2 structured router conversation precedence + R9.7.3 action morphology/terminal truth + R9.8 generic verified result transfer + R9.8.1 master full acceptance/diagnostic engine + R9.9 reversible action journal/verified undo + R9.9.1 brightness verified undo device acceptance + R9.9.2 opt-in low-battery controlled proactivity + R10.0 unified screen intelligence + R10.1 local self-diagnostics/self-audit + R10.2 personal search expansion + R10.3 long autonomous tasks/recovery + R10.4 adaptive verified execution loop + R10.5 generalized live adaptive autonomy + R10.6 cross-lane adaptive continuity + R10.6.1 durable goal binding fix + R10.7 cross-lane durable recovery continuity + R10.7.1 isolated acceptance cleanup hardening + R10.8 general-purpose long autonomous objectives + R10.9 dynamic goal decomposition/planner contract + R10.10 adaptive planner production path + R10.11 production replan/durable recovery + R10.12 natural lifecycle recovery/background continuation + R10.13 full process-death recovery + R10.13.1 post-process readiness/reconciliation + R10.13.2 process-death core recovery proof correction + R10.14 perception process isolation/cross-process accessibility bridge + R10.14.1 cross-process visual evidence fix + R10.14.2 lifecycle profile/self-diagnostic truth + R10.14.3 history recovery reconciliation + R10.15 generalized cross-process autonomy hardening + R10.15.1 self-diagnostics routing reconciliation + R10.16 perception process recovery/safe bridge rebind + R10.16.1 restart telemetry reconciliation + R10.17 screen intelligence 2.0"
+            "Android v12.21.0 / R7.9 truth-hardening + R8.0 multi-attachment + R8.1–R8.4 accepted Personal Global Search stack + R8.5–R8.5.4 capability/evidence truth + R9.0 autonomous agent foundation + R9.0.1 history live-refresh proof fix + R9.0.2 diagnostic reconciliation/history refresh fix + R9.0.3 TTS health reconciliation + R9.1 IME perception/active telemetry truth + R9.2 autonomous recovery/long-task reconciliation + R9.2.1 adaptive hypothesis reconciliation + R9.3 app integration framework + R9.3.1 screen health reconciliation + R9.3.2 history latency recovery reconciliation + R9.3.3 informational terminal reconciliation + R9.3.4 app integration device acceptance + R9.4 multi-app task orchestration + R9.4.1 screen ownership union reconciliation + R9.5 verified result transfer between app steps + R9.5.1 partial marker provenance reconciliation + R9.5.2 bounded marker observation + R9.5.3 verified action result transfer + R9.6 verified semantic observation fallback + R9.6.1 visual fallback acceptance truth + R9.7 structured screen reading + R9.7.1 conversation routing/terminal truth + R9.7.2 structured router conversation precedence + R9.7.3 action morphology/terminal truth + R9.8 generic verified result transfer + R9.8.1 master full acceptance/diagnostic engine + R9.9 reversible action journal/verified undo + R9.9.1 brightness verified undo device acceptance + R9.9.2 opt-in low-battery controlled proactivity + R10.0 unified screen intelligence + R10.1 local self-diagnostics/self-audit + R10.2 personal search expansion + R10.3 long autonomous tasks/recovery + R10.4 adaptive verified execution loop + R10.5 generalized live adaptive autonomy + R10.6 cross-lane adaptive continuity + R10.6.1 durable goal binding fix + R10.7 cross-lane durable recovery continuity + R10.7.1 isolated acceptance cleanup hardening + R10.8 general-purpose long autonomous objectives + R10.9 dynamic goal decomposition/planner contract + R10.10 adaptive planner production path + R10.11 production replan/durable recovery + R10.12 natural lifecycle recovery/background continuation + R10.13 full process-death recovery + R10.13.1 post-process readiness/reconciliation + R10.13.2 process-death core recovery proof correction + R10.14 perception process isolation/cross-process accessibility bridge + R10.14.1 cross-process visual evidence fix + R10.14.2 lifecycle profile/self-diagnostic truth + R10.14.3 history recovery reconciliation + R10.15 generalized cross-process autonomy hardening + R10.15.1 self-diagnostics routing reconciliation + R10.16 perception process recovery/safe bridge rebind + R10.16.1 restart telemetry reconciliation + R10.17 screen intelligence 2.0 + R10.17.1 acceptance routing reconciliation"
 
         // AyanaCommandHistoryStore v2.8 keeps up to 4k chars inline and stores longer
         // results out-of-line. Self-review intentionally remains inline so copied History
