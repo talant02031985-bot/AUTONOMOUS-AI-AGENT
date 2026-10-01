@@ -5,10 +5,12 @@ import org.json.JSONObject
 import java.util.Locale
 
 /**
- * AYANA Universal UI Action Engine v1.0 — R10.18 UNIVERSAL UI ACTION ENGINE.
+ * AYANA Universal UI Action Engine v1.1 — R10.18.2 LIVE TARGET AUTHORITY RECONCILIATION.
  *
  * Production contract:
  * - every generic UI mutation starts from fresh verified Screen Intelligence truth;
+ * - exact click targets may delegate target resolution to a live Accessibility query only
+ *   where Screen Intelligence already has a fail-closed native-query contract (Samsung Settings);
  * - visual/structured evidence may help understanding, but NEVER grants action authority;
  * - click/input/scroll are dispatched at most once per engine call;
  * - a mutation that Android accepted but AYANA could not verify is never blindly retried;
@@ -93,9 +95,19 @@ class AyanaUniversalUiActionEngine(
                 .put("requested_target", requestedTarget)
         }
 
-        val preflight = acquireStablePreflight()
+        val preflight =
+            acquireStablePreflight(
+                actionKind = actionKind,
+                target = normalizedTarget.canonical
+            )
         val before = preflight.optJSONObject("screen") ?: JSONObject()
-        val authorityReady = mutationAuthorityReady(before)
+        val authorityMode =
+            preDispatchAuthorityMode(
+                actionKind = actionKind,
+                screen = before,
+                target = normalizedTarget.canonical
+            )
+        val authorityReady = authorityMode != AUTHORITY_NONE
 
         if (shouldCancel()) {
             return cancelled("cancelled_after_preflight")
@@ -116,6 +128,7 @@ class AyanaUniversalUiActionEngine(
                 .put("preflight", preflight)
                 .put("dispatch_count", 0)
                 .put("pre_dispatch_verified", false)
+                .put("pre_dispatch_authority_mode", authorityMode)
                 .put("visual_grants_action_authority", false)
                 .put("blind_retry_allowed", false)
                 .put("safe_replan_allowed", true)
@@ -224,6 +237,21 @@ class AyanaUniversalUiActionEngine(
                 remove("screen_before")
             }
 
+        val proofLevel =
+            dispatch.optString("proof_level").trim()
+
+        val actionAuthoritySource =
+            when {
+                proofLevel.contains("native_accessibility_text_query") ->
+                    "live_accessibility_exact_target_query"
+                proofLevel.contains("semantic_target") ->
+                    "live_accessibility_semantic_target"
+                authorityMode != AUTHORITY_NONE ->
+                    authorityMode
+                else ->
+                    AUTHORITY_NONE
+            }
+
         return JSONObject()
             .put("success", postconditionVerified)
             .put("verified", postconditionVerified)
@@ -239,9 +267,10 @@ class AyanaUniversalUiActionEngine(
             .put("role_hint", normalizedTarget.roleHint)
             .put("dispatch_count", 1)
             .put("pre_dispatch_verified", authorityReady)
+            .put("pre_dispatch_authority_mode", authorityMode)
             .put("postcondition_verified", postconditionVerified)
             .put("post_observation_verified", postTruthVerified)
-            .put("action_authority_source", "live_accessibility_structure")
+            .put("action_authority_source", actionAuthoritySource)
             .put("visual_read_only_corroboration_allowed", true)
             .put("visual_grants_action_authority", false)
             .put("screen_text_instruction_authority", false)
@@ -302,6 +331,19 @@ class AyanaUniversalUiActionEngine(
                 .put("interaction_understanding_usable", false)
                 .put("read_only_understanding_usable", true)
                 .put("visual_observation_used", true)
+                .put("visual_grants_action_authority", true)
+
+        val sparseSettings =
+            JSONObject()
+                .put("success", true)
+                .put("snapshot_success", true)
+                .put("foreground_truth_verified", true)
+                .put("foreground_truth_conflict", false)
+                .put("effective_foreground_package", "com.android.settings")
+                .put("interaction_package", "com.android.settings")
+                .put("interaction_understanding_usable", false)
+                .put("visual_grants_action_authority", false)
+                .put("nodes", JSONArray())
 
         val roleButton = normalizeTarget("кнопку Разрешения")
         val roleField = normalizeTarget("поле ввода Поиск")
@@ -309,6 +351,16 @@ class AyanaUniversalUiActionEngine(
 
         return mutationAuthorityReady(live) &&
             !mutationAuthorityReady(visualOnly) &&
+            preDispatchAuthorityMode(
+                actionKind = ACTION_CLICK,
+                screen = sparseSettings,
+                target = "Экран"
+            ) == AUTHORITY_LIVE_EXACT_TARGET_QUERY &&
+            preDispatchAuthorityMode(
+                actionKind = ACTION_INPUT_TEXT,
+                screen = sparseSettings,
+                target = "Поиск"
+            ) == AUTHORITY_NONE &&
             roleButton.canonical == "Разрешения" &&
             roleButton.roleHint == "button" &&
             roleField.canonical == "Поиск" &&
@@ -318,21 +370,30 @@ class AyanaUniversalUiActionEngine(
             SUPPORTED_ACTIONS.size == 3
     }
 
-    private fun acquireStablePreflight(): JSONObject =
+    private fun acquireStablePreflight(
+        actionKind: String,
+        target: String
+    ): JSONObject =
         acquireStableObservation(
             requireInteraction = true,
-            maxAttempts = PREFLIGHT_MAX_ATTEMPTS
+            maxAttempts = PREFLIGHT_MAX_ATTEMPTS,
+            actionKind = actionKind,
+            target = target
         )
 
     private fun acquireStablePostObservation(): JSONObject =
         acquireStableObservation(
             requireInteraction = false,
-            maxAttempts = POST_OBSERVATION_MAX_ATTEMPTS
+            maxAttempts = POST_OBSERVATION_MAX_ATTEMPTS,
+            actionKind = "",
+            target = ""
         )
 
     private fun acquireStableObservation(
         requireInteraction: Boolean,
-        maxAttempts: Int
+        maxAttempts: Int,
+        actionKind: String,
+        target: String
     ): JSONObject {
         var latest = JSONObject()
         var attempts = 0
@@ -348,7 +409,11 @@ class AyanaUniversalUiActionEngine(
 
             val ready =
                 if (requireInteraction) {
-                    mutationAuthorityReady(latest)
+                    preDispatchAuthorityMode(
+                        actionKind = actionKind,
+                        screen = latest,
+                        target = target
+                    ) != AUTHORITY_NONE
                 } else {
                     snapshotTruthVerified(latest)
                 }
@@ -366,11 +431,71 @@ class AyanaUniversalUiActionEngine(
             }
         }
 
+        val finalAuthorityMode =
+            if (requireInteraction) {
+                preDispatchAuthorityMode(
+                    actionKind = actionKind,
+                    screen = latest,
+                    target = target
+                )
+            } else {
+                AUTHORITY_NONE
+            }
+
         return JSONObject()
-            .put("verified", if (requireInteraction) mutationAuthorityReady(latest) else snapshotTruthVerified(latest))
+            .put(
+                "verified",
+                if (requireInteraction) {
+                    finalAuthorityMode != AUTHORITY_NONE
+                } else {
+                    snapshotTruthVerified(latest)
+                }
+            )
             .put("attempts", attempts)
             .put("read_only_only", true)
+            .put("authority_mode", finalAuthorityMode)
             .put("screen", latest)
+    }
+
+    private fun preDispatchAuthorityMode(
+        actionKind: String,
+        screen: JSONObject,
+        target: String
+    ): String {
+        if (!snapshotTruthVerified(screen)) return AUTHORITY_NONE
+        if (screen.optBoolean("visual_grants_action_authority", false)) return AUTHORITY_NONE
+
+        if (mutationAuthorityReady(screen)) {
+            return AUTHORITY_LIVE_STRUCTURE
+        }
+
+        if (
+            actionKind == ACTION_CLICK &&
+            target.isNotBlank() &&
+            supportsDelegatedExactTargetResolution(screen)
+        ) {
+            return AUTHORITY_LIVE_EXACT_TARGET_QUERY
+        }
+
+        return AUTHORITY_NONE
+    }
+
+    private fun supportsDelegatedExactTargetResolution(
+        screen: JSONObject
+    ): Boolean {
+        val effectivePackage =
+            screen.optString("effective_foreground_package").trim()
+        val interactionPackage =
+            screen
+                .optString("interaction_package", effectivePackage)
+                .trim()
+
+        // AyanaScreenIntelligence has a fail-closed exact native text/description
+        // query only for Samsung/Android Settings. The live query is restricted to
+        // current TYPE_APPLICATION interaction windows, exact normalized match,
+        // visible+enabled nodes, ambiguity rejection and verified screen change.
+        return effectivePackage == "com.android.settings" &&
+            interactionPackage == "com.android.settings"
     }
 
     private fun mutationAuthorityReady(
@@ -510,8 +635,8 @@ class AyanaUniversalUiActionEngine(
         )
 
     companion object {
-        const val VERSION = "1.0"
-        const val CONTRACT_VERSION = 1
+        const val VERSION = "1.1"
+        const val CONTRACT_VERSION = 2
 
         const val ACTION_CLICK = "click"
         const val ACTION_INPUT_TEXT = "input_text"
@@ -527,5 +652,9 @@ class AyanaUniversalUiActionEngine(
         private const val PREFLIGHT_MAX_ATTEMPTS = 3
         private const val POST_OBSERVATION_MAX_ATTEMPTS = 3
         private const val OBSERVATION_SETTLE_MS = 90L
+
+        private const val AUTHORITY_NONE = "none"
+        private const val AUTHORITY_LIVE_STRUCTURE = "live_accessibility_structure"
+        private const val AUTHORITY_LIVE_EXACT_TARGET_QUERY = "live_accessibility_exact_target_query"
     }
 }
