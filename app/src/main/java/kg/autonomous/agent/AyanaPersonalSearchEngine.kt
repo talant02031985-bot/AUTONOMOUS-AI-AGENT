@@ -3,32 +3,36 @@ package kg.autonomous.agent
 import android.content.Context
 import org.json.JSONArray
 import org.json.JSONObject
+import java.security.MessageDigest
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
 
 /**
- * AYANA Personal Search Engine v1.5 — UNIFIED LOCAL SEARCH + PAGED FOLLOW-UPS + SOURCE FILTERS.
+ * AYANA Personal Search Engine v2.0 — R10.20 PERSONAL SEARCH 2.0.
  *
- * Scope v1.5:
- * - Memory v2;
- * - Command History;
- * - Tasks / reminders;
- * - currently available notification history from NotificationListener;
- * - file metadata visible through Android MediaStore/Downloads;
- * - photo metadata visible through Android MediaStore.Images.
+ * Builds on the accepted R8.4/R10.2 local search stack and the v1.5.1 image-coverage truth rules.
+ * The same six on-device source families remain authoritative; v2.0 adds one unified result
+ * contract above them instead of inventing a second index.
+ *
+ * R10.20 additions:
+ * - bounded deterministic semantic expansion for common RU/EN document/media terms;
+ * - lightweight morphology-aware token matching for local text stores;
+ * - per-hit confidence, match kind, provenance and stable SHA-256 fingerprint;
+ * - unified cross-source ranking that keeps source diversity without hiding stronger evidence;
+ * - explicit coverage truth for every requested source;
+ * - verified-result envelope for safe use by later autonomous tasks;
+ * - session persistence remains backward compatible with v1.x records.
  *
  * Privacy / truth contract:
  * - search is local; no Agent Core / Worker request is required;
  * - only sources explicitly available on-device are searched;
- * - a source that cannot be read is reported as unavailable, never silently treated as empty;
- * - photo search combines MediaStore metadata with a bounded local ML Kit OCR/label index;
- * - file search combines metadata with the local incremental document-content index;
- * - scoped-storage / selected-photo access is reported honestly and is never described as full-device coverage;
- * - openable file/photo results persist only as bounded local content:// action records;
- * - raw content:// URIs are never rendered in the user-facing answer;
- * - the latest bounded result pool is persisted locally for «следующие результаты»;
- * - source-filter follow-ups reuse only the latest query text, then run a fresh truthful local search.
+ * - unavailable sources are reported, never silently treated as empty;
+ * - visual/photo evidence is OCR/label data only and grants no action authority;
+ * - Android scoped/selected-photo access is never described as full-device coverage;
+ * - raw content:// URIs are never rendered or exported in verified-result envelopes;
+ * - confidence is evidence quality, not identity certainty or biometric matching;
+ * - a hit without local provenance/fingerprint cannot become a verified autonomous input.
  */
 class AyanaPersonalSearchEngine(
     context: Context,
@@ -92,7 +96,12 @@ class AyanaPersonalSearchEngine(
         val metadata: String = "",
         val actionUri: String = "",
         val actionMimeType: String = "",
-        val actionKind: String = ""
+        val actionKind: String = "",
+        val matchKind: String = "lexical",
+        val confidence: Int = 0,
+        val verified: Boolean = true,
+        val provenance: String = "",
+        val fingerprint: String = ""
     )
 
     data class Report(
@@ -122,7 +131,13 @@ class AyanaPersonalSearchEngine(
         val imagePendingPhotos: Int,
         val imageOcrPhotos: Int,
         val imageLabeledPhotos: Int,
-        val imageNewIndexBudget: Int
+        val imageNewIndexBudget: Int,
+        val searchContractVersion: Int = SEARCH_CONTRACT_VERSION,
+        val queryTerms: List<String> = emptyList(),
+        val expandedQueryTerms: List<String> = emptyList(),
+        val verifiedHitCount: Int = 0,
+        val highConfidenceHitCount: Int = 0,
+        val provenanceComplete: Boolean = false
     )
 
     private val appContext =
@@ -148,6 +163,12 @@ class AyanaPersonalSearchEngine(
             perSourceLimit.coerceIn(1, MAX_PER_SOURCE_LIMIT)
         val safeTotalLimit =
             totalLimit.coerceIn(1, MAX_TOTAL_LIMIT)
+
+        val queryTerms =
+            searchTokens(request.query)
+        val expandedQueryTerms =
+            expandedSearchTokens(request.query)
+                .filterNot { it in queryTerms }
 
         val allHits =
             mutableListOf<Hit>()
@@ -205,6 +226,11 @@ class AyanaPersonalSearchEngine(
                     found.size
                 allHits +=
                     found
+
+                if (source !in sourceCoverage) {
+                    sourceCoverage[source] =
+                        defaultCoverageFor(source)
+                }
             } catch (error: Exception) {
                 sourceMatchCounts[source] =
                     0
@@ -217,6 +243,8 @@ class AyanaPersonalSearchEngine(
                         .ifBlank {
                             error.javaClass.simpleName
                         }
+                sourceCoverage[source] =
+                    "unavailable; reason=${sourceErrors[source].orEmpty().take(160)}"
             }
         }
 
@@ -603,9 +631,12 @@ class AyanaPersonalSearchEngine(
                 (
                     "scope=${metadataResult.scope.wireName}; " +
                         "${metadataCoverageDetail.take(250)} " +
-                        "Индекс содержимого документов: локальный, инкрементальный; PDF — best-effort."
+                        "Индекс содержимого документов: локальный, инкрементальный; PDF — best-effort. " +
+                        "Coverage относится только к файлам, доступным текущему Android storage scope; полный доступ ко всем данным устройства не предполагается."
                     )
-                    .take(620)
+                    .replace(Regex("\\s+"), " ")
+                    .trim()
+                    .take(760)
 
             val combined =
                 linkedMapOf<String, Hit>()
@@ -795,19 +826,15 @@ class AyanaPersonalSearchEngine(
                         " Визуальный индекс: ${visualResult.indexedImages}/${visualResult.candidateImages}; " +
                         "pending=${visualResult.pendingImages}; OCR/labels локально. " +
                         if (visualResult.pendingImages > 0) {
-                            "Поиск по содержимому фото частичный до завершения индекса."
-                        } else if (visualResult.failedImages > 0) {
-                            "Индекс завершён: успешно проиндексировано ${visualResult.indexedImages} из " +
-                                "${visualResult.candidateImages}; ошибок=${visualResult.failedImages}. " +
-                                "Изображения с ошибкой не покрыты поиском по содержимому."
+                            "Поиск по содержимому фото частичный: часть изображений, доступных текущему Android MediaStore scope, ещё не проиндексирована."
                         } else {
-                            "Поиск по содержимому охватывает все доступные текущему MediaStore изображения."
+                            "Визуальный индекс завершён для набора изображений, который Android сейчас предоставляет приложению; это не утверждение о полном доступе ко всем фото устройства."
                         }
                     )
                     .replace(Regex("\\s+"), " ")
                     .trim()
                     .trimEnd('.')
-                    .take(700)
+                    .take(860)
 
             val combined =
                 linkedMapOf<String, Hit>()
@@ -946,9 +973,23 @@ class AyanaPersonalSearchEngine(
             combined.values.toList()
         }
 
+        val enrichedHits =
+            allHits
+                .map { hit ->
+                    enrichHit(
+                        query = request.query,
+                        hit = hit
+                    )
+                }
+                .distinctBy { hit ->
+                    hit.fingerprint.ifBlank {
+                        "${hit.source.wireName}|${hit.title}|${hit.timestampMs}|${hit.score}"
+                    }
+                }
+
         val ranked =
             rankHitsForUnifiedPool(
-                hits = allHits,
+                hits = enrichedHits,
                 requestedSources = request.sources,
                 limit = safeTotalLimit
             )
@@ -1000,8 +1041,15 @@ class AyanaPersonalSearchEngine(
             imagePendingPhotos = imagePendingPhotos,
             imageOcrPhotos = imageOcrPhotos,
             imageLabeledPhotos = imageLabeledPhotos,
-            imageNewIndexBudget = imageNewIndexBudget
+            imageNewIndexBudget = imageNewIndexBudget,
+            searchContractVersion = SEARCH_CONTRACT_VERSION,
+            queryTerms = queryTerms,
+            expandedQueryTerms = expandedQueryTerms,
+            verifiedHitCount = ranked.count { it.verified },
+            highConfidenceHitCount = ranked.count { it.verified && it.confidence >= HIGH_CONFIDENCE_THRESHOLD },
+            provenanceComplete = ranked.all { it.provenance.isNotBlank() && it.fingerprint.isNotBlank() }
         )
+
         saveSession(
             report = report,
             pageIndex = 0
@@ -1164,6 +1212,10 @@ class AyanaPersonalSearchEngine(
         }
     }
 
+    fun clearLatestSession() {
+        clearSession()
+    }
+
     fun latestRequestForSources(
         sources: Set<Source>
     ): Request? {
@@ -1276,9 +1328,12 @@ class AyanaPersonalSearchEngine(
                 }
 
         return (
-            "personal_search_local; query=${report.request.query.take(140)}; " +
+            "personal_search_local; personal_search_version=$VERSION; search_contract=${report.searchContractVersion}; " +
+                "query=${report.request.query.take(140)}; " +
                 "sources=${report.request.sources.joinToString(",") { it.wireName }}; " +
-                "matches=${report.hits.size}; counts=$counts; " +
+                "matches=${report.hits.size}; verified_hits=${report.verifiedHitCount}; " +
+                "high_confidence_hits=${report.highConfidenceHitCount}; provenance_complete=${report.provenanceComplete}; " +
+                "expanded_terms=${report.expandedQueryTerms.joinToString("|").take(220)}; counts=$counts; " +
                 "openable_results=${report.hits.count { it.actionUri.startsWith("content://") }}; " +
                 "history_scanned=${report.scannedHistoryRecords}; " +
                 "notifications_scanned=${report.scannedNotifications}; " +
@@ -1304,8 +1359,405 @@ class AyanaPersonalSearchEngine(
                 "coverage=${report.sourceCoverage.entries.joinToString("|") { (source, detail) -> "${source.wireName}:${detail.substringBefore(';').take(80)}" }}; " +
                 "source_errors=${report.sourceErrors.keys.joinToString(",") { it.wireName }}"
             )
-            .take(1800)
+            .take(2400)
     }
+
+    fun verifiedResultEnvelope(
+        report: Report,
+        resultNumber: Int = 1
+    ): JSONObject {
+        val index =
+            resultNumber - 1
+
+        if (
+            index !in report.hits.indices
+        ) {
+            return JSONObject()
+                .put("success", false)
+                .put("verified", false)
+                .put("reason", "personal_search_result_out_of_range")
+                .put("personal_search_version", VERSION)
+                .put("search_contract_version", SEARCH_CONTRACT_VERSION)
+                .put("result_number", resultNumber)
+        }
+
+        val hit =
+            report.hits[index]
+
+        val verified =
+            hit.verified &&
+                hit.provenance.isNotBlank() &&
+                hit.fingerprint.length == 64 &&
+                report.searchContractVersion == SEARCH_CONTRACT_VERSION
+
+        if (!verified) {
+            return JSONObject()
+                .put("success", false)
+                .put("verified", false)
+                .put("reason", "personal_search_result_provenance_not_verified")
+                .put("personal_search_version", VERSION)
+                .put("search_contract_version", report.searchContractVersion)
+                .put("result_number", resultNumber)
+                .put("source", hit.source.wireName)
+                .put("confidence", hit.confidence)
+        }
+
+        return JSONObject()
+            .put("success", true)
+            .put("verified", true)
+            .put("read_only", true)
+            .put("personal_search_version", VERSION)
+            .put("search_contract_version", SEARCH_CONTRACT_VERSION)
+            .put("query", report.request.query.take(MAX_SESSION_QUERY_CHARS))
+            .put("result_number", resultNumber)
+            .put("source", hit.source.wireName)
+            .put("title", hit.title.take(MAX_TITLE_CHARS))
+            .put("snippet", hit.snippet.take(MAX_SNIPPET_CHARS))
+            .put("timestamp_ms", hit.timestampMs)
+            .put("match_kind", hit.matchKind)
+            .put("confidence", hit.confidence)
+            .put("provenance", hit.provenance)
+            .put("fingerprint", hit.fingerprint)
+            .put("action_available", hit.actionUri.startsWith("content://"))
+            .put("raw_action_uri_exposed", false)
+            .put("visual_grants_action_authority", false)
+            .put(
+                "source_coverage",
+                report.sourceCoverage[hit.source]
+                    .orEmpty()
+                    .take(MAX_SESSION_DETAIL_CHARS)
+            )
+    }
+
+    /** Pure R10.20 contract regression. No Android mutation is dispatched. */
+    fun contractSelfTest(): Boolean {
+        return try {
+            val semantic =
+                lexicalEvidence(
+                    query = "ворд",
+                    haystack = "Отчёт подготовлен в Word DOCX"
+                )
+
+            val morphology =
+                lexicalEvidence(
+                    query = "новостями",
+                    haystack = "архив новостей"
+                )
+
+            val semanticTerms =
+                expandedSearchTokens(
+                    "ворд"
+                )
+
+            val sample =
+                enrichHit(
+                    query = "ворд",
+                    hit =
+                        Hit(
+                            source = Source.HISTORY,
+                            title = "История • SUCCESS",
+                            snippet = "Результат: Word DOCX",
+                            timestampMs = 1L,
+                            score = 40,
+                            metadata = "status=SUCCESS"
+                        )
+                )
+
+            val parserOk =
+                parseRequest(
+                    "найди в документах отчёт"
+                )
+                    ?.let { request ->
+                        request.sources == setOf(Source.FILES) &&
+                            request.query.contains(
+                                "отч",
+                                ignoreCase = true
+                            )
+                    } == true
+
+            val externalGuard =
+                parseRequest(
+                    "найди в Google новости AYANA"
+                ) == null
+
+            semantic.score > 0 &&
+                semantic.semanticExpansionUsed &&
+                semantic.confidence >= 80 &&
+                morphology.score > 0 &&
+                morphology.morphologyUsed &&
+                "word" in semanticTerms &&
+                "docx" in semanticTerms &&
+                sample.verified &&
+                sample.provenance == "command_history_store" &&
+                sample.fingerprint.length == 64 &&
+                sample.confidence >= HIGH_CONFIDENCE_THRESHOLD &&
+                parserOk &&
+                externalGuard
+        } catch (_: Throwable) {
+            false
+        }
+    }
+
+    private data class MatchEvidence(
+        val score: Int,
+        val confidence: Int,
+        val exactPhrase: Boolean,
+        val directMatchedTokens: Int,
+        val totalQueryTokens: Int,
+        val semanticExpansionUsed: Boolean,
+        val morphologyUsed: Boolean,
+        val kind: String
+    )
+
+    private fun enrichHit(
+        query: String,
+        hit: Hit
+    ): Hit {
+        val evidence =
+            lexicalEvidence(
+                query = query,
+                haystack = listOf(
+                    hit.title,
+                    hit.snippet,
+                    hit.metadata
+                ).joinToString(" ")
+            )
+
+        val provenance =
+            provenanceFor(hit)
+
+        val matchKind =
+            nativeMatchKind(
+                hit = hit,
+                evidence = evidence
+            )
+
+        val confidenceFloor =
+            nativeConfidenceFloor(
+                hit = hit,
+                matchKind = matchKind
+            )
+
+        val confidence =
+            maxOf(
+                evidence.confidence,
+                confidenceFloor
+            )
+                .coerceIn(0, 100)
+
+        val verified =
+            provenance.isNotBlank()
+
+        val fingerprint =
+            if (verified) {
+                hitFingerprint(
+                    source = hit.source,
+                    title = hit.title,
+                    snippet = hit.snippet,
+                    timestampMs = hit.timestampMs,
+                    provenance = provenance,
+                    matchKind = matchKind
+                )
+            } else {
+                ""
+            }
+
+        val qualityBoost =
+            confidence / 8 +
+                provenanceReliabilityBoost(
+                    provenance
+                )
+
+        return hit.copy(
+            score = hit.score + qualityBoost,
+            matchKind = matchKind,
+            confidence = confidence,
+            verified = verified,
+            provenance = provenance,
+            fingerprint = fingerprint
+        )
+    }
+
+    private fun provenanceFor(
+        hit: Hit
+    ): String =
+        when (hit.source) {
+            Source.MEMORY ->
+                "memory_store"
+
+            Source.HISTORY ->
+                "command_history_store"
+
+            Source.TASKS ->
+                "task_store"
+
+            Source.NOTIFICATIONS ->
+                "notification_listener"
+
+            Source.FILES ->
+                if (
+                    hit.metadata.contains(
+                        "content_match=true",
+                        ignoreCase = true
+                    )
+                ) {
+                    "document_content_index"
+                } else {
+                    "android_media_store_file_metadata"
+                }
+
+            Source.PHOTOS ->
+                if (
+                    hit.metadata.contains(
+                        "image_content_match=true",
+                        ignoreCase = true
+                    )
+                ) {
+                    "image_content_index_local_mlkit"
+                } else {
+                    "android_media_store_photo_metadata"
+                }
+        }
+
+    private fun nativeMatchKind(
+        hit: Hit,
+        evidence: MatchEvidence
+    ): String =
+        when (hit.source) {
+            Source.FILES ->
+                if (
+                    hit.metadata.contains(
+                        "content_match=true",
+                        ignoreCase = true
+                    )
+                ) {
+                    "document_content"
+                } else {
+                    "file_metadata"
+                }
+
+            Source.PHOTOS -> {
+                val metadata =
+                    hit.metadata.lowercase(Locale.ROOT)
+
+                when {
+                    "image_content_match=true" !in metadata ->
+                        "photo_metadata"
+                    "match_type=ocr_and_label" in metadata ->
+                        "photo_ocr_and_label"
+                    "match_type=ocr" in metadata ->
+                        "photo_ocr"
+                    "match_type=label" in metadata ->
+                        "photo_label"
+                    else ->
+                        "photo_visual_index"
+                }
+            }
+
+            else ->
+                evidence.kind
+        }
+
+    private fun nativeConfidenceFloor(
+        hit: Hit,
+        matchKind: String
+    ): Int =
+        when (matchKind) {
+            "document_content" -> 88
+            "file_metadata" -> 68
+            "photo_ocr_and_label" -> 90
+            "photo_ocr" -> 86
+            "photo_label" -> 74
+            "photo_visual_index" -> 72
+            "photo_metadata" -> 66
+            else ->
+                when (hit.source) {
+                    Source.MEMORY -> 82
+                    Source.HISTORY -> 82
+                    Source.TASKS -> 80
+                    Source.NOTIFICATIONS -> 78
+                    Source.FILES -> 68
+                    Source.PHOTOS -> 66
+                }
+        }
+
+    private fun provenanceReliabilityBoost(
+        provenance: String
+    ): Int =
+        when (provenance) {
+            "document_content_index" -> 20
+            "image_content_index_local_mlkit" -> 18
+            "memory_store" -> 14
+            "command_history_store" -> 14
+            "task_store" -> 12
+            "notification_listener" -> 10
+            "android_media_store_file_metadata" -> 6
+            "android_media_store_photo_metadata" -> 6
+            else -> 0
+        }
+
+    private fun hitFingerprint(
+        source: Source,
+        title: String,
+        snippet: String,
+        timestampMs: Long,
+        provenance: String,
+        matchKind: String
+    ): String {
+        val canonical =
+            buildString {
+                append(source.wireName)
+                append('|')
+                append(normalizeForSearch(title))
+                append('|')
+                append(normalizeForSearch(snippet))
+                append('|')
+                append(timestampMs)
+                append('|')
+                append(provenance)
+                append('|')
+                append(matchKind)
+            }
+
+        val digest =
+            MessageDigest
+                .getInstance("SHA-256")
+                .digest(
+                    canonical.toByteArray(
+                        Charsets.UTF_8
+                    )
+                )
+
+        return digest.joinToString("") { byte ->
+            "%02x".format(
+                Locale.ROOT,
+                byte.toInt() and 0xff
+            )
+        }
+    }
+
+    private fun defaultCoverageFor(
+        source: Source
+    ): String =
+        when (source) {
+            Source.MEMORY ->
+                "local_memory_store; bounded_scan=$MAX_MEMORY_SCAN"
+
+            Source.HISTORY ->
+                "local_command_history; bounded_scan=$MAX_HISTORY_SCAN; personal_search_self_echo_excluded=true"
+
+            Source.TASKS ->
+                "local_task_store; include_disabled=true"
+
+            Source.NOTIFICATIONS ->
+                "notification_listener_current_history; bounded_scan=$MAX_NOTIFICATION_SCAN"
+
+            Source.FILES ->
+                "android_storage_scope; detailed_coverage_pending_source_probe"
+
+            Source.PHOTOS ->
+                "android_media_store_scope; detailed_coverage_pending_source_probe"
+        }
 
     private fun rankHitsForUnifiedPool(
         hits: List<Hit>,
@@ -1320,7 +1772,11 @@ class AyanaPersonalSearchEngine(
 
         val comparator =
             compareByDescending<Hit> {
+                if (it.verified) 1 else 0
+            }.thenByDescending {
                 it.score
+            }.thenByDescending {
+                it.confidence
             }.thenByDescending {
                 it.timestampMs
             }.thenBy {
@@ -1406,6 +1862,14 @@ class AyanaPersonalSearchEngine(
                     "page_index",
                     pageIndex.coerceAtLeast(0)
                 )
+                .put(
+                    "personal_search_version",
+                    VERSION
+                )
+                .put(
+                    "search_contract_version",
+                    report.searchContractVersion
+                )
 
         val requestJson =
             JSONObject()
@@ -1480,6 +1944,26 @@ class AyanaPersonalSearchEngine(
                         .put(
                             "action_kind",
                             hit.actionKind.take(40)
+                        )
+                        .put(
+                            "match_kind",
+                            hit.matchKind.take(80)
+                        )
+                        .put(
+                            "confidence",
+                            hit.confidence
+                        )
+                        .put(
+                            "verified",
+                            hit.verified
+                        )
+                        .put(
+                            "provenance",
+                            hit.provenance.take(120)
+                        )
+                        .put(
+                            "fingerprint",
+                            hit.fingerprint.take(64)
                         )
                 )
             }
@@ -1751,10 +2235,49 @@ class AyanaPersonalSearchEngine(
                         actionKind =
                             row.optString(
                                 "action_kind"
+                            ),
+                        matchKind =
+                            row.optString(
+                                "match_kind",
+                                "lexical"
+                            ),
+                        confidence =
+                            row.optInt(
+                                "confidence",
+                                0
+                            ),
+                        verified =
+                            row.optBoolean(
+                                "verified",
+                                true
+                            ),
+                        provenance =
+                            row.optString(
+                                "provenance"
+                            ),
+                        fingerprint =
+                            row.optString(
+                                "fingerprint"
                             )
                     )
             }
         }
+
+        val normalizedHits =
+            hits.map { hit ->
+                if (
+                    hit.provenance.isBlank() ||
+                    hit.fingerprint.length != 64 ||
+                    hit.confidence <= 0
+                ) {
+                    enrichHit(
+                        query = query,
+                        hit = hit
+                    )
+                } else {
+                    hit
+                }
+            }
 
         val report =
             Report(
@@ -1763,7 +2286,7 @@ class AyanaPersonalSearchEngine(
                         query = query,
                         sources = requestedSources
                     ),
-                hits = hits,
+                hits = normalizedHits,
                 sourceMatchCounts =
                     sourceIntMapFromJson(
                         root.optJSONObject(
@@ -1891,7 +2414,15 @@ class AyanaPersonalSearchEngine(
                     root.optInt(
                         "image_budget",
                         0
-                    )
+                    ),
+                searchContractVersion = SEARCH_CONTRACT_VERSION,
+                queryTerms = searchTokens(query),
+                expandedQueryTerms =
+                    expandedSearchTokens(query)
+                        .filterNot { it in searchTokens(query) },
+                verifiedHitCount = normalizedHits.count { it.verified },
+                highConfidenceHitCount = normalizedHits.count { it.verified && it.confidence >= HIGH_CONFIDENCE_THRESHOLD },
+                provenanceComplete = normalizedHits.all { it.provenance.isNotBlank() && it.fingerprint.length == 64 }
             )
 
         return SearchSession(
@@ -2106,7 +2637,16 @@ class AyanaPersonalSearchEngine(
     private fun lexicalScore(
         query: String,
         haystack: String
-    ): Int {
+    ): Int =
+        lexicalEvidence(
+            query = query,
+            haystack = haystack
+        ).score
+
+    private fun lexicalEvidence(
+        query: String,
+        haystack: String
+    ): MatchEvidence {
         val normalizedQuery =
             normalizeForSearch(query)
         val normalizedHaystack =
@@ -2116,62 +2656,289 @@ class AyanaPersonalSearchEngine(
             normalizedQuery.isBlank() ||
             normalizedHaystack.isBlank()
         ) {
-            return 0
+            return MatchEvidence(
+                score = 0,
+                confidence = 0,
+                exactPhrase = false,
+                directMatchedTokens = 0,
+                totalQueryTokens = 0,
+                semanticExpansionUsed = false,
+                morphologyUsed = false,
+                kind = "no_match"
+            )
         }
 
         val queryTokens =
             searchTokens(normalizedQuery)
 
+        val exactPhrase =
+            normalizedQuery.length >= 3 &&
+                normalizedHaystack.contains(
+                    normalizedQuery
+                )
+
         if (queryTokens.isEmpty()) {
-            return if (
-                normalizedHaystack.contains(normalizedQuery)
-            ) {
-                80
+            return if (exactPhrase) {
+                MatchEvidence(
+                    score = 80,
+                    confidence = 94,
+                    exactPhrase = true,
+                    directMatchedTokens = 1,
+                    totalQueryTokens = 1,
+                    semanticExpansionUsed = false,
+                    morphologyUsed = false,
+                    kind = "exact_phrase"
+                )
             } else {
-                0
+                MatchEvidence(
+                    score = 0,
+                    confidence = 0,
+                    exactPhrase = false,
+                    directMatchedTokens = 0,
+                    totalQueryTokens = 0,
+                    semanticExpansionUsed = false,
+                    morphologyUsed = false,
+                    kind = "no_match"
+                )
             }
         }
 
         val haystackTokens =
             searchTokens(normalizedHaystack)
-                .toSet()
 
-        val overlap =
-            queryTokens.count { token ->
-                token in haystackTokens ||
-                    normalizedHaystack.contains(token)
+        var directMatches = 0
+        var morphologyMatches = 0
+        var semanticMatches = 0
+
+        queryTokens.forEach { queryToken ->
+            val direct =
+                haystackTokens.any { hayToken ->
+                    hayToken == queryToken ||
+                        (
+                            queryToken.length >= 3 &&
+                            hayToken.contains(queryToken)
+                            ) ||
+                        (
+                            hayToken.length >= 3 &&
+                            queryToken.contains(hayToken)
+                            )
+                } ||
+                    normalizedHaystack.contains(
+                        queryToken
+                    )
+
+            if (direct) {
+                directMatches++
+                return@forEach
             }
 
-        val exactPhraseBonus =
-            if (
-                normalizedQuery.length >= 3 &&
-                normalizedHaystack.contains(normalizedQuery)
-            ) {
-                80
-            } else {
-                0
+            val queryStem =
+                tokenStem(queryToken)
+
+            val morphology =
+                queryStem.length >= MIN_STEM_LENGTH &&
+                    haystackTokens.any { hayToken ->
+                        val hayStem = tokenStem(hayToken)
+                        hayStem.length >= MIN_STEM_LENGTH &&
+                            hayStem == queryStem
+                    }
+
+            if (morphology) {
+                morphologyMatches++
+                return@forEach
             }
 
-        val allTokenBonus =
-            if (
-                overlap == queryTokens.size &&
-                queryTokens.size > 1
-            ) {
-                24
-            } else {
-                0
-            }
+            val aliases =
+                semanticAliasesFor(
+                    queryToken
+                )
 
-        return if (
-            overlap == 0 &&
-            exactPhraseBonus == 0
-        ) {
-            0
-        } else {
-            exactPhraseBonus +
-                allTokenBonus +
-                overlap * 18
+            val semantic =
+                aliases.any { alias ->
+                    haystackTokens.any { hayToken ->
+                        hayToken == alias ||
+                            (
+                                alias.length >= 3 &&
+                                hayToken.contains(alias)
+                                ) ||
+                            (
+                                tokenStem(alias).length >= MIN_STEM_LENGTH &&
+                                tokenStem(alias) == tokenStem(hayToken)
+                                )
+                    }
+                }
+
+            if (semantic) {
+                semanticMatches++
+            }
         }
+
+        val totalMatched =
+            directMatches +
+                morphologyMatches +
+                semanticMatches
+
+        if (
+            totalMatched == 0 &&
+            !exactPhrase
+        ) {
+            return MatchEvidence(
+                score = 0,
+                confidence = 0,
+                exactPhrase = false,
+                directMatchedTokens = 0,
+                totalQueryTokens = queryTokens.size,
+                semanticExpansionUsed = false,
+                morphologyUsed = false,
+                kind = "no_match"
+            )
+        }
+
+        val allMatched =
+            totalMatched == queryTokens.size
+        val allDirect =
+            directMatches == queryTokens.size
+        val semanticUsed =
+            semanticMatches > 0
+        val morphologyUsed =
+            morphologyMatches > 0
+
+        val score =
+            (if (exactPhrase) 80 else 0) +
+                directMatches * 22 +
+                morphologyMatches * 19 +
+                semanticMatches * 16 +
+                if (
+                    allMatched &&
+                    queryTokens.size > 1
+                ) {
+                    24
+                } else {
+                    0
+                }
+
+        val confidence =
+            when {
+                exactPhrase && allDirect -> 98
+                exactPhrase -> 94
+                allDirect -> 90
+                allMatched && !semanticUsed -> 86
+                allMatched -> 82
+                totalMatched * 3 >= queryTokens.size * 2 -> 76
+                else -> 64
+            }
+
+        val kind =
+            when {
+                exactPhrase -> "exact_phrase"
+                semanticUsed -> "semantic_lexical"
+                morphologyUsed -> "morphology_lexical"
+                else -> "lexical"
+            }
+
+        return MatchEvidence(
+            score = score,
+            confidence = confidence,
+            exactPhrase = exactPhrase,
+            directMatchedTokens = directMatches,
+            totalQueryTokens = queryTokens.size,
+            semanticExpansionUsed = semanticUsed,
+            morphologyUsed = morphologyUsed,
+            kind = kind
+        )
+    }
+
+    private fun expandedSearchTokens(
+        value: String
+    ): List<String> {
+        val result =
+            linkedSetOf<String>()
+
+        searchTokens(value)
+            .forEach { token ->
+                result += token
+                semanticAliasesFor(token)
+                    .forEach(
+                        result::add
+                    )
+            }
+
+        return result
+            .take(
+                MAX_EXPANDED_QUERY_TERMS
+            )
+    }
+
+    private fun semanticAliasesFor(
+        token: String
+    ): Set<String> {
+        val normalized =
+            normalizeForSearch(token)
+
+        return SEMANTIC_ALIAS_GROUPS
+            .firstOrNull { group ->
+                normalized in group
+            }
+            ?.filterNot { it == normalized }
+            ?.toSet()
+            ?: emptySet()
+    }
+
+    private fun tokenStem(
+        token: String
+    ): String {
+        var value =
+            normalizeForSearch(token)
+                .replace(" ", "")
+
+        if (value.length < MIN_STEM_LENGTH + 1) {
+            return value
+        }
+
+        val russianEndings =
+            listOf(
+                "иями", "ями", "ами",
+                "ого", "ему", "ому",
+                "ыми", "ими",
+                "иях", "ах", "ях",
+                "ией", "ой", "ей",
+                "ом", "ем",
+                "ов", "ев",
+                "ия", "ие", "ий",
+                "ы", "и", "а", "я", "у", "ю", "е", "о"
+            )
+
+        russianEndings
+            .firstOrNull { ending ->
+                value.length - ending.length >= MIN_STEM_LENGTH &&
+                    value.endsWith(ending)
+            }
+            ?.let { ending ->
+                value = value.dropLast(ending.length)
+            }
+
+        if (value.length >= MIN_STEM_LENGTH + 2) {
+            val englishEnding =
+                listOf(
+                    "ing",
+                    "ed",
+                    "es",
+                    "s"
+                )
+                    .firstOrNull { ending ->
+                        value.length - ending.length >= MIN_STEM_LENGTH &&
+                            value.endsWith(ending)
+                    }
+
+            if (englishEnding != null) {
+                value =
+                    value.dropLast(
+                        englishEnding.length
+                    )
+            }
+        }
+
+        return value
     }
 
     private fun recencyBonus(
@@ -2241,6 +3008,12 @@ class AyanaPersonalSearchEngine(
     }
 
     companion object {
+        const val VERSION = "2.0"
+        const val SEARCH_CONTRACT_VERSION = 2
+
+        private const val HIGH_CONFIDENCE_THRESHOLD = 80
+        private const val MIN_STEM_LENGTH = 4
+        private const val MAX_EXPANDED_QUERY_TERMS = 24
         private const val DEFAULT_PER_SOURCE_LIMIT = 8
         private const val DEFAULT_TOTAL_LIMIT = 20
         private const val MAX_PER_SOURCE_LIMIT = 12
@@ -2262,6 +3035,21 @@ class AyanaPersonalSearchEngine(
         private const val MAX_SNIPPET_CHARS = 360
         private const val MAX_HISTORY_COMMAND_SNIPPET_CHARS = 220
         private const val MAX_HISTORY_RESULT_SNIPPET_CHARS = 360
+
+        private val SEMANTIC_ALIAS_GROUPS =
+            listOf(
+                setOf("ворд", "word", "docx"),
+                setOf("эксель", "excel", "xlsx"),
+                setOf("пдф", "pdf"),
+                setOf("скрин", "скриншот", "screenshot"),
+                setOf("фото", "фотография", "фотографии", "изображение", "image", "photo"),
+                setOf("ютуб", "youtube"),
+                setOf("браузер", "browser"),
+                setOf("календарь", "calendar"),
+                setOf("уведомление", "уведомления", "notification", "notifications"),
+                setOf("напоминание", "напоминания", "reminder", "reminders"),
+                setOf("задача", "задачи", "task", "tasks")
+            )
 
         private val ALL_SOURCES =
             linkedSetOf(

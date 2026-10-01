@@ -63,6 +63,15 @@ import kotlin.math.abs
 
 class AyanaVoiceService : Service() {
 
+    // AYANA v12.52.0 / R10.20 PERSONAL SEARCH 2.0.
+    // Builds on DEVICE-CONFIRMED R10.19. Personal Search Engine v2.0 keeps the existing
+    // six local source families but adds one provenance/confidence/fingerprint contract,
+    // bounded RU/EN semantic expansion, morphology-aware local matching, truthful coverage
+    // for every source and a verified-result envelope suitable for later autonomous tasks.
+    // Acceptance uses a temporary reversible History record, proves semantic alias matching
+    // and provenance-bound export, deletes the record and clears the temporary search session.
+    // No network/Agent Core authority is added. ORB/visualizer/UI unchanged.
+    //
     // AYANA v12.51.0 / R10.19 AUTONOMOUS MULTI-APP TASKS 2.0.
     // Builds on DEVICE-CONFIRMED R10.18.3. The production Dynamic Goal Planner v1.2
     // can now execute verified App Info navigation, R10.18 Universal UI exact-target
@@ -4532,6 +4541,20 @@ originalCommand
                 return
             }
 
+
+        // R10.20 PERSONAL SEARCH 2.0 ACCEPTANCE.
+        // Local-only reversible probe: seeded History fact -> semantic alias search ->
+        // provenance/fingerprint envelope -> cleanup. No Agent Core or external UI action.
+        if (
+            isR10_20PersonalSearch2AcceptanceCommand(
+                routingNormalized
+            )
+        ) {
+            runR10_20PersonalSearch2Acceptance(
+                silent = silent
+            )
+            return
+        }
 
         // R10.19 AUTONOMOUS MULTI-APP TASKS 2.0 ACCEPTANCE.
         // Runs the production Dynamic Goal Planner with an eight-subgoal DAG across
@@ -41080,6 +41103,314 @@ failedSubgoalId = subgoal.id,
 
 
 
+    private fun isR10_20PersonalSearch2AcceptanceCommand(
+        command: String
+    ): Boolean {
+        val normalized =
+            command
+                .lowercase(Locale.ROOT)
+                .replace('ё', 'е')
+                .replace(Regex("\\s+"), " ")
+                .trim()
+                .removePrefix("аяна ")
+                .trim()
+                .replace(Regex("\\br10\\s+20\\b"), "r10.20")
+
+        return normalized in
+            setOf(
+                "проверь персональный поиск 2.0",
+                "проверь персональный поиск 2 0",
+                "протестируй персональный поиск 2.0",
+                "протестируй персональный поиск 2 0",
+                "проверь personal search 2.0",
+                "проверь personal search 2 0",
+                "проверь r10.20"
+            )
+    }
+
+    private fun runR10_20PersonalSearch2Acceptance(
+        silent: Boolean
+    ) {
+        executionPhase(
+            phase = "r10_20_personal_search_2_0_acceptance",
+            executor = "personal_search_engine_v2_0"
+        )
+
+        val commandToken =
+            activeCommandToken
+
+        val worker =
+            thread(
+                start = false,
+                name = "AyanaPersonalSearchR10_20Acceptance"
+            ) {
+                var seedId: String? = null
+                var seedDeleted = false
+                var sessionCleanupVerified = false
+
+                try {
+                    val localContractOk =
+                        try {
+                            personalSearchEngine.contractSelfTest()
+                        } catch (_: Throwable) {
+                            false
+                        }
+
+                    val marker =
+                        "AYANA_R10_20_SEARCH_" +
+                            UUID.randomUUID()
+                                .toString()
+                                .take(8)
+
+                    seedId =
+                        commandHistoryStore.begin(
+                            command = marker,
+                            source = "self_test"
+                        )
+
+                    commandHistoryStore.finish(
+                        id = seedId.orEmpty(),
+                        success = true,
+                        result =
+                            "Контрольная запись R10.20: документ подготовлен в Word DOCX. Маркер $marker",
+                        technical = "r10_20_personal_search_seed"
+                    )
+
+                    val report =
+                        personalSearchEngine.search(
+                            request =
+                                AyanaPersonalSearchEngine.Request(
+                                    query = "ворд",
+                                    sources =
+                                        linkedSetOf(
+                                            AyanaPersonalSearchEngine.Source.HISTORY
+                                        )
+                                ),
+                            perSourceLimit = 12,
+                            totalLimit = 20
+                        )
+
+                    val hitIndex =
+                        report.hits.indexOfFirst { hit ->
+                            hit.source ==
+                                AyanaPersonalSearchEngine.Source.HISTORY &&
+                                (
+                                    hit.title.contains(marker) ||
+                                        hit.snippet.contains(marker)
+                                    )
+                        }
+
+                    val hit =
+                        report.hits
+                            .getOrNull(
+                                hitIndex
+                            )
+
+                    val envelope =
+                        if (hitIndex >= 0) {
+                            personalSearchEngine.verifiedResultEnvelope(
+                                report = report,
+                                resultNumber = hitIndex + 1
+                            )
+                        } else {
+                            JSONObject()
+                                .put("success", false)
+                                .put("verified", false)
+                                .put("reason", "r10_20_seed_hit_not_found")
+                        }
+
+                    val semanticExpansionVerified =
+                        hit?.matchKind == "semantic_lexical" &&
+                            report.expandedQueryTerms.any {
+                                it == "word" ||
+                                    it == "docx"
+                            }
+
+                    val provenanceVerified =
+                        hit?.verified == true &&
+                            hit.provenance == "command_history_store" &&
+                            hit.fingerprint.length == 64 &&
+                            envelope.optBoolean("verified", false) &&
+                            envelope.optString("fingerprint") == hit.fingerprint &&
+                            !envelope.optBoolean("raw_action_uri_exposed", true)
+
+                    val confidenceVerified =
+                        (hit?.confidence ?: 0) >= 80
+
+                    val coverageVerified =
+                        report.sourceCoverage[
+                            AyanaPersonalSearchEngine.Source.HISTORY
+                        ]
+                            .orEmpty()
+                            .contains("local_command_history") &&
+                            AyanaPersonalSearchEngine.Source.HISTORY !in
+                                report.sourceErrors.keys
+
+                    seedDeleted =
+                        commandHistoryStore.delete(
+                            seedId.orEmpty()
+                        )
+
+                    personalSearchEngine.clearLatestSession()
+
+                    sessionCleanupVerified =
+                        personalSearchEngine.latestRequestForSources(
+                            setOf(
+                                AyanaPersonalSearchEngine.Source.HISTORY
+                            )
+                        ) == null
+
+                    val acceptanceOk =
+                        localContractOk &&
+                            hit != null &&
+                            semanticExpansionVerified &&
+                            provenanceVerified &&
+                            confidenceVerified &&
+                            coverageVerified &&
+                            report.searchContractVersion ==
+                                AyanaPersonalSearchEngine.SEARCH_CONTRACT_VERSION &&
+                            report.provenanceComplete &&
+                            seedDeleted &&
+                            sessionCleanupVerified
+
+                    val evidence =
+                        JSONObject()
+                            .put("r10_20_acceptance", true)
+                            .put("r10_20_personal_search_2_0", true)
+                            .put("acceptance_ok", acceptanceOk)
+                            .put("personal_search_version", AyanaPersonalSearchEngine.VERSION)
+                            .put("search_contract_version", report.searchContractVersion)
+                            .put("local_contract_self_test", localContractOk)
+                            .put("query", report.request.query)
+                            .put("semantic_expansion_verified", semanticExpansionVerified)
+                            .put("expanded_query_terms", JSONArray(report.expandedQueryTerms))
+                            .put("live_history_hit_verified", hit != null)
+                            .put("verified_hit_count", report.verifiedHitCount)
+                            .put("high_confidence_hit_count", report.highConfidenceHitCount)
+                            .put("provenance_complete", report.provenanceComplete)
+                            .put("hit_confidence", hit?.confidence ?: 0)
+                            .put("hit_match_kind", hit?.matchKind.orEmpty())
+                            .put("hit_provenance", hit?.provenance.orEmpty())
+                            .put("hit_fingerprint", hit?.fingerprint.orEmpty())
+                            .put("verified_result_envelope", envelope.optBoolean("verified", false))
+                            .put("verified_result_fingerprint_match", provenanceVerified)
+                            .put("raw_action_uri_exposed", envelope.optBoolean("raw_action_uri_exposed", false))
+                            .put("source_coverage_truth_verified", coverageVerified)
+                            .put("source_errors", report.sourceErrors.keys.joinToString(",") { it.wireName })
+                            .put("temporary_history_record_deleted", seedDeleted)
+                            .put("temporary_search_session_cleared", sessionCleanupVerified)
+                            .put("agent_core_used", false)
+                            .put("network_required", false)
+                            .put("visual_grants_action_authority", false)
+                            .put("unresolved_side_effect", false)
+                            .put("orb_visual_implementation_changed", false)
+
+                    commandHistoryStore.addEvent(
+                        activeCommandHistoryId,
+                        state =
+                            if (acceptanceOk) {
+                                "r10_20_personal_search_2_0_verified"
+                            } else {
+                                "r10_20_personal_search_2_0_failed"
+                            },
+                        message =
+                            if (acceptanceOk) {
+                                "R10.20 подтвердил semantic local search + provenance-bound verified result"
+                            } else {
+                                "R10.20 Personal Search 2.0 acceptance не подтвердил все обязательные gates"
+                            },
+                        details = evidence.toString().take(5000)
+                    )
+
+                    mainHandler.post {
+                        if (
+                            isCommandCancelled(commandToken) ||
+                            commandToken != activeCommandToken
+                        ) {
+                            return@post
+                        }
+
+                        if (acceptanceOk) {
+                            respondAndResume(
+                                text =
+                                    "R10.20 подтверждён: Personal Search 2.0 нашёл временную History-запись по семантическому варианту «ворд» -> Word/DOCX, закрепил provenance/confidence/fingerprint, сформировал verified-result envelope и полностью удалил тестовые данные.",
+                                silent = silent,
+                                success = true,
+                                technical = evidence.toString()
+                            )
+                        } else {
+                            respondAndResume(
+                                text = "R10.20 не прошёл acceptance. См. technical evidence в History.",
+                                silent = silent,
+                                success = false,
+                                technical = evidence.toString()
+                            )
+                        }
+                    }
+                } catch (error: Throwable) {
+                    try {
+                        if (!seedDeleted && !seedId.isNullOrBlank()) {
+                            seedDeleted =
+                                commandHistoryStore.delete(
+                                    seedId.orEmpty()
+                                )
+                        }
+                    } catch (_: Throwable) {
+                    }
+
+                    try {
+                        personalSearchEngine.clearLatestSession()
+                        sessionCleanupVerified =
+                            personalSearchEngine.latestRequestForSources(
+                                setOf(
+                                    AyanaPersonalSearchEngine.Source.HISTORY
+                                )
+                            ) == null
+                    } catch (_: Throwable) {
+                    }
+
+                    val evidence =
+                        JSONObject()
+                            .put("r10_20_acceptance", true)
+                            .put("acceptance_ok", false)
+                            .put("reason", "r10_20_acceptance_exception")
+                            .put("error", (error.message ?: error.javaClass.simpleName).take(800))
+                            .put("temporary_history_record_deleted", seedDeleted)
+                            .put("temporary_search_session_cleared", sessionCleanupVerified)
+                            .put("unresolved_side_effect", false)
+
+                    mainHandler.post {
+                        if (
+                            !isCommandCancelled(commandToken) &&
+                            commandToken == activeCommandToken
+                        ) {
+                            respondAndResume(
+                                text = "R10.20 Personal Search 2.0 завершился ошибкой.",
+                                silent = silent,
+                                success = false,
+                                technical = evidence.toString()
+                            )
+                        }
+                    }
+                } finally {
+                    if (
+                        Thread.currentThread() ===
+                        currentAgentThread
+                    ) {
+                        currentAgentThread = null
+                    }
+                }
+            }
+
+        currentAgentThread =
+            worker
+
+        executionKernel
+            .bindThread(worker)
+
+        worker.start()
+    }
+
     private fun isR10_19AutonomousMultiAppAcceptanceCommand(
         command: String
     ): Boolean {
@@ -68191,12 +68522,12 @@ state
         private const val MASTER_STATUS_MANUAL_REQUIRED =
             "MANUAL_REQUIRED"
 
-        // R10.19 AUTONOMOUS MULTI-APP TASKS 2.0 RELEASE TRUTH.
+        // R10.20 PERSONAL SEARCH 2.0 RELEASE TRUTH.
         private const val AYANA_VOICE_SERVICE_RELEASE =
-            "v12.51.0 / R10.19 AUTONOMOUS MULTI-APP TASKS 2.0"
+            "v12.52.0 / R10.20 PERSONAL SEARCH 2.0"
 
         private const val AYANA_PERSONAL_SEARCH_ENGINE_RELEASE =
-            "v1.5.1 IMAGE COVERAGE TRUTH + R10.2 UNIFIED SEARCH CONTRACT v1.0"
+            "v2.0 / R10.20 PERSONAL SEARCH 2.0 + VERIFIED RESULT CONTRACT v2"
 
         private const val AYANA_CAPABILITY_REGISTRY_RELEASE =
             "v3.2.1"
@@ -68205,13 +68536,13 @@ state
             "v11.1.10 Multi-Attachment"
 
         private const val AYANA_ACCEPTED_FEATURE_CHECKPOINT =
-            "R10.18.3 UNIVERSAL UI ACTION ENGINE — DEVICE-CONFIRMED ACCEPTED"
+            "R10.19 AUTONOMOUS MULTI-APP TASKS 2.0 — DEVICE-CONFIRMED ACCEPTED"
 
         private const val AYANA_CURRENT_FEATURE_RELEASE =
-            "R10.19 AUTONOMOUS MULTI-APP TASKS 2.0 — PENDING DEVICE CONFIRMATION"
+            "R10.20 PERSONAL SEARCH 2.0 — PENDING DEVICE CONFIRMATION"
 
         private const val AYANA_RELEASE_LINEAGE =
-            "Android v12.21.0 / R7.9 truth-hardening + R8.0 multi-attachment + R8.1–R8.4 accepted Personal Global Search stack + R8.5–R8.5.4 capability/evidence truth + R9.0 autonomous agent foundation + R9.0.1 history live-refresh proof fix + R9.0.2 diagnostic reconciliation/history refresh fix + R9.0.3 TTS health reconciliation + R9.1 IME perception/active telemetry truth + R9.2 autonomous recovery/long-task reconciliation + R9.2.1 adaptive hypothesis reconciliation + R9.3 app integration framework + R9.3.1 screen health reconciliation + R9.3.2 history latency recovery reconciliation + R9.3.3 informational terminal reconciliation + R9.3.4 app integration device acceptance + R9.4 multi-app task orchestration + R9.4.1 screen ownership union reconciliation + R9.5 verified result transfer between app steps + R9.5.1 partial marker provenance reconciliation + R9.5.2 bounded marker observation + R9.5.3 verified action result transfer + R9.6 verified semantic observation fallback + R9.6.1 visual fallback acceptance truth + R9.7 structured screen reading + R9.7.1 conversation routing/terminal truth + R9.7.2 structured router conversation precedence + R9.7.3 action morphology/terminal truth + R9.8 generic verified result transfer + R9.8.1 master full acceptance/diagnostic engine + R9.9 reversible action journal/verified undo + R9.9.1 brightness verified undo device acceptance + R9.9.2 opt-in low-battery controlled proactivity + R10.0 unified screen intelligence + R10.1 local self-diagnostics/self-audit + R10.2 personal search expansion + R10.3 long autonomous tasks/recovery + R10.4 adaptive verified execution loop + R10.5 generalized live adaptive autonomy + R10.6 cross-lane adaptive continuity + R10.6.1 durable goal binding fix + R10.7 cross-lane durable recovery continuity + R10.7.1 isolated acceptance cleanup hardening + R10.8 general-purpose long autonomous objectives + R10.9 dynamic goal decomposition/planner contract + R10.10 adaptive planner production path + R10.11 production replan/durable recovery + R10.12 natural lifecycle recovery/background continuation + R10.13 full process-death recovery + R10.13.1 post-process readiness/reconciliation + R10.13.2 process-death core recovery proof correction + R10.14 perception process isolation/cross-process accessibility bridge + R10.14.1 cross-process visual evidence fix + R10.14.2 lifecycle profile/self-diagnostic truth + R10.14.3 history recovery reconciliation + R10.15 generalized cross-process autonomy hardening + R10.15.1 self-diagnostics routing reconciliation + R10.16 perception process recovery/safe bridge rebind + R10.16.1 restart telemetry reconciliation + R10.17 screen intelligence 2.0 + R10.17.1 acceptance routing reconciliation + R10.18 universal UI action engine + R10.18.1 acceptance target reconciliation + R10.18.2 live target authority reconciliation + R10.18.3 app info target reconciliation + R10.19 autonomous multi-app tasks 2.0"
+            "Android v12.21.0 / R7.9 truth-hardening + R8.0 multi-attachment + R8.1–R8.4 accepted Personal Global Search stack + R8.5–R8.5.4 capability/evidence truth + R9.0 autonomous agent foundation + R9.0.1 history live-refresh proof fix + R9.0.2 diagnostic reconciliation/history refresh fix + R9.0.3 TTS health reconciliation + R9.1 IME perception/active telemetry truth + R9.2 autonomous recovery/long-task reconciliation + R9.2.1 adaptive hypothesis reconciliation + R9.3 app integration framework + R9.3.1 screen health reconciliation + R9.3.2 history latency recovery reconciliation + R9.3.3 informational terminal reconciliation + R9.3.4 app integration device acceptance + R9.4 multi-app task orchestration + R9.4.1 screen ownership union reconciliation + R9.5 verified result transfer between app steps + R9.5.1 partial marker provenance reconciliation + R9.5.2 bounded marker observation + R9.5.3 verified action result transfer + R9.6 verified semantic observation fallback + R9.6.1 visual fallback acceptance truth + R9.7 structured screen reading + R9.7.1 conversation routing/terminal truth + R9.7.2 structured router conversation precedence + R9.7.3 action morphology/terminal truth + R9.8 generic verified result transfer + R9.8.1 master full acceptance/diagnostic engine + R9.9 reversible action journal/verified undo + R9.9.1 brightness verified undo device acceptance + R9.9.2 opt-in low-battery controlled proactivity + R10.0 unified screen intelligence + R10.1 local self-diagnostics/self-audit + R10.2 personal search expansion + R10.3 long autonomous tasks/recovery + R10.4 adaptive verified execution loop + R10.5 generalized live adaptive autonomy + R10.6 cross-lane adaptive continuity + R10.6.1 durable goal binding fix + R10.7 cross-lane durable recovery continuity + R10.7.1 isolated acceptance cleanup hardening + R10.8 general-purpose long autonomous objectives + R10.9 dynamic goal decomposition/planner contract + R10.10 adaptive planner production path + R10.11 production replan/durable recovery + R10.12 natural lifecycle recovery/background continuation + R10.13 full process-death recovery + R10.13.1 post-process readiness/reconciliation + R10.13.2 process-death core recovery proof correction + R10.14 perception process isolation/cross-process accessibility bridge + R10.14.1 cross-process visual evidence fix + R10.14.2 lifecycle profile/self-diagnostic truth + R10.14.3 history recovery reconciliation + R10.15 generalized cross-process autonomy hardening + R10.15.1 self-diagnostics routing reconciliation + R10.16 perception process recovery/safe bridge rebind + R10.16.1 restart telemetry reconciliation + R10.17 screen intelligence 2.0 + R10.17.1 acceptance routing reconciliation + R10.18 universal UI action engine + R10.18.1 acceptance target reconciliation + R10.18.2 live target authority reconciliation + R10.18.3 app info target reconciliation + R10.19 autonomous multi-app tasks 2.0 + R10.20 personal search 2.0"
 
         // AyanaCommandHistoryStore v2.8 keeps up to 4k chars inline and stores longer
         // results out-of-line. Self-review intentionally remains inline so copied History
