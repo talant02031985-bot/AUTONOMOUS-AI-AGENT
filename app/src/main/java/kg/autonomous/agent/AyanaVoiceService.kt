@@ -63,6 +63,14 @@ import kotlin.math.abs
 
 class AyanaVoiceService : Service() {
 
+    // AYANA v12.47.4 / R10.15.1 ROUTING RECONCILIATION.
+    // Builds on DEVICE-CONFIRMED R10.15 GENERALIZED CROSS-PROCESS AUTONOMY HARDENING.
+    // Natural self-diagnostics wording such as «проведи подробную самодиагностику»
+    // is routed to the existing local deterministic diagnostics path without Agent Core.
+    // The lexical stem «самодиагност» is itself sufficient self-scope; question-like
+    // capability queries remain excluded by the pre-existing questionLike guard.
+    // No new authority, no planner/action changes, no ORB/visualizer/UI changes.
+    //
     // AYANA v12.47.3 / R10.14.3 HISTORY RECOVERY RECONCILIATION.
     // R10.14 keeps the R10.13.2 full process-death core baseline and isolates Android
     // Accessibility/perception in :perception. Main-process Screen Intelligence consumes
@@ -997,8 +1005,7 @@ class AyanaVoiceService : Service() {
             applicationContext
         )
     }
-
-    private val miniOrbController by lazy {
+private val miniOrbController by lazy {
         AyanaMiniOrbController(
             applicationContext
         )
@@ -1998,7 +2005,7 @@ mainHandler.post {
     private fun startWakeListening() {
 
         if (
-            shuttingDown ||
+shuttingDown ||
             !modelReady
         ) {
             return
@@ -2998,7 +3005,7 @@ if (
                             commandHistoryStore.addEvent(
                                 activeCommandHistoryId,
                                 state = "cancel_heard",
-                                message = text.take(
+message = text.take(
                                     220
                                 )
                             )
@@ -3997,8 +4004,7 @@ if (
             )
             return
         }
-
-        if (
+if (
             isDurableGoalCancelPhrase(
                 routingNormalized
             )
@@ -4998,7 +5004,7 @@ originalCommand
         // Only narrow media/document capability questions stay local. Higher-level
         // development/project questions (APK, GitHub, source code, AI agents, etc.)
         // must reach Agent Core for contextual reasoning.
-        localCapabilityTruthReply(
+localCapabilityTruthReply(
             routingNormalized
         )
             ?.let {
@@ -5998,7 +6004,7 @@ if (localCalculation != null) {
                     "открой мне приложение "
                 )
                 .removePrefix(
-                    "открой мне программу "
+"открой мне программу "
                 )
                 .removePrefix(
                     "запусти мне приложение "
@@ -6998,7 +7004,7 @@ if (localCalculation != null) {
                     screenVerificationTextForInteraction(
                         screenBefore
                     )
-                )
+)
 
             val visibleTarget =
                 targets.firstOrNull { target ->
@@ -7998,7 +8004,7 @@ if (
         val deadline =
             System.currentTimeMillis() +
                 timeoutMs
-                    .coerceAtLeast(
+.coerceAtLeast(
                         0L
                     )
 
@@ -8998,8 +9004,7 @@ if (
                 "storage_total_bytes"
             ).forEach(::copyIfPresent)
         }
-
-        if (AggregateMetric.MEDIA_VOLUME in metrics) {
+if (AggregateMetric.MEDIA_VOLUME in metrics) {
             listOf(
                 "media_volume",
                 "media_volume_max"
@@ -9998,7 +10003,7 @@ if (
             name = "AyanaLifecycleClarify"
         ) {
             val resolution =
-                try {
+try {
                     appResolver.resolve(
                         candidate
                     )
@@ -10998,7 +11003,7 @@ timeoutMs
                             )
                         }
                     }
-                }
+}
                 return@thread
             }
 
@@ -11998,7 +12003,7 @@ BatteryManager.EXTRA_SCALE,
                 )
                 .put(
                     "broad_proactivity_claimed",
-                    false
+false
                 )
 
         commandHistoryStore.addEvent(
@@ -12998,7 +13003,7 @@ if (
                     originalRaw
                 )
                 Settings.System.putInt(
-                    contentResolver,
+contentResolver,
                     Settings.System.SCREEN_BRIGHTNESS_MODE,
                     originalMode
                 )
@@ -13998,7 +14003,7 @@ AyanaNotificationListenerService.PROJECTION_TITLES -> {
                 "package=${result.optString("package")}; " +
                     "confidence=${result.optInt("confidence", 0)}; " +
                     "source=${result.optString("source")}; " +
-                    "reason=${result.optString("reason")}".take(520)
+"reason=${result.optString("reason")}".take(520)
         )
 
         if (
@@ -14998,7 +15003,7 @@ respondAndResume(
                     ""
                 )
                 .orEmpty()
-                .trim()
+.trim()
         } catch (_: Exception) {
             ""
         }
@@ -15998,7 +16003,7 @@ var attempts = 0
                                 .put("adaptive_lane", "multi_app")
                                 .put(
                                     "adaptive_authority",
-                                    "app_integration_registry+verified_result_transfer+screen_intelligence"
+"app_integration_registry+verified_result_transfer+screen_intelligence"
                                 )
                                 .put("safe_auto_resume", false)
                                 .put("last_checkpoint", "r10_5_multi_app_started")
@@ -16998,7 +17003,7 @@ var attempts = 0
                     if (r10_5Acceptance) {
                         r10_5AcceptanceEvidence
                             .put(
-                                "acceptance_ok",
+"acceptance_ok",
                                 r10_5AcceptanceOk
                             )
                             .put(
@@ -17998,7 +18003,7 @@ var attempts = 0
      * Only leading/trailing envelope punctuation is removed. Internal punctuation
      * is preserved so search queries and user text are not rewritten globally.
      */
-    private fun sanitizeRoutingEnvelope(
+private fun sanitizeRoutingEnvelope(
         value: String
     ): String {
 
@@ -18183,10 +18188,13 @@ var attempts = 0
             return false
         }
 
+        // R10.15.1: «самодиагностика» semantically names AYANA's own
+        // diagnostics, so it must not require a second explicit self marker.
         val selfScope =
             normalized.contains("себ") ||
                 normalized.contains("аяна") ||
-                normalized.contains("систем")
+                normalized.contains("систем") ||
+                normalized.contains("самодиагност")
 
         val explicitDiagnosticVerb =
             normalized.contains("продиагност") ||
@@ -18997,8 +19005,7 @@ else ->
             phase = "local_personal_global_search",
             executor = "personal_search_engine"
         )
-
-        // R8.4 DEVICE CONTENT SEARCH + UNIFIED SEARCH SESSION PERFORMANCE/TRUTH.
+// R8.4 DEVICE CONTENT SEARCH + UNIFIED SEARCH SESSION PERFORMANCE/TRUTH.
         // MediaStore, first-run document extraction and bounded local image ML indexing
         // may touch many rows/files. Never execute these operations on the main looper.
         // Keep the local search bounded in its own execution thread and publish the final
@@ -19998,7 +20005,7 @@ executeCommand(
                 return null to
                     PreExecutionPlanResult(
                         terminalStatus =
-                            AyanaCommandHistoryStore.STATUS_UNSUPPORTED,
+AyanaCommandHistoryStore.STATUS_UNSUPPORTED,
                         message = "Не удалось однозначно определить приложение для составной команды.",
                         technical = "composite_app_target_missing"
                     )
@@ -20998,7 +21005,7 @@ executionKernel.markSideEffectReconciliationStarted(
                 waitForForegroundPackage(
                     step.packageName
                 )
-            } else {
+} else {
                 currentForegroundPackage()
             }
 
@@ -21998,7 +22005,7 @@ finishLocalCommand(
                     confidence = 1.0
                 )
             } catch (_: Exception) {
-                null
+null
             }
 
         if (item == null) {
@@ -22997,8 +23004,7 @@ append(index + 1)
                     (columns?.length() ?: 0) > 0 &&
                         (rows?.length() ?: 0) > 0
                     )
-
-        val reportPayloadPresent =
+val reportPayloadPresent =
             !asksForSubstantialReport ||
                 (
                     content.length >= 220 &&
@@ -23998,7 +24004,7 @@ val verified =
                         prompt =
                             verifiedSemanticObservation
                                 .promptForStructuredScreenRead(),
-                        manifest = manifest
+manifest = manifest
                     )
                 } catch (error: Exception) {
                     JSONObject()
@@ -24998,8 +25004,7 @@ val item = values.optJSONObject(index) ?: continue
                 "полная проверка аяна",
                 "полную проверку аяна"
             ).any(normalized::contains)
-
-        if (exhaustiveAcceptance) {
+if (exhaustiveAcceptance) {
             return AyanaAcceptanceTestEngine.Mode.EXHAUSTIVE_ACCEPTANCE
         }
 
@@ -25998,7 +26003,7 @@ val ok =
             )
             .put(
                 "detail",
-                "Live Accessibility semantics verified: connected service + owner-fusion + raw/effective package + window evidence"
+"Live Accessibility semantics verified: connected service + owner-fusion + raw/effective package + window evidence"
             )
             .put(
                 "accessibility_connected",
@@ -26998,7 +27003,7 @@ val ok =
             .put(
                 "engine",
                 "AyanaMasterFullAcceptance"
-            )
+)
             .put(
                 "engine_version",
                 MASTER_ACCEPTANCE_VERSION
@@ -27998,7 +28003,7 @@ val ok =
                     probe.optString(
                         "status",
                         row.optString("status")
-                    )
+)
                 )
                 .put(
                     "verified",
@@ -28998,8 +29003,7 @@ val ok =
                     append("   Evidence scope: ${item.optString("evidence_scope")}\n")
                 }
             }
-
-            append("\nВСЕ ТЕСТЫ\n")
+append("\nВСЕ ТЕСТЫ\n")
             append("========================================\n")
 
             for (index in 0 until tests.length()) {
@@ -29998,7 +30002,7 @@ AyanaAcceptanceTestEngine.PROBE_NOTIFICATION_ROUTING ->
                         "делай commit в GitHub"
                     ).isNullOrBlank() &&
                     AyanaStructuredLocalCommandRouter
-                        .parse(
+.parse(
                             "а что ты зациклилась на GitHub? как будто нет других приложений и задач и как будто если ты самостоятельно делать commit github ты станешь полноценным ии агентом"
                         )
                         ?.let { intent ->
@@ -30998,7 +31002,7 @@ AyanaAcceptanceTestEngine.PROBE_NOTIFICATION_ROUTING ->
 
         val runtime =
             snapshot.optJSONObject("runtime")
-                ?: JSONObject()
+?: JSONObject()
 
         val ok =
             snapshot.optBoolean("success", false) &&
@@ -31998,7 +32002,7 @@ if (sessionOk) {
                         )
                     )
                     .put(
-                        "planner_terminal_criterion",
+"planner_terminal_criterion",
                         planner.optString(
                             "terminal_criterion"
                         ).isNotBlank()
@@ -32998,7 +33002,7 @@ Thread.sleep(90L)
             }
 
         val restoreVerified = modeRestored && brightnessRestored
-        val ok = targetVerified && restoreVerified
+val ok = targetVerified && restoreVerified
 
         return acceptanceProbeResult(
             status = if (ok) AyanaAcceptanceTestEngine.STATUS_PASS else AyanaAcceptanceTestEngine.STATUS_FAIL,
@@ -33997,8 +34001,7 @@ requestMethod = "GET"
                     instanceFollowRedirects = false
                     useCaches = false
                 }
-
-            val code =
+val code =
                 connection.responseCode
 
             JSONObject()
@@ -34998,7 +35001,7 @@ it.optString(
 
             val actual =
                 record?.let(
-                    commandHistoryStore::fullResult
+commandHistoryStore::fullResult
                 )
                     .orEmpty()
 
@@ -35998,7 +36001,7 @@ routed.forEach {
             message =
                 if (ok) {
                     "STOP grammar распознаёт direct/wake-prefixed STOP и не ловит обычную команду."
-                } else {
+} else {
                     "STOP grammar regression: direct=${direct.matched}, wake=${withWake.matched}, ordinary=${ordinary.matched}."
                 },
             evidenceScope = "live_pure_voice_grammar",
@@ -36998,7 +37001,7 @@ routed.forEach {
                                 fallbackAuthorityCeiling =
                                     AyanaCrossLaneAdaptiveContinuity.defaultUnifiedAuthorityCeiling()
                             )
-                        }
+}
 
                     var longObjective =
                         if (resumeGoal == null) {
@@ -37998,7 +38001,7 @@ routed.forEach {
                         planner = planner,
                         longObjective = longObjective,
                         adaptiveLoop = adaptiveLoop,
-                        failedSubgoalId = subgoal.id,
+failedSubgoalId = subgoal.id,
                         failureReason = "persisted_failed_subgoal",
                         stateFingerprint = currentState
                     )
@@ -38998,7 +39001,7 @@ routed.forEach {
             .put("unresolved_side_effect", adaptiveLoop.hasUnresolvedSideEffect())
             .put("long_objective_terminal_ready", longTerminal)
             .put("adaptive_terminal_recorded", adaptiveTerminalRecorded)
-            .put("terminal_ledger_converged", terminalLedgerConverged)
+.put("terminal_ledger_converged", terminalLedgerConverged)
             .put("r10_11_acceptance", r10_11Acceptance)
             .put(
                 "controlled_verified_failure_injected",
@@ -39998,7 +40001,7 @@ routed.forEach {
                 candidate.snapshot()
             )
             .put(
-                "candidate_plan_fingerprint",
+"candidate_plan_fingerprint",
                 candidate.planFingerprint()
             )
             .put(
@@ -40998,7 +41001,7 @@ routed.forEach {
         ) {
             respondAndResume(
                 text = "R10.11 остановлен: planner foundation self-test не подтверждён.",
-                silent = silent,
+silent = silent,
                 success = false,
                 technical =
                     JSONObject()
@@ -41998,7 +42001,7 @@ routed.forEach {
 
                     val persistedAdaptiveSnapshot =
                         restoredGoal?.optJSONObject(
-                            "adaptive_execution_loop"
+"adaptive_execution_loop"
                         )
                     val persistedContinuitySnapshot =
                         restoredGoal?.optJSONObject(
@@ -42998,7 +43001,7 @@ routed.forEach {
                 lane = AyanaCrossLaneAdaptiveContinuity.LANE_MULTI_APP,
                 authority = AyanaCrossLaneAdaptiveContinuity.AUTH_MULTI_APP,
                 dependencies = listOf("read_title")
-            ),
+),
             AyanaLongObjectiveCoordinator.SubgoalSpec(
                 id = "final_device_state",
                 title = "Final factual verification after consumer",
@@ -43998,7 +44001,7 @@ routed.forEach {
                                 stateFingerprint = youtubeAfterState,
                                 mayMutate = false,
                                 authoritySource =
-                                    AyanaCrossLaneAdaptiveContinuity.AUTH_AGENT_CORE
+AyanaCrossLaneAdaptiveContinuity.AUTH_AGENT_CORE
                             )
                         } else {
                             JSONObject().put("allowed", false)
@@ -44998,7 +45001,7 @@ routed.forEach {
                                 checkpointTag =
                                     "r10_7_browser_verified_pre_interrupt",
                                 safeAutoResume = true
-                            )
+)
                             .put(
                                 "mode",
                                 AyanaDurableGoalStore.MODE_ORCHESTRATOR
@@ -45998,7 +46001,7 @@ routed.forEach {
                                 stateFingerprint = initialState,
                                 mayMutate = false,
                                 authoritySource =
-                                    AyanaCrossLaneAdaptiveContinuity.AUTH_AGENT_CORE
+AyanaCrossLaneAdaptiveContinuity.AUTH_AGENT_CORE
                             )
                         } else {
                             JSONObject(agentGate.toString())
@@ -46998,7 +47001,7 @@ routed.forEach {
 
         val worker =
             thread(
-                start = false,
+start = false,
                 name = "AyanaR10_4AdaptiveLoopAcceptance"
             ) {
                 var finalRestore: JSONObject? = null
@@ -47998,8 +48001,7 @@ val primaryMarkerObserved =
                                     "replay_performed",
                                     true
                                 )
-
-                    val networkPaused =
+val networkPaused =
                         thirdRestartStore
                             .checkpoint(
                                 goalId,
@@ -48998,7 +49000,7 @@ val primaryMarkerObserved =
                 .ifBlank { "unknown" }
         } catch (_: Exception) {
             "unknown"
-        }
+}
 
     private fun selfReviewEvidenceResolution(
         item: JSONObject,
@@ -49998,8 +50000,7 @@ val activeNetwork =
                     )
                 }
             )
-
-            respondUnsupportedAndResume(
+respondUnsupportedAndResume(
                 text =
                     "FAST.com открыт и начнёт измерение автоматически, но текущая AYANA пока не умеет надёжно прочитать и подтвердить итоговую скорость в Mbps.",
                 silent =
@@ -50998,7 +50999,7 @@ val activeNetwork =
                             replanStartAgentStep =
                                 replanStartAgentStep
                         )
-                    ) {
+) {
                         val reason =
                             "Перепланирование остановлено: достигнут лимит безопасных альтернативных шагов без подтверждённого прогресса."
 
@@ -51997,8 +51998,7 @@ state = "agent_response",
                                         message = "Не удалось сохранить checkpoint перед tool call",
                                         details = "tool=$toolName"
                                     )
-
-                                    finalAnswer =
+finalAnswer =
                                         "Я остановила выполнение до следующего действия: checkpoint цели не сохранился. Это защищает задачу от продолжения с неверного состояния."
 
                                     finalSuccess =
@@ -52998,7 +52998,7 @@ result.optBoolean(
                                     AyanaCompletionContract
                                         .DeliverableKind
                                         .ANALYSIS in
-                                        expectedOutputs
+expectedOutputs
 
                                 val artifactAnalysis =
                                     arguments
@@ -53998,7 +53998,7 @@ adaptiveExecutionLoop
                 if (
                     finalSuccess &&
                     originalGoalTerminalCriterion.isNotBlank() &&
-                    !originalGoalTerminalCriterionSatisfied
+!originalGoalTerminalCriterionSatisfied
                 ) {
                     finalSuccess =
                         false
@@ -54998,7 +54998,7 @@ STATE_SUCCESS
                 setOf(
                     "click_screen_element",
                     "tap_screen_coordinates"
-                )
+)
             ) {
                 durableGoalStore
                     .markPaused(
@@ -55998,7 +55998,7 @@ details = error.message.orEmpty().take(220)
 
             askAyana(
                 message = goal.optString("command"),
-                silent = silent,
+silent = silent,
                 resumeGoal = updated
             )
             return
@@ -56998,7 +56998,7 @@ return ""
     ): Boolean =
         normalized in
             setOf(
-                "продолжи предыдущую задачу",
+"продолжи предыдущую задачу",
                 "продолжи предыдущую цель",
                 "возобнови предыдущую задачу",
                 "возобнови предыдущую цель"
@@ -57997,8 +57997,7 @@ return ""
             Regex("(?:на|в)\\s+(?:русск(?:ий|ого|ом)|русский язык)|по[-\\s]?русски")
                 .containsMatchIn(text) ->
                 DocxTranslationTarget("ru", "русский")
-
-            Regex("(?:на|в)\\s+(?:английск(?:ий|ого|ом)|английский язык)|по[-\\s]?английски")
+Regex("(?:на|в)\\s+(?:английск(?:ий|ого|ом)|английский язык)|по[-\\s]?английски")
                 .containsMatchIn(text) ->
                 DocxTranslationTarget("en", "английский")
 
@@ -58998,7 +58997,7 @@ technical = technical
                                             .put(
                                                 "data_base64",
                                                 Base64.encodeToString(
-                                                    file.readBytes(),
+file.readBytes(),
                                                     Base64.NO_WRAP
                                                 )
                                             )
@@ -59998,7 +59997,7 @@ return callAgentCore(
                         "prepare_ms=$safePrepare; " +
                         "upload_ms=$safeUpload; " +
                         "headers_wait_ms=$safeHeaders; " +
-                        "latency_class=${capabilityRegistry.agentCoreLatencySnapshot().optString("classification", "NO_DATA")}; " +
+"latency_class=${capabilityRegistry.agentCoreLatencySnapshot().optString("classification", "NO_DATA")}; " +
                         "bottleneck=${capabilityRegistry.agentCoreLatencySnapshot().optString("bottleneck", "unknown")}; " +
                         "body_read_ms=$safeBody; " +
                         "json_parse_ms=$safeParse; " +
@@ -60998,7 +60997,7 @@ private fun isSemanticActionResultVerified(
                         state = "goal_checkpoint_error",
                         message = "Compiled Android plan не сохранён перед выполнением",
                         details = error.message.orEmpty().take(220)
-                    )
+)
                     false
                 }
 
@@ -61998,7 +61997,7 @@ result = result
                         planner.optString(
                             "domain"
                         )
-                    )
+)
                     .put(
                         "planner_subgoals",
                         planner.optJSONArray(
@@ -62998,7 +62997,7 @@ recurrence = old.recurrence,
         if (
             directIntent !=
             null
-        ) {
+) {
 
             try {
 
@@ -63998,7 +63997,7 @@ appTarget = label,
 
                 is JSONObject -> {
                     val reference =
-                        firstString(
+firstString(
                             value,
                             listOf(
                                 "reference",
@@ -64998,7 +64997,7 @@ appTarget = label,
                 .orEmpty()
 
         val profile =
-            connection
+connection
                 .getHeaderField(
                     "X-Ayana-Voice-Profile"
                 )
@@ -65998,7 +65997,7 @@ terminalStatus: String? = null
             state
 
         // Command history is command-scoped. Background wake-listening can
-        // legitimately restart while another text/network path is still finishing,
+// legitimately restart while another text/network path is still finishing,
         // but that ambient state must not appear as an event inside the command.
         if (state != STATE_LISTENING) {
             commandHistoryStore.addEvent(
@@ -66301,9 +66300,9 @@ state
         private const val MASTER_STATUS_MANUAL_REQUIRED =
             "MANUAL_REQUIRED"
 
-        // R10.14.3 HISTORY RECOVERY RECONCILIATION RELEASE TRUTH.
+        // R10.15.1 ROUTING RECONCILIATION RELEASE TRUTH.
         private const val AYANA_VOICE_SERVICE_RELEASE =
-            "v12.47.3 / R10.14.3 HISTORY RECOVERY RECONCILIATION"
+            "v12.47.4 / R10.15.1 ROUTING RECONCILIATION"
 
         private const val AYANA_PERSONAL_SEARCH_ENGINE_RELEASE =
             "v1.5.1 IMAGE COVERAGE TRUTH + R10.2 UNIFIED SEARCH CONTRACT v1.0"
@@ -66315,13 +66314,13 @@ state
             "v11.1.10 Multi-Attachment"
 
         private const val AYANA_ACCEPTED_FEATURE_CHECKPOINT =
-            "R10.14.2 PERCEPTION PROCESS ISOLATION + CROSS-PROCESS ACCESSIBILITY CONTINUITY — DEVICE-CONFIRMED ACCEPTED"
+            "R10.15 GENERALIZED CROSS-PROCESS AUTONOMY HARDENING — DEVICE-CONFIRMED ACCEPTED"
 
         private const val AYANA_CURRENT_FEATURE_RELEASE =
-            "R10.14.3 HISTORY RECOVERY RECONCILIATION — PENDING DEVICE CONFIRMATION"
+            "R10.15.1 ROUTING RECONCILIATION — PENDING DEVICE CONFIRMATION"
 
         private const val AYANA_RELEASE_LINEAGE =
-            "Android v12.21.0 / R7.9 truth-hardening + R8.0 multi-attachment + R8.1–R8.4 accepted Personal Global Search stack + R8.5–R8.5.4 capability/evidence truth + R9.0 autonomous agent foundation + R9.0.1 history live-refresh proof fix + R9.0.2 diagnostic reconciliation/history refresh fix + R9.0.3 TTS health reconciliation + R9.1 IME perception/active telemetry truth + R9.2 autonomous recovery/long-task reconciliation + R9.2.1 adaptive hypothesis reconciliation + R9.3 app integration framework + R9.3.1 screen health reconciliation + R9.3.2 history latency recovery reconciliation + R9.3.3 informational terminal reconciliation + R9.3.4 app integration device acceptance + R9.4 multi-app task orchestration + R9.4.1 screen ownership union reconciliation + R9.5 verified result transfer between app steps + R9.5.1 partial marker provenance reconciliation + R9.5.2 bounded marker observation + R9.5.3 verified action result transfer + R9.6 verified semantic observation fallback + R9.6.1 visual fallback acceptance truth + R9.7 structured screen reading + R9.7.1 conversation routing/terminal truth + R9.7.2 structured router conversation precedence + R9.7.3 action morphology/terminal truth + R9.8 generic verified result transfer + R9.8.1 master full acceptance/diagnostic engine + R9.9 reversible action journal/verified undo + R9.9.1 brightness verified undo device acceptance + R9.9.2 opt-in low-battery controlled proactivity + R10.0 unified screen intelligence + R10.1 local self-diagnostics/self-audit + R10.2 personal search expansion + R10.3 long autonomous tasks/recovery + R10.4 adaptive verified execution loop + R10.5 generalized live adaptive autonomy + R10.6 cross-lane adaptive continuity + R10.6.1 durable goal binding fix + R10.7 cross-lane durable recovery continuity + R10.7.1 isolated acceptance cleanup hardening + R10.8 general-purpose long autonomous objectives + R10.9 dynamic goal decomposition/planner contract + R10.10 adaptive planner production path + R10.11 production replan/durable recovery + R10.12 natural lifecycle recovery/background continuation + R10.13 full process-death recovery + R10.13.1 post-process readiness/reconciliation + R10.13.2 process-death core recovery proof correction + R10.14 perception process isolation/cross-process accessibility bridge + R10.14.1 cross-process visual evidence fix + R10.14.2 lifecycle profile/self-diagnostic truth + R10.14.3 history recovery reconciliation"
+            "Android v12.21.0 / R7.9 truth-hardening + R8.0 multi-attachment + R8.1–R8.4 accepted Personal Global Search stack + R8.5–R8.5.4 capability/evidence truth + R9.0 autonomous agent foundation + R9.0.1 history live-refresh proof fix + R9.0.2 diagnostic reconciliation/history refresh fix + R9.0.3 TTS health reconciliation + R9.1 IME perception/active telemetry truth + R9.2 autonomous recovery/long-task reconciliation + R9.2.1 adaptive hypothesis reconciliation + R9.3 app integration framework + R9.3.1 screen health reconciliation + R9.3.2 history latency recovery reconciliation + R9.3.3 informational terminal reconciliation + R9.3.4 app integration device acceptance + R9.4 multi-app task orchestration + R9.4.1 screen ownership union reconciliation + R9.5 verified result transfer between app steps + R9.5.1 partial marker provenance reconciliation + R9.5.2 bounded marker observation + R9.5.3 verified action result transfer + R9.6 verified semantic observation fallback + R9.6.1 visual fallback acceptance truth + R9.7 structured screen reading + R9.7.1 conversation routing/terminal truth + R9.7.2 structured router conversation precedence + R9.7.3 action morphology/terminal truth + R9.8 generic verified result transfer + R9.8.1 master full acceptance/diagnostic engine + R9.9 reversible action journal/verified undo + R9.9.1 brightness verified undo device acceptance + R9.9.2 opt-in low-battery controlled proactivity + R10.0 unified screen intelligence + R10.1 local self-diagnostics/self-audit + R10.2 personal search expansion + R10.3 long autonomous tasks/recovery + R10.4 adaptive verified execution loop + R10.5 generalized live adaptive autonomy + R10.6 cross-lane adaptive continuity + R10.6.1 durable goal binding fix + R10.7 cross-lane durable recovery continuity + R10.7.1 isolated acceptance cleanup hardening + R10.8 general-purpose long autonomous objectives + R10.9 dynamic goal decomposition/planner contract + R10.10 adaptive planner production path + R10.11 production replan/durable recovery + R10.12 natural lifecycle recovery/background continuation + R10.13 full process-death recovery + R10.13.1 post-process readiness/reconciliation + R10.13.2 process-death core recovery proof correction + R10.14 perception process isolation/cross-process accessibility bridge + R10.14.1 cross-process visual evidence fix + R10.14.2 lifecycle profile/self-diagnostic truth + R10.14.3 history recovery reconciliation + R10.15 generalized cross-process autonomy hardening + R10.15.1 self-diagnostics routing reconciliation"
 
         // AyanaCommandHistoryStore v2.8 keeps up to 4k chars inline and stores longer
         // results out-of-line. Self-review intentionally remains inline so copied History
@@ -66997,8 +66996,7 @@ const val ACTION_START =
 
         private val PROCESS_EPOCH_ID: String =
             UUID.randomUUID().toString()
-
-        const val STATE_LISTENING =
+const val STATE_LISTENING =
             "listening"
 
         const val STATE_COMMAND =
