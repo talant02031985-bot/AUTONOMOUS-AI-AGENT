@@ -18,7 +18,13 @@ import org.json.JSONObject
 import java.util.UUID
 
 /**
- * AYANA Perception Bridge v1.3 — R10.16 PERCEPTION PROCESS RECOVERY + SAFE REBIND.
+ * AYANA Perception Bridge v1.3.1 — R10.16.1 RESTART TELEMETRY RECONCILIATION.
+ *
+ * R10.16.1 keeps the accepted R10.16 recovery/rebind behavior unchanged and fixes restart
+ * provenance telemetry: after a provider PID/epoch change, the current bridge generation keeps
+ * reporting that it is the restarted generation instead of losing that fact on the next status()
+ * call. The pre-restart PID/epoch remain attached to that generation for consistent History.
+ * No retry policy, action authority, ORB/UI behavior, or process lifecycle semantics are changed.
  *
  * R10.16 builds on the accepted R10.15 strict cross-process route contract and adds bounded
  * recovery when the isolated :perception process itself is killed/recreated while the main
@@ -42,7 +48,7 @@ import java.util.UUID
  * - No new action authority is introduced. IPC only transports existing verified operations.
  */
 object AyanaPerceptionBridgeContract {
-    const val VERSION = "1.3"
+    const val VERSION = "1.3.1"
 
     const val PERCEPTION_AUTHORITY = "kg.autonomous.agent.perception.bridge"
     const val OWN_APP_AUTHORITY = "kg.autonomous.agent.ownapp.bridge"
@@ -926,24 +932,45 @@ class AyanaPerceptionBridgeClient(
             val previousPid = lastProviderPid
             val previousEpoch = lastProviderEpoch
             val hadPrevious = previousPid > 0 && previousEpoch.isNotBlank()
-            val restarted =
+            val identityChanged =
                 hadPrevious &&
                     (previousPid != pid || previousEpoch != epoch)
 
             if (!hadPrevious) {
                 providerGeneration = 1L
-            } else if (restarted) {
+            } else if (identityChanged) {
                 providerGeneration = (providerGeneration + 1L).coerceAtLeast(2L)
+                lastRestartedProviderPid = pid
+                lastRestartedProviderEpoch = epoch
+                lastRestartedPreviousPid = previousPid
+                lastRestartedPreviousEpoch = previousEpoch
             }
 
             lastProviderPid = pid
             lastProviderEpoch = epoch
 
+            // R10.16.1: restart provenance belongs to the provider generation, not to a
+            // single status() call. Otherwise the first post-restart observation is true
+            // and every later observation incorrectly flips back to false.
+            val restartProvenanceActive =
+                pid > 0 &&
+                    epoch.isNotBlank() &&
+                    pid == lastRestartedProviderPid &&
+                    epoch == lastRestartedProviderEpoch
+
             return parsed
                 .put("perception_bridge_generation", providerGeneration)
-                .put("perception_process_restarted", restarted)
-                .put("previous_perception_process_id", if (hadPrevious) previousPid else -1)
-                .put("previous_perception_process_epoch_id", if (hadPrevious) previousEpoch else "")
+                .put("perception_process_restarted", restartProvenanceActive)
+                .put(
+                    "previous_perception_process_id",
+                    if (restartProvenanceActive) lastRestartedPreviousPid else -1
+                )
+                .put(
+                    "previous_perception_process_epoch_id",
+                    if (restartProvenanceActive) lastRestartedPreviousEpoch else ""
+                )
+                .put("restart_telemetry_reconciled", true)
+                .put("restart_telemetry_version", "1.0")
         }
     }
 
@@ -1036,6 +1063,18 @@ class AyanaPerceptionBridgeClient(
 
         @Volatile
         private var providerGeneration: Long = 0L
+
+        @Volatile
+        private var lastRestartedProviderPid: Int = -1
+
+        @Volatile
+        private var lastRestartedProviderEpoch: String = ""
+
+        @Volatile
+        private var lastRestartedPreviousPid: Int = -1
+
+        @Volatile
+        private var lastRestartedPreviousEpoch: String = ""
 
         fun currentProcessName(context: Context): String {
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
