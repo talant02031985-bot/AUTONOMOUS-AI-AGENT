@@ -6,7 +6,12 @@ import org.json.JSONObject
 import java.util.Locale
 
 /**
- * AYANA Self-Diagnostics v4.7 — R10.17 SCREEN UNDERSTANDING 2.0 AUDIT.
+ * AYANA Self-Diagnostics v4.8 — R10.18 UNIVERSAL UI ACTION ENGINE AUDIT.
+ *
+ * R10.18 adds a pure contract check for the universal UI mutation layer: generic
+ * click/input/scroll must require live Accessibility interaction authority, visual
+ * evidence stays read-only, each mutation gets one dispatch, and ambiguous accepted
+ * side effects forbid blind retry. R10.17 Screen Understanding truth is preserved.
  *
  * R10.17 keeps raw Accessibility coverage truth separate from semantic understanding truth.
  * A `partial` raw snapshot is no longer automatically a WARNING when Screen Understanding
@@ -682,6 +687,34 @@ class AyanaSelfDiagnostics(
                     "status=$screenUnderstandingStatus; confidence=$screenUnderstandingConfidence; coverage=$screenCoverageStatus; read_only=true; interaction=$screenInteractionUnderstandingUsable; visual_action_authority=false"
                 else ->
                     "Engine v2.0 активен, но текущего evidence недостаточно: status=$screenUnderstandingStatus; confidence=$screenUnderstandingConfidence; coverage=$screenCoverageStatus"
+            }
+        )
+
+        val universalUiActionContractOk =
+            try {
+                AyanaUniversalUiActionEngine(
+                    screenIntelligence = AyanaScreenIntelligence(appContext)
+                ).selfTest()
+            } catch (_: Throwable) {
+                false
+            }
+
+        addCheck(
+            checks,
+            "universal_ui_action_engine",
+            when {
+                !universalUiActionContractOk -> STATUS_FAIL
+                screenUnderstandingVersion != AyanaScreenUnderstandingEngine.VERSION -> STATUS_WARNING
+                else -> STATUS_PASS
+            },
+            "Universal UI Action Engine",
+            when {
+                !universalUiActionContractOk ->
+                    "R10.18 contract self-test failed"
+                screenUnderstandingVersion != AyanaScreenUnderstandingEngine.VERSION ->
+                    "R10.18 contract активен, но Screen Understanding 2.0 runtime truth не подтверждён"
+                else ->
+                    "v${AyanaUniversalUiActionEngine.VERSION}: live Accessibility authority required; visual_action_authority=false; single-dispatch mutation; blind retry blocked"
             }
         )
 
@@ -1580,6 +1613,8 @@ class AyanaSelfDiagnostics(
                     setOf(
                         "accessibility",
                         "screen_intelligence",
+                        "screen_understanding_2_0",
+                        "universal_ui_action_engine",
                         "overlay",
                         "app_resolver",
                         "recent_command_health"
@@ -1712,6 +1747,9 @@ class AyanaSelfDiagnostics(
 
             "screen_understanding_2_0" ->
                 "Проверьте foreground truth, text/control evidence и visual read-only provenance. Visual evidence не должно давать action authority."
+
+            "universal_ui_action_engine" ->
+                "Проверьте R10.18 preflight/post-condition contract: live Accessibility authority, single dispatch и запрет blind retry после accepted-but-unverified mutation."
 
             "perception_route_contract" ->
                 "Проверьте AndroidManifest :perception, AyanaPerceptionBridge version/PID contract и исключите прямой AgentAccessibilityService fallback из main process."
