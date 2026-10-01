@@ -13,16 +13,21 @@ import android.os.Bundle
 import android.os.IBinder
 import android.os.Parcel
 import android.os.Process
+import android.os.SystemClock
 import org.json.JSONObject
 import java.util.UUID
 
 /**
- * AYANA Perception Bridge v1.2 — R10.15 GENERALIZED CROSS-PROCESS ROUTE CONTRACT.
+ * AYANA Perception Bridge v1.3 — R10.16 PERCEPTION PROCESS RECOVERY + SAFE REBIND.
  *
- * R10.15 makes the bridge a fail-closed process boundary, not an opportunistic fallback.
- * Every main-process perception/action call must reach a distinct :perception PID using the
- * exact bridge version. Same-process provider routing, version mismatch, or a bridge call
- * originating from :perception is rejected. No action authority is added.
+ * R10.16 builds on the accepted R10.15 strict cross-process route contract and adds bounded
+ * recovery when the isolated :perception process itself is killed/recreated while the main
+ * AYANA process remains alive. Provider PID + process epoch form the generation identity.
+ * Read-only calls may perform one bounded rebind/retry after a transient provider loss.
+ * Mutating calls are never blindly replayed after an ambiguous transport failure; only an
+ * explicit provider-side pre-dispatch unavailability result is eligible for one safe retry.
+ * Same-process routing/version/provenance mismatches remain fail-closed. No action authority
+ * is added.
  *
  * Design goals:
  * - AgentAccessibilityService lives in :perception and remains alive when the main AYANA
@@ -37,7 +42,7 @@ import java.util.UUID
  * - No new action authority is introduced. IPC only transports existing verified operations.
  */
 object AyanaPerceptionBridgeContract {
-    const val VERSION = "1.2"
+    const val VERSION = "1.3"
 
     const val PERCEPTION_AUTHORITY = "kg.autonomous.agent.perception.bridge"
     const val OWN_APP_AUTHORITY = "kg.autonomous.agent.ownapp.bridge"
@@ -78,6 +83,7 @@ object AyanaPerceptionBridgeContract {
 class AyanaPerceptionBridgeProvider : ContentProvider() {
 
     private val perceptionProcessEpochId: String = UUID.randomUUID().toString()
+    private val providerCreatedElapsedMs: Long = SystemClock.elapsedRealtime()
 
     private val screenIntelligence by lazy {
         AyanaScreenIntelligence(
@@ -214,6 +220,7 @@ class AyanaPerceptionBridgeProvider : ContentProvider() {
                         .put("perception_process_id", Process.myPid())
                         .put("perception_process_name", currentProcessName())
                         .put("perception_process_epoch_id", perceptionProcessEpochId)
+                        .put("perception_provider_uptime_ms", (SystemClock.elapsedRealtime() - providerCreatedElapsedMs).coerceAtLeast(0L))
                         .put("main_process_direct_accessibility_allowed", false)
                         .put("perception_local_accessibility_allowed", true)
                         .toString()
@@ -231,6 +238,7 @@ class AyanaPerceptionBridgeProvider : ContentProvider() {
                         .put("perception_process_id", Process.myPid())
                         .put("perception_process_name", currentProcessName())
                         .put("perception_process_epoch_id", perceptionProcessEpochId)
+                        .put("perception_provider_uptime_ms", (SystemClock.elapsedRealtime() - providerCreatedElapsedMs).coerceAtLeast(0L))
                         .put("main_process_direct_accessibility_allowed", false)
                         .put("perception_local_accessibility_allowed", true)
                         .toString()
@@ -270,7 +278,13 @@ class AyanaPerceptionBridgeProvider : ContentProvider() {
             .put("perception_process_name", currentProcessName())
             .put("perception_process_epoch_id", perceptionProcessEpochId)
             .put("perception_bridge_version", AyanaPerceptionBridgeContract.VERSION)
+            .put("perception_provider_uptime_ms", (SystemClock.elapsedRealtime() - providerCreatedElapsedMs).coerceAtLeast(0L))
             .put("route_contract", "cross_process_bridge_only_outside_perception")
+            .put("rebind_policy_version", "1.0")
+            .put("read_only_rebind_retry_supported", true)
+            .put("explicit_pre_dispatch_rebind_retry_supported", true)
+            .put("mutation_blind_retry_allowed", false)
+            .put("provider_epoch_required", true)
             .put("main_process_direct_accessibility_allowed", false)
             .put("perception_local_accessibility_allowed", true)
             .put("provider_is_perception_process", currentProcessName().endsWith(":perception"))
@@ -613,6 +627,117 @@ class AyanaPerceptionBridgeClient(
         )
     }
 
+    fun awaitReady(
+        timeoutMs: Long = REBIND_DEFAULT_TIMEOUT_MS,
+        pollMs: Long = REBIND_POLL_MS
+    ): JSONObject {
+        if (isLocalPerceptionProcess()) {
+            return unavailable("bridge_call_from_perception_process_blocked")
+                .put("perception_route", "local_perception_required")
+                .put("perception_route_verified", false)
+        }
+
+        val startedAt = SystemClock.elapsedRealtime()
+        val deadline = startedAt + timeoutMs.coerceIn(250L, REBIND_MAX_TIMEOUT_MS)
+        var attempts = 0
+        var latest = JSONObject()
+
+        do {
+            attempts++
+            latest = callOnce(
+                method = AyanaPerceptionBridgeContract.METHOD_STATUS,
+                args = JSONObject(),
+                callbackBinder = null
+            )
+
+            val ready =
+                latest.optBoolean("success", false) &&
+                    latest.optBoolean("perception_route_verified", false) &&
+                    latest.optBoolean("provider_process_separated", false) &&
+                    latest.optBoolean("bridge_version_match", false) &&
+                    latest.optBoolean("provider_epoch_verified", false) &&
+                    latest.optBoolean("accessibility_connected", false) &&
+                    latest.optBoolean("route_contract_verified", false)
+
+            if (ready) {
+                return latest
+                    .put("perception_rebind_wait", true)
+                    .put("perception_rebind_ready", true)
+                    .put("perception_rebind_attempts", attempts)
+                    .put(
+                        "perception_rebind_wait_ms",
+                        (SystemClock.elapsedRealtime() - startedAt).coerceAtLeast(0L)
+                    )
+            }
+
+            if (SystemClock.elapsedRealtime() >= deadline) break
+
+            try {
+                Thread.sleep(pollMs.coerceIn(50L, 500L))
+            } catch (_: InterruptedException) {
+                break
+            }
+        } while (SystemClock.elapsedRealtime() < deadline)
+
+        return JSONObject(latest.toString())
+            .put("success", false)
+            .put("verified", false)
+            .put("terminal_status", "UNSUPPORTED")
+            .put("perception_rebind_wait", true)
+            .put("perception_rebind_ready", false)
+            .put("perception_rebind_attempts", attempts)
+            .put(
+                "perception_rebind_wait_ms",
+                (SystemClock.elapsedRealtime() - startedAt).coerceAtLeast(0L)
+            )
+            .put("reason", "perception_rebind_timeout")
+    }
+
+    fun recoveryPolicySelfTest(): JSONObject {
+        val readFailure =
+            JSONObject()
+                .put("success", false)
+                .put("reason", "perception_bridge_call_failed")
+
+        val explicitPreDispatch =
+            JSONObject()
+                .put("success", false)
+                .put("reason", "accessibility_unavailable")
+
+        val readRetryAllowed =
+            isSafeRetryMethod(AyanaPerceptionBridgeContract.METHOD_SCREEN_STATE) &&
+                isRecoverableReadFailure(readFailure)
+
+        val mutationBlindRetryBlocked =
+            isMutatingMethod(AyanaPerceptionBridgeContract.METHOD_CLICK) &&
+                !isSafeRetryMethod(AyanaPerceptionBridgeContract.METHOD_CLICK) &&
+                isTransportAmbiguousFailure(readFailure)
+
+        val explicitPreDispatchRetryRecognized =
+            isMutatingMethod(AyanaPerceptionBridgeContract.METHOD_CLICK) &&
+                isExplicitPreDispatchUnavailable(explicitPreDispatch)
+
+        val destructiveBlindRetryBlocked =
+            isMutatingMethod(AyanaPerceptionBridgeContract.METHOD_REMOVE_RECENT_TASK) &&
+                !isSafeRetryMethod(AyanaPerceptionBridgeContract.METHOD_REMOVE_RECENT_TASK)
+
+        val ok =
+            readRetryAllowed &&
+                mutationBlindRetryBlocked &&
+                explicitPreDispatchRetryRecognized &&
+                destructiveBlindRetryBlocked
+
+        return JSONObject()
+            .put("success", ok)
+            .put("verified", ok)
+            .put("perception_rebind_policy_version", REBIND_POLICY_VERSION)
+            .put("read_only_rebind_retry_supported", readRetryAllowed)
+            .put("explicit_pre_dispatch_rebind_retry_supported", explicitPreDispatchRetryRecognized)
+            .put("mutation_blind_retry_allowed", false)
+            .put("mutation_blind_retry_blocked", mutationBlindRetryBlocked)
+            .put("destructive_blind_retry_blocked", destructiveBlindRetryBlocked)
+    }
+
     private fun call(
         method: String,
         args: JSONObject,
@@ -626,6 +751,74 @@ class AyanaPerceptionBridgeClient(
                 .put("perception_route_verified", false)
         }
 
+        val first =
+            callOnce(
+                method = method,
+                args = args,
+                callbackBinder = callbackBinder
+            )
+
+        val safeRetry = isSafeRetryMethod(method)
+        val explicitPreDispatchUnavailable =
+            isExplicitPreDispatchUnavailable(first)
+        val transportAmbiguousMutation =
+            isMutatingMethod(method) &&
+                isTransportAmbiguousFailure(first) &&
+                !explicitPreDispatchUnavailable
+
+        if (transportAmbiguousMutation) {
+            return JSONObject(first.toString())
+                .put("terminal_status", "ERROR")
+                .put("reconciliation_required", true)
+                .put("side_effect_state", "UNKNOWN")
+                .put("blind_retry_allowed", false)
+                .put("mutation_replay_blocked", true)
+                .put("perception_rebind_policy_version", REBIND_POLICY_VERSION)
+        }
+
+        val shouldRebind =
+            (safeRetry && isRecoverableReadFailure(first)) ||
+                (isMutatingMethod(method) && explicitPreDispatchUnavailable)
+
+        if (!shouldRebind) {
+            return first
+                .put("perception_rebind_attempted", false)
+                .put("blind_retry_allowed", !isMutatingMethod(method))
+                .put("perception_rebind_policy_version", REBIND_POLICY_VERSION)
+        }
+
+        val readiness = awaitReady()
+        if (!readiness.optBoolean("perception_rebind_ready", false)) {
+            return JSONObject(first.toString())
+                .put("perception_rebind_attempted", true)
+                .put("perception_rebind_verified", false)
+                .put("rebind_status", readiness)
+                .put("blind_retry_allowed", false)
+                .put("perception_rebind_policy_version", REBIND_POLICY_VERSION)
+        }
+
+        val retry =
+            callOnce(
+                method = method,
+                args = args,
+                callbackBinder = callbackBinder
+            )
+
+        return retry
+            .put("perception_rebind_attempted", true)
+            .put("perception_rebind_verified", retry.optBoolean("perception_route_verified", false))
+            .put("perception_rebind_previous_reason", first.optString("reason"))
+            .put("perception_rebind_ready_pid", readiness.optInt("perception_process_id", -1))
+            .put("perception_rebind_ready_epoch", readiness.optString("perception_process_epoch_id"))
+            .put("blind_retry_allowed", false)
+            .put("perception_rebind_policy_version", REBIND_POLICY_VERSION)
+    }
+
+    private fun callOnce(
+        method: String,
+        args: JSONObject,
+        callbackBinder: IBinder?
+    ): JSONObject {
         return try {
             val extras =
                 Bundle().apply {
@@ -658,43 +851,63 @@ class AyanaPerceptionBridgeClient(
                 unavailable("empty_perception_bridge_response")
             } else {
                 val parsed = JSONObject(json)
-                val providerVersion =
-                    parsed.optString("perception_bridge_version").trim()
-                val providerPid =
-                    parsed.optInt("perception_process_id", -1)
-                val providerProcessName =
-                    parsed.optString("perception_process_name").trim()
+                val providerVersion = parsed.optString("perception_bridge_version").trim()
+                val providerPid = parsed.optInt("perception_process_id", -1)
+                val providerProcessName = parsed.optString("perception_process_name").trim()
+                val providerEpoch = parsed.optString("perception_process_epoch_id").trim()
                 val clientPid = Process.myPid()
 
-                if (providerVersion != AyanaPerceptionBridgeContract.VERSION) {
-                    unavailable(
-                        reason = "perception_bridge_version_mismatch",
-                        error = "provider=$providerVersion expected=${AyanaPerceptionBridgeContract.VERSION}"
-                    )
-                        .put("provider_process_id", providerPid)
-                        .put("provider_process_name", providerProcessName)
-                } else if (providerPid <= 0 || providerPid == clientPid) {
-                    unavailable(
-                        reason = "perception_bridge_not_cross_process",
-                        error = "client_pid=$clientPid provider_pid=$providerPid"
-                    )
-                        .put("provider_process_id", providerPid)
-                        .put("provider_process_name", providerProcessName)
-                } else if (!providerProcessName.endsWith(":perception")) {
-                    unavailable(
-                        reason = "perception_provider_process_name_invalid",
-                        error = providerProcessName.take(240)
-                    )
-                        .put("provider_process_id", providerPid)
-                        .put("provider_process_name", providerProcessName)
-                } else {
-                    parsed
-                        .put("cross_process_perception", true)
-                        .put("perception_route", "cross_process_bridge")
-                        .put("perception_route_verified", true)
-                        .put("client_process_id", clientPid)
-                        .put("provider_process_separated", true)
-                        .put("bridge_version_match", true)
+                when {
+                    providerVersion != AyanaPerceptionBridgeContract.VERSION ->
+                        unavailable(
+                            reason = "perception_bridge_version_mismatch",
+                            error = "provider=$providerVersion expected=${AyanaPerceptionBridgeContract.VERSION}"
+                        )
+                            .put("provider_process_id", providerPid)
+                            .put("provider_process_name", providerProcessName)
+                            .put("provider_process_epoch_id", providerEpoch)
+
+                    providerPid <= 0 || providerPid == clientPid ->
+                        unavailable(
+                            reason = "perception_bridge_not_cross_process",
+                            error = "client_pid=$clientPid provider_pid=$providerPid"
+                        )
+                            .put("provider_process_id", providerPid)
+                            .put("provider_process_name", providerProcessName)
+                            .put("provider_process_epoch_id", providerEpoch)
+
+                    !providerProcessName.endsWith(":perception") ->
+                        unavailable(
+                            reason = "perception_provider_process_name_invalid",
+                            error = providerProcessName.take(240)
+                        )
+                            .put("provider_process_id", providerPid)
+                            .put("provider_process_name", providerProcessName)
+                            .put("provider_process_epoch_id", providerEpoch)
+
+                    providerEpoch.isBlank() ->
+                        unavailable(
+                            reason = "perception_provider_epoch_missing",
+                            error = "provider_pid=$providerPid"
+                        )
+                            .put("provider_process_id", providerPid)
+                            .put("provider_process_name", providerProcessName)
+
+                    else ->
+                        annotateProviderIdentity(
+                            parsed
+                                .put("cross_process_perception", true)
+                                .put("perception_route", "cross_process_bridge")
+                                .put("perception_route_verified", true)
+                                .put("client_process_id", clientPid)
+                                .put("provider_process_separated", true)
+                                .put("bridge_version_match", true)
+                                .put("provider_epoch_verified", true)
+                                .put("rebind_policy_version", REBIND_POLICY_VERSION)
+                                .put("read_only_rebind_retry_supported", true)
+                                .put("explicit_pre_dispatch_rebind_retry_supported", true)
+                                .put("mutation_blind_retry_allowed", false)
+                        )
                 }
             }
         } catch (error: Throwable) {
@@ -704,6 +917,85 @@ class AyanaPerceptionBridgeClient(
             )
         }
     }
+
+    private fun annotateProviderIdentity(parsed: JSONObject): JSONObject {
+        val pid = parsed.optInt("perception_process_id", -1)
+        val epoch = parsed.optString("perception_process_epoch_id").trim()
+
+        synchronized(PROVIDER_IDENTITY_LOCK) {
+            val previousPid = lastProviderPid
+            val previousEpoch = lastProviderEpoch
+            val hadPrevious = previousPid > 0 && previousEpoch.isNotBlank()
+            val restarted =
+                hadPrevious &&
+                    (previousPid != pid || previousEpoch != epoch)
+
+            if (!hadPrevious) {
+                providerGeneration = 1L
+            } else if (restarted) {
+                providerGeneration = (providerGeneration + 1L).coerceAtLeast(2L)
+            }
+
+            lastProviderPid = pid
+            lastProviderEpoch = epoch
+
+            return parsed
+                .put("perception_bridge_generation", providerGeneration)
+                .put("perception_process_restarted", restarted)
+                .put("previous_perception_process_id", if (hadPrevious) previousPid else -1)
+                .put("previous_perception_process_epoch_id", if (hadPrevious) previousEpoch else "")
+        }
+    }
+
+    private fun isSafeRetryMethod(method: String): Boolean =
+        method in
+            setOf(
+                AyanaPerceptionBridgeContract.METHOD_STATUS,
+                AyanaPerceptionBridgeContract.METHOD_SCREEN_STATE,
+                AyanaPerceptionBridgeContract.METHOD_CAPTURE_VERIFIED_EXTERNAL_WINDOW,
+                AyanaPerceptionBridgeContract.METHOD_RECORD_VISUAL,
+                AyanaPerceptionBridgeContract.METHOD_CLEAR_VISUAL,
+                AyanaPerceptionBridgeContract.METHOD_ATTEST_FOREGROUND_OWNER
+            )
+
+    private fun isMutatingMethod(method: String): Boolean =
+        method in
+            setOf(
+                AyanaPerceptionBridgeContract.METHOD_CLICK,
+                AyanaPerceptionBridgeContract.METHOD_INPUT_TEXT,
+                AyanaPerceptionBridgeContract.METHOD_SCROLL,
+                AyanaPerceptionBridgeContract.METHOD_TAP,
+                AyanaPerceptionBridgeContract.METHOD_PRESS_BACK,
+                AyanaPerceptionBridgeContract.METHOD_PRESS_HOME,
+                AyanaPerceptionBridgeContract.METHOD_REMOVE_RECENT_TASK
+            )
+
+    private fun isExplicitPreDispatchUnavailable(result: JSONObject): Boolean {
+        val reason = result.optString("reason")
+        return reason in
+            setOf(
+                "perception_process_accessibility_unavailable",
+                "accessibility_unavailable"
+            )
+    }
+
+    private fun isRecoverableReadFailure(result: JSONObject): Boolean {
+        if (result.optBoolean("success", false)) return false
+        return result.optString("reason") in
+            setOf(
+                "perception_bridge_call_failed",
+                "empty_perception_bridge_response",
+                "perception_process_accessibility_unavailable",
+                "accessibility_unavailable"
+            )
+    }
+
+    private fun isTransportAmbiguousFailure(result: JSONObject): Boolean =
+        result.optString("reason") in
+            setOf(
+                "perception_bridge_call_failed",
+                "empty_perception_bridge_response"
+            )
 
     private fun unavailable(
         reason: String,
@@ -722,8 +1014,29 @@ class AyanaPerceptionBridgeClient(
             .put("client_process_id", Process.myPid())
             .put("provider_process_separated", false)
             .put("bridge_version_match", false)
+            .put("provider_epoch_verified", false)
+            .put("perception_rebind_policy_version", REBIND_POLICY_VERSION)
+            .put("read_only_rebind_retry_supported", true)
+            .put("explicit_pre_dispatch_rebind_retry_supported", true)
+            .put("mutation_blind_retry_allowed", false)
 
     companion object {
+        private const val REBIND_POLICY_VERSION = "1.0"
+        private const val REBIND_DEFAULT_TIMEOUT_MS = 8_000L
+        private const val REBIND_MAX_TIMEOUT_MS = 15_000L
+        private const val REBIND_POLL_MS = 180L
+
+        private val PROVIDER_IDENTITY_LOCK = Any()
+
+        @Volatile
+        private var lastProviderPid: Int = -1
+
+        @Volatile
+        private var lastProviderEpoch: String = ""
+
+        @Volatile
+        private var providerGeneration: Long = 0L
+
         fun currentProcessName(context: Context): String {
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
                 return try {
@@ -747,6 +1060,7 @@ class AyanaPerceptionBridgeClient(
             }
         }
     }
+
 }
 
 class AyanaOwnAppBridgeClient(
