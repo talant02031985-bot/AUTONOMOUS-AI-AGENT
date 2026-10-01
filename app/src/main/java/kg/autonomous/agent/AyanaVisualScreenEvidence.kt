@@ -19,7 +19,11 @@ import kotlin.math.max
 import kotlin.math.roundToInt
 
 /**
- * AYANA R10.14.1 Visual Screen Evidence v1.1 — CROSS-PROCESS CAPTURE.
+ * AYANA R10.15 Visual Screen Evidence v1.2 — STRICT PROCESS-IDENTITY ROUTING.
+ *
+ * Outside :perception every capture MUST traverse AyanaPerceptionBridge. A process-local
+ * Accessibility singleton in the main process is never trusted as a fallback. Inside
+ * :perception capture requires the local Accessibility service and fails closed otherwise.
  *
  * Read-only screenshot bridge for verified semantic fallback.
  * It does not interpret pixels and does not authorize actions.
@@ -69,15 +73,7 @@ class AyanaVisualScreenEvidence(
             return failure("visual_capture_main_thread_blocked")
         }
 
-        val service =
-            AgentAccessibilityService.instance
-
-        if (service == null) {
-            if (perceptionBridge.isLocalPerceptionProcess()) {
-                return failure("accessibility_service_unavailable")
-                    .put("cross_process_visual_capture", false)
-            }
-
+        if (!perceptionBridge.isLocalPerceptionProcess()) {
             return try {
                 perceptionBridge
                     .captureVerifiedExternalWindow(
@@ -86,6 +82,7 @@ class AyanaVisualScreenEvidence(
                     )
                     .put("visual_screen_evidence_version", VERSION)
                     .put("cross_process_visual_capture", true)
+                    .put("perception_route", "cross_process_bridge")
             } catch (error: Throwable) {
                 failure("cross_process_visual_capture_failed")
                     .put(
@@ -93,8 +90,15 @@ class AyanaVisualScreenEvidence(
                         (error.message ?: error.javaClass.simpleName).take(240)
                     )
                     .put("cross_process_visual_capture", true)
+                    .put("perception_route", "cross_process_bridge")
             }
         }
+
+        val service =
+            AgentAccessibilityService.instance
+                ?: return failure("accessibility_service_unavailable")
+                    .put("cross_process_visual_capture", false)
+                    .put("perception_route", "local_perception_service")
 
         val before =
             try {
@@ -327,6 +331,8 @@ class AyanaVisualScreenEvidence(
             )
             .put("source", "android_accessibility_screenshot")
             .put("visual_screen_evidence_version", VERSION)
+            .put("perception_route", "local_perception_service")
+            .put("process_local_accessibility_scope_verified", perceptionBridge.isLocalPerceptionProcess())
     }
 
     fun deleteEvidenceFile(
@@ -709,7 +715,7 @@ class AyanaVisualScreenEvidence(
             .put("visual_screen_evidence_version", VERSION)
 
     companion object {
-        const val VERSION = "1.1"
+        const val VERSION = "1.2"
 
         private const val MULTIMODAL_CACHE_DIR =
             "ayana_multimodal"
