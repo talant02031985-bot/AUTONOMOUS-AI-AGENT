@@ -63,6 +63,13 @@ import kotlin.math.abs
 
 class AyanaVoiceService : Service() {
 
+    // AYANA v12.48.1 / R10.16.1 RESTART TELEMETRY RECONCILIATION.
+    // Builds on DEVICE-CONFIRMED R10.16. Recovery behavior is unchanged. Acceptance now
+    // requires the restored bridge generation to retain restart provenance across subsequent
+    // status/screen reads: perception_process_restarted=true and previous PID/epoch must match
+    // the pre-kill provider. This closes telemetry contradiction without expanding authority.
+    // ORB/visualizer/UI unchanged.
+    //
     // AYANA v12.48.0 / R10.16 PERCEPTION PROCESS RECOVERY + SAFE REBIND.
     // Builds on DEVICE-CONFIRMED R10.15.1. If the isolated :perception process dies
     // while the main AYANA process remains alive, the bridge verifies a new provider PID
@@ -40475,7 +40482,10 @@ failedSubgoalId = subgoal.id,
                 "проверь восстановление perception process",
                 "проверь perception process recovery",
                 "проверь safe rebind perception",
-                "проверь r10.16"
+                "проверь r10.16",
+                "проверь согласованность телеметрии восстановления восприятия",
+                "проверь телеметрию восстановления процесса восприятия",
+                "проверь r10.16.1"
             )
     }
 
@@ -40483,8 +40493,8 @@ failedSubgoalId = subgoal.id,
         silent: Boolean
     ) {
         executionPhase(
-            phase = "r10_16_perception_process_recovery_acceptance",
-            executor = "perception_recovery_v1_0+perception_bridge_v1_3"
+            phase = "r10_16_1_perception_restart_telemetry_acceptance",
+            executor = "perception_recovery_v1_0+perception_bridge_v1_3_1"
         )
 
         val commandToken = activeCommandToken
@@ -40631,6 +40641,19 @@ failedSubgoalId = subgoal.id,
                             postScreen.optInt("perception_process_id", -1) == restoredPid &&
                             postScreen.optString("perception_process_epoch_id") == restoredEpoch
 
+                    val restoredTelemetry =
+                        recovery.optJSONObject("restored") ?: JSONObject()
+
+                    val restartTelemetryVerified =
+                        restoredTelemetry.optBoolean("restart_telemetry_reconciled", false) &&
+                            restoredTelemetry.optBoolean("perception_process_restarted", false) &&
+                            restoredTelemetry.optInt("previous_perception_process_id", -1) == originPid &&
+                            restoredTelemetry.optString("previous_perception_process_epoch_id") == originEpoch &&
+                            restoredTelemetry.optInt("perception_process_id", -1) == restoredPid &&
+                            restoredTelemetry.optString("perception_process_epoch_id") == restoredEpoch &&
+                            restoredTelemetry.optLong("perception_bridge_generation", 0L) >
+                                recovery.optLong("origin_bridge_generation", 0L)
+
                     val accepted =
                         recovery.optBoolean("success", false) &&
                             recovery.optBoolean("verified", false) &&
@@ -40646,6 +40669,7 @@ failedSubgoalId = subgoal.id,
                             restoredEpoch.isNotBlank() &&
                             originEpoch != restoredEpoch &&
                             postScreenVerified &&
+                            restartTelemetryVerified &&
                             policyOk
 
                     val evidence =
@@ -40667,6 +40691,11 @@ failedSubgoalId = subgoal.id,
                             .put("route_contract_verified", recovery.optBoolean("route_contract_verified", false))
                             .put("post_recovery_screen_verified", postScreenVerified)
                             .put("post_recovery_screen_package", postScreen.optString("effective_foreground_package"))
+                            .put("restart_telemetry_verified", restartTelemetryVerified)
+                            .put("restored_perception_process_restarted", restoredTelemetry.optBoolean("perception_process_restarted", false))
+                            .put("telemetry_previous_perception_process_id", restoredTelemetry.optInt("previous_perception_process_id", -1))
+                            .put("telemetry_previous_perception_process_epoch_id", restoredTelemetry.optString("previous_perception_process_epoch_id"))
+                            .put("restart_telemetry_version", restoredTelemetry.optString("restart_telemetry_version"))
                             .put("read_only_rebind_retry_supported", policy.optBoolean("read_only_rebind_retry_supported", false))
                             .put("mutation_blind_retry_blocked", policy.optBoolean("mutation_blind_retry_blocked", false))
                             .put("destructive_blind_retry_blocked", policy.optBoolean("destructive_blind_retry_blocked", false))
@@ -40678,15 +40707,15 @@ failedSubgoalId = subgoal.id,
                         activeCommandHistoryId,
                         state =
                             if (accepted) {
-                                "r10_16_perception_process_recovery_verified"
+                                "r10_16_1_restart_telemetry_verified"
                             } else {
-                                "r10_16_perception_process_recovery_failed"
+                                "r10_16_1_restart_telemetry_failed"
                             },
                         message =
                             if (accepted) {
-                                "R10.16 подтвердил restart :perception + safe bridge rebind без смерти main process"
+                                "R10.16.1 подтвердил restart :perception + согласованную restart telemetry"
                             } else {
-                                "R10.16 perception process recovery не подтверждён"
+                                "R10.16.1 restart telemetry reconciliation не подтверждён"
                             },
                         details = evidence.toString().take(5200)
                     )
@@ -40700,16 +40729,16 @@ failedSubgoalId = subgoal.id,
                             if (accepted) {
                                 respondAndResume(
                                     text =
-                                        "R10.16 подтверждён: :perception перезапущен, main AYANA остался жив, " +
-                                            "bridge переподключился к новому PID/epoch, Accessibility восстановлен, " +
-                                            "fresh screen read подтверждён; blind mutation replay запрещён.",
+                                        "R10.16.1 подтверждён: :perception перезапущен, PID/epoch/generation изменились, " +
+                                            "restart telemetry согласована и сохраняет предыдущую identity; " +
+                                            "fresh screen read подтверждён, blind mutation replay запрещён.",
                                     silent = silent,
                                     success = true,
                                     technical = evidence.toString()
                                 )
                             } else {
                                 respondAndResume(
-                                    text = "R10.16 не прошёл acceptance. См. technical evidence в History.",
+                                    text = "R10.16.1 не прошёл telemetry acceptance. См. technical evidence в History.",
                                     silent = silent,
                                     success = false,
                                     technical = evidence.toString()
@@ -66634,9 +66663,9 @@ state
         private const val MASTER_STATUS_MANUAL_REQUIRED =
             "MANUAL_REQUIRED"
 
-        // R10.15.1 ROUTING RECONCILIATION RELEASE TRUTH.
+        // R10.16.1 RESTART TELEMETRY RECONCILIATION RELEASE TRUTH.
         private const val AYANA_VOICE_SERVICE_RELEASE =
-            "v12.47.4 / R10.15.1 ROUTING RECONCILIATION"
+            "v12.48.1 / R10.16.1 RESTART TELEMETRY RECONCILIATION"
 
         private const val AYANA_PERSONAL_SEARCH_ENGINE_RELEASE =
             "v1.5.1 IMAGE COVERAGE TRUTH + R10.2 UNIFIED SEARCH CONTRACT v1.0"
@@ -66648,13 +66677,13 @@ state
             "v11.1.10 Multi-Attachment"
 
         private const val AYANA_ACCEPTED_FEATURE_CHECKPOINT =
-            "R10.15.1 ROUTING RECONCILIATION — DEVICE-CONFIRMED ACCEPTED"
+            "R10.16 PERCEPTION PROCESS RECOVERY + SAFE REBIND — DEVICE-CONFIRMED ACCEPTED"
 
         private const val AYANA_CURRENT_FEATURE_RELEASE =
-            "R10.16 PERCEPTION PROCESS RECOVERY + SAFE REBIND — PENDING DEVICE CONFIRMATION"
+            "R10.16.1 RESTART TELEMETRY RECONCILIATION — PENDING DEVICE CONFIRMATION"
 
         private const val AYANA_RELEASE_LINEAGE =
-            "Android v12.21.0 / R7.9 truth-hardening + R8.0 multi-attachment + R8.1–R8.4 accepted Personal Global Search stack + R8.5–R8.5.4 capability/evidence truth + R9.0 autonomous agent foundation + R9.0.1 history live-refresh proof fix + R9.0.2 diagnostic reconciliation/history refresh fix + R9.0.3 TTS health reconciliation + R9.1 IME perception/active telemetry truth + R9.2 autonomous recovery/long-task reconciliation + R9.2.1 adaptive hypothesis reconciliation + R9.3 app integration framework + R9.3.1 screen health reconciliation + R9.3.2 history latency recovery reconciliation + R9.3.3 informational terminal reconciliation + R9.3.4 app integration device acceptance + R9.4 multi-app task orchestration + R9.4.1 screen ownership union reconciliation + R9.5 verified result transfer between app steps + R9.5.1 partial marker provenance reconciliation + R9.5.2 bounded marker observation + R9.5.3 verified action result transfer + R9.6 verified semantic observation fallback + R9.6.1 visual fallback acceptance truth + R9.7 structured screen reading + R9.7.1 conversation routing/terminal truth + R9.7.2 structured router conversation precedence + R9.7.3 action morphology/terminal truth + R9.8 generic verified result transfer + R9.8.1 master full acceptance/diagnostic engine + R9.9 reversible action journal/verified undo + R9.9.1 brightness verified undo device acceptance + R9.9.2 opt-in low-battery controlled proactivity + R10.0 unified screen intelligence + R10.1 local self-diagnostics/self-audit + R10.2 personal search expansion + R10.3 long autonomous tasks/recovery + R10.4 adaptive verified execution loop + R10.5 generalized live adaptive autonomy + R10.6 cross-lane adaptive continuity + R10.6.1 durable goal binding fix + R10.7 cross-lane durable recovery continuity + R10.7.1 isolated acceptance cleanup hardening + R10.8 general-purpose long autonomous objectives + R10.9 dynamic goal decomposition/planner contract + R10.10 adaptive planner production path + R10.11 production replan/durable recovery + R10.12 natural lifecycle recovery/background continuation + R10.13 full process-death recovery + R10.13.1 post-process readiness/reconciliation + R10.13.2 process-death core recovery proof correction + R10.14 perception process isolation/cross-process accessibility bridge + R10.14.1 cross-process visual evidence fix + R10.14.2 lifecycle profile/self-diagnostic truth + R10.14.3 history recovery reconciliation + R10.15 generalized cross-process autonomy hardening + R10.15.1 self-diagnostics routing reconciliation + R10.16 perception process recovery/safe bridge rebind"
+            "Android v12.21.0 / R7.9 truth-hardening + R8.0 multi-attachment + R8.1–R8.4 accepted Personal Global Search stack + R8.5–R8.5.4 capability/evidence truth + R9.0 autonomous agent foundation + R9.0.1 history live-refresh proof fix + R9.0.2 diagnostic reconciliation/history refresh fix + R9.0.3 TTS health reconciliation + R9.1 IME perception/active telemetry truth + R9.2 autonomous recovery/long-task reconciliation + R9.2.1 adaptive hypothesis reconciliation + R9.3 app integration framework + R9.3.1 screen health reconciliation + R9.3.2 history latency recovery reconciliation + R9.3.3 informational terminal reconciliation + R9.3.4 app integration device acceptance + R9.4 multi-app task orchestration + R9.4.1 screen ownership union reconciliation + R9.5 verified result transfer between app steps + R9.5.1 partial marker provenance reconciliation + R9.5.2 bounded marker observation + R9.5.3 verified action result transfer + R9.6 verified semantic observation fallback + R9.6.1 visual fallback acceptance truth + R9.7 structured screen reading + R9.7.1 conversation routing/terminal truth + R9.7.2 structured router conversation precedence + R9.7.3 action morphology/terminal truth + R9.8 generic verified result transfer + R9.8.1 master full acceptance/diagnostic engine + R9.9 reversible action journal/verified undo + R9.9.1 brightness verified undo device acceptance + R9.9.2 opt-in low-battery controlled proactivity + R10.0 unified screen intelligence + R10.1 local self-diagnostics/self-audit + R10.2 personal search expansion + R10.3 long autonomous tasks/recovery + R10.4 adaptive verified execution loop + R10.5 generalized live adaptive autonomy + R10.6 cross-lane adaptive continuity + R10.6.1 durable goal binding fix + R10.7 cross-lane durable recovery continuity + R10.7.1 isolated acceptance cleanup hardening + R10.8 general-purpose long autonomous objectives + R10.9 dynamic goal decomposition/planner contract + R10.10 adaptive planner production path + R10.11 production replan/durable recovery + R10.12 natural lifecycle recovery/background continuation + R10.13 full process-death recovery + R10.13.1 post-process readiness/reconciliation + R10.13.2 process-death core recovery proof correction + R10.14 perception process isolation/cross-process accessibility bridge + R10.14.1 cross-process visual evidence fix + R10.14.2 lifecycle profile/self-diagnostic truth + R10.14.3 history recovery reconciliation + R10.15 generalized cross-process autonomy hardening + R10.15.1 self-diagnostics routing reconciliation + R10.16 perception process recovery/safe bridge rebind + R10.16.1 restart telemetry reconciliation"
 
         // AyanaCommandHistoryStore v2.8 keeps up to 4k chars inline and stores longer
         // results out-of-line. Self-review intentionally remains inline so copied History
