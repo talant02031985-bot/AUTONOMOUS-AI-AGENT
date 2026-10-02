@@ -63,6 +63,15 @@ import kotlin.math.abs
 
 class AyanaVoiceService : Service() {
 
+    // AYANA v12.55.0 / R10.23 VOICE & BACKGROUND 2.0.
+    // Builds on DEVICE-CONFIRMED R10.21.1 + R10.22.1. Voice-session control now has
+    // an explicit local coordinator: 30-second natural follow-up ownership, stale-session
+    // rejection across mode/lifecycle transitions, fail-closed Service recovery back to WAKE,
+    // and bounded duplicate VOICE dispatch suppression. Human acoustic recognition is not
+    // falsely self-proven: acceptance verifies the live Service/model/microphone readiness plus
+    // deterministic wake/follow-up/recovery/duplicate-dispatch contracts. Durable Goal recovery
+    // remains the only owner of autonomous post-lifecycle execution. ORB/visualizer/UI unchanged.
+    //
     // AYANA v12.54.1 / R10.22.1 NOTIFICATION ACCEPTANCE VISIBILITY RECONCILIATION.
     // Keeps Communication Assistant Engine v2.0 production behavior unchanged. R10.22 device
     // evidence showed NotificationListener connected=true while AYANA's own temporary notification
@@ -677,6 +686,12 @@ class AyanaVoiceService : Service() {
     private val commandDispatchLock =
         Any()
 
+    // R10.23: deterministic voice-session/background ownership. AudioRecord/Sherpa remain
+    // in this Service; the coordinator owns only mode generation, follow-up lifetime and
+    // bounded duplicate voice-dispatch truth.
+    private val voiceBackgroundCoordinator =
+        AyanaVoiceBackgroundCoordinator()
+
     @Volatile
     private var listenMode =
         ListenMode.WAKE
@@ -749,6 +764,10 @@ class AyanaVoiceService : Service() {
     // an older session can never stop a newer microphone session.
     @Volatile
     private var followUpDeadlineToken =
+        0L
+
+    @Volatile
+    private var followUpVoiceSessionGeneration =
         0L
 
     @Volatile
@@ -1595,6 +1614,12 @@ private val miniOrbController by lazy {
         isRunning = false
         shuttingDown = false
 
+        // R10.23: a new Service instance never inherits an executable voice session.
+        // ACTION_START/null recovery explicitly re-enters WAKE after model readiness.
+        voiceBackgroundCoordinator.invalidate(
+            SystemClock.elapsedRealtime()
+        )
+
         createNotificationChannel()
         createBatteryProactivityNotificationChannel()
         registerBatteryProactivityReceiver()
@@ -1882,6 +1907,13 @@ mainHandler.post {
                 isRunning =
                     true
 
+                // R10.23: voice control-plane recovery is always WAKE-only. It never
+                // replays a previously heard command; DurableGoalStore separately owns
+                // any safe autonomous goal continuation.
+                voiceBackgroundCoordinator.recoverService(
+                    SystemClock.elapsedRealtime()
+                )
+
                 ensureOrbForActiveService()
 
                 if (
@@ -2145,6 +2177,10 @@ shuttingDown ||
         listenMode =
             ListenMode.WAKE
 
+        voiceBackgroundCoordinator.enterWake(
+            SystemClock.elapsedRealtime()
+        )
+
         broadcastStatus(
             "Жду: «Аяна»",
             STATE_LISTENING
@@ -2168,6 +2204,10 @@ shuttingDown ||
 
         listenMode =
             ListenMode.QUICK_COMMAND
+
+        voiceBackgroundCoordinator.enterQuickCommand(
+            SystemClock.elapsedRealtime()
+        )
 
         broadcastStatus(
             "Слушаю…",
@@ -2226,6 +2266,13 @@ shuttingDown ||
         listenMode =
             ListenMode.FOLLOW_UP
 
+        val voiceSession =
+            voiceBackgroundCoordinator.enterFollowUp(
+                SystemClock.elapsedRealtime()
+            )
+        followUpVoiceSessionGeneration =
+            voiceSession.generation
+
         broadcastStatus(
             "Можно продолжить без «Аяна»",
             STATE_COMMAND
@@ -2250,7 +2297,11 @@ if (
                     deadlineToken ==
                     followUpDeadlineToken &&
                     listenMode ==
-                    ListenMode.FOLLOW_UP
+                    ListenMode.FOLLOW_UP &&
+                    voiceBackgroundCoordinator.isCurrent(
+                        followUpVoiceSessionGeneration,
+                        AyanaVoiceBackgroundCoordinator.Mode.FOLLOW_UP
+                    )
                 ) {
                     followUpDeadlineToken++
                     stopSherpaListening()
@@ -2273,6 +2324,10 @@ if (
 
         listenMode =
             ListenMode.CANCEL
+
+        voiceBackgroundCoordinator.enterCancel(
+            SystemClock.elapsedRealtime()
+        )
 
         // Do not overwrite THINKING / EXECUTING / SPEAKING visual status.
         // Keep a tiny local listener alive only for STOP/full-shutdown phrases.
@@ -2328,6 +2383,10 @@ if (
 
         listenMode =
             ListenMode.COMMAND
+
+        voiceBackgroundCoordinator.enterCommand(
+            SystemClock.elapsedRealtime()
+        )
 
         broadcastStatus(
             "Слушаю команду…",
@@ -3037,31 +3096,16 @@ if (
                         val followUpNow =
                             SystemClock.elapsedRealtime()
 
-                        val followUpElapsed =
-                            followUpNow -
-                                modeStartedAt
-
-                        val followUpSilentExpired =
-                            !speechSeen &&
-                                followUpElapsed >=
-                                FOLLOW_UP_WINDOW_MS
-
-                        val followUpSpeechStalled =
-                            speechSeen &&
-                                followUpElapsed >=
-                                FOLLOW_UP_WINDOW_MS &&
-                                followUpNow -
-                                    recognitionChangedAt >=
-                                FOLLOW_UP_STALLED_SPEECH_MS
-
-                        val followUpHardExpired =
-                            followUpElapsed >=
-                                FOLLOW_UP_HARD_LIMIT_MS
+                        val followUpDecision =
+                            voiceBackgroundCoordinator.evaluateFollowUp(
+                                sessionGeneration = followUpVoiceSessionGeneration,
+                                speechSeen = speechSeen,
+                                recognitionChangedAtMs = recognitionChangedAt,
+                                nowMs = followUpNow
+                            )
 
                         if (
-                            followUpSilentExpired ||
-                            followUpSpeechStalled ||
-                            followUpHardExpired
+                            followUpDecision.shouldReturnToWake
                         ) {
 
                             isRecording =
@@ -3929,6 +3973,10 @@ message = text.take(
         listenMode =
             ListenMode.BUSY
 
+        voiceBackgroundCoordinator.enterBusy(
+            SystemClock.elapsedRealtime()
+        )
+
         val normalized =
             sanitizeRoutingEnvelope(
                 normalizeRecognitionText(
@@ -3956,6 +4004,34 @@ message = text.take(
             }
 
             return
+        }
+
+        // R10.23: a recognizer/endpoint race must never execute the same VOICE command
+        // twice. Text mode remains unaffected, and the dedupe window is intentionally
+        // short so a deliberate later repetition is treated as a new command.
+        if (!silent) {
+            val dispatchClaim =
+                voiceBackgroundCoordinator.claimVoiceDispatch(
+                    command = normalized,
+                    nowMs = SystemClock.elapsedRealtime()
+                )
+
+            if (!dispatchClaim.allowed) {
+                commandHistoryStore.addEvent(
+                    activeCommandHistoryId,
+                    state = "voice_duplicate_dispatch_suppressed",
+                    message = "Повторный voice-dispatch подавлен до выполнения действия",
+                    details =
+                        "reason=${dispatchClaim.reason}; fingerprint=${dispatchClaim.fingerprint}; " +
+                            "window_ms=${AyanaVoiceBackgroundCoordinator.DEFAULT_DUPLICATE_VOICE_DISPATCH_WINDOW_MS}"
+                )
+                mainHandler.post {
+                    if (!shuttingDown && isRunning) {
+                        startFollowUpListening()
+                    }
+                }
+                return
+            }
         }
 
         // ROUTING REPAIR v9.0
@@ -4579,6 +4655,19 @@ originalCommand
                 return
             }
 
+
+        // R10.23 VOICE & BACKGROUND 2.0 ACCEPTANCE.
+        // Live Service/model/microphone readiness + deterministic wake/follow-up/recovery truth.
+        if (
+            isR10_23VoiceBackgroundAcceptanceCommand(
+                routingNormalized
+            )
+        ) {
+            runR10_23VoiceBackgroundAcceptance(
+                silent = silent
+            )
+            return
+        }
 
         // R10.22 NOTIFICATIONS & COMMUNICATION ASSISTANT ACCEPTANCE.
         // Reversible live NotificationListener probe + local grouping/draft/send-policy truth.
@@ -41208,6 +41297,242 @@ failedSubgoalId = subgoal.id,
 
 
 
+    private fun isR10_23VoiceBackgroundAcceptanceCommand(
+        command: String
+    ): Boolean {
+        val normalized =
+            command
+                .lowercase(Locale.ROOT)
+                .replace('ё', 'е')
+                .replace(Regex("\\s+"), " ")
+                .trim()
+                .removePrefix("аяна ")
+                .trim()
+                .replace(Regex("\\br10\\s+23\\b"), "r10.23")
+                .replace(Regex("\\b2\\s+0\\b"), "2.0")
+
+        return normalized in
+            setOf(
+                "проверь голос и фон 2.0",
+                "проверь голос и фоновую работу 2.0",
+                "проверь voice background 2.0",
+                "проверь voice and background 2.0",
+                "проверь r10.23"
+            )
+    }
+
+    private fun runR10_23VoiceBackgroundAcceptance(
+        silent: Boolean
+    ) {
+        executionPhase(
+            phase = "r10_23_voice_background_2_0_acceptance",
+            executor = "voice_background_coordinator_v2_0"
+        )
+
+        val localSelfTest =
+            try {
+                voiceBackgroundCoordinator.contractSelfTest()
+            } catch (_: Throwable) {
+                false
+            }
+
+        val micPermissionGranted =
+            checkSelfPermission(
+                Manifest.permission.RECORD_AUDIO
+            ) == PackageManager.PERMISSION_GRANTED
+
+        val serviceLive =
+            isRunning &&
+                !shuttingDown
+
+        val recognitionReady =
+            modelReady &&
+                recognizer != null
+
+        val wakeOnly =
+            removeLeadingWakeWord(
+                "аяна"
+            )
+
+        val wakeCommand =
+            removeLeadingWakeWord(
+                "аяна открой youtube"
+            )
+
+        val wakeGrammarVerified =
+            wakeOnly.isBlank() &&
+                wakeCommand == "открой youtube"
+
+        val testCoordinator =
+            AyanaVoiceBackgroundCoordinator()
+
+        val followSession =
+            testCoordinator.enterFollowUp(
+                1_000L
+            )
+        val beforeDeadline =
+            testCoordinator.evaluateFollowUp(
+                sessionGeneration = followSession.generation,
+                speechSeen = false,
+                recognitionChangedAtMs = 1_000L,
+                nowMs = 30_999L
+            )
+        val atDeadline =
+            testCoordinator.evaluateFollowUp(
+                sessionGeneration = followSession.generation,
+                speechSeen = false,
+                recognitionChangedAtMs = 1_000L,
+                nowMs = 31_000L
+            )
+
+        val followUpThirtySecondsVerified =
+            AyanaVoiceBackgroundCoordinator.DEFAULT_FOLLOW_UP_WINDOW_MS == 30_000L &&
+                beforeDeadline.status ==
+                AyanaVoiceBackgroundCoordinator.FollowUpStatus.ACTIVE &&
+                atDeadline.status ==
+                AyanaVoiceBackgroundCoordinator.FollowUpStatus.EXPIRED_SILENCE
+
+        val staleSession =
+            testCoordinator.enterFollowUp(
+                40_000L
+            )
+        testCoordinator.enterWake(
+            40_100L
+        )
+        val staleRejected =
+            testCoordinator.evaluateFollowUp(
+                sessionGeneration = staleSession.generation,
+                speechSeen = false,
+                recognitionChangedAtMs = 40_000L,
+                nowMs = 70_000L
+            ).status ==
+            AyanaVoiceBackgroundCoordinator.FollowUpStatus.STALE_SESSION
+
+        val recoverySource =
+            testCoordinator.enterFollowUp(
+                80_000L
+            )
+        val recovered =
+            testCoordinator.recoverService(
+                80_100L
+            )
+        val recoveryWakeOnly =
+            recovered.mode ==
+                AyanaVoiceBackgroundCoordinator.Mode.WAKE &&
+                recovered.serviceEpoch >
+                recoverySource.serviceEpoch &&
+                !testCoordinator.isCurrent(
+                    recoverySource.generation
+                )
+
+        val firstDispatch =
+            testCoordinator.claimVoiceDispatch(
+                "аяна открой youtube",
+                100_000L
+            )
+        val duplicateDispatch =
+            testCoordinator.claimVoiceDispatch(
+                "Аяна, открой YouTube",
+                100_600L
+            )
+        val laterDispatch =
+            testCoordinator.claimVoiceDispatch(
+                "аяна открой youtube",
+                102_500L
+            )
+        val duplicateDispatchGuardVerified =
+            firstDispatch.allowed &&
+                !duplicateDispatch.allowed &&
+                duplicateDispatch.duplicateSuppressed &&
+                laterDispatch.allowed
+
+        val acceptanceOk =
+            localSelfTest &&
+                serviceLive &&
+                recognitionReady &&
+                micPermissionGranted &&
+                wakeGrammarVerified &&
+                followUpThirtySecondsVerified &&
+                staleRejected &&
+                recoveryWakeOnly &&
+                duplicateDispatchGuardVerified
+
+        val evidence =
+            JSONObject()
+                .put("r10_23_acceptance", true)
+                .put("r10_23_voice_background_2_0", true)
+                .put("acceptance_ok", acceptanceOk)
+                .put(
+                    "voice_background_coordinator_version",
+                    AyanaVoiceBackgroundCoordinator.VERSION
+                )
+                .put(
+                    "voice_background_contract_version",
+                    AyanaVoiceBackgroundCoordinator.CONTRACT_VERSION
+                )
+                .put("local_contract_self_test", localSelfTest)
+                .put("service_live_verified", serviceLive)
+                .put("recognition_model_ready", recognitionReady)
+                .put("record_audio_permission_granted", micPermissionGranted)
+                .put("wake_grammar_verified", wakeGrammarVerified)
+                .put("wake_only_ack_contract_verified", wakeOnly.isBlank())
+                .put("wake_plus_command_contract_verified", wakeCommand == "открой youtube")
+                .put(
+                    "follow_up_window_ms",
+                    AyanaVoiceBackgroundCoordinator.DEFAULT_FOLLOW_UP_WINDOW_MS
+                )
+                .put("follow_up_30s_verified", followUpThirtySecondsVerified)
+                .put("stale_voice_session_rejected", staleRejected)
+                .put("service_recovery_returns_to_wake", recoveryWakeOnly)
+                .put("voice_blind_command_replay_allowed", false)
+                .put("duplicate_voice_dispatch_guard_verified", duplicateDispatchGuardVerified)
+                .put(
+                    "duplicate_voice_dispatch_window_ms",
+                    AyanaVoiceBackgroundCoordinator.DEFAULT_DUPLICATE_VOICE_DISPATCH_WINDOW_MS
+                )
+                .put("durable_goal_recovery_owner_preserved", true)
+                .put("human_acoustic_wake_self_proven", false)
+                .put("manual_human_wake_test_required", true)
+                .put("agent_core_used", false)
+                .put("network_required", false)
+                .put("unresolved_side_effect", false)
+                .put("orb_visual_implementation_changed", false)
+
+        commandHistoryStore.addEvent(
+            activeCommandHistoryId,
+            state =
+                if (acceptanceOk) {
+                    "r10_23_voice_background_2_0_verified"
+                } else {
+                    "r10_23_voice_background_2_0_failed"
+                },
+            message =
+                if (acceptanceOk) {
+                    "R10.23 подтвердил live voice-service readiness + 30s follow-up + stale-session/recovery/duplicate-dispatch contracts"
+                } else {
+                    "R10.23 Voice & Background 2.0 не подтвердил все gates"
+                },
+            details = evidence.toString().take(5000)
+        )
+
+        if (acceptanceOk) {
+            respondAndResume(
+                text =
+                    "R10.23 подтверждён на уровне voice/background control-plane: Service и локальная модель готовы, follow-up = 30 секунд, stale voice-session блокируется, lifecycle recovery возвращается в WAKE без blind replay, повторный voice-dispatch подавляется. Человеческое произнесение wake-word остаётся отдельным ручным acoustic test и не подменяется synthetic self-test.",
+                silent = silent,
+                success = true,
+                technical = evidence.toString()
+            )
+        } else {
+            respondAndResume(
+                text = "R10.23 не прошёл acceptance. См. technical evidence в History.",
+                silent = silent,
+                success = false,
+                technical = evidence.toString()
+            )
+        }
+    }
+
     private fun isR10_22CommunicationAssistantAcceptanceCommand(
         command: String
     ): Boolean {
@@ -69502,6 +69827,10 @@ state
         recognizer =
             null
 
+        voiceBackgroundCoordinator.invalidate(
+            SystemClock.elapsedRealtime()
+        )
+
         modelReady =
             false
         capabilityRegistry
@@ -69580,6 +69909,10 @@ state
         recognizer =
             null
 
+        voiceBackgroundCoordinator.invalidate(
+            SystemClock.elapsedRealtime()
+        )
+
         modelReady =
             false
         capabilityRegistry
@@ -69615,9 +69948,9 @@ state
         private const val MASTER_STATUS_MANUAL_REQUIRED =
             "MANUAL_REQUIRED"
 
-        // R10.22 NOTIFICATIONS & COMMUNICATION ASSISTANT RELEASE TRUTH.
+        // R10.23 VOICE & BACKGROUND 2.0 RELEASE TRUTH.
         private const val AYANA_VOICE_SERVICE_RELEASE =
-            "v12.54.2 / R10.21.1 PPTX COMPLETION EVIDENCE RECONCILIATION + R10.22.1"
+            "v12.55.0 / R10.23 VOICE & BACKGROUND 2.0"
 
         private const val AYANA_PERSONAL_SEARCH_ENGINE_RELEASE =
             "v2.0 / R10.20 PERSONAL SEARCH 2.0 + VERIFIED RESULT CONTRACT v2"
@@ -69629,13 +69962,13 @@ state
             "v11.2.1 / R10.21 PPTX ARTIFACT CONTRACT"
 
         private const val AYANA_ACCEPTED_FEATURE_CHECKPOINT =
-            "R10.21 DOCUMENT & OFFICE ENGINE 2.0 — DEVICE-CONFIRMED ACCEPTED"
+            "R10.21.1 PPTX COMPLETION + R10.22.1 COMMUNICATION — DEVICE-CONFIRMED ACCEPTED"
 
         private const val AYANA_CURRENT_FEATURE_RELEASE =
-            "R10.22.1 NOTIFICATION ACCEPTANCE VISIBILITY RECONCILIATION + R10.21.1 PPTX COMPLETION HOTFIX — PENDING DEVICE CONFIRMATION"
+            "R10.23 VOICE & BACKGROUND 2.0 — PENDING DEVICE CONFIRMATION"
 
         private const val AYANA_RELEASE_LINEAGE =
-            "Android v12.21.0 / R7.9 truth-hardening + R8.0 multi-attachment + R8.1–R8.4 accepted Personal Global Search stack + R8.5–R8.5.4 capability/evidence truth + R9.0 autonomous agent foundation + R9.0.1 history live-refresh proof fix + R9.0.2 diagnostic reconciliation/history refresh fix + R9.0.3 TTS health reconciliation + R9.1 IME perception/active telemetry truth + R9.2 autonomous recovery/long-task reconciliation + R9.2.1 adaptive hypothesis reconciliation + R9.3 app integration framework + R9.3.1 screen health reconciliation + R9.3.2 history latency recovery reconciliation + R9.3.3 informational terminal reconciliation + R9.3.4 app integration device acceptance + R9.4 multi-app task orchestration + R9.4.1 screen ownership union reconciliation + R9.5 verified result transfer between app steps + R9.5.1 partial marker provenance reconciliation + R9.5.2 bounded marker observation + R9.5.3 verified action result transfer + R9.6 verified semantic observation fallback + R9.6.1 visual fallback acceptance truth + R9.7 structured screen reading + R9.7.1 conversation routing/terminal truth + R9.7.2 structured router conversation precedence + R9.7.3 action morphology/terminal truth + R9.8 generic verified result transfer + R9.8.1 master full acceptance/diagnostic engine + R9.9 reversible action journal/verified undo + R9.9.1 brightness verified undo device acceptance + R9.9.2 opt-in low-battery controlled proactivity + R10.0 unified screen intelligence + R10.1 local self-diagnostics/self-audit + R10.2 personal search expansion + R10.3 long autonomous tasks/recovery + R10.4 adaptive verified execution loop + R10.5 generalized live adaptive autonomy + R10.6 cross-lane adaptive continuity + R10.6.1 durable goal binding fix + R10.7 cross-lane durable recovery continuity + R10.7.1 isolated acceptance cleanup hardening + R10.8 general-purpose long autonomous objectives + R10.9 dynamic goal decomposition/planner contract + R10.10 adaptive planner production path + R10.11 production replan/durable recovery + R10.12 natural lifecycle recovery/background continuation + R10.13 full process-death recovery + R10.13.1 post-process readiness/reconciliation + R10.13.2 process-death core recovery proof correction + R10.14 perception process isolation/cross-process accessibility bridge + R10.14.1 cross-process visual evidence fix + R10.14.2 lifecycle profile/self-diagnostic truth + R10.14.3 history recovery reconciliation + R10.15 generalized cross-process autonomy hardening + R10.15.1 self-diagnostics routing reconciliation + R10.16 perception process recovery/safe bridge rebind + R10.16.1 restart telemetry reconciliation + R10.17 screen intelligence 2.0 + R10.17.1 acceptance routing reconciliation + R10.18 universal UI action engine + R10.18.1 acceptance target reconciliation + R10.18.2 live target authority reconciliation + R10.18.3 app info target reconciliation + R10.19 autonomous multi-app tasks 2.0 + R10.20 personal search 2.0 + R10.21 document & office engine 2.0 + R10.22 notifications & communication assistant + R10.22.1 notification acceptance visibility reconciliation + R10.21.1 pptx completion evidence reconciliation"
+            "Android v12.21.0 / R7.9 truth-hardening + R8.0 multi-attachment + R8.1–R8.4 accepted Personal Global Search stack + R8.5–R8.5.4 capability/evidence truth + R9.0 autonomous agent foundation + R9.0.1 history live-refresh proof fix + R9.0.2 diagnostic reconciliation/history refresh fix + R9.0.3 TTS health reconciliation + R9.1 IME perception/active telemetry truth + R9.2 autonomous recovery/long-task reconciliation + R9.2.1 adaptive hypothesis reconciliation + R9.3 app integration framework + R9.3.1 screen health reconciliation + R9.3.2 history latency recovery reconciliation + R9.3.3 informational terminal reconciliation + R9.3.4 app integration device acceptance + R9.4 multi-app task orchestration + R9.4.1 screen ownership union reconciliation + R9.5 verified result transfer between app steps + R9.5.1 partial marker provenance reconciliation + R9.5.2 bounded marker observation + R9.5.3 verified action result transfer + R9.6 verified semantic observation fallback + R9.6.1 visual fallback acceptance truth + R9.7 structured screen reading + R9.7.1 conversation routing/terminal truth + R9.7.2 structured router conversation precedence + R9.7.3 action morphology/terminal truth + R9.8 generic verified result transfer + R9.8.1 master full acceptance/diagnostic engine + R9.9 reversible action journal/verified undo + R9.9.1 brightness verified undo device acceptance + R9.9.2 opt-in low-battery controlled proactivity + R10.0 unified screen intelligence + R10.1 local self-diagnostics/self-audit + R10.2 personal search expansion + R10.3 long autonomous tasks/recovery + R10.4 adaptive verified execution loop + R10.5 generalized live adaptive autonomy + R10.6 cross-lane adaptive continuity + R10.6.1 durable goal binding fix + R10.7 cross-lane durable recovery continuity + R10.7.1 isolated acceptance cleanup hardening + R10.8 general-purpose long autonomous objectives + R10.9 dynamic goal decomposition/planner contract + R10.10 adaptive planner production path + R10.11 production replan/durable recovery + R10.12 natural lifecycle recovery/background continuation + R10.13 full process-death recovery + R10.13.1 post-process readiness/reconciliation + R10.13.2 process-death core recovery proof correction + R10.14 perception process isolation/cross-process accessibility bridge + R10.14.1 cross-process visual evidence fix + R10.14.2 lifecycle profile/self-diagnostic truth + R10.14.3 history recovery reconciliation + R10.15 generalized cross-process autonomy hardening + R10.15.1 self-diagnostics routing reconciliation + R10.16 perception process recovery/safe bridge rebind + R10.16.1 restart telemetry reconciliation + R10.17 screen intelligence 2.0 + R10.17.1 acceptance routing reconciliation + R10.18 universal UI action engine + R10.18.1 acceptance target reconciliation + R10.18.2 live target authority reconciliation + R10.18.3 app info target reconciliation + R10.19 autonomous multi-app tasks 2.0 + R10.20 personal search 2.0 + R10.21 document & office engine 2.0 + R10.22 notifications & communication assistant + R10.22.1 notification acceptance visibility reconciliation + R10.21.1 pptx completion evidence reconciliation + R10.23 voice & background 2.0"
 
         // AyanaCommandHistoryStore v2.8 keeps up to 4k chars inline and stores longer
         // results out-of-line. Self-review intentionally remains inline so copied History
@@ -70087,16 +70420,16 @@ const val ACTION_START =
         // After a completed voice action, allow a short natural follow-up
         // without repeating «Аяна». Silence returns to normal wake mode.
         private const val FOLLOW_UP_WINDOW_MS =
-            8000L
+            AyanaVoiceBackgroundCoordinator.DEFAULT_FOLLOW_UP_WINDOW_MS
 
         // A non-empty recognizer hypothesis can be noise/echo and must not keep
-        // FOLLOW_UP alive forever. After the normal window, a stable hypothesis
+        // FOLLOW_UP alive forever. After the normal 30-second window, a stable hypothesis
         // receives only a short endpoint grace; an absolute hard deadline wins.
         private const val FOLLOW_UP_STALLED_SPEECH_MS =
-            1400L
+            AyanaVoiceBackgroundCoordinator.DEFAULT_FOLLOW_UP_STALLED_SPEECH_MS
 
         private const val FOLLOW_UP_HARD_LIMIT_MS =
-            12000L
+            AyanaVoiceBackgroundCoordinator.DEFAULT_FOLLOW_UP_HARD_LIMIT_MS
 
         // v11.5 app execution router. The context TTL deliberately outlives one
         // Marin clarification response so the user's short follow-up remains local.
