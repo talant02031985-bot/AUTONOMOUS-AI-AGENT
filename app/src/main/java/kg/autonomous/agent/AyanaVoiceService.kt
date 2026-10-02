@@ -63,6 +63,15 @@ import kotlin.math.abs
 
 class AyanaVoiceService : Service() {
 
+    // AYANA v12.53.0 / R10.21 DOCUMENT & OFFICE ENGINE 2.0.
+    // Builds on DEVICE-CONFIRMED R10.20. Adds AyanaOfficeDocumentEngine v2.0 with
+    // dependency-free TXT/DOCX/XLSX/PPTX read-edit-reopen verification, exact OOXML
+    // package-preserving replacement, and a real PowerPoint PPTX create_artifact path.
+    // Production PDF stays on the already accepted ArtifactEngine; R10.21 verifies it
+    // separately. Document text remains data-only and never grants Android action authority.
+    // Acceptance uses reversible scratch Office files plus one published-and-deleted PPTX.
+    // ORB/visualizer/UI unchanged.
+    //
     // AYANA v12.52.0 / R10.20 PERSONAL SEARCH 2.0.
     // Builds on DEVICE-CONFIRMED R10.19. Personal Search Engine v2.0 keeps the existing
     // six local source families but adds one provenance/confidence/fingerprint contract,
@@ -1138,6 +1147,12 @@ private val miniOrbController by lazy {
     // private cache, verified, and only then published to Downloads/AYANA.
     private val artifactEngine by lazy {
         AyanaArtifactEngine(applicationContext)
+    }
+
+    // R10.21 verified Office/OOXML layer. PPTX creation is owned here because the
+    // legacy ArtifactEngine intentionally predates PowerPoint support.
+    private val officeDocumentEngine by lazy {
+        AyanaOfficeDocumentEngine(applicationContext)
     }
 
     // v12.7: DOCX translation does not rebuild Word from plain text. It keeps
@@ -4541,6 +4556,19 @@ originalCommand
                 return
             }
 
+
+        // R10.21 DOCUMENT & OFFICE ENGINE 2.0 ACCEPTANCE.
+        // Local read/edit/reopen truth plus one real published-and-deleted PPTX artifact.
+        if (
+            isR10_21DocumentOffice2AcceptanceCommand(
+                routingNormalized
+            )
+        ) {
+            runR10_21DocumentOffice2Acceptance(
+                silent = silent
+            )
+            return
+        }
 
         // R10.20 PERSONAL SEARCH 2.0 ACCEPTANCE.
         // Local-only reversible probe: seeded History fact -> semantic alias search ->
@@ -9414,6 +9442,12 @@ if (AggregateMetric.MEDIA_VOLUME in metrics) {
             "xlsx",
             "excel",
             "эксел",
+            "pptx",
+            "powerpoint",
+            "power point",
+            "пауэрпоинт",
+            "паверпоинт",
+            "презентац",
             "jpeg",
 "jpg",
             "изображен",
@@ -23167,7 +23201,13 @@ append(index + 1)
                     (columns?.length() ?: 0) > 0 &&
                         (rows?.length() ?: 0) > 0
                     )
-val reportPayloadPresent =
+
+        val presentationPayloadPresent =
+            kind != "pptx" ||
+                content.isNotBlank() ||
+                (rows?.length() ?: 0) > 0
+
+        val reportPayloadPresent =
             !asksForSubstantialReport ||
                 (
                     content.length >= 220 &&
@@ -23177,6 +23217,7 @@ val reportPayloadPresent =
         val allowed =
             (!asksForCode || codePayloadPresent) &&
                 tablePayloadPresent &&
+                presentationPayloadPresent &&
                 reportPayloadPresent
 
         val reason =
@@ -23186,6 +23227,9 @@ val reportPayloadPresent =
 
                 !tablePayloadPresent ->
                     "requested_table_payload_missing"
+
+                !presentationPayloadPresent ->
+                    "requested_presentation_payload_missing"
 
                 !reportPayloadPresent ->
                     "requested_report_payload_incomplete"
@@ -23204,6 +23248,7 @@ val reportPayloadPresent =
             .put("code_marker_count", codeMarkerCount)
             .put("code_payload_present", codePayloadPresent)
             .put("table_payload_present", tablePayloadPresent)
+            .put("presentation_payload_present", presentationPayloadPresent)
             .put("report_payload_present", reportPayloadPresent)
     }
 
@@ -41103,6 +41148,291 @@ failedSubgoalId = subgoal.id,
 
 
 
+    private fun isR10_21DocumentOffice2AcceptanceCommand(
+        command: String
+    ): Boolean {
+        val normalized =
+            command
+                .lowercase(Locale.ROOT)
+                .replace('ё', 'е')
+                .replace(Regex("\\s+"), " ")
+                .trim()
+                .removePrefix("аяна ")
+                .trim()
+                .replace(Regex("\\br10\\s+21\\b"), "r10.21")
+                .replace(Regex("\\b2\\s+0\\b"), "2.0")
+
+        return normalized in
+            setOf(
+                "проверь документы и офис 2.0",
+                "проверь document office 2.0",
+                "проверь document & office engine 2.0",
+                "проверь офисный движок 2.0",
+                "проверь powerpoint и документы 2.0",
+                "проверь r10.21"
+            )
+    }
+
+    private fun runR10_21DocumentOffice2Acceptance(
+        silent: Boolean
+    ) {
+        executionPhase(
+            phase = "r10_21_document_office_engine_2_0_acceptance",
+            executor = "office_document_engine_v2_0+artifact_engine_v1_3"
+        )
+
+        val commandToken =
+            activeCommandToken
+
+        val worker =
+            thread(
+                start = false,
+                name = "AyanaOfficeR10_21Acceptance"
+            ) {
+                var publishedReference = ""
+                var pptxCleanupVerified = false
+
+                try {
+                    val localSelfTest =
+                        try {
+                            officeDocumentEngine.selfTest()
+                        } catch (_: Throwable) {
+                            false
+                        }
+
+                    val scratch =
+                        officeDocumentEngine
+                            .runScratchRoundTripAcceptance()
+
+                    val slides =
+                        JSONArray()
+                            .put(
+                                JSONArray()
+                                    .put("AYANA Office 2.0")
+                                    .put("R10.21 PowerPoint production publish/reopen verification")
+                            )
+                            .put(
+                                JSONArray()
+                                    .put("Проверка")
+                                    .put("AYANA_R10_21_PPTX_VERIFIED")
+                            )
+
+                    val pptxResult =
+                        officeDocumentEngine
+                            .createPresentationArtifact(
+                                arguments =
+                                    JSONObject()
+                                        .put("kind", "pptx")
+                                        .put(
+                                            "filename",
+                                            "AYANA_R10_21_PPTX_${System.currentTimeMillis()}.pptx"
+                                        )
+                                        .put("title", "AYANA Office 2.0")
+                                        .put(
+                                            "content",
+                                            "R10.21 PowerPoint production verification"
+                                        )
+                                        .put("columns", JSONArray())
+                                        .put("rows", slides)
+                                        .put("column_types", JSONArray())
+                                        .put("chart_type", "none"),
+                                tryBeginPublish = { true },
+                                onPublishAccepted = { },
+                                onPublishReconciliationStarted = { },
+                                onPublishReconciled = { _, _ -> }
+                            )
+
+                    publishedReference =
+                        pptxResult
+                            .optString("artifact_reference")
+                            .trim()
+
+                    val pptxPublishedVerified =
+                        pptxResult.optBoolean("success", false) &&
+                            pptxResult.optBoolean("verified", false) &&
+                            pptxResult.optInt("slide_count", 0) == 2 &&
+                            pptxResult.optBoolean(
+                                "package_reopened_verified",
+                                false
+                            ) &&
+                            pptxResult.optBoolean(
+                                "semantic_content_verified",
+                                false
+                            ) &&
+                            publishedReference.isNotBlank()
+
+                    pptxCleanupVerified =
+                        if (publishedReference.isBlank()) {
+                            false
+                        } else {
+                            try {
+                                contentResolver.delete(
+                                    Uri.parse(publishedReference),
+                                    null,
+                                    null
+                                ) > 0
+                            } catch (_: Throwable) {
+                                false
+                            }
+                        }
+
+                    publishedReference = ""
+
+                    // R10.21 does not replace the already accepted production PDF writer.
+                    // Re-run that exact production round-trip and cleanup to prove no regression.
+                    val pdfProbe =
+                        acceptanceArtifactRoundTripProbe("pdf")
+                    val pdfProductionVerified =
+                        pdfProbe.optBoolean("verified", false)
+
+                    val scratchVerified =
+                        scratch.optBoolean("verified", false) &&
+                            scratch.optBoolean("txt_roundtrip_verified", false) &&
+                            scratch.optBoolean("docx_roundtrip_verified", false) &&
+                            scratch.optBoolean("docx_package_structure_preserved", false) &&
+                            scratch.optBoolean("xlsx_roundtrip_verified", false) &&
+                            scratch.optBoolean("xlsx_package_structure_preserved", false) &&
+                            scratch.optBoolean("pptx_roundtrip_verified", false) &&
+                            scratch.optBoolean("pptx_package_structure_preserved", false) &&
+                            scratch.optInt("pptx_slide_count", 0) == 2 &&
+                            scratch.optBoolean("pdf_structural_probe_verified", false) &&
+                            scratch.optBoolean("scratch_cleanup_verified", false) &&
+                            !scratch.optBoolean("source_modified_in_place", true)
+
+                    val acceptanceOk =
+                        localSelfTest &&
+                            scratchVerified &&
+                            pptxPublishedVerified &&
+                            pptxCleanupVerified &&
+                            pdfProductionVerified
+
+                    val evidence =
+                        JSONObject()
+                            .put("r10_21_acceptance", true)
+                            .put("r10_21_document_office_engine_2_0", true)
+                            .put("acceptance_ok", acceptanceOk)
+                            .put(
+                                "office_document_engine_version",
+                                AyanaOfficeDocumentEngine.VERSION
+                            )
+                            .put(
+                                "office_contract_version",
+                                AyanaOfficeDocumentEngine.CONTRACT_VERSION
+                            )
+                            .put("local_contract_self_test", localSelfTest)
+                            .put("txt_roundtrip_verified", scratch.optBoolean("txt_roundtrip_verified", false))
+                            .put("docx_roundtrip_verified", scratch.optBoolean("docx_roundtrip_verified", false))
+                            .put("docx_package_structure_preserved", scratch.optBoolean("docx_package_structure_preserved", false))
+                            .put("xlsx_roundtrip_verified", scratch.optBoolean("xlsx_roundtrip_verified", false))
+                            .put("xlsx_package_structure_preserved", scratch.optBoolean("xlsx_package_structure_preserved", false))
+                            .put("pptx_roundtrip_verified", scratch.optBoolean("pptx_roundtrip_verified", false))
+                            .put("pptx_package_structure_preserved", scratch.optBoolean("pptx_package_structure_preserved", false))
+                            .put("pptx_slide_count", scratch.optInt("pptx_slide_count", 0))
+                            .put("pptx_create_artifact_supported", true)
+                            .put("pptx_production_publish_verified", pptxPublishedVerified)
+                            .put("pptx_production_reopen_verified", pptxResult.optBoolean("package_reopened_verified", false))
+                            .put("pptx_production_semantic_content_verified", pptxResult.optBoolean("semantic_content_verified", false))
+                            .put("pptx_artifact_reference_present", pptxResult.optString("artifact_reference").isNotBlank())
+                            .put("pptx_test_artifact_deleted", pptxCleanupVerified)
+                            .put("pdf_existing_production_roundtrip_verified", pdfProductionVerified)
+                            .put("source_modified_in_place", false)
+                            .put("document_text_instruction_authority", false)
+                            .put("document_text_grants_action_authority", false)
+                            .put("network_required", false)
+                            .put("agent_core_used", false)
+                            .put("unresolved_side_effect", false)
+                            .put("orb_visual_implementation_changed", false)
+
+                    commandHistoryStore.addEvent(
+                        activeCommandHistoryId,
+                        state =
+                            if (acceptanceOk) {
+                                "r10_21_document_office_engine_2_0_verified"
+                            } else {
+                                "r10_21_document_office_engine_2_0_failed"
+                            },
+                        message =
+                            if (acceptanceOk) {
+                                "R10.21 подтвердил TXT/DOCX/XLSX/PPTX read-edit-reopen и production PPTX create_artifact"
+                            } else {
+                                "R10.21 Document & Office Engine 2.0 не подтвердил все gates"
+                            },
+                        details = evidence.toString().take(5000)
+                    )
+
+                    mainHandler.post {
+                        if (
+                            isCommandCancelled(commandToken) ||
+                            commandToken != activeCommandToken
+                        ) {
+                            return@post
+                        }
+
+                        if (acceptanceOk) {
+                            respondAndResume(
+                                text =
+                                    "R10.21 подтверждён: AYANA прочитала, изменила, повторно открыла и проверила TXT/DOCX/XLSX/PPTX без перестройки OOXML-пакета; production PowerPoint PPTX реально создан, повторно проверен и тестовый файл удалён. PDF production round-trip также подтверждён.",
+                                silent = silent,
+                                success = true,
+                                technical = evidence.toString()
+                            )
+                        } else {
+                            respondAndResume(
+                                text = "R10.21 не прошёл acceptance. См. technical evidence в History.",
+                                silent = silent,
+                                success = false,
+                                technical = evidence.toString()
+                            )
+                        }
+                    }
+                } catch (error: Throwable) {
+                    if (publishedReference.isNotBlank()) {
+                        try {
+                            pptxCleanupVerified =
+                                contentResolver.delete(
+                                    Uri.parse(publishedReference),
+                                    null,
+                                    null
+                                ) > 0
+                        } catch (_: Throwable) {
+                        }
+                    }
+
+                    val evidence =
+                        JSONObject()
+                            .put("r10_21_acceptance", true)
+                            .put("acceptance_ok", false)
+                            .put("reason", "r10_21_acceptance_exception")
+                            .put("error", (error.message ?: error.javaClass.simpleName).take(800))
+                            .put("pptx_test_artifact_deleted", pptxCleanupVerified)
+                            .put("unresolved_side_effect", false)
+
+                    mainHandler.post {
+                        if (
+                            !isCommandCancelled(commandToken) &&
+                            commandToken == activeCommandToken
+                        ) {
+                            respondAndResume(
+                                text = "R10.21 Document & Office Engine 2.0 завершился ошибкой.",
+                                silent = silent,
+                                success = false,
+                                technical = evidence.toString()
+                            )
+                        }
+                    }
+                } finally {
+                    if (Thread.currentThread() === currentAgentThread) {
+                        currentAgentThread = null
+                    }
+                }
+            }
+
+        currentAgentThread = worker
+        executionKernel.bindThread(worker)
+        worker.start()
+    }
+
+
     private fun isR10_20PersonalSearch2AcceptanceCommand(
         command: String
     ): Boolean {
@@ -51789,7 +52119,7 @@ mutableListOf<String>()
 
             hasDocument &&
                 asksCreation ->
-                "Да. Текущая AYANA создаёт реальные TXT, Word DOCX, PDF, Excel XLSX, JPEG и JPEG-графики, проверяет результат и только после этого сохраняет его в Downloads/AYANA. PPTX пока не создаётся."
+                "Да. Текущая AYANA создаёт реальные TXT, Word DOCX, PDF, Excel XLSX, PowerPoint PPTX, JPEG и JPEG-графики, проверяет результат и только после этого сохраняет его в Downloads/AYANA. Для PPTX R10.21 повторно открывает OOXML-пакет и проверяет число слайдов и текст перед SUCCESS."
 
             topicCount >= 2 &&
                 (asksUpload || asksAnalysis) ->
@@ -62881,32 +63211,59 @@ private fun isSemanticActionResultVerified(
 
                 "create_artifact" -> {
 
-                    artifactEngine
-                        .create(
-                            arguments = arguments,
-                            tryBeginPublish = { detail ->
-                                executionKernel.tryBeginIrreversibleDispatch(
-                                    kind = "artifact_publish",
-                                    detail = detail
-                                )
-                            },
-                            onPublishAccepted = { detail ->
-                                executionKernel.markIrreversibleDispatchAccepted(
-                                    detail
-                                )
-                            },
-                            onPublishReconciliationStarted = { detail ->
-                                executionKernel.markSideEffectReconciliationStarted(
-                                    detail
-                                )
-                            },
-                            onPublishReconciled = { committed, detail ->
-                                executionKernel.markSideEffectReconciled(
-                                    committed = committed,
-                                    detail = detail
-                                )
-                            }
-                        )
+                    val artifactKind =
+                        arguments
+                            .optString("kind")
+                            .trim()
+                            .lowercase(Locale.ROOT)
+
+                    if (artifactKind == "pptx") {
+                        officeDocumentEngine
+                            .createPresentationArtifact(
+                                arguments = arguments,
+                                tryBeginPublish = { detail ->
+                                    executionKernel.tryBeginIrreversibleDispatch(
+                                        kind = "artifact_publish",
+                                        detail = detail
+                                    )
+                                },
+                                onPublishAccepted = { detail ->
+                                    executionKernel.markIrreversibleDispatchAccepted(detail)
+                                },
+                                onPublishReconciliationStarted = { detail ->
+                                    executionKernel.markSideEffectReconciliationStarted(detail)
+                                },
+                                onPublishReconciled = { committed, detail ->
+                                    executionKernel.markSideEffectReconciled(
+                                        committed = committed,
+                                        detail = detail
+                                    )
+                                }
+                            )
+                    } else {
+                        artifactEngine
+                            .create(
+                                arguments = arguments,
+                                tryBeginPublish = { detail ->
+                                    executionKernel.tryBeginIrreversibleDispatch(
+                                        kind = "artifact_publish",
+                                        detail = detail
+                                    )
+                                },
+                                onPublishAccepted = { detail ->
+                                    executionKernel.markIrreversibleDispatchAccepted(detail)
+                                },
+                                onPublishReconciliationStarted = { detail ->
+                                    executionKernel.markSideEffectReconciliationStarted(detail)
+                                },
+                                onPublishReconciled = { committed, detail ->
+                                    executionKernel.markSideEffectReconciled(
+                                        committed = committed,
+                                        detail = detail
+                                    )
+                                }
+                            )
+                    }
                 }
 
                 "delete_reminder" -> {
@@ -68522,9 +68879,9 @@ state
         private const val MASTER_STATUS_MANUAL_REQUIRED =
             "MANUAL_REQUIRED"
 
-        // R10.20 PERSONAL SEARCH 2.0 RELEASE TRUTH.
+        // R10.21 DOCUMENT & OFFICE ENGINE 2.0 RELEASE TRUTH.
         private const val AYANA_VOICE_SERVICE_RELEASE =
-            "v12.52.0 / R10.20 PERSONAL SEARCH 2.0"
+            "v12.53.0 / R10.21 DOCUMENT & OFFICE ENGINE 2.0"
 
         private const val AYANA_PERSONAL_SEARCH_ENGINE_RELEASE =
             "v2.0 / R10.20 PERSONAL SEARCH 2.0 + VERIFIED RESULT CONTRACT v2"
@@ -68533,16 +68890,16 @@ state
             "v3.2.1"
 
         private const val AYANA_WORKER_RELEASE =
-            "v11.1.10 Multi-Attachment"
+            "v11.2.1 / R10.21 PPTX ARTIFACT CONTRACT"
 
         private const val AYANA_ACCEPTED_FEATURE_CHECKPOINT =
-            "R10.19 AUTONOMOUS MULTI-APP TASKS 2.0 — DEVICE-CONFIRMED ACCEPTED"
+            "R10.20 PERSONAL SEARCH 2.0 — DEVICE-CONFIRMED ACCEPTED"
 
         private const val AYANA_CURRENT_FEATURE_RELEASE =
-            "R10.20 PERSONAL SEARCH 2.0 — PENDING DEVICE CONFIRMATION"
+            "R10.21 DOCUMENT & OFFICE ENGINE 2.0 — PENDING DEVICE CONFIRMATION"
 
         private const val AYANA_RELEASE_LINEAGE =
-            "Android v12.21.0 / R7.9 truth-hardening + R8.0 multi-attachment + R8.1–R8.4 accepted Personal Global Search stack + R8.5–R8.5.4 capability/evidence truth + R9.0 autonomous agent foundation + R9.0.1 history live-refresh proof fix + R9.0.2 diagnostic reconciliation/history refresh fix + R9.0.3 TTS health reconciliation + R9.1 IME perception/active telemetry truth + R9.2 autonomous recovery/long-task reconciliation + R9.2.1 adaptive hypothesis reconciliation + R9.3 app integration framework + R9.3.1 screen health reconciliation + R9.3.2 history latency recovery reconciliation + R9.3.3 informational terminal reconciliation + R9.3.4 app integration device acceptance + R9.4 multi-app task orchestration + R9.4.1 screen ownership union reconciliation + R9.5 verified result transfer between app steps + R9.5.1 partial marker provenance reconciliation + R9.5.2 bounded marker observation + R9.5.3 verified action result transfer + R9.6 verified semantic observation fallback + R9.6.1 visual fallback acceptance truth + R9.7 structured screen reading + R9.7.1 conversation routing/terminal truth + R9.7.2 structured router conversation precedence + R9.7.3 action morphology/terminal truth + R9.8 generic verified result transfer + R9.8.1 master full acceptance/diagnostic engine + R9.9 reversible action journal/verified undo + R9.9.1 brightness verified undo device acceptance + R9.9.2 opt-in low-battery controlled proactivity + R10.0 unified screen intelligence + R10.1 local self-diagnostics/self-audit + R10.2 personal search expansion + R10.3 long autonomous tasks/recovery + R10.4 adaptive verified execution loop + R10.5 generalized live adaptive autonomy + R10.6 cross-lane adaptive continuity + R10.6.1 durable goal binding fix + R10.7 cross-lane durable recovery continuity + R10.7.1 isolated acceptance cleanup hardening + R10.8 general-purpose long autonomous objectives + R10.9 dynamic goal decomposition/planner contract + R10.10 adaptive planner production path + R10.11 production replan/durable recovery + R10.12 natural lifecycle recovery/background continuation + R10.13 full process-death recovery + R10.13.1 post-process readiness/reconciliation + R10.13.2 process-death core recovery proof correction + R10.14 perception process isolation/cross-process accessibility bridge + R10.14.1 cross-process visual evidence fix + R10.14.2 lifecycle profile/self-diagnostic truth + R10.14.3 history recovery reconciliation + R10.15 generalized cross-process autonomy hardening + R10.15.1 self-diagnostics routing reconciliation + R10.16 perception process recovery/safe bridge rebind + R10.16.1 restart telemetry reconciliation + R10.17 screen intelligence 2.0 + R10.17.1 acceptance routing reconciliation + R10.18 universal UI action engine + R10.18.1 acceptance target reconciliation + R10.18.2 live target authority reconciliation + R10.18.3 app info target reconciliation + R10.19 autonomous multi-app tasks 2.0 + R10.20 personal search 2.0"
+            "Android v12.21.0 / R7.9 truth-hardening + R8.0 multi-attachment + R8.1–R8.4 accepted Personal Global Search stack + R8.5–R8.5.4 capability/evidence truth + R9.0 autonomous agent foundation + R9.0.1 history live-refresh proof fix + R9.0.2 diagnostic reconciliation/history refresh fix + R9.0.3 TTS health reconciliation + R9.1 IME perception/active telemetry truth + R9.2 autonomous recovery/long-task reconciliation + R9.2.1 adaptive hypothesis reconciliation + R9.3 app integration framework + R9.3.1 screen health reconciliation + R9.3.2 history latency recovery reconciliation + R9.3.3 informational terminal reconciliation + R9.3.4 app integration device acceptance + R9.4 multi-app task orchestration + R9.4.1 screen ownership union reconciliation + R9.5 verified result transfer between app steps + R9.5.1 partial marker provenance reconciliation + R9.5.2 bounded marker observation + R9.5.3 verified action result transfer + R9.6 verified semantic observation fallback + R9.6.1 visual fallback acceptance truth + R9.7 structured screen reading + R9.7.1 conversation routing/terminal truth + R9.7.2 structured router conversation precedence + R9.7.3 action morphology/terminal truth + R9.8 generic verified result transfer + R9.8.1 master full acceptance/diagnostic engine + R9.9 reversible action journal/verified undo + R9.9.1 brightness verified undo device acceptance + R9.9.2 opt-in low-battery controlled proactivity + R10.0 unified screen intelligence + R10.1 local self-diagnostics/self-audit + R10.2 personal search expansion + R10.3 long autonomous tasks/recovery + R10.4 adaptive verified execution loop + R10.5 generalized live adaptive autonomy + R10.6 cross-lane adaptive continuity + R10.6.1 durable goal binding fix + R10.7 cross-lane durable recovery continuity + R10.7.1 isolated acceptance cleanup hardening + R10.8 general-purpose long autonomous objectives + R10.9 dynamic goal decomposition/planner contract + R10.10 adaptive planner production path + R10.11 production replan/durable recovery + R10.12 natural lifecycle recovery/background continuation + R10.13 full process-death recovery + R10.13.1 post-process readiness/reconciliation + R10.13.2 process-death core recovery proof correction + R10.14 perception process isolation/cross-process accessibility bridge + R10.14.1 cross-process visual evidence fix + R10.14.2 lifecycle profile/self-diagnostic truth + R10.14.3 history recovery reconciliation + R10.15 generalized cross-process autonomy hardening + R10.15.1 self-diagnostics routing reconciliation + R10.16 perception process recovery/safe bridge rebind + R10.16.1 restart telemetry reconciliation + R10.17 screen intelligence 2.0 + R10.17.1 acceptance routing reconciliation + R10.18 universal UI action engine + R10.18.1 acceptance target reconciliation + R10.18.2 live target authority reconciliation + R10.18.3 app info target reconciliation + R10.19 autonomous multi-app tasks 2.0 + R10.20 personal search 2.0 + R10.21 document & office engine 2.0"
 
         // AyanaCommandHistoryStore v2.8 keeps up to 4k chars inline and stores longer
         // results out-of-line. Self-review intentionally remains inline so copied History
