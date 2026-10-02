@@ -63,6 +63,15 @@ import kotlin.math.abs
 
 class AyanaVoiceService : Service() {
 
+    // AYANA v12.57.0 / R10.25 CROSS-PROCESS ACCESSIBILITY TRUTH RECONCILIATION.
+    // R10.14 moved Accessibility ownership into the isolated :perception process. Capability
+    // Registry still exposes its legacy process-local accessibility flag, so main-process
+    // self-audit could report accessibility_connected=false while the verified bridge and
+    // Unified Screen Intelligence were healthy. R10.25 preserves the raw local flag but
+    // derives effective availability from the version-matched perception bridge, reconciles
+    // only Accessibility-gated capability availability, and injects the effective truth after
+    // the legacy compact context. No new Android authority, UI or ORB behavior is introduced.
+    //
     // AYANA v12.56.2 / R10.24.2 ACCEPTANCE TRUTH RECONCILIATION.
     // R10.24.1 exact-volume field regression is now DEVICE-CONFIRMED on the target tablet:
     // «громкость девять из пятнадцати» -> requested=9, target=9, actual=9, max=15,
@@ -27129,7 +27138,9 @@ val ok =
     private fun capabilityProbeExtendedAccessibilitySemantics(): JSONObject {
         val registry =
             try {
-                capabilityRegistry.snapshot()
+                reconcileCrossProcessAccessibilityRegistry(
+                    capabilityRegistry.snapshot()
+                )
             } catch (_: Exception) {
                 JSONObject()
             }
@@ -32206,7 +32217,9 @@ AyanaAcceptanceTestEngine.PROBE_NOTIFICATION_ROUTING ->
 
     private fun acceptanceRuntimeCapabilitiesProbe(): JSONObject {
         val snapshot =
-            capabilityRegistry.snapshot()
+            reconcileCrossProcessAccessibilityRegistry(
+                capabilityRegistry.snapshot()
+            )
 
         val runtime =
             snapshot.optJSONObject("runtime")
@@ -52949,6 +52962,254 @@ val networkPaused =
         return explicitAudit || fullCapabilityInventory
     }
 
+    private fun crossProcessAccessibilityTruth(
+        registrySnapshot: JSONObject? = null
+    ): JSONObject {
+        val runtime =
+            registrySnapshot
+                ?.optJSONObject("runtime")
+                ?: JSONObject()
+
+        val localConnected =
+            runtime.optBoolean(
+                "accessibility_connected",
+                false
+            )
+
+        val runningInPerceptionProcess =
+            try {
+                perceptionBridge.isLocalPerceptionProcess()
+            } catch (_: Throwable) {
+                false
+            }
+
+        val bridge =
+            if (!runningInPerceptionProcess) {
+                try {
+                    perceptionBridge.status()
+                } catch (error: Throwable) {
+                    JSONObject()
+                        .put("success", false)
+                        .put("error", error.message ?: error.javaClass.simpleName)
+                }
+            } else {
+                JSONObject()
+            }
+
+        val bridgeVersionOk =
+            !bridge.has("bridge_version_match") ||
+                bridge.optBoolean("bridge_version_match", false)
+
+        val providerProcessOk =
+            !bridge.has("provider_process_separated") ||
+                bridge.optBoolean("provider_process_separated", false)
+
+        val bridgeConnected =
+            bridge.optBoolean("success", false) &&
+                bridge.optBoolean("accessibility_connected", false) &&
+                bridgeVersionOk &&
+                providerProcessOk
+
+        val effectiveConnected =
+            localConnected || bridgeConnected
+
+        return JSONObject()
+            .put("effective_connected", effectiveConnected)
+            .put("local_process_connected", localConnected)
+            .put("bridge_connected", bridgeConnected)
+            .put("running_in_perception_process", runningInPerceptionProcess)
+            .put(
+                "source",
+                when {
+                    localConnected -> "local_process"
+                    bridgeConnected -> "perception_bridge"
+                    else -> "none"
+                }
+            )
+            .put("screen_evidence_available", bridge.optBoolean("screen_evidence_available", false))
+            .put("content_status", bridge.optString("content_status"))
+            .put("effective_foreground_package", bridge.optString("effective_foreground_package"))
+            .put(
+                "window_count",
+                bridge.optInt(
+                    "window_count",
+                    bridge.optInt("raw_window_count", 0)
+                )
+            )
+            .put("bridge_version_match", bridgeVersionOk)
+            .put("provider_process_separated", providerProcessOk)
+            .put("perception_process_id", bridge.optInt("perception_process_id", -1))
+    }
+
+    private fun reconcileCrossProcessAccessibilityRegistry(
+        registrySnapshot: JSONObject
+    ): JSONObject {
+        val reconciled =
+            try {
+                JSONObject(registrySnapshot.toString())
+            } catch (_: Exception) {
+                registrySnapshot
+            }
+
+        val runtime =
+            reconciled.optJSONObject("runtime")
+                ?: JSONObject().also {
+                    reconciled.put("runtime", it)
+                }
+
+        val truth =
+            crossProcessAccessibilityTruth(registrySnapshot)
+
+        val effectiveConnected =
+            truth.optBoolean("effective_connected", false)
+
+        runtime
+            .put("accessibility_connected_legacy_local_process", truth.optBoolean("local_process_connected", false))
+            .put("accessibility_connected_cross_process", truth.optBoolean("bridge_connected", false))
+            .put("accessibility_connected", effectiveConnected)
+            .put("accessibility_truth_source", truth.optString("source", "none"))
+            .put("perception_process_id", truth.optInt("perception_process_id", -1))
+
+        if (!effectiveConnected) {
+            return reconciled
+        }
+
+        val screen =
+            try {
+                screenIntelligence.getScreenState()
+            } catch (_: Throwable) {
+                JSONObject()
+            }
+
+        val contentState =
+            screen.optString(
+                "primary_content_state",
+                truth.optString("content_status", "unknown")
+            )
+
+        val screenReadable =
+            contentState == "readable" || contentState == "partial"
+
+        val screenEvidenceUsable =
+            screen.optBoolean("success", false) &&
+                screen.optBoolean(
+                    "execution_evidence_usable",
+                    truth.optBoolean("screen_evidence_available", false)
+                )
+
+        val effectivePackage =
+            screen.optString(
+                "effective_foreground_package",
+                truth.optString("effective_foreground_package")
+            ).trim()
+
+        val windowCount =
+            screen.optInt(
+                "window_count",
+                screen.optInt(
+                    "raw_window_count",
+                    truth.optInt("window_count", 0)
+                )
+            )
+
+        val capabilities =
+            reconciled.optJSONArray("capabilities")
+                ?: return reconciled
+
+        val connectionGated =
+            setOf(
+                "window_detection",
+                "app_task_removal",
+                "strict_terminal_verification",
+                "settings_intent_attestation",
+                "app_detail_permissions_navigation"
+            )
+
+        fun applyAvailabilityTruth(
+            item: JSONObject,
+            availableNow: Boolean
+        ) {
+            val implemented =
+                item.optBoolean("implemented", false)
+
+            val deviceConfirmed =
+                item.optBoolean("device_confirmed", false)
+
+            item
+                .put("available_now", availableNow)
+                .put(
+                    "truth_state",
+                    when {
+                        !implemented -> "UNIMPLEMENTED"
+                        !availableNow && deviceConfirmed -> "DEVICE_CONFIRMED_UNAVAILABLE_NOW"
+                        !availableNow -> "IMPLEMENTED_UNAVAILABLE_NOW"
+                        deviceConfirmed -> "DEVICE_CONFIRMED_AVAILABLE"
+                        else -> "IMPLEMENTED_AVAILABLE_UNCONFIRMED"
+                    }
+                )
+        }
+
+        for (index in 0 until capabilities.length()) {
+            val item = capabilities.optJSONObject(index) ?: continue
+            when (item.optString("id")) {
+                in connectionGated ->
+                    applyAvailabilityTruth(
+                        item = item,
+                        availableNow = true
+                    )
+
+                "screen_content_reading" ->
+                    applyAvailabilityTruth(
+                        item = item,
+                        availableNow = screenReadable && screenEvidenceUsable
+                    )
+
+                "perception_owner_fusion" ->
+                    applyAvailabilityTruth(
+                        item = item,
+                        availableNow =
+                            screenEvidenceUsable &&
+                                effectivePackage.isNotBlank()
+                    )
+
+                "extended_accessibility_semantics" ->
+                    applyAvailabilityTruth(
+                        item = item,
+                        availableNow =
+                            screenEvidenceUsable &&
+                                effectivePackage.isNotBlank() &&
+                                windowCount >= 1
+                    )
+            }
+        }
+
+        return reconciled
+    }
+
+    private fun crossProcessAccessibilityTruthContext(): String {
+        val snapshot =
+            try {
+                capabilityRegistry.snapshot()
+            } catch (_: Exception) {
+                JSONObject()
+            }
+
+        val truth = crossProcessAccessibilityTruth(snapshot)
+
+        return buildString {
+            append("AYANA R10.25 CROSS-PROCESS ACCESSIBILITY TRUTH: ")
+            append("effective_accessibility_connected=")
+            append(truth.optBoolean("effective_connected", false))
+            append("; local_process_flag=")
+            append(truth.optBoolean("local_process_connected", false))
+            append("; perception_bridge_connected=")
+            append(truth.optBoolean("bridge_connected", false))
+            append("; source=")
+            append(truth.optString("source", "none"))
+            append(". If the legacy local flag disagrees after process isolation, this effective bridge truth has priority for capability availability; visual evidence still grants no action authority.")
+        }
+    }
+
     private fun runR10LocalSelfAuditCommand(
         silent: Boolean
     ) {
@@ -52979,7 +53240,7 @@ val networkPaused =
             return
         }
 
-        val registry =
+        val registryRaw =
             try {
                 capabilityRegistry.snapshot()
             } catch (error: Exception) {
@@ -52993,6 +53254,13 @@ val networkPaused =
                 )
                 return
             }
+
+        // R10.25: Registry v3.2.1 still exposes process-local Accessibility.
+        // Reconcile only the audit copy against the verified :perception bridge.
+        val registry =
+            reconcileCrossProcessAccessibilityRegistry(
+                registryRaw
+            )
 
         val capabilities =
             registry.optJSONArray("capabilities")
@@ -53235,9 +53503,29 @@ val networkPaused =
             published.optString("name", filename)
                 .ifBlank { filename }
 
+        val auditRuntime =
+            registry.optJSONObject("runtime")
+                ?: JSONObject()
+
         val technical =
             JSONObject()
                 .put("self_audit_engine_version", AyanaLocalSelfAudit.VERSION)
+                .put(
+                    "accessibility_connected",
+                    auditRuntime.optBoolean("accessibility_connected", false)
+                )
+                .put(
+                    "accessibility_truth_source",
+                    auditRuntime.optString("accessibility_truth_source", "none")
+                )
+                .put(
+                    "accessibility_connected_legacy_local_process",
+                    auditRuntime.optBoolean("accessibility_connected_legacy_local_process", false)
+                )
+                .put(
+                    "accessibility_connected_cross_process",
+                    auditRuntime.optBoolean("accessibility_connected_cross_process", false)
+                )
                 .put("local_only", true)
                 .put("agent_core_turns", 0)
                 .put("worker_turns", 0)
@@ -55153,6 +55441,16 @@ respondUnsupportedAndResume(
                         append(
                             capabilityRegistry
                                 .compactContext()
+                        )
+
+                        append(
+                            "\n"
+                        )
+
+                        // R10.25: follows legacy registry context intentionally so verified
+                        // cross-process truth wins if a process-local flag differs.
+                        append(
+                            crossProcessAccessibilityTruthContext()
                         )
 
                         append(
@@ -70874,7 +71172,7 @@ state
 
         // R10.24 FIELD HARDENING RELEASE TRUTH.
         private const val AYANA_VOICE_SERVICE_RELEASE =
-            "v12.56.2 / R10.24.2 ACCEPTANCE TRUTH RECONCILIATION"
+            "v12.57.0 / R10.25 CROSS-PROCESS ACCESSIBILITY TRUTH RECONCILIATION"
 
         private const val AYANA_PERSONAL_SEARCH_ENGINE_RELEASE =
             "v2.0 / R10.20 PERSONAL SEARCH 2.0 + VERIFIED RESULT CONTRACT v2"
@@ -70886,13 +71184,13 @@ state
             "v11.3.2 / R10.24.2 ACCEPTANCE TRUTH RECONCILIATION"
 
         private const val AYANA_ACCEPTED_FEATURE_CHECKPOINT =
-            "R10.24.1 FIELD HARDENING RECONCILIATION — DEVICE-CONFIRMED; R10.23 + R10.21.1 + R10.22.1 preserved"
+            "R10.24.2 ACCEPTANCE TRUTH RECONCILIATION — DEVICE-CONFIRMED; R10.24.1 + R10.23 + R10.21.1 + R10.22.1 preserved"
 
         private const val AYANA_CURRENT_FEATURE_RELEASE =
-            "R10.24.2 ACCEPTANCE TRUTH RECONCILIATION — PENDING DEVICE CONFIRMATION"
+            "R10.25 CROSS-PROCESS ACCESSIBILITY TRUTH RECONCILIATION — PENDING DEVICE CONFIRMATION"
 
         private const val AYANA_RELEASE_LINEAGE =
-            "Android v12.21.0 / R7.9 truth-hardening + R8.0 multi-attachment + R8.1–R8.4 accepted Personal Global Search stack + R8.5–R8.5.4 capability/evidence truth + R9.0 autonomous agent foundation + R9.0.1 history live-refresh proof fix + R9.0.2 diagnostic reconciliation/history refresh fix + R9.0.3 TTS health reconciliation + R9.1 IME perception/active telemetry truth + R9.2 autonomous recovery/long-task reconciliation + R9.2.1 adaptive hypothesis reconciliation + R9.3 app integration framework + R9.3.1 screen health reconciliation + R9.3.2 history latency recovery reconciliation + R9.3.3 informational terminal reconciliation + R9.3.4 app integration device acceptance + R9.4 multi-app task orchestration + R9.4.1 screen ownership union reconciliation + R9.5 verified result transfer between app steps + R9.5.1 partial marker provenance reconciliation + R9.5.2 bounded marker observation + R9.5.3 verified action result transfer + R9.6 verified semantic observation fallback + R9.6.1 visual fallback acceptance truth + R9.7 structured screen reading + R9.7.1 conversation routing/terminal truth + R9.7.2 structured router conversation precedence + R9.7.3 action morphology/terminal truth + R9.8 generic verified result transfer + R9.8.1 master full acceptance/diagnostic engine + R9.9 reversible action journal/verified undo + R9.9.1 brightness verified undo device acceptance + R9.9.2 opt-in low-battery controlled proactivity + R10.0 unified screen intelligence + R10.1 local self-diagnostics/self-audit + R10.2 personal search expansion + R10.3 long autonomous tasks/recovery + R10.4 adaptive verified execution loop + R10.5 generalized live adaptive autonomy + R10.6 cross-lane adaptive continuity + R10.6.1 durable goal binding fix + R10.7 cross-lane durable recovery continuity + R10.7.1 isolated acceptance cleanup hardening + R10.8 general-purpose long autonomous objectives + R10.9 dynamic goal decomposition/planner contract + R10.10 adaptive planner production path + R10.11 production replan/durable recovery + R10.12 natural lifecycle recovery/background continuation + R10.13 full process-death recovery + R10.13.1 post-process readiness/reconciliation + R10.13.2 process-death core recovery proof correction + R10.14 perception process isolation/cross-process accessibility bridge + R10.14.1 cross-process visual evidence fix + R10.14.2 lifecycle profile/self-diagnostic truth + R10.14.3 history recovery reconciliation + R10.15 generalized cross-process autonomy hardening + R10.15.1 self-diagnostics routing reconciliation + R10.16 perception process recovery/safe bridge rebind + R10.16.1 restart telemetry reconciliation + R10.17 screen intelligence 2.0 + R10.17.1 acceptance routing reconciliation + R10.18 universal UI action engine + R10.18.1 acceptance target reconciliation + R10.18.2 live target authority reconciliation + R10.18.3 app info target reconciliation + R10.19 autonomous multi-app tasks 2.0 + R10.20 personal search 2.0 + R10.21 document & office engine 2.0 + R10.22 notifications & communication assistant + R10.22.1 notification acceptance visibility reconciliation + R10.21.1 pptx completion evidence reconciliation + R10.23 voice & background 2.0 + R10.24 field hardening + R10.24.1 field hardening reconciliation/device acceptance + R10.24.2 acceptance truth reconciliation"
+            "Android v12.21.0 / R7.9 truth-hardening + R8.0 multi-attachment + R8.1–R8.4 accepted Personal Global Search stack + R8.5–R8.5.4 capability/evidence truth + R9.0 autonomous agent foundation + R9.0.1 history live-refresh proof fix + R9.0.2 diagnostic reconciliation/history refresh fix + R9.0.3 TTS health reconciliation + R9.1 IME perception/active telemetry truth + R9.2 autonomous recovery/long-task reconciliation + R9.2.1 adaptive hypothesis reconciliation + R9.3 app integration framework + R9.3.1 screen health reconciliation + R9.3.2 history latency recovery reconciliation + R9.3.3 informational terminal reconciliation + R9.3.4 app integration device acceptance + R9.4 multi-app task orchestration + R9.4.1 screen ownership union reconciliation + R9.5 verified result transfer between app steps + R9.5.1 partial marker provenance reconciliation + R9.5.2 bounded marker observation + R9.5.3 verified action result transfer + R9.6 verified semantic observation fallback + R9.6.1 visual fallback acceptance truth + R9.7 structured screen reading + R9.7.1 conversation routing/terminal truth + R9.7.2 structured router conversation precedence + R9.7.3 action morphology/terminal truth + R9.8 generic verified result transfer + R9.8.1 master full acceptance/diagnostic engine + R9.9 reversible action journal/verified undo + R9.9.1 brightness verified undo device acceptance + R9.9.2 opt-in low-battery controlled proactivity + R10.0 unified screen intelligence + R10.1 local self-diagnostics/self-audit + R10.2 personal search expansion + R10.3 long autonomous tasks/recovery + R10.4 adaptive verified execution loop + R10.5 generalized live adaptive autonomy + R10.6 cross-lane adaptive continuity + R10.6.1 durable goal binding fix + R10.7 cross-lane durable recovery continuity + R10.7.1 isolated acceptance cleanup hardening + R10.8 general-purpose long autonomous objectives + R10.9 dynamic goal decomposition/planner contract + R10.10 adaptive planner production path + R10.11 production replan/durable recovery + R10.12 natural lifecycle recovery/background continuation + R10.13 full process-death recovery + R10.13.1 post-process readiness/reconciliation + R10.13.2 process-death core recovery proof correction + R10.14 perception process isolation/cross-process accessibility bridge + R10.14.1 cross-process visual evidence fix + R10.14.2 lifecycle profile/self-diagnostic truth + R10.14.3 history recovery reconciliation + R10.15 generalized cross-process autonomy hardening + R10.15.1 self-diagnostics routing reconciliation + R10.16 perception process recovery/safe bridge rebind + R10.16.1 restart telemetry reconciliation + R10.17 screen intelligence 2.0 + R10.17.1 acceptance routing reconciliation + R10.18 universal UI action engine + R10.18.1 acceptance target reconciliation + R10.18.2 live target authority reconciliation + R10.18.3 app info target reconciliation + R10.19 autonomous multi-app tasks 2.0 + R10.20 personal search 2.0 + R10.21 document & office engine 2.0 + R10.22 notifications & communication assistant + R10.22.1 notification acceptance visibility reconciliation + R10.21.1 pptx completion evidence reconciliation + R10.23 voice & background 2.0 + R10.24 field hardening + R10.24.1 field hardening reconciliation/device acceptance + R10.24.2 acceptance truth reconciliation + R10.25 cross-process accessibility truth reconciliation"
 
         // AyanaCommandHistoryStore v2.8 keeps up to 4k chars inline and stores longer
         // results out-of-line. Self-review intentionally remains inline so copied History
