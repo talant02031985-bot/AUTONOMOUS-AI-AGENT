@@ -63,6 +63,13 @@ import kotlin.math.abs
 
 class AyanaVoiceService : Service() {
 
+    // AYANA v12.56.0 / R10.24 FIELD HARDENING.
+    // Consolidates the real FIELD CHALLENGE findings without changing ORB/UI: whole-goal
+    // notification analysis routing, Personal Search -> verified reasoning continuation, fresh
+    // current-device fact provenance for artifact goals, fail-closed external-message terminal
+    // truth (with Worker v11.3), reversible brightness round-trip routing, and spoken exact-volume
+    // normalization. R10.23 voice/background control-plane stays intact.
+    //
     // AYANA v12.55.0 / R10.23 VOICE & BACKGROUND 2.0.
     // Builds on DEVICE-CONFIRMED R10.21.1 + R10.22.1. Voice-session control now has
     // an explicit local coordinator: 30-second natural follow-up ownership, stale-session
@@ -4656,6 +4663,20 @@ originalCommand
             }
 
 
+        // R10.24 FIELD HARDENING — verified reversible brightness round-trip.
+        // A phrase such as «запомни текущую яркость, установи 20%, проверь, отмени и проверь»
+        // is one whole goal. It must never be collapsed into MemoryRemember merely because the
+        // first verb is «запомни». This route reads the original state, performs one bounded
+        // mutation, verifies it, records undo provenance, restores and verifies the original.
+        extractBrightnessVerifiedRoundTripTarget(originalCommand)
+            ?.let { targetPercent ->
+                runLocalBrightnessVerifiedRoundTrip(
+                    targetPercent = targetPercent,
+                    silent = silent
+                )
+                return
+            }
+
         // R10.23 VOICE & BACKGROUND 2.0 ACCEPTANCE.
         // Live Service/model/microphone readiness + deterministic wake/follow-up/recovery truth.
         if (
@@ -4901,7 +4922,11 @@ originalCommand
             ?.let { personalSearchRequest ->
                 runLocalPersonalGlobalSearch(
                     request = personalSearchRequest,
-                    silent = silent
+                    silent = silent,
+                    reasoningGoal =
+                        originalCommand.takeIf {
+                            personalSearchRequiresReasoningContinuation(it)
+                        }
                 )
                 return
             }
@@ -4917,6 +4942,30 @@ originalCommand
             )
             ?.let { structuredIntent ->
                 if (
+                    shouldDeferStructuredNotificationReadToCommunication(
+                        command = originalCommand,
+                        intent = structuredIntent
+                    )
+                ) {
+                    commandHistoryStore.addEvent(
+                        activeCommandHistoryId,
+                        state = "structured_notification_read_communication_bypassed",
+                        message = "Structured NotificationRead уступил whole-goal Communication Assistant intent",
+                        details = originalCommand.take(600)
+                    )
+                } else if (
+                    shouldDeferStructuredMemoryRememberToWholeGoal(
+                        command = originalCommand,
+                        intent = structuredIntent
+                    )
+                ) {
+                    commandHistoryStore.addEvent(
+                        activeCommandHistoryId,
+                        state = "structured_memory_remember_whole_goal_bypassed",
+                        message = "Structured MemoryRemember не получил владение составной device-action целью",
+                        details = originalCommand.take(600)
+                    )
+                } else if (
                     shouldDeferStructuredUnknownCapabilityToConversation(
                         command = originalCommand,
                         intent = structuredIntent
@@ -9125,9 +9174,8 @@ if (
     private fun extractRequestedAggregateMetrics(
         command: String
     ): Set<AggregateMetric> {
-        if (requestsArtifactDeliverable(command)) {
-            return emptySet()
-        }
+        val artifactGoal =
+            requestsArtifactDeliverable(command)
 
         val c =
             command
@@ -9145,7 +9193,9 @@ if (
                 "какая",
                 "каково",
                 "сколько",
-                "состояние",
+                "состояни",
+                "параметр",
+                "текущ",
                 "статус"
             ).any { c.contains(it) }
 
@@ -9171,10 +9221,6 @@ if (
                 "выбрать",
                 "найди",
                 "найти",
-                "создай",
-                "создать",
-                "сделай",
-                "сделать",
                 "измени",
                 "изменить",
                 "увелич",
@@ -9185,7 +9231,17 @@ if (
                 "сверни",
                 "удали",
                 "очисти"
-            )
+            ) +
+                if (artifactGoal) {
+                    emptyList()
+                } else {
+                    listOf(
+                        "создай",
+                        "создать",
+                        "сделай",
+                        "сделать"
+                    )
+                }
 
         if (stateChangingMarkers.any { c.contains(it) }) {
             return emptySet()
@@ -9221,6 +9277,25 @@ if (
         }
 
         if (c.contains("ориентац") || c.contains("альбомн") || c.contains("портретн")) {
+            result += AggregateMetric.ORIENTATION
+        }
+
+        // R10.24 freshness rule for broad current-state artifacts. If the user asks for
+        // a file/presentation about the *current* tablet/device state without naming
+        // individual metrics, capture one fresh local snapshot instead of silently using
+        // historical Agent context as if it were current.
+        if (
+            result.isEmpty() &&
+            artifactGoal &&
+            (c.contains("текущ") || c.contains("сейчас")) &&
+            (c.contains("состояни") || c.contains("параметр") || c.contains("статус")) &&
+            (c.contains("планш") || c.contains("устройств"))
+        ) {
+            result += AggregateMetric.BATTERY
+            result += AggregateMetric.NETWORK
+            result += AggregateMetric.STORAGE
+            result += AggregateMetric.MEDIA_VOLUME
+            result += AggregateMetric.BRIGHTNESS
             result += AggregateMetric.ORIENTATION
         }
 
@@ -9312,6 +9387,9 @@ if (
     ): String {
         val facts = JSONObject()
             .put("provenance", "android_local_verified_snapshot")
+            .put("fresh_current_snapshot", true)
+            .put("captured_at_ms", System.currentTimeMillis())
+            .put("captured_local_datetime", LocalDateTime.now().toString())
             .put("summary", summary)
             .put("requested_metrics", JSONArray(metrics.map { it.name }))
 
@@ -13818,15 +13896,391 @@ AyanaNotificationListenerService.PROJECTION_TITLES -> {
         )
     }
 
+    private fun normalizeRussianSmallNumbersForRouting(
+        text: String
+    ): String {
+        var out = text
+
+        val replacements =
+            listOf(
+                "пятнадцати" to "15", "пятнадцать" to "15",
+                "четырнадцати" to "14", "четырнадцать" to "14",
+                "тринадцати" to "13", "тринадцать" to "13",
+                "двенадцати" to "12", "двенадцать" to "12",
+                "одиннадцати" to "11", "одиннадцать" to "11",
+                "десяти" to "10", "десять" to "10",
+                "девяти" to "9", "девять" to "9",
+                "восьми" to "8", "восемь" to "8",
+                "семи" to "7", "семь" to "7",
+                "шести" to "6", "шесть" to "6",
+                "пяти" to "5", "пять" to "5",
+                "четырех" to "4", "четыре" to "4",
+                "трех" to "3", "три" to "3",
+                "двух" to "2", "две" to "2", "два" to "2",
+                "одного" to "1", "одну" to "1", "одна" to "1", "один" to "1",
+                "нуля" to "0", "ноль" to "0", "нуль" to "0"
+            )
+
+        replacements.forEach { (word, number) ->
+            out =
+                out.replace(
+                    Regex("(?<![\\p{L}\\p{N}])${Regex.escape(word)}(?![\\p{L}\\p{N}])"),
+                    number
+                )
+        }
+
+        return out
+            .replace(Regex("\\s+"), " ")
+            .trim()
+    }
+
+    private fun extractBrightnessVerifiedRoundTripTarget(
+        command: String
+    ): Int? {
+        val c =
+            normalizeRussianSmallNumbersForRouting(
+                command
+                    .lowercase(Locale.ROOT)
+                    .replace('ё', 'е')
+                    .replace(Regex("\\s+"), " ")
+                    .trim()
+            )
+
+        if (!c.contains("ярк")) return null
+
+        val captureOriginal =
+            c.contains("запомни текущ") ||
+                c.contains("сохрани текущ") ||
+                c.contains("исходн")
+
+        val setIntent =
+            c.contains("установ") ||
+                c.contains("постав") ||
+                c.contains("выстав")
+
+        val undoIntent =
+            c.contains("отмени") ||
+                c.contains("верни") ||
+                c.contains("восстанов")
+
+        val verifyIntent =
+            c.contains("проверь") ||
+                c.contains("подтверд")
+
+        if (!captureOriginal || !setIntent || !undoIntent || !verifyIntent) {
+            return null
+        }
+
+        val percent =
+            Regex("""(\d{1,3})\s*(?:%|процент(?:а|ов)?)""")
+                .find(c)
+                ?.groupValues
+                ?.getOrNull(1)
+                ?.toIntOrNull()
+                ?: return null
+
+        return percent.takeIf { it in 0..100 }
+    }
+
+    private fun runLocalBrightnessVerifiedRoundTrip(
+        targetPercent: Int,
+        silent: Boolean
+    ) {
+        executionPhase(
+            phase = "field_brightness_roundtrip",
+            executor = "brightness_executor+reversible_action_journal"
+        )
+
+        if (
+            Build.VERSION.SDK_INT >= Build.VERSION_CODES.M &&
+            !Settings.System.canWrite(this)
+        ) {
+            respondBlockedAndResume(
+                text = "Для проверяемого изменения и возврата яркости нужен системный доступ «Изменение системных настроек». Ничего не изменено.",
+                silent = silent,
+                technical = "field_brightness_roundtrip_write_settings_required"
+            )
+            return
+        }
+
+        val originalMode =
+            try {
+                Settings.System.getInt(
+                    contentResolver,
+                    Settings.System.SCREEN_BRIGHTNESS_MODE,
+                    -1
+                )
+            } catch (_: Exception) {
+                -1
+            }
+
+        val originalRaw =
+            try {
+                Settings.System.getInt(
+                    contentResolver,
+                    Settings.System.SCREEN_BRIGHTNESS,
+                    -1
+                )
+            } catch (_: Exception) {
+                -1
+            }
+
+        if (originalMode < 0 || originalRaw !in 0..255) {
+            respondAndResume(
+                text = "Не удалось надёжно прочитать исходную яркость; изменение не выполнялось.",
+                silent = silent,
+                success = false,
+                technical = "field_brightness_roundtrip_original_unavailable"
+            )
+            return
+        }
+
+        val targetRaw =
+            ((targetPercent / 100.0) * 255.0)
+                .toInt()
+                .coerceIn(0, 255)
+
+        if (
+            !beginLocalVerifiedSideEffect(
+                kind = "screen_brightness_verified_roundtrip",
+                detail = "original_mode=$originalMode; original_raw=$originalRaw; target_percent=$targetPercent; target_raw=$targetRaw"
+            )
+        ) {
+            respondAndResume(
+                text = "Проверяемое изменение яркости отменено до dispatch.",
+                silent = silent,
+                success = false,
+                technical = "field_brightness_roundtrip_dispatch_rejected"
+            )
+            return
+        }
+
+        var dispatchAccepted = false
+        var targetVerified = false
+        var restoredVerified = false
+        var observedTargetMode = originalMode
+        var observedTargetRaw = originalRaw
+        var observedRestoredMode = originalMode
+        var observedRestoredRaw = originalRaw
+        var entry: AyanaReversibleActionJournal.Entry? = null
+        var failure = ""
+
+        try {
+            val modeWritten =
+                Settings.System.putInt(
+                    contentResolver,
+                    Settings.System.SCREEN_BRIGHTNESS_MODE,
+                    Settings.System.SCREEN_BRIGHTNESS_MODE_MANUAL
+                )
+
+            val rawWritten =
+                Settings.System.putInt(
+                    contentResolver,
+                    Settings.System.SCREEN_BRIGHTNESS,
+                    targetRaw
+                )
+
+            dispatchAccepted = modeWritten || rawWritten
+            if (dispatchAccepted) {
+                executionKernel.markIrreversibleDispatchAccepted(
+                    "field_brightness_roundtrip_target=$targetRaw"
+                )
+                executionKernel.markSideEffectReconciliationStarted(
+                    "field_brightness_roundtrip_verify_target_then_restore"
+                )
+            }
+
+            Thread.sleep(120L)
+
+            observedTargetMode =
+                Settings.System.getInt(
+                    contentResolver,
+                    Settings.System.SCREEN_BRIGHTNESS_MODE,
+                    -1
+                )
+
+            observedTargetRaw =
+                Settings.System.getInt(
+                    contentResolver,
+                    Settings.System.SCREEN_BRIGHTNESS,
+                    -1
+                )
+
+            targetVerified =
+                modeWritten &&
+                    rawWritten &&
+                    observedTargetMode == Settings.System.SCREEN_BRIGHTNESS_MODE_MANUAL &&
+                    abs(observedTargetRaw - targetRaw) <= 2
+
+            if (!targetVerified) {
+                failure = "target_not_verified"
+            } else {
+                entry =
+                    recordVerifiedReversibleBrightness(
+                        beforeMode = originalMode,
+                        beforeRaw = originalRaw,
+                        afterMode = observedTargetMode,
+                        afterRaw = observedTargetRaw,
+                        source = "r10_24_field_brightness_roundtrip"
+                    )
+
+                if (entry == null) {
+                    failure = "journal_record_missing"
+                } else {
+                    val undo =
+                        performReversibleUndo(
+                            entry = entry!!,
+                            trackExecutionKernel = false
+                        )
+
+                    if (!undo.optBoolean("verified", false)) {
+                        failure = "undo_not_verified:${undo.optString("reason")}"
+                    }
+                }
+            }
+        } catch (error: Exception) {
+            failure = "exception:${error.javaClass.simpleName}"
+        } finally {
+            // Last-resort restore is unconditional. The user's requested terminal state is
+            // the exact original mode/value; no temporary test mutation may be left behind.
+            try {
+                Settings.System.putInt(
+                    contentResolver,
+                    Settings.System.SCREEN_BRIGHTNESS,
+                    originalRaw
+                )
+                Settings.System.putInt(
+                    contentResolver,
+                    Settings.System.SCREEN_BRIGHTNESS_MODE,
+                    originalMode
+                )
+                Thread.sleep(120L)
+            } catch (_: Exception) {
+            }
+
+            observedRestoredMode =
+                try {
+                    Settings.System.getInt(
+                        contentResolver,
+                        Settings.System.SCREEN_BRIGHTNESS_MODE,
+                        -1
+                    )
+                } catch (_: Exception) {
+                    -1
+                }
+
+            observedRestoredRaw =
+                try {
+                    Settings.System.getInt(
+                        contentResolver,
+                        Settings.System.SCREEN_BRIGHTNESS,
+                        -1
+                    )
+                } catch (_: Exception) {
+                    -1
+                }
+
+            val rawRestored =
+                if (originalMode == Settings.System.SCREEN_BRIGHTNESS_MODE_MANUAL) {
+                    observedRestoredRaw >= 0 &&
+                        abs(observedRestoredRaw - originalRaw) <= 2
+                } else {
+                    true
+                }
+
+            restoredVerified =
+                observedRestoredMode == originalMode &&
+                    rawRestored
+
+            if (dispatchAccepted) {
+                executionKernel.markSideEffectReconciled(
+                    committed = !restoredVerified,
+                    detail =
+                        "field_brightness_roundtrip_restored=$restoredVerified; " +
+                            "original=$originalMode/$originalRaw; restored=$observedRestoredMode/$observedRestoredRaw"
+                )
+            } else {
+                markLocalSideEffectNotCommitted(
+                    "field_brightness_roundtrip_no_dispatch"
+                )
+            }
+        }
+
+        val ok =
+            targetVerified &&
+                entry != null &&
+                restoredVerified &&
+                failure.isBlank()
+
+        val evidence =
+            JSONObject()
+                .put("target_percent", targetPercent)
+                .put("original_mode", originalMode)
+                .put("original_raw", originalRaw)
+                .put("observed_target_mode", observedTargetMode)
+                .put("observed_target_raw", observedTargetRaw)
+                .put("target_verified", targetVerified)
+                .put("journal_recorded", entry != null)
+                .put("restored_mode", observedRestoredMode)
+                .put("restored_raw", observedRestoredRaw)
+                .put("restored_verified", restoredVerified)
+                .put("persistent_mutation", !restoredVerified)
+                .put("failure", failure)
+
+        commandHistoryStore.addEvent(
+            activeCommandHistoryId,
+            state =
+                if (ok) {
+                    "field_brightness_roundtrip_verified"
+                } else {
+                    "field_brightness_roundtrip_failed"
+                },
+            message =
+                if (ok) {
+                    "R10.24 brightness read → set → verify → undo → verify подтверждён"
+                } else {
+                    "R10.24 brightness round-trip не прошёл полную проверку"
+                },
+            details = evidence.toString().take(2600)
+        )
+
+        if (ok) {
+            val originalPercent =
+                ((originalRaw * 100.0) / 255.0)
+                    .toInt()
+                    .coerceIn(0, 100)
+
+            finishLocalCommand(
+                "Яркость проверена: исходно примерно $originalPercent%, установлено $targetPercent%, изменение подтверждено, затем отменено; исходное состояние восстановлено и проверено.",
+                silent,
+                technical = evidence.toString()
+            )
+        } else {
+            respondAndResume(
+                text =
+                    if (restoredVerified) {
+                        "Полный тест яркости не подтверждён, но исходное состояние восстановлено."
+                    } else {
+                        "Полный тест яркости не подтверждён, и восстановление исходного состояния требует проверки пользователя."
+                    },
+                silent = silent,
+                success = false,
+                technical = evidence.toString()
+            )
+        }
+    }
+
     private fun extractExactMediaVolumeRequest(
         command: String
     ): ExactMediaVolumeRequest? {
         val c =
-            command
-.lowercase(Locale.ROOT)
-                .replace('ё', 'е')
-                .replace(Regex("\\s+"), " ")
-                .trim()
+            normalizeRussianSmallNumbersForRouting(
+                command
+                    .lowercase(Locale.ROOT)
+                    .replace('ё', 'е')
+                    .replace(Regex("\\s+"), " ")
+                    .trim()
+            )
 
         if (
             !c.contains("громк") &&
@@ -19345,7 +19799,8 @@ else ->
 
     private fun runLocalPersonalGlobalSearch(
         request: AyanaPersonalSearchEngine.Request,
-        silent: Boolean
+        silent: Boolean,
+        reasoningGoal: String? = null
     ) {
         executionPhase(
             phase = "local_personal_global_search",
@@ -19442,6 +19897,23 @@ else ->
                                 technical =
                                     "$technical; requested_sources_unavailable=true"
                             )
+                        } else if (!reasoningGoal.isNullOrBlank() && report.hits.isNotEmpty()) {
+                            val verifiedEvidence =
+                                buildPersonalSearchVerifiedReasoningEvidence(report)
+
+                            commandHistoryStore.addEvent(
+                                activeCommandHistoryId,
+                                state = "personal_search_reasoning_handoff",
+                                message = "Verified Personal Search результаты переданы для завершения всей смысловой цели",
+                                details =
+                                    "hits=${report.hits.size}; verified=${report.verifiedHitCount}; evidence_chars=${verifiedEvidence.length}; terminal=RUNNING"
+                            )
+
+                            askAyana(
+                                message = reasoningGoal,
+                                silent = silent,
+                                verifiedLocalEvidence = verifiedEvidence
+                            )
                         } else {
                             // Text-mode commands must publish STATE_TEXT so MainActivity replaces
                             // the temporary “AYANA думает…” placeholder with the actual result.
@@ -19463,6 +19935,209 @@ else ->
         currentAgentThread = worker
         executionKernel.bindThread(worker)
         worker.start()
+    }
+
+    /** R10.24: whole-goal Personal Search must not terminal after retrieval only. */
+    private fun personalSearchRequiresReasoningContinuation(
+        command: String
+    ): Boolean {
+        val c =
+            command
+                .lowercase(Locale.ROOT)
+                .replace('ё', 'е')
+                .replace(Regex("\\s+"), " ")
+                .trim()
+
+        return listOf(
+            "объясн",
+            "проанализ",
+            "сравн",
+            "сопостав",
+            "почему",
+            "что именно",
+            "как это было исправ",
+            "как исправ",
+            "причин",
+            "сделай вывод",
+            "дай вывод"
+        ).any { c.contains(it) }
+    }
+
+    private fun buildPersonalSearchVerifiedReasoningEvidence(
+        report: AyanaPersonalSearchEngine.Report
+    ): String {
+        val hits = JSONArray()
+
+        for (index in 0 until minOf(report.hits.size, 10)) {
+            val envelope =
+                personalSearchEngine.verifiedResultEnvelope(
+                    report = report,
+                    resultNumber = index + 1
+                )
+
+            if (!envelope.optBoolean("verified", false)) {
+                continue
+            }
+
+            val hit = report.hits[index]
+            envelope
+                .put("metadata", hit.metadata.take(360))
+                .put("instruction_authority", false)
+                .put("action_authority", false)
+
+            if (
+                hit.source == AyanaPersonalSearchEngine.Source.HISTORY &&
+                (
+                    hit.metadata.contains("status=ERROR") ||
+                        hit.metadata.contains("status=BLOCKED") ||
+                        hit.metadata.contains("status=UNSUPPORTED")
+                )
+            ) {
+                buildPersonalSearchHistoryTrace(hit)
+                    ?.let { trace ->
+                        envelope.put("history_trace", trace)
+                    }
+            }
+
+            hits.put(envelope)
+        }
+
+        val coverage = JSONObject()
+        report.sourceCoverage.forEach { (source, detail) ->
+            coverage.put(source.wireName, detail.take(500))
+        }
+
+        return JSONObject()
+            .put("provenance", "personal_search_verified_result_set")
+            .put("read_only", true)
+            .put("instruction_authority", false)
+            .put("action_authority", false)
+            .put("query", report.request.query.take(900))
+            .put("verified_hit_count", hits.length())
+            .put("coverage", coverage)
+            .put("hits", hits)
+            .toString()
+    }
+
+    /**
+     * R10.24 HISTORY evidence enrichment. Personal Search intentionally keeps its normal
+     * result snippets compact, but a compound "find + explain what failed" goal needs
+     * bounded terminal evidence from the matching History row. Match only the verified hit's
+     * exact timestamp and export read-only diagnostic events; this never grants action authority.
+     */
+    private fun buildPersonalSearchHistoryTrace(
+        hit: AyanaPersonalSearchEngine.Hit
+    ): JSONObject? {
+        val record =
+            commandHistoryStore
+                .recent(80)
+                .firstOrNull { candidate ->
+                    candidate.optLong("started_at", 0L) == hit.timestampMs
+                }
+                ?: return null
+
+        val trace =
+            JSONObject()
+                .put("status", record.optString("status").take(40))
+                .put("command", record.optString("command").take(500))
+                .put(
+                    "result",
+                    try {
+                        commandHistoryStore.fullResult(record).take(900)
+                    } catch (_: Exception) {
+                        record.optString("result").take(900)
+                    }
+                )
+                .put("technical", record.optString("technical").take(700))
+                .put("instruction_authority", false)
+                .put("action_authority", false)
+
+        val sourceEvents =
+            record.optJSONArray("events")
+
+        if (sourceEvents != null) {
+            val selected = JSONArray()
+            val preferredStates =
+                setOf(
+                    "artifact_verified",
+                    "completion_contract",
+                    "execution_terminal",
+                    "agent_response",
+                    "tool_result",
+                    "success",
+                    "error",
+                    "blocked",
+                    "unsupported"
+                )
+
+            for (eventIndex in 0 until sourceEvents.length()) {
+                val event = sourceEvents.optJSONObject(eventIndex) ?: continue
+                val state = event.optString("state")
+                if (state !in preferredStates) continue
+
+                selected.put(
+                    JSONObject()
+                        .put("state", state.take(80))
+                        .put("message", event.optString("message").take(360))
+                        .put("details", event.optString("details").take(900))
+                )
+
+                if (selected.length() >= 4) break
+            }
+
+            if (selected.length() > 0) {
+                trace.put("events", selected)
+            }
+        }
+
+        return trace
+    }
+
+    /**
+     * R10.24 field-routing reconciliation. Narrow NotificationRead and MemoryRemember
+     * intents may not steal an explicit richer whole-goal command.
+     */
+    private fun shouldDeferStructuredNotificationReadToCommunication(
+        command: String,
+        intent: AyanaStructuredLocalCommandRouter.Intent
+    ): Boolean {
+        if (intent !is AyanaStructuredLocalCommandRouter.Intent.NotificationRead) {
+            return false
+        }
+
+        return isCommunicationSendFromNotificationRequest(command) ||
+            isCommunicationDraftRequest(command) ||
+            isCommunicationDigestRequest(command)
+    }
+
+    private fun shouldDeferStructuredMemoryRememberToWholeGoal(
+        command: String,
+        intent: AyanaStructuredLocalCommandRouter.Intent
+    ): Boolean {
+        if (intent !is AyanaStructuredLocalCommandRouter.Intent.MemoryRemember) {
+            return false
+        }
+
+        val c =
+            command
+                .lowercase(Locale.ROOT)
+                .replace('ё', 'е')
+                .replace(Regex("\\s+"), " ")
+                .trim()
+
+        val multiStep =
+            c.contains(" затем ") ||
+                c.contains(" потом ") ||
+                c.contains(" после этого ") ||
+                c.count { it == ',' } >= 2
+
+        val nonMemoryAction =
+            listOf(
+                "ярк", "громк", "установ", "измени", "открой", "закрой",
+                "запусти", "нажми", "отмени", "верни", "восстанов", "проверь"
+            ).any { c.contains(it) }
+
+        return multiStep && nonMemoryAction
     }
 
     /**
@@ -54076,7 +54751,8 @@ respondUnsupportedAndResume(
         silent: Boolean,
         resumeGoal: JSONObject? = null,
         automaticRecovery: Boolean = false,
-        verifiedDeviceFacts: String? = null
+        verifiedDeviceFacts: String? = null,
+        verifiedLocalEvidence: String? = null
     ) {
 
         stopSherpaListening()
@@ -54365,7 +55041,10 @@ respondUnsupportedAndResume(
                 // Responses API request with function_call_output.
                 var previousResponseId:
                     String? =
-                    if (verifiedDeviceFacts.isNullOrBlank()) {
+                    if (
+                        verifiedDeviceFacts.isNullOrBlank() &&
+                        verifiedLocalEvidence.isNullOrBlank()
+                    ) {
                         agentPreviousResponseId
                     } else {
                         null
@@ -54650,6 +55329,12 @@ respondUnsupportedAndResume(
                             verifiedDeviceFacts =
                                 if (step == 1) {
                                     verifiedDeviceFacts
+                                } else {
+                                    null
+                                },
+                            verifiedLocalEvidence =
+                                if (step == 1) {
+                                    verifiedLocalEvidence
                                 } else {
                                     null
                                 }
@@ -62831,6 +63516,7 @@ connection
         message: String?,
         toolResults: JSONArray?,
         verifiedDeviceFacts: String?,
+        verifiedLocalEvidence: String?,
         source: String
     ): AgentCoreTransportPolicy {
         val hasToolResults =
@@ -62852,6 +63538,7 @@ connection
             source == "text" &&
                 !hasToolResults &&
                 verifiedDeviceFacts.isNullOrBlank() &&
+                verifiedLocalEvidence.isNullOrBlank() &&
                 normalized.isNotBlank() &&
                 !hasPotentialSideEffectVerb &&
                 (
@@ -62892,13 +63579,15 @@ connection
         source: String,
         commandToken: Long,
         recoveryObserver: ((String, String) -> Unit)? = null,
-        verifiedDeviceFacts: String? = null
+        verifiedDeviceFacts: String? = null,
+        verifiedLocalEvidence: String? = null
     ): JSONObject {
         val transportPolicy =
             resolveAgentCoreTransportPolicy(
                 message = message,
                 toolResults = toolResults,
                 verifiedDeviceFacts = verifiedDeviceFacts,
+                verifiedLocalEvidence = verifiedLocalEvidence,
                 source = source
             )
 
@@ -62940,6 +63629,7 @@ return callAgentCore(
                     intelligenceContext = intelligenceContext,
                     source = source,
                     verifiedDeviceFacts = verifiedDeviceFacts,
+                    verifiedLocalEvidence = verifiedLocalEvidence,
                     readTimeoutMs = transportPolicy.readTimeoutMs
                 )
             } catch (timeout: SocketTimeoutException) {
@@ -62989,7 +63679,8 @@ return callAgentCore(
                             toolResults != null &&
                                 toolResults.length() > 0,
                         hasVerifiedDeviceFacts =
-                            !verifiedDeviceFacts.isNullOrBlank(),
+                            !verifiedDeviceFacts.isNullOrBlank() ||
+                                !verifiedLocalEvidence.isNullOrBlank(),
                         compactRestartAlreadyUsed =
                             compactRestartUsed
                     )
@@ -63057,6 +63748,7 @@ return callAgentCore(
         intelligenceContext: String?,
         source: String,
         verifiedDeviceFacts: String? = null,
+        verifiedLocalEvidence: String? = null,
         readTimeoutMs: Int = AGENT_CORE_READ_TIMEOUT_MS
     ): JSONObject {
 
@@ -63209,6 +63901,16 @@ return callAgentCore(
                 requestJson.put(
                     "verified_device_facts",
                     verifiedDeviceFacts
+                )
+            }
+
+            if (
+                !verifiedLocalEvidence
+                    .isNullOrBlank()
+            ) {
+                requestJson.put(
+                    "verified_local_evidence",
+                    verifiedLocalEvidence
                 )
             }
 
@@ -69948,9 +70650,9 @@ state
         private const val MASTER_STATUS_MANUAL_REQUIRED =
             "MANUAL_REQUIRED"
 
-        // R10.23 VOICE & BACKGROUND 2.0 RELEASE TRUTH.
+        // R10.24 FIELD HARDENING RELEASE TRUTH.
         private const val AYANA_VOICE_SERVICE_RELEASE =
-            "v12.55.0 / R10.23 VOICE & BACKGROUND 2.0"
+            "v12.56.0 / R10.24 FIELD HARDENING"
 
         private const val AYANA_PERSONAL_SEARCH_ENGINE_RELEASE =
             "v2.0 / R10.20 PERSONAL SEARCH 2.0 + VERIFIED RESULT CONTRACT v2"
@@ -69959,16 +70661,16 @@ state
             "v3.2.1"
 
         private const val AYANA_WORKER_RELEASE =
-            "v11.2.1 / R10.21 PPTX ARTIFACT CONTRACT"
+            "v11.3.0 / R10.24 FIELD HARDENING"
 
         private const val AYANA_ACCEPTED_FEATURE_CHECKPOINT =
-            "R10.21.1 PPTX COMPLETION + R10.22.1 COMMUNICATION — DEVICE-CONFIRMED ACCEPTED"
+            "R10.23 VOICE & BACKGROUND 2.0 — DEVICE-CONFIRMED; R10.21.1 + R10.22.1 preserved"
 
         private const val AYANA_CURRENT_FEATURE_RELEASE =
-            "R10.23 VOICE & BACKGROUND 2.0 — PENDING DEVICE CONFIRMATION"
+            "R10.24 FIELD HARDENING — PENDING DEVICE CONFIRMATION"
 
         private const val AYANA_RELEASE_LINEAGE =
-            "Android v12.21.0 / R7.9 truth-hardening + R8.0 multi-attachment + R8.1–R8.4 accepted Personal Global Search stack + R8.5–R8.5.4 capability/evidence truth + R9.0 autonomous agent foundation + R9.0.1 history live-refresh proof fix + R9.0.2 diagnostic reconciliation/history refresh fix + R9.0.3 TTS health reconciliation + R9.1 IME perception/active telemetry truth + R9.2 autonomous recovery/long-task reconciliation + R9.2.1 adaptive hypothesis reconciliation + R9.3 app integration framework + R9.3.1 screen health reconciliation + R9.3.2 history latency recovery reconciliation + R9.3.3 informational terminal reconciliation + R9.3.4 app integration device acceptance + R9.4 multi-app task orchestration + R9.4.1 screen ownership union reconciliation + R9.5 verified result transfer between app steps + R9.5.1 partial marker provenance reconciliation + R9.5.2 bounded marker observation + R9.5.3 verified action result transfer + R9.6 verified semantic observation fallback + R9.6.1 visual fallback acceptance truth + R9.7 structured screen reading + R9.7.1 conversation routing/terminal truth + R9.7.2 structured router conversation precedence + R9.7.3 action morphology/terminal truth + R9.8 generic verified result transfer + R9.8.1 master full acceptance/diagnostic engine + R9.9 reversible action journal/verified undo + R9.9.1 brightness verified undo device acceptance + R9.9.2 opt-in low-battery controlled proactivity + R10.0 unified screen intelligence + R10.1 local self-diagnostics/self-audit + R10.2 personal search expansion + R10.3 long autonomous tasks/recovery + R10.4 adaptive verified execution loop + R10.5 generalized live adaptive autonomy + R10.6 cross-lane adaptive continuity + R10.6.1 durable goal binding fix + R10.7 cross-lane durable recovery continuity + R10.7.1 isolated acceptance cleanup hardening + R10.8 general-purpose long autonomous objectives + R10.9 dynamic goal decomposition/planner contract + R10.10 adaptive planner production path + R10.11 production replan/durable recovery + R10.12 natural lifecycle recovery/background continuation + R10.13 full process-death recovery + R10.13.1 post-process readiness/reconciliation + R10.13.2 process-death core recovery proof correction + R10.14 perception process isolation/cross-process accessibility bridge + R10.14.1 cross-process visual evidence fix + R10.14.2 lifecycle profile/self-diagnostic truth + R10.14.3 history recovery reconciliation + R10.15 generalized cross-process autonomy hardening + R10.15.1 self-diagnostics routing reconciliation + R10.16 perception process recovery/safe bridge rebind + R10.16.1 restart telemetry reconciliation + R10.17 screen intelligence 2.0 + R10.17.1 acceptance routing reconciliation + R10.18 universal UI action engine + R10.18.1 acceptance target reconciliation + R10.18.2 live target authority reconciliation + R10.18.3 app info target reconciliation + R10.19 autonomous multi-app tasks 2.0 + R10.20 personal search 2.0 + R10.21 document & office engine 2.0 + R10.22 notifications & communication assistant + R10.22.1 notification acceptance visibility reconciliation + R10.21.1 pptx completion evidence reconciliation + R10.23 voice & background 2.0"
+            "Android v12.21.0 / R7.9 truth-hardening + R8.0 multi-attachment + R8.1–R8.4 accepted Personal Global Search stack + R8.5–R8.5.4 capability/evidence truth + R9.0 autonomous agent foundation + R9.0.1 history live-refresh proof fix + R9.0.2 diagnostic reconciliation/history refresh fix + R9.0.3 TTS health reconciliation + R9.1 IME perception/active telemetry truth + R9.2 autonomous recovery/long-task reconciliation + R9.2.1 adaptive hypothesis reconciliation + R9.3 app integration framework + R9.3.1 screen health reconciliation + R9.3.2 history latency recovery reconciliation + R9.3.3 informational terminal reconciliation + R9.3.4 app integration device acceptance + R9.4 multi-app task orchestration + R9.4.1 screen ownership union reconciliation + R9.5 verified result transfer between app steps + R9.5.1 partial marker provenance reconciliation + R9.5.2 bounded marker observation + R9.5.3 verified action result transfer + R9.6 verified semantic observation fallback + R9.6.1 visual fallback acceptance truth + R9.7 structured screen reading + R9.7.1 conversation routing/terminal truth + R9.7.2 structured router conversation precedence + R9.7.3 action morphology/terminal truth + R9.8 generic verified result transfer + R9.8.1 master full acceptance/diagnostic engine + R9.9 reversible action journal/verified undo + R9.9.1 brightness verified undo device acceptance + R9.9.2 opt-in low-battery controlled proactivity + R10.0 unified screen intelligence + R10.1 local self-diagnostics/self-audit + R10.2 personal search expansion + R10.3 long autonomous tasks/recovery + R10.4 adaptive verified execution loop + R10.5 generalized live adaptive autonomy + R10.6 cross-lane adaptive continuity + R10.6.1 durable goal binding fix + R10.7 cross-lane durable recovery continuity + R10.7.1 isolated acceptance cleanup hardening + R10.8 general-purpose long autonomous objectives + R10.9 dynamic goal decomposition/planner contract + R10.10 adaptive planner production path + R10.11 production replan/durable recovery + R10.12 natural lifecycle recovery/background continuation + R10.13 full process-death recovery + R10.13.1 post-process readiness/reconciliation + R10.13.2 process-death core recovery proof correction + R10.14 perception process isolation/cross-process accessibility bridge + R10.14.1 cross-process visual evidence fix + R10.14.2 lifecycle profile/self-diagnostic truth + R10.14.3 history recovery reconciliation + R10.15 generalized cross-process autonomy hardening + R10.15.1 self-diagnostics routing reconciliation + R10.16 perception process recovery/safe bridge rebind + R10.16.1 restart telemetry reconciliation + R10.17 screen intelligence 2.0 + R10.17.1 acceptance routing reconciliation + R10.18 universal UI action engine + R10.18.1 acceptance target reconciliation + R10.18.2 live target authority reconciliation + R10.18.3 app info target reconciliation + R10.19 autonomous multi-app tasks 2.0 + R10.20 personal search 2.0 + R10.21 document & office engine 2.0 + R10.22 notifications & communication assistant + R10.22.1 notification acceptance visibility reconciliation + R10.21.1 pptx completion evidence reconciliation + R10.23 voice & background 2.0 + R10.24 field hardening"
 
         // AyanaCommandHistoryStore v2.8 keeps up to 4k chars inline and stores longer
         // results out-of-line. Self-review intentionally remains inline so copied History
