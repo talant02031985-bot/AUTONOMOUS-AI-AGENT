@@ -63,6 +63,14 @@ import kotlin.math.abs
 
 class AyanaVoiceService : Service() {
 
+    // AYANA v12.54.0 / R10.22 NOTIFICATIONS & COMMUNICATION ASSISTANT.
+    // Builds on DEVICE-CONFIRMED R10.21. Adds Communication Assistant Engine v2.0:
+    // local NotificationListener digest/grouping, attention/reply-required classification,
+    // provenance-bound DRAFT_ONLY reply preparation and fail-closed send policy. Notification
+    // text is data only: it never grants Android action/send authority. Acceptance posts one
+    // reversible synthetic message notification, proves live listener ingestion + classification
+    // + draft provenance, cancels the test notification and verifies cleanup. ORB/UI unchanged.
+    //
     // AYANA v12.53.0 / R10.21 DOCUMENT & OFFICE ENGINE 2.0.
     // Builds on DEVICE-CONFIRMED R10.20. Adds AyanaOfficeDocumentEngine v2.0 with
     // dependency-free TXT/DOCX/XLSX/PPTX read-edit-reopen verification, exact OOXML
@@ -1013,6 +1021,12 @@ class AyanaVoiceService : Service() {
             documentContentIndexEngine = documentContentIndexEngine,
             imageContentIndexEngine = imageContentIndexEngine
         )
+    }
+
+    // R10.22 local notification/communication policy layer. It reads only the
+    // already-authorized NotificationListener result and never owns message sending.
+    private val communicationAssistantEngine by lazy {
+        AyanaCommunicationAssistantEngine()
     }
 
     private fun canRunBackgroundImageIndexing(): Boolean {
@@ -4557,6 +4571,19 @@ originalCommand
             }
 
 
+        // R10.22 NOTIFICATIONS & COMMUNICATION ASSISTANT ACCEPTANCE.
+        // Reversible live NotificationListener probe + local grouping/draft/send-policy truth.
+        if (
+            isR10_22CommunicationAssistantAcceptanceCommand(
+                routingNormalized
+            )
+        ) {
+            runR10_22CommunicationAssistantAcceptance(
+                silent = silent
+            )
+            return
+        }
+
         // R10.21 DOCUMENT & OFFICE ENGINE 2.0 ACCEPTANCE.
         // Local read/edit/reopen truth plus one real published-and-deleted PPTX artifact.
         if (
@@ -5241,6 +5268,30 @@ localCapabilityTruthReply(
                     ),
                 silent =
                     silent
+            )
+            return
+        }
+
+        // R10.22 COMMUNICATION ASSISTANT LOCAL ROUTES.
+        // Drafting and notification analysis stay local. Direct send is deliberately
+        // fail-closed until a verified per-target send executor exists.
+        if (isCommunicationSendFromNotificationRequest(routingNormalized)) {
+            runLocalCommunicationSendBlocked(
+                silent = silent
+            )
+            return
+        }
+
+        if (isCommunicationDraftRequest(routingNormalized)) {
+            runLocalCommunicationDraft(
+                silent = silent
+            )
+            return
+        }
+
+        if (isCommunicationDigestRequest(routingNormalized)) {
+            runLocalCommunicationDigest(
+                silent = silent
             )
             return
         }
@@ -41148,6 +41199,558 @@ failedSubgoalId = subgoal.id,
 
 
 
+    private fun isR10_22CommunicationAssistantAcceptanceCommand(
+        command: String
+    ): Boolean {
+        val normalized =
+            command
+                .lowercase(Locale.ROOT)
+                .replace('ё', 'е')
+                .replace(Regex("\\s+"), " ")
+                .trim()
+                .removePrefix("аяна ")
+                .trim()
+                .replace(Regex("\\br10\\s+22\\b"), "r10.22")
+                .replace(Regex("\\b2\\s+0\\b"), "2.0")
+
+        return normalized in
+            setOf(
+                "проверь уведомления и коммуникации 2.0",
+                "проверь уведомления и общение 2.0",
+                "проверь communication assistant 2.0",
+                "проверь notifications communication assistant",
+                "проверь r10.22"
+            )
+    }
+
+    private fun isCommunicationDigestRequest(
+        command: String
+    ): Boolean {
+        val c =
+            command
+                .lowercase(Locale.ROOT)
+                .replace('ё', 'е')
+                .replace(Regex("\\s+"), " ")
+                .trim()
+
+        val notificationScope =
+            c.contains("уведомлен") ||
+                c.contains("сообщен")
+
+        if (!notificationScope) return false
+        if (
+            c.contains("настрой") ||
+            c.contains("разрешен") ||
+            c.contains("доступ к уведом")
+        ) {
+            return false
+        }
+
+        return c.contains("разбери") ||
+            c.contains("проанализ") ||
+            c.contains("сгрупп") ||
+            c.contains("сводк") ||
+            c.contains("требуют ответа") ||
+            c.contains("требует ответа") ||
+            c.contains("нужен ответ") ||
+            c.contains("важные уведом") ||
+            c.contains("важные сообщ") ||
+            c.contains("что требует внимания") ||
+            c.contains("какие требуют внимания")
+    }
+
+    private fun isCommunicationDraftRequest(
+        command: String
+    ): Boolean {
+        val c =
+            command
+                .lowercase(Locale.ROOT)
+                .replace('ё', 'е')
+                .replace(Regex("\\s+"), " ")
+                .trim()
+
+        val scope =
+            c.contains("уведомлен") ||
+                c.contains("сообщен")
+        if (!scope || !c.contains("ответ")) return false
+
+        return c.contains("подготов") ||
+            c.contains("состав") ||
+            c.contains("напиши") ||
+            c.contains("предлож") ||
+            c.contains("черновик")
+    }
+
+    private fun isCommunicationSendFromNotificationRequest(
+        command: String
+    ): Boolean {
+        val c =
+            command
+                .lowercase(Locale.ROOT)
+                .replace('ё', 'е')
+                .replace(Regex("\\s+"), " ")
+                .trim()
+
+        val send =
+            c.contains("отправ") ||
+                c.contains("пошли") ||
+                c.contains("ответь")
+        val notificationScope =
+            c.contains("последнее уведом") ||
+                c.contains("последнему уведом") ||
+                c.contains("последнее сообщ") ||
+                c.contains("последнему сообщ") ||
+                c.contains("на это уведом")
+
+        return send && notificationScope
+    }
+
+    private fun runLocalCommunicationDigest(
+        silent: Boolean
+    ) {
+        val source =
+            AyanaNotificationListenerService.readRecent(
+                context = this,
+                limit = 32,
+                appFilter = null,
+                projection = AyanaNotificationListenerService.PROJECTION_FULL
+            )
+
+        val analysis =
+            communicationAssistantEngine.analyzeReadResult(source)
+
+        if (!analysis.optBoolean("success", false)) {
+            respondAndResume(
+                text = source.optString("message").ifBlank {
+                    "Не удалось прочитать уведомления для анализа."
+                },
+                silent = silent,
+                success = false,
+                terminalStatus =
+                    when (source.optString("terminal_status").uppercase(Locale.ROOT)) {
+                        "BLOCKED" -> AyanaCommandHistoryStore.STATUS_BLOCKED
+                        "UNSUPPORTED" -> AyanaCommandHistoryStore.STATUS_UNSUPPORTED
+                        else -> null
+                    },
+                technical = analysis.toString()
+            )
+            return
+        }
+
+        commandHistoryStore.addEvent(
+            activeCommandHistoryId,
+            state = "communication_digest_verified",
+            message = "R10.22 локально сгруппировал уведомления и выделил требующие ответа",
+            details = analysis.toString().take(5000)
+        )
+
+        respondAndResume(
+            text = communicationAssistantEngine.renderRussian(analysis),
+            silent = silent,
+            success = true,
+            technical = analysis.toString()
+        )
+    }
+
+    private fun runLocalCommunicationDraft(
+        silent: Boolean
+    ) {
+        val source =
+            AyanaNotificationListenerService.readRecent(
+                context = this,
+                limit = 32,
+                appFilter = null,
+                projection = AyanaNotificationListenerService.PROJECTION_FULL
+            )
+
+        val draft =
+            communicationAssistantEngine.buildDraftFromReadResult(source)
+
+        if (!draft.optBoolean("success", false)) {
+            respondAndResume(
+                text = source.optString("message").ifBlank {
+                    "Не нашлось уведомления, для которого можно подготовить черновик ответа."
+                },
+                silent = silent,
+                success = false,
+                terminalStatus =
+                    when (source.optString("terminal_status").uppercase(Locale.ROOT)) {
+                        "BLOCKED" -> AyanaCommandHistoryStore.STATUS_BLOCKED
+                        "UNSUPPORTED" -> AyanaCommandHistoryStore.STATUS_UNSUPPORTED
+                        else -> null
+                    },
+                technical = draft.toString()
+            )
+            return
+        }
+
+        commandHistoryStore.addEvent(
+            activeCommandHistoryId,
+            state = "communication_draft_prepared",
+            message = "R10.22 подготовил DRAFT_ONLY ответ без send authority",
+            details = draft.toString().take(3500)
+        )
+
+        val app = draft.optString("target_app").ifBlank { "приложение" }
+        respondAndResume(
+            text =
+                "Черновик ответа для $app:\n${draft.optString("draft")}\n\n" +
+                    "Это только черновик — AYANA его не отправляла.",
+            silent = silent,
+            success = true,
+            technical = draft.toString()
+        )
+    }
+
+    private fun runLocalCommunicationSendBlocked(
+        silent: Boolean
+    ) {
+        val policy =
+            communicationAssistantEngine.actionPolicy(
+                action = "send_message",
+                explicitUserAction = true
+            )
+
+        respondUnsupportedAndResume(
+            text =
+                "Безопасная прямая отправка ответа из уведомления пока не зарегистрирована как проверяемый executor. " +
+                    "AYANA может разобрать уведомления и подготовить черновик, но не будет выдавать отправку за выполненную.",
+            silent = silent,
+            technical = policy.toString()
+        )
+    }
+
+    private fun createR10_22AcceptanceNotificationChannel() {
+        if (Build.VERSION.SDK_INT < 26) return
+        val manager = getSystemService(NotificationManager::class.java)
+        if (manager.getNotificationChannel(R10_22_ACCEPTANCE_CHANNEL_ID) != null) return
+        manager.createNotificationChannel(
+            NotificationChannel(
+                R10_22_ACCEPTANCE_CHANNEL_ID,
+                "AYANA — R10.22 acceptance",
+                NotificationManager.IMPORTANCE_LOW
+            ).apply {
+                description = "Временные тестовые уведомления Communication Assistant"
+                setShowBadge(false)
+            }
+        )
+    }
+
+    private fun postR10_22AcceptanceNotification(
+        notificationId: Int,
+        marker: String
+    ): Boolean {
+        if (
+            Build.VERSION.SDK_INT >= 33 &&
+            checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) !=
+            PackageManager.PERMISSION_GRANTED
+        ) {
+            return false
+        }
+
+        createR10_22AcceptanceNotificationChannel()
+
+        val builder =
+            if (Build.VERSION.SDK_INT >= 26) {
+                Notification.Builder(this, R10_22_ACCEPTANCE_CHANNEL_ID)
+            } else {
+                @Suppress("DEPRECATION")
+                Notification.Builder(this)
+            }
+
+        val notification =
+            builder
+                .setSmallIcon(android.R.drawable.ic_dialog_email)
+                .setContentTitle(marker)
+                .setContentText("Можешь подтвердить встречу сегодня?")
+                .setCategory(Notification.CATEGORY_MESSAGE)
+                .setOnlyAlertOnce(true)
+                .setAutoCancel(false)
+                .build()
+
+        return try {
+            getSystemService(NotificationManager::class.java)
+                .notify(notificationId, notification)
+            true
+        } catch (_: Throwable) {
+            false
+        }
+    }
+
+    private fun cancelR10_22AcceptanceNotification(
+        notificationId: Int
+    ) {
+        try {
+            getSystemService(NotificationManager::class.java)
+                .cancel(notificationId)
+        } catch (_: Throwable) {
+        }
+    }
+
+    private fun markerNotificationCount(
+        source: JSONObject,
+        marker: String
+    ): Int {
+        val items = source.optJSONArray("notifications") ?: JSONArray()
+        var count = 0
+        for (index in 0 until items.length()) {
+            val item = items.optJSONObject(index) ?: continue
+            if (
+                item.optString("title").contains(marker, ignoreCase = true) ||
+                item.optString("text").contains(marker, ignoreCase = true)
+            ) {
+                count += 1
+            }
+        }
+        return count
+    }
+
+    private fun runR10_22CommunicationAssistantAcceptance(
+        silent: Boolean
+    ) {
+        executionPhase(
+            phase = "r10_22_notifications_communication_assistant_acceptance",
+            executor = "communication_assistant_v2_0+notification_listener"
+        )
+
+        val commandToken = activeCommandToken
+
+        val worker =
+            thread(
+                start = false,
+                name = "AyanaCommunicationR10_22Acceptance"
+            ) {
+                val notificationId = 10222
+                val marker = "AYANA_R10_22_${System.currentTimeMillis()}"
+                var posted = false
+                var cleanupVerified = false
+
+                try {
+                    val localSelfTest =
+                        try {
+                            communicationAssistantEngine.selfTest()
+                        } catch (_: Throwable) {
+                            false
+                        }
+
+                    posted =
+                        postR10_22AcceptanceNotification(
+                            notificationId = notificationId,
+                            marker = marker
+                        )
+
+                    var liveSource = JSONObject()
+                    var liveMarkerCount = 0
+                    if (posted) {
+                        val deadline = SystemClock.elapsedRealtime() + 2_200L
+                        while (SystemClock.elapsedRealtime() < deadline) {
+                            liveSource =
+                                AyanaNotificationListenerService.readRecent(
+                                    context = this@AyanaVoiceService,
+                                    limit = 40,
+                                    appFilter = null,
+                                    projection = AyanaNotificationListenerService.PROJECTION_FULL
+                                )
+                            liveMarkerCount = markerNotificationCount(liveSource, marker)
+                            if (liveSource.optBoolean("success", false) && liveMarkerCount >= 1) {
+                                break
+                            }
+                            SystemClock.sleep(120L)
+                        }
+                    }
+
+                    val analysis =
+                        communicationAssistantEngine.analyzeReadResult(liveSource)
+                    val draft =
+                        communicationAssistantEngine.buildDraftFromReadResult(
+                            liveSource,
+                            marker
+                        )
+                    val sendPolicy =
+                        communicationAssistantEngine.actionPolicy(
+                            action = "send_message",
+                            explicitUserAction = true
+                        )
+
+                    val liveNotificationVerified =
+                        posted &&
+                            liveSource.optBoolean("success", false) &&
+                            liveMarkerCount >= 1
+
+                    val liveReplyClassificationVerified =
+                        if (!analysis.optBoolean("success", false)) {
+                            false
+                        } else {
+                            val items = analysis.optJSONArray("notifications") ?: JSONArray()
+                            var matched = false
+                            for (index in 0 until items.length()) {
+                                val item = items.optJSONObject(index) ?: continue
+                                if (
+                                    item.optString("title").contains(marker, ignoreCase = true) &&
+                                    item.optBoolean("reply_required", false) &&
+                                    item.optBoolean("needs_attention", false) &&
+                                    item.optString("provenance") == "notification_listener_service" &&
+                                    item.optString("fingerprint").length == 64
+                                ) {
+                                    matched = true
+                                    break
+                                }
+                            }
+                            matched
+                        }
+
+                    val draftVerified =
+                        draft.optBoolean("success", false) &&
+                            draft.optBoolean("draft_generated", false) &&
+                            draft.optBoolean("draft_only", false) &&
+                            draft.optBoolean("requires_user_review", false) &&
+                            draft.optString("source_fingerprint").length == 64 &&
+                            draft.optString("draft_fingerprint").length == 64 &&
+                            !draft.optBoolean("send_authority", true)
+
+                    val sendFailClosed =
+                        !sendPolicy.optBoolean("allowed", true) &&
+                            !sendPolicy.optBoolean("supported", true) &&
+                            !sendPolicy.optBoolean("send_authority", true) &&
+                            sendPolicy.optString("reason") ==
+                            "verified_send_executor_not_registered"
+
+                    cancelR10_22AcceptanceNotification(notificationId)
+                    SystemClock.sleep(80L)
+                    cleanupVerified = !isNotificationActive(notificationId)
+
+                    val acceptanceOk =
+                        localSelfTest &&
+                            liveNotificationVerified &&
+                            liveReplyClassificationVerified &&
+                            draftVerified &&
+                            sendFailClosed &&
+                            cleanupVerified
+
+                    val evidence =
+                        JSONObject()
+                            .put("r10_22_acceptance", true)
+                            .put("r10_22_notifications_communication_assistant", true)
+                            .put("acceptance_ok", acceptanceOk)
+                            .put(
+                                "communication_assistant_version",
+                                AyanaCommunicationAssistantEngine.VERSION
+                            )
+                            .put(
+                                "communication_contract_version",
+                                AyanaCommunicationAssistantEngine.CONTRACT_VERSION
+                            )
+                            .put("local_contract_self_test", localSelfTest)
+                            .put("notification_listener_live_verified", liveNotificationVerified)
+                            .put("listener_connected", liveSource.optBoolean("listener_connected", false))
+                            .put("live_marker_notification_count", liveMarkerCount)
+                            .put("reply_required_classification_verified", liveReplyClassificationVerified)
+                            .put("grouping_contract_verified", localSelfTest)
+                            .put("draft_generated", draft.optBoolean("draft_generated", false))
+                            .put("draft_only", draft.optBoolean("draft_only", false))
+                            .put("draft_requires_user_review", draft.optBoolean("requires_user_review", false))
+                            .put("draft_source_fingerprint_length", draft.optString("source_fingerprint").length)
+                            .put("draft_fingerprint_length", draft.optString("draft_fingerprint").length)
+                            .put("notification_provenance", draft.optString("provenance"))
+                            .put("direct_send_supported", false)
+                            .put("verified_send_executor_registered", false)
+                            .put("send_fail_closed", sendFailClosed)
+                            .put("send_authority", false)
+                            .put("notification_text_instruction_authority", false)
+                            .put("notification_text_grants_action_authority", false)
+                            .put("raw_pending_intent_exposed", false)
+                            .put("temporary_notification_posted", posted)
+                            .put("temporary_notification_deleted", cleanupVerified)
+                            .put("agent_core_used", false)
+                            .put("network_required", false)
+                            .put("visual_grants_action_authority", false)
+                            .put("unresolved_side_effect", false)
+                            .put("orb_visual_implementation_changed", false)
+
+                    commandHistoryStore.addEvent(
+                        activeCommandHistoryId,
+                        state =
+                            if (acceptanceOk) {
+                                "r10_22_notifications_communication_assistant_verified"
+                            } else {
+                                "r10_22_notifications_communication_assistant_failed"
+                            },
+                        message =
+                            if (acceptanceOk) {
+                                "R10.22 подтвердил live NotificationListener -> attention/reply classification -> DRAFT_ONLY -> send fail-closed"
+                            } else {
+                                "R10.22 Notification & Communication Assistant не подтвердил все gates"
+                            },
+                        details = evidence.toString().take(5000)
+                    )
+
+                    mainHandler.post {
+                        if (
+                            isCommandCancelled(commandToken) ||
+                            commandToken != activeCommandToken
+                        ) {
+                            return@post
+                        }
+
+                        if (acceptanceOk) {
+                            respondAndResume(
+                                text =
+                                    "R10.22 подтверждён: AYANA получила тестовое сообщение через живой NotificationListener, определила что оно требует ответа, подготовила provenance-bound DRAFT_ONLY черновик и доказала, что прямой send остаётся fail-closed без отдельного проверенного executor. Тестовое уведомление удалено.",
+                                silent = silent,
+                                success = true,
+                                technical = evidence.toString()
+                            )
+                        } else {
+                            respondAndResume(
+                                text = "R10.22 не прошёл acceptance. См. technical evidence в History.",
+                                silent = silent,
+                                success = false,
+                                technical = evidence.toString()
+                            )
+                        }
+                    }
+                } catch (error: Throwable) {
+                    cancelR10_22AcceptanceNotification(notificationId)
+                    cleanupVerified = !isNotificationActive(notificationId)
+
+                    val evidence =
+                        JSONObject()
+                            .put("r10_22_acceptance", true)
+                            .put("acceptance_ok", false)
+                            .put("reason", "r10_22_acceptance_exception")
+                            .put("error", (error.message ?: error.javaClass.simpleName).take(800))
+                            .put("temporary_notification_posted", posted)
+                            .put("temporary_notification_deleted", cleanupVerified)
+                            .put("send_authority", false)
+                            .put("unresolved_side_effect", false)
+
+                    mainHandler.post {
+                        if (
+                            !isCommandCancelled(commandToken) &&
+                            commandToken == activeCommandToken
+                        ) {
+                            respondAndResume(
+                                text = "R10.22 Notification & Communication Assistant завершился ошибкой.",
+                                silent = silent,
+                                success = false,
+                                technical = evidence.toString()
+                            )
+                        }
+                    }
+                } finally {
+                    cancelR10_22AcceptanceNotification(notificationId)
+                    if (Thread.currentThread() === currentAgentThread) {
+                        currentAgentThread = null
+                    }
+                }
+            }
+
+        currentAgentThread = worker
+        executionKernel.bindThread(worker)
+        worker.start()
+    }
+
+
     private fun isR10_21DocumentOffice2AcceptanceCommand(
         command: String
     ): Boolean {
@@ -68873,15 +69476,18 @@ state
         private const val MASTER_ACCEPTANCE_VERSION =
             "1.0"
 
+        private const val R10_22_ACCEPTANCE_CHANNEL_ID =
+            "ayana_r10_22_acceptance"
+
         private const val MASTER_ACCEPTANCE_MODE =
             "master_full_acceptance"
 
         private const val MASTER_STATUS_MANUAL_REQUIRED =
             "MANUAL_REQUIRED"
 
-        // R10.21 DOCUMENT & OFFICE ENGINE 2.0 RELEASE TRUTH.
+        // R10.22 NOTIFICATIONS & COMMUNICATION ASSISTANT RELEASE TRUTH.
         private const val AYANA_VOICE_SERVICE_RELEASE =
-            "v12.53.0 / R10.21 DOCUMENT & OFFICE ENGINE 2.0"
+            "v12.54.0 / R10.22 NOTIFICATIONS & COMMUNICATION ASSISTANT"
 
         private const val AYANA_PERSONAL_SEARCH_ENGINE_RELEASE =
             "v2.0 / R10.20 PERSONAL SEARCH 2.0 + VERIFIED RESULT CONTRACT v2"
@@ -68893,13 +69499,13 @@ state
             "v11.2.1 / R10.21 PPTX ARTIFACT CONTRACT"
 
         private const val AYANA_ACCEPTED_FEATURE_CHECKPOINT =
-            "R10.20 PERSONAL SEARCH 2.0 — DEVICE-CONFIRMED ACCEPTED"
+            "R10.21 DOCUMENT & OFFICE ENGINE 2.0 — DEVICE-CONFIRMED ACCEPTED"
 
         private const val AYANA_CURRENT_FEATURE_RELEASE =
-            "R10.21 DOCUMENT & OFFICE ENGINE 2.0 — PENDING DEVICE CONFIRMATION"
+            "R10.22 NOTIFICATIONS & COMMUNICATION ASSISTANT — PENDING DEVICE CONFIRMATION"
 
         private const val AYANA_RELEASE_LINEAGE =
-            "Android v12.21.0 / R7.9 truth-hardening + R8.0 multi-attachment + R8.1–R8.4 accepted Personal Global Search stack + R8.5–R8.5.4 capability/evidence truth + R9.0 autonomous agent foundation + R9.0.1 history live-refresh proof fix + R9.0.2 diagnostic reconciliation/history refresh fix + R9.0.3 TTS health reconciliation + R9.1 IME perception/active telemetry truth + R9.2 autonomous recovery/long-task reconciliation + R9.2.1 adaptive hypothesis reconciliation + R9.3 app integration framework + R9.3.1 screen health reconciliation + R9.3.2 history latency recovery reconciliation + R9.3.3 informational terminal reconciliation + R9.3.4 app integration device acceptance + R9.4 multi-app task orchestration + R9.4.1 screen ownership union reconciliation + R9.5 verified result transfer between app steps + R9.5.1 partial marker provenance reconciliation + R9.5.2 bounded marker observation + R9.5.3 verified action result transfer + R9.6 verified semantic observation fallback + R9.6.1 visual fallback acceptance truth + R9.7 structured screen reading + R9.7.1 conversation routing/terminal truth + R9.7.2 structured router conversation precedence + R9.7.3 action morphology/terminal truth + R9.8 generic verified result transfer + R9.8.1 master full acceptance/diagnostic engine + R9.9 reversible action journal/verified undo + R9.9.1 brightness verified undo device acceptance + R9.9.2 opt-in low-battery controlled proactivity + R10.0 unified screen intelligence + R10.1 local self-diagnostics/self-audit + R10.2 personal search expansion + R10.3 long autonomous tasks/recovery + R10.4 adaptive verified execution loop + R10.5 generalized live adaptive autonomy + R10.6 cross-lane adaptive continuity + R10.6.1 durable goal binding fix + R10.7 cross-lane durable recovery continuity + R10.7.1 isolated acceptance cleanup hardening + R10.8 general-purpose long autonomous objectives + R10.9 dynamic goal decomposition/planner contract + R10.10 adaptive planner production path + R10.11 production replan/durable recovery + R10.12 natural lifecycle recovery/background continuation + R10.13 full process-death recovery + R10.13.1 post-process readiness/reconciliation + R10.13.2 process-death core recovery proof correction + R10.14 perception process isolation/cross-process accessibility bridge + R10.14.1 cross-process visual evidence fix + R10.14.2 lifecycle profile/self-diagnostic truth + R10.14.3 history recovery reconciliation + R10.15 generalized cross-process autonomy hardening + R10.15.1 self-diagnostics routing reconciliation + R10.16 perception process recovery/safe bridge rebind + R10.16.1 restart telemetry reconciliation + R10.17 screen intelligence 2.0 + R10.17.1 acceptance routing reconciliation + R10.18 universal UI action engine + R10.18.1 acceptance target reconciliation + R10.18.2 live target authority reconciliation + R10.18.3 app info target reconciliation + R10.19 autonomous multi-app tasks 2.0 + R10.20 personal search 2.0 + R10.21 document & office engine 2.0"
+            "Android v12.21.0 / R7.9 truth-hardening + R8.0 multi-attachment + R8.1–R8.4 accepted Personal Global Search stack + R8.5–R8.5.4 capability/evidence truth + R9.0 autonomous agent foundation + R9.0.1 history live-refresh proof fix + R9.0.2 diagnostic reconciliation/history refresh fix + R9.0.3 TTS health reconciliation + R9.1 IME perception/active telemetry truth + R9.2 autonomous recovery/long-task reconciliation + R9.2.1 adaptive hypothesis reconciliation + R9.3 app integration framework + R9.3.1 screen health reconciliation + R9.3.2 history latency recovery reconciliation + R9.3.3 informational terminal reconciliation + R9.3.4 app integration device acceptance + R9.4 multi-app task orchestration + R9.4.1 screen ownership union reconciliation + R9.5 verified result transfer between app steps + R9.5.1 partial marker provenance reconciliation + R9.5.2 bounded marker observation + R9.5.3 verified action result transfer + R9.6 verified semantic observation fallback + R9.6.1 visual fallback acceptance truth + R9.7 structured screen reading + R9.7.1 conversation routing/terminal truth + R9.7.2 structured router conversation precedence + R9.7.3 action morphology/terminal truth + R9.8 generic verified result transfer + R9.8.1 master full acceptance/diagnostic engine + R9.9 reversible action journal/verified undo + R9.9.1 brightness verified undo device acceptance + R9.9.2 opt-in low-battery controlled proactivity + R10.0 unified screen intelligence + R10.1 local self-diagnostics/self-audit + R10.2 personal search expansion + R10.3 long autonomous tasks/recovery + R10.4 adaptive verified execution loop + R10.5 generalized live adaptive autonomy + R10.6 cross-lane adaptive continuity + R10.6.1 durable goal binding fix + R10.7 cross-lane durable recovery continuity + R10.7.1 isolated acceptance cleanup hardening + R10.8 general-purpose long autonomous objectives + R10.9 dynamic goal decomposition/planner contract + R10.10 adaptive planner production path + R10.11 production replan/durable recovery + R10.12 natural lifecycle recovery/background continuation + R10.13 full process-death recovery + R10.13.1 post-process readiness/reconciliation + R10.13.2 process-death core recovery proof correction + R10.14 perception process isolation/cross-process accessibility bridge + R10.14.1 cross-process visual evidence fix + R10.14.2 lifecycle profile/self-diagnostic truth + R10.14.3 history recovery reconciliation + R10.15 generalized cross-process autonomy hardening + R10.15.1 self-diagnostics routing reconciliation + R10.16 perception process recovery/safe bridge rebind + R10.16.1 restart telemetry reconciliation + R10.17 screen intelligence 2.0 + R10.17.1 acceptance routing reconciliation + R10.18 universal UI action engine + R10.18.1 acceptance target reconciliation + R10.18.2 live target authority reconciliation + R10.18.3 app info target reconciliation + R10.19 autonomous multi-app tasks 2.0 + R10.20 personal search 2.0 + R10.21 document & office engine 2.0 + R10.22 notifications & communication assistant"
 
         // AyanaCommandHistoryStore v2.8 keeps up to 4k chars inline and stores longer
         // results out-of-line. Self-review intentionally remains inline so copied History
