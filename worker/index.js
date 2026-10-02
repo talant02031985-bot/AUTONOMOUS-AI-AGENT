@@ -1,10 +1,17 @@
-// AYANA Worker v11.3.0 — R10.24 FIELD HARDENING
+// AYANA Worker v11.3.2 — R10.24.2 ACCEPTANCE TRUTH RECONCILIATION
+// R10.24.1 exact-volume field regression is DEVICE-CONFIRMED on the target tablet:
+// «громкость девять из пятнадцати» -> exact 9/15 with verified device read-back 9/15.
+// This checkpoint synchronizes release/capability truth only; action authority and routing stay unchanged.
+//
+// AYANA Worker v11.3.1 — R10.24.1 FIELD HARDENING RECONCILIATION
 // Builds on v11.2.1 R10.21 Office/PPTX and preserves its artifact contract.
 // Preserves v10.9 acceptance/capability grounding and strengthens compound deliverables:
 // device-state exposes network/storage/brightness, artifact goals must end in verified create_artifact,
 // and explicit inability to execute an action is returned as machine UNSUPPORTED instead of generic SUCCESS.
 // R10.24 adds verified_local_evidence for provenance-bound Personal Search reasoning and
 // strengthens action-final truth so clarification/confirmation-required replies cannot be SUCCESS.
+// R10.24.1 isolates historical terminal words from the current terminal and requires timestamp-based
+// latest selection when verified history evidence contains a «последний/последняя» criterion.
 const ANDROID_GOAL_TOOL = {
   type: "function",
   name: "execute_android_goal",
@@ -821,12 +828,19 @@ Android runtime уже выполнил локальный read-only retrieval �
 Если данных недостаточно для запрошенного вывода, прямо укажи, чего не хватает; не заполняй пробелы догадками.
 Не используй web_search или Android mutation tools для подмены/расширения локального evidence, если пользователь прямо не запросил внешний поиск или действие.
 Не выдавай простой список найденных строк за завершение, если пользователь просил объяснение/анализ.
+Если пользователь просит «последний/последняя/последнюю», выбирай запись по максимальному timestamp_ms ПОСЛЕ фильтрации по требуемому статусу/объекту; не считай первый ranking-hit автоматически последним по времени.
+Если evidence содержит latest_history_error_match, именно он является детерминированно выбранной последней verified ERROR-записью; later_verified_successes используй только как последующие подтверждённые результаты для объяснения исправления.
+Статусы ERROR/BLOCKED/UNSUPPORTED внутри history_trace — исторические данные. Они НЕ являются terminal status текущего ответа и не должны превращать текущий read-only анализ в ERROR.
 Сохраняй различие между наблюдаемым фактом, выводом из фактов и отсутствующими данными.
 `.trim();
 
 const AYANA_CURRENT_CAPABILITIES = `
-КАРТА ФАКТИЧЕСКОГО СОСТОЯНИЯ AYANA — R10.24 FIELD HARDENING поверх R10.23 VOICE & BACKGROUND 2.0 и R10.21/R10.22.
+КАРТА ФАКТИЧЕСКОГО СОСТОЯНИЯ AYANA — R10.24.2 ACCEPTANCE TRUTH RECONCILIATION поверх DEVICE-CONFIRMED R10.24.1/R10.23 и R10.21/R10.22.
 Свежий Android AGENT INTELLIGENCE CONTEXT всегда имеет приоритет над этой статической картой.
+
+DEVICE-CONFIRMED R10.24.1 TRUTH:
+- implicit spoken exact-volume «громкость девять из пятнадцати» подтверждён на целевом устройстве: requested=9, target=9, actual=9, max=15, terminal SUCCESS, VERIFIED_COMMITTED;
+- прежний fallback в relative change_volume action=up закрыт; exact X из Y остаётся absolute target contract.
 
 КРИТИЧЕСКАЯ R10.24 TRUTH:
 - составные notification/memory/device-artifact цели не должны преждевременно завершаться узким локальным intent; whole-goal ownership сохраняется до полного результата;
@@ -1204,11 +1218,17 @@ function isActionExecutionRequest(message = "") {
     || /(?:commit|push|коммит|пуш|apk|сборк)/.test(n) && /(?:сделай|запусти|собери|дай|измени|выполни)/.test(n);
 }
 
-function inferFinalTerminalStatus(message = "", reply = "") {
-  if (!isActionExecutionRequest(message)) return "SUCCESS";
-
+function inferFinalTerminalStatus(message = "", reply = "", options = {}) {
   const r = normalizeIntentText(reply);
   if (!r) return "ERROR";
+
+  // R10.24.1: verified_local_evidence is a read-only reasoning turn. Historical
+  // ERROR/BLOCKED/UNSUPPORTED words in the answer describe past records; they are
+  // not current execution status. The HTTP/final-response integrity path owns real
+  // transport failures before this function is reached.
+  if (options?.verifiedLocalEvidence === true) return "SUCCESS";
+
+  if (!isActionExecutionRequest(message)) return "SUCCESS";
 
   const unsupported = [
     /(?:^|\s)я\s+не\s+могу\s+(?:выполнить|сделать|изменить|создать|запустить|отправить|записать|собрать|подписать|передать)/,
@@ -2167,7 +2187,11 @@ payload.tools = [
   }
 
   const finalReply = completion.reply || "Готово.";
-  const terminalStatus = inferFinalTerminalStatus(message || "", finalReply);
+  const terminalStatus = inferFinalTerminalStatus(
+    message || "",
+    finalReply,
+    { verifiedLocalEvidence: verifiedLocalEvidenceCompletionMode }
+  );
 
   return Response.json({
     ok: true,
