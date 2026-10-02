@@ -63,12 +63,12 @@ import kotlin.math.abs
 
 class AyanaVoiceService : Service() {
 
-    // AYANA v12.56.0 / R10.24 FIELD HARDENING.
-    // Consolidates the real FIELD CHALLENGE findings without changing ORB/UI: whole-goal
-    // notification analysis routing, Personal Search -> verified reasoning continuation, fresh
-    // current-device fact provenance for artifact goals, fail-closed external-message terminal
-    // truth (with Worker v11.3), reversible brightness round-trip routing, and spoken exact-volume
-    // normalization. R10.23 voice/background control-plane stays intact.
+    // AYANA v12.56.1 / R10.24.1 FIELD HARDENING RECONCILIATION.
+    // Builds on R10.24 and closes the three residual FIELD regressions without changing ORB/UI:
+    // spoken implicit exact-volume ratios (e.g. «громкость девять из пятнадцати»), deterministic
+    // latest-history failure selection + historical-terminal isolation for Personal Search reasoning,
+    // and terminal convergence for verified reversible brightness round-trips. R10.23 voice/background
+    // control-plane and all accepted R10.19–R10.24 behavior remain intact.
     //
     // AYANA v12.55.0 / R10.23 VOICE & BACKGROUND 2.0.
     // Builds on DEVICE-CONFIRMED R10.21.1 + R10.22.1. Voice-session control now has
@@ -14193,11 +14193,22 @@ AyanaNotificationListenerService.PROJECTION_TITLES -> {
                     rawRestored
 
             if (dispatchAccepted) {
+                // R10.24.1 terminal convergence: the side-effect boundary here is the
+                // *round-trip operation*, not a persistent brightness mutation. A verified
+                // set -> verify -> undo -> restore sequence is therefore a committed
+                // successful operation even though persistent_mutation=false.
+                val roundTripOperationCommitted =
+                    targetVerified &&
+                        entry != null &&
+                        restoredVerified &&
+                        failure.isBlank()
+
                 executionKernel.markSideEffectReconciled(
-                    committed = !restoredVerified,
+                    committed = roundTripOperationCommitted,
                     detail =
-                        "field_brightness_roundtrip_restored=$restoredVerified; " +
-                            "original=$originalMode/$originalRaw; restored=$observedRestoredMode/$observedRestoredRaw"
+                        "field_brightness_roundtrip_complete=$roundTripOperationCommitted; " +
+                            "restored=$restoredVerified; persistent_mutation=${!restoredVerified}; " +
+                            "original=$originalMode/$originalRaw; restored_state=$observedRestoredMode/$observedRestoredRaw"
                 )
             } else {
                 markLocalSideEffectNotCommitted(
@@ -14297,13 +14308,30 @@ AyanaNotificationListenerService.PROJECTION_TITLES -> {
                 Regex("""(?:^|\s)до\s+\d{1,3}(?:\s|$)""")
                     .containsMatchIn(c)
 
+        val readOnlyVolumeQuestion =
+            c.contains("какая громк") ||
+                c.contains("какой уровень громк") ||
+                c.contains("сколько громк") ||
+                c.contains("текущая громк") ||
+                c.contains("текущий уровень громк") ||
+                c.startsWith("уровень громкости")
+
+        // R10.24.1: short spoken commands often arrive without an imperative verb:
+        // «громкость девять из пятнадцати». The explicit X/Y ratio itself is an
+        // absolute-target contract when the phrase is not a read-only question.
+        val implicitScaledTarget =
+            !readOnlyVolumeQuestion &&
+                Regex("""(?:^|\s)\d{1,3}\s*(?:из|/)\s*\d{1,3}(?:\s|$)""")
+                    .containsMatchIn(c)
+
         val setIntent =
             c.contains("установ") ||
                 c.contains("постав") ||
                 c.contains("выстав") ||
                 c.contains("задай") ||
                 c.contains("сделай громкость") ||
-                directionalTargetIntent
+                directionalTargetIntent ||
+                implicitScaledTarget
 
         if (!setIntent) {
             return null
@@ -19968,6 +19996,24 @@ else ->
     ): String {
         val hits = JSONArray()
 
+        val queryNormalized =
+            report.request.query
+                .lowercase(Locale.ROOT)
+                .replace('ё', 'е')
+                .replace(Regex("\\s+"), " ")
+                .trim()
+
+        val asksLatestFailure =
+            queryNormalized.contains("последн") &&
+                (
+                    queryNormalized.contains("ошиб") ||
+                        queryNormalized.contains("error") ||
+                        queryNormalized.contains("сбой")
+                    )
+
+        var latestHistoryErrorHit: AyanaPersonalSearchEngine.Hit? = null
+        var latestHistoryErrorTrace: JSONObject? = null
+
         for (index in 0 until minOf(report.hits.size, 10)) {
             val envelope =
                 personalSearchEngine.verifiedResultEnvelope(
@@ -19982,21 +20028,33 @@ else ->
             val hit = report.hits[index]
             envelope
                 .put("metadata", hit.metadata.take(360))
+                .put("timestamp_ms", hit.timestampMs)
                 .put("instruction_authority", false)
                 .put("action_authority", false)
 
-            if (
-                hit.source == AyanaPersonalSearchEngine.Source.HISTORY &&
-                (
-                    hit.metadata.contains("status=ERROR") ||
-                        hit.metadata.contains("status=BLOCKED") ||
-                        hit.metadata.contains("status=UNSUPPORTED")
-                )
-            ) {
-                buildPersonalSearchHistoryTrace(hit)
-                    ?.let { trace ->
-                        envelope.put("history_trace", trace)
-                    }
+            if (hit.source == AyanaPersonalSearchEngine.Source.HISTORY) {
+                val trace = buildPersonalSearchHistoryTrace(hit)
+                val historyStatus = trace?.optString("status").orEmpty()
+
+                if (
+                    historyStatus == AyanaCommandHistoryStore.STATUS_ERROR ||
+                    historyStatus == AyanaCommandHistoryStore.STATUS_BLOCKED ||
+                    historyStatus == AyanaCommandHistoryStore.STATUS_UNSUPPORTED
+                ) {
+                    trace?.let { envelope.put("history_trace", it) }
+                }
+
+                if (
+                    asksLatestFailure &&
+                    historyStatus == AyanaCommandHistoryStore.STATUS_ERROR &&
+                    (
+                        latestHistoryErrorHit == null ||
+                            hit.timestampMs > latestHistoryErrorHit!!.timestampMs
+                        )
+                ) {
+                    latestHistoryErrorHit = hit
+                    latestHistoryErrorTrace = trace
+                }
             }
 
             hits.put(envelope)
@@ -20007,16 +20065,89 @@ else ->
             coverage.put(source.wireName, detail.take(500))
         }
 
-        return JSONObject()
-            .put("provenance", "personal_search_verified_result_set")
-            .put("read_only", true)
-            .put("instruction_authority", false)
-            .put("action_authority", false)
-            .put("query", report.request.query.take(900))
-            .put("verified_hit_count", hits.length())
-            .put("coverage", coverage)
-            .put("hits", hits)
-            .toString()
+        val out =
+            JSONObject()
+                .put("provenance", "personal_search_verified_result_set")
+                .put("read_only", true)
+                .put("instruction_authority", false)
+                .put("action_authority", false)
+                .put("query", report.request.query.take(900))
+                .put("verified_hit_count", hits.length())
+                .put("history_latest_selection_rule", "max(timestamp_ms) after verified status/relevance filtering")
+                .put("historical_terminal_status_is_data_only", true)
+                .put("coverage", coverage)
+                .put("hits", hits)
+
+        if (asksLatestFailure && latestHistoryErrorHit != null) {
+            val latestHit = latestHistoryErrorHit!!
+            val latestIndex =
+                report.hits.indexOf(latestHit)
+
+            if (latestIndex >= 0) {
+                val latestEnvelope =
+                    personalSearchEngine.verifiedResultEnvelope(
+                        report = report,
+                        resultNumber = latestIndex + 1
+                    )
+
+                if (latestEnvelope.optBoolean("verified", false)) {
+                    latestEnvelope
+                        .put("metadata", latestHit.metadata.take(360))
+                        .put("timestamp_ms", latestHit.timestampMs)
+                        .put("selection_reason", "latest_verified_history_error_by_timestamp")
+                        .put("instruction_authority", false)
+                        .put("action_authority", false)
+
+                    latestHistoryErrorTrace?.let {
+                        latestEnvelope.put("history_trace", it)
+                    }
+
+                    out.put("latest_history_error_match", latestEnvelope)
+
+                    val laterSuccesses = JSONArray()
+                    report.hits
+                        .filter { candidate ->
+                            candidate.source == AyanaPersonalSearchEngine.Source.HISTORY &&
+                                candidate.timestampMs > latestHit.timestampMs
+                        }
+                        .sortedBy { it.timestampMs }
+                        .forEach { candidate ->
+                            if (laterSuccesses.length() >= 3) return@forEach
+
+                            val trace = buildPersonalSearchHistoryTrace(candidate)
+                            if (trace?.optString("status") != AyanaCommandHistoryStore.STATUS_SUCCESS) {
+                                return@forEach
+                            }
+
+                            val candidateIndex =
+                                report.hits.indexOf(candidate)
+
+                            if (candidateIndex < 0) return@forEach
+
+                            val candidateEnvelope =
+                                personalSearchEngine.verifiedResultEnvelope(
+                                    report = report,
+                                    resultNumber = candidateIndex + 1
+                                )
+
+                            if (!candidateEnvelope.optBoolean("verified", false)) return@forEach
+
+                            candidateEnvelope
+                                .put("metadata", candidate.metadata.take(360))
+                                .put("timestamp_ms", candidate.timestampMs)
+                                .put("history_trace", trace)
+                                .put("instruction_authority", false)
+                                .put("action_authority", false)
+
+                            laterSuccesses.put(candidateEnvelope)
+                        }
+
+                    out.put("later_verified_successes", laterSuccesses)
+                }
+            }
+        }
+
+        return out.toString()
     }
 
     /**
@@ -23821,6 +23952,45 @@ append(index + 1)
             }
 
         return !hardFailureReply
+    }
+
+    /**
+     * R10.24.1: verified local evidence is a read-only data handoff. Historical rows can
+     * legitimately contain ERROR/BLOCKED/UNSUPPORTED words and statuses; those are facts
+     * being analyzed, not the terminal status of the current execution. If Worker returns a
+     * heuristic ERROR for a substantive final over verified local evidence, reconcile it to
+     * SUCCESS unless the transport itself returned a real error object or an empty final.
+     */
+    private fun shouldReconcileVerifiedLocalEvidenceMachineError(
+        verifiedLocalEvidence: String?,
+        response: JSONObject,
+        reply: String
+    ): Boolean {
+        if (verifiedLocalEvidence.isNullOrBlank()) return false
+
+        if (
+            response.optString("terminal_status")
+                .uppercase(Locale.ROOT) != "ERROR"
+        ) {
+            return false
+        }
+
+        if (response.optString("type") != "final") return false
+        if (response.optString("error").isNotBlank()) return false
+        if (reply.trim().length < INFORMATIONAL_FINAL_MIN_REPLY_CHARS) return false
+
+        val completionStatus =
+            response.optString("completion_status")
+                .lowercase(Locale.ROOT)
+
+        if (
+            completionStatus.isNotBlank() &&
+            completionStatus != "completed"
+        ) {
+            return false
+        }
+
+        return true
     }
 
     /**
@@ -35794,6 +35964,16 @@ val code =
                 "уменьшить громкость до 2"
             )
 
+        val spokenImplicit =
+            extractExactMediaVolumeRequest(
+                "громкость девять из пятнадцати"
+            )
+
+        val readOnlyQueryRejected =
+            extractExactMediaVolumeRequest(
+                "какая сейчас громкость"
+            ) == null
+
         val ok =
             first?.requestedLevel ==
                 5 &&
@@ -35804,7 +35984,13 @@ val code =
                 2 &&
                 second.requestedScaleMax ==
                 null &&
-                !second.percent
+                !second.percent &&
+                spokenImplicit?.requestedLevel ==
+                9 &&
+                spokenImplicit.requestedScaleMax ==
+                15 &&
+                !spokenImplicit.percent &&
+                readOnlyQueryRejected
 
         return acceptanceProbeResult(
             status =
@@ -55533,8 +55719,19 @@ state = "agent_response",
                                         reply = finalAnswer.orEmpty()
                                     )
 
+                            val verifiedLocalEvidenceTerminalReconciled =
+                                lastSemanticActionResult == null &&
+                                    shouldReconcileVerifiedLocalEvidenceMachineError(
+                                        verifiedLocalEvidence = verifiedLocalEvidence,
+                                        response = response,
+                                        reply = finalAnswer.orEmpty()
+                                    )
+
                             val machineTerminalStatus =
-                                if (informationalTerminalReconciled) {
+                                if (
+                                    informationalTerminalReconciled ||
+                                    verifiedLocalEvidenceTerminalReconciled
+                                ) {
                                     "SUCCESS"
                                 } else {
                                     rawMachineTerminalStatus
@@ -55549,6 +55746,21 @@ state = "agent_response",
                                         (
                                             "raw_terminal=$rawMachineTerminalStatus; " +
                                                 "completion_integrity=${response.optString("completion_integrity")}; " +
+                                                "completion_status=${response.optString("completion_status")}; " +
+                                                "reply_chars=${finalAnswer?.length ?: 0}"
+                                            ).take(900)
+                                )
+                            }
+
+                            if (verifiedLocalEvidenceTerminalReconciled) {
+                                commandHistoryStore.addEvent(
+                                    activeCommandHistoryId,
+                                    state = "agent_verified_local_evidence_terminal_reconciled",
+                                    message = "Исторический ERROR внутри verified local evidence не перенесён на текущий execution",
+                                    details =
+                                        (
+                                            "raw_terminal=$rawMachineTerminalStatus; " +
+                                                "verified_local_evidence=true; " +
                                                 "completion_status=${response.optString("completion_status")}; " +
                                                 "reply_chars=${finalAnswer?.length ?: 0}"
                                             ).take(900)
@@ -69754,15 +69966,19 @@ terminalStatus: String? = null
                     }
                 }
 
-        executionKernel.complete(
-            status = kernelStatus,
-            reason = kernelReason.take(600)
-        )
+        val completedSnapshot =
+            executionKernel.complete(
+                status = kernelStatus,
+                reason = kernelReason.take(600)
+            )
+
+        val effectiveKernelStatus =
+            completedSnapshot?.terminalStatus ?: kernelStatus
 
         commandHistoryStore.addEvent(
             id,
             state = "execution_terminal",
-            message = kernelStatus.name,
+            message = effectiveKernelStatus.name,
             details = executionKernel.diagnosticSummary().take(1000)
         )
     }
@@ -70652,7 +70868,7 @@ state
 
         // R10.24 FIELD HARDENING RELEASE TRUTH.
         private const val AYANA_VOICE_SERVICE_RELEASE =
-            "v12.56.0 / R10.24 FIELD HARDENING"
+            "v12.56.1 / R10.24.1 FIELD HARDENING RECONCILIATION"
 
         private const val AYANA_PERSONAL_SEARCH_ENGINE_RELEASE =
             "v2.0 / R10.20 PERSONAL SEARCH 2.0 + VERIFIED RESULT CONTRACT v2"
@@ -70661,13 +70877,13 @@ state
             "v3.2.1"
 
         private const val AYANA_WORKER_RELEASE =
-            "v11.3.0 / R10.24 FIELD HARDENING"
+            "v11.3.1 / R10.24.1 FIELD HARDENING RECONCILIATION"
 
         private const val AYANA_ACCEPTED_FEATURE_CHECKPOINT =
             "R10.23 VOICE & BACKGROUND 2.0 — DEVICE-CONFIRMED; R10.21.1 + R10.22.1 preserved"
 
         private const val AYANA_CURRENT_FEATURE_RELEASE =
-            "R10.24 FIELD HARDENING — PENDING DEVICE CONFIRMATION"
+            "R10.24.1 FIELD HARDENING RECONCILIATION — PENDING DEVICE CONFIRMATION"
 
         private const val AYANA_RELEASE_LINEAGE =
             "Android v12.21.0 / R7.9 truth-hardening + R8.0 multi-attachment + R8.1–R8.4 accepted Personal Global Search stack + R8.5–R8.5.4 capability/evidence truth + R9.0 autonomous agent foundation + R9.0.1 history live-refresh proof fix + R9.0.2 diagnostic reconciliation/history refresh fix + R9.0.3 TTS health reconciliation + R9.1 IME perception/active telemetry truth + R9.2 autonomous recovery/long-task reconciliation + R9.2.1 adaptive hypothesis reconciliation + R9.3 app integration framework + R9.3.1 screen health reconciliation + R9.3.2 history latency recovery reconciliation + R9.3.3 informational terminal reconciliation + R9.3.4 app integration device acceptance + R9.4 multi-app task orchestration + R9.4.1 screen ownership union reconciliation + R9.5 verified result transfer between app steps + R9.5.1 partial marker provenance reconciliation + R9.5.2 bounded marker observation + R9.5.3 verified action result transfer + R9.6 verified semantic observation fallback + R9.6.1 visual fallback acceptance truth + R9.7 structured screen reading + R9.7.1 conversation routing/terminal truth + R9.7.2 structured router conversation precedence + R9.7.3 action morphology/terminal truth + R9.8 generic verified result transfer + R9.8.1 master full acceptance/diagnostic engine + R9.9 reversible action journal/verified undo + R9.9.1 brightness verified undo device acceptance + R9.9.2 opt-in low-battery controlled proactivity + R10.0 unified screen intelligence + R10.1 local self-diagnostics/self-audit + R10.2 personal search expansion + R10.3 long autonomous tasks/recovery + R10.4 adaptive verified execution loop + R10.5 generalized live adaptive autonomy + R10.6 cross-lane adaptive continuity + R10.6.1 durable goal binding fix + R10.7 cross-lane durable recovery continuity + R10.7.1 isolated acceptance cleanup hardening + R10.8 general-purpose long autonomous objectives + R10.9 dynamic goal decomposition/planner contract + R10.10 adaptive planner production path + R10.11 production replan/durable recovery + R10.12 natural lifecycle recovery/background continuation + R10.13 full process-death recovery + R10.13.1 post-process readiness/reconciliation + R10.13.2 process-death core recovery proof correction + R10.14 perception process isolation/cross-process accessibility bridge + R10.14.1 cross-process visual evidence fix + R10.14.2 lifecycle profile/self-diagnostic truth + R10.14.3 history recovery reconciliation + R10.15 generalized cross-process autonomy hardening + R10.15.1 self-diagnostics routing reconciliation + R10.16 perception process recovery/safe bridge rebind + R10.16.1 restart telemetry reconciliation + R10.17 screen intelligence 2.0 + R10.17.1 acceptance routing reconciliation + R10.18 universal UI action engine + R10.18.1 acceptance target reconciliation + R10.18.2 live target authority reconciliation + R10.18.3 app info target reconciliation + R10.19 autonomous multi-app tasks 2.0 + R10.20 personal search 2.0 + R10.21 document & office engine 2.0 + R10.22 notifications & communication assistant + R10.22.1 notification acceptance visibility reconciliation + R10.21.1 pptx completion evidence reconciliation + R10.23 voice & background 2.0 + R10.24 field hardening"
