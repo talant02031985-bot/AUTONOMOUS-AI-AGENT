@@ -63,6 +63,15 @@ import kotlin.math.abs
 
 class AyanaVoiceService : Service() {
 
+    // AYANA v12.58.0 / R10.26 CAPABILITY EVIDENCE METADATA RECONCILIATION.
+    // Builds on DEVICE-CONFIRMED R10.25. Capability truth already distinguishes live availability
+    // from accepted historical/device evidence, but several legacy Registry notes still contained
+    // stale phrases such as “pending device acceptance” after effective device proof was present.
+    // R10.26 reconciles only the self-audit copy of capability metadata: accepted evidence remains
+    // authoritative, stale pending-language is removed from the presented note, and reconciliation
+    // counters are exposed in technical evidence. Availability, action authority, routing, ORB/UI,
+    // cross-process Accessibility and all device mutation behavior remain unchanged.
+    //
     // AYANA v12.57.0 / R10.25 CROSS-PROCESS ACCESSIBILITY TRUTH RECONCILIATION.
     // R10.14 moved Accessibility ownership into the isolated :perception process. Capability
     // Registry still exposes its legacy process-local accessibility flag, so main-process
@@ -53210,6 +53219,90 @@ val networkPaused =
         }
     }
 
+    private fun reconcileCapabilityEvidenceMetadata(
+        item: JSONObject,
+        effectiveConfirmed: Boolean,
+        evidenceCode: String
+    ): JSONObject {
+        val originalNote =
+            item.optString("note")
+                .trim()
+
+        if (!effectiveConfirmed || originalNote.isBlank()) {
+            return item
+                .put("evidence_metadata_reconciled", false)
+                .put("evidence_metadata_stale_after_reconciliation", false)
+        }
+
+        val stalePatterns =
+            listOf(
+                Regex("(?i)\\bpending device acceptance\\b"),
+                Regex("(?i)\\brequires device acceptance test\\b"),
+                Regex("(?i)\\bawaiting device test\\b"),
+                Regex("(?i)\\bawaiting device confirmation\\b"),
+                Regex("(?i)\\bpending full device acceptance\\b"),
+                Regex("(?i)\\bpending acceptance\\b"),
+                Regex("(?i)\\bfull multi-step acceptance still required\\b")
+            )
+
+        val staleDetected =
+            stalePatterns.any { pattern ->
+                pattern.containsMatchIn(originalNote)
+            }
+
+        if (!staleDetected) {
+            return item
+                .put("evidence_metadata_reconciled", false)
+                .put("evidence_metadata_stale_after_reconciliation", false)
+        }
+
+        var reconciledNote =
+            originalNote
+
+        stalePatterns.forEach { pattern ->
+            reconciledNote =
+                pattern.replace(
+                    reconciledNote,
+                    ""
+                )
+        }
+
+        reconciledNote =
+            reconciledNote
+                .replace(Regex("\\s*;\\s*;\\s*"), "; ")
+                .replace(Regex("\\s{2,}"), " ")
+                .trim()
+                .trim(';', '.', ' ')
+
+        val proofSuffix =
+            "R10.26 proof reconciled: device-confirmed via ${evidenceCode.ifBlank { "accepted" }} evidence"
+
+        reconciledNote =
+            if (reconciledNote.isBlank()) {
+                proofSuffix
+            } else {
+                "$reconciledNote; $proofSuffix"
+            }
+
+        val staleAfter =
+            stalePatterns.any { pattern ->
+                pattern.containsMatchIn(reconciledNote)
+            }
+
+        return item
+            .put("note", reconciledNote)
+            .put("evidence_metadata_reconciled", true)
+            .put("evidence_metadata_original_note", originalNote)
+            .put(
+                "evidence_metadata_reason",
+                "stale_pending_language_after_confirmed_evidence"
+            )
+            .put(
+                "evidence_metadata_stale_after_reconciliation",
+                staleAfter
+            )
+    }
+
     private fun runR10LocalSelfAuditCommand(
         silent: Boolean
     ) {
@@ -53281,6 +53374,9 @@ val networkPaused =
         }
 
         val enriched = JSONArray()
+        var capabilityMetadataReconciledCount = 0
+        var capabilityMetadataStaleAfterCount = 0
+
         for (index in 0 until capabilities.length()) {
             val item = capabilities.optJSONObject(index) ?: continue
             val copy = JSONObject(item.toString())
@@ -53308,6 +53404,30 @@ val networkPaused =
                     "evidence_historical",
                     resolution.historicalAccepted
                 )
+
+            reconcileCapabilityEvidenceMetadata(
+                item = copy,
+                effectiveConfirmed = resolution.effectiveConfirmed,
+                evidenceCode = resolution.sourceCode
+            )
+
+            if (
+                copy.optBoolean(
+                    "evidence_metadata_reconciled",
+                    false
+                )
+            ) {
+                capabilityMetadataReconciledCount++
+            }
+
+            if (
+                copy.optBoolean(
+                    "evidence_metadata_stale_after_reconciliation",
+                    false
+                )
+            ) {
+                capabilityMetadataStaleAfterCount++
+            }
 
             enriched.put(copy)
         }
@@ -53530,6 +53650,15 @@ val networkPaused =
                 .put("agent_core_turns", 0)
                 .put("worker_turns", 0)
                 .put("engine_self_test", engineSelfTest)
+                .put("capability_evidence_metadata_reconciliation_version", "1.0")
+                .put(
+                    "capability_metadata_reconciled",
+                    capabilityMetadataReconciledCount
+                )
+                .put(
+                    "capability_metadata_stale_after_reconciliation",
+                    capabilityMetadataStaleAfterCount
+                )
                 .put(
                     "registered_capabilities",
                     audit.optInt("registered_capabilities", 0)
@@ -71172,7 +71301,7 @@ state
 
         // R10.24 FIELD HARDENING RELEASE TRUTH.
         private const val AYANA_VOICE_SERVICE_RELEASE =
-            "v12.57.0 / R10.25 CROSS-PROCESS ACCESSIBILITY TRUTH RECONCILIATION"
+            "v12.58.0 / R10.26 CAPABILITY EVIDENCE METADATA RECONCILIATION"
 
         private const val AYANA_PERSONAL_SEARCH_ENGINE_RELEASE =
             "v2.0 / R10.20 PERSONAL SEARCH 2.0 + VERIFIED RESULT CONTRACT v2"
@@ -71184,13 +71313,13 @@ state
             "v11.3.2 / R10.24.2 ACCEPTANCE TRUTH RECONCILIATION"
 
         private const val AYANA_ACCEPTED_FEATURE_CHECKPOINT =
-            "R10.24.2 ACCEPTANCE TRUTH RECONCILIATION — DEVICE-CONFIRMED; R10.24.1 + R10.23 + R10.21.1 + R10.22.1 preserved"
+            "R10.25 CROSS-PROCESS ACCESSIBILITY TRUTH RECONCILIATION — DEVICE-CONFIRMED; R10.24.2 + R10.24.1 + R10.23 preserved"
 
         private const val AYANA_CURRENT_FEATURE_RELEASE =
-            "R10.25 CROSS-PROCESS ACCESSIBILITY TRUTH RECONCILIATION — PENDING DEVICE CONFIRMATION"
+            "R10.26 CAPABILITY EVIDENCE METADATA RECONCILIATION — PENDING DEVICE CONFIRMATION"
 
         private const val AYANA_RELEASE_LINEAGE =
-            "Android v12.21.0 / R7.9 truth-hardening + R8.0 multi-attachment + R8.1–R8.4 accepted Personal Global Search stack + R8.5–R8.5.4 capability/evidence truth + R9.0 autonomous agent foundation + R9.0.1 history live-refresh proof fix + R9.0.2 diagnostic reconciliation/history refresh fix + R9.0.3 TTS health reconciliation + R9.1 IME perception/active telemetry truth + R9.2 autonomous recovery/long-task reconciliation + R9.2.1 adaptive hypothesis reconciliation + R9.3 app integration framework + R9.3.1 screen health reconciliation + R9.3.2 history latency recovery reconciliation + R9.3.3 informational terminal reconciliation + R9.3.4 app integration device acceptance + R9.4 multi-app task orchestration + R9.4.1 screen ownership union reconciliation + R9.5 verified result transfer between app steps + R9.5.1 partial marker provenance reconciliation + R9.5.2 bounded marker observation + R9.5.3 verified action result transfer + R9.6 verified semantic observation fallback + R9.6.1 visual fallback acceptance truth + R9.7 structured screen reading + R9.7.1 conversation routing/terminal truth + R9.7.2 structured router conversation precedence + R9.7.3 action morphology/terminal truth + R9.8 generic verified result transfer + R9.8.1 master full acceptance/diagnostic engine + R9.9 reversible action journal/verified undo + R9.9.1 brightness verified undo device acceptance + R9.9.2 opt-in low-battery controlled proactivity + R10.0 unified screen intelligence + R10.1 local self-diagnostics/self-audit + R10.2 personal search expansion + R10.3 long autonomous tasks/recovery + R10.4 adaptive verified execution loop + R10.5 generalized live adaptive autonomy + R10.6 cross-lane adaptive continuity + R10.6.1 durable goal binding fix + R10.7 cross-lane durable recovery continuity + R10.7.1 isolated acceptance cleanup hardening + R10.8 general-purpose long autonomous objectives + R10.9 dynamic goal decomposition/planner contract + R10.10 adaptive planner production path + R10.11 production replan/durable recovery + R10.12 natural lifecycle recovery/background continuation + R10.13 full process-death recovery + R10.13.1 post-process readiness/reconciliation + R10.13.2 process-death core recovery proof correction + R10.14 perception process isolation/cross-process accessibility bridge + R10.14.1 cross-process visual evidence fix + R10.14.2 lifecycle profile/self-diagnostic truth + R10.14.3 history recovery reconciliation + R10.15 generalized cross-process autonomy hardening + R10.15.1 self-diagnostics routing reconciliation + R10.16 perception process recovery/safe bridge rebind + R10.16.1 restart telemetry reconciliation + R10.17 screen intelligence 2.0 + R10.17.1 acceptance routing reconciliation + R10.18 universal UI action engine + R10.18.1 acceptance target reconciliation + R10.18.2 live target authority reconciliation + R10.18.3 app info target reconciliation + R10.19 autonomous multi-app tasks 2.0 + R10.20 personal search 2.0 + R10.21 document & office engine 2.0 + R10.22 notifications & communication assistant + R10.22.1 notification acceptance visibility reconciliation + R10.21.1 pptx completion evidence reconciliation + R10.23 voice & background 2.0 + R10.24 field hardening + R10.24.1 field hardening reconciliation/device acceptance + R10.24.2 acceptance truth reconciliation + R10.25 cross-process accessibility truth reconciliation"
+            "Android v12.21.0 / R7.9 truth-hardening + R8.0 multi-attachment + R8.1–R8.4 accepted Personal Global Search stack + R8.5–R8.5.4 capability/evidence truth + R9.0 autonomous agent foundation + R9.0.1 history live-refresh proof fix + R9.0.2 diagnostic reconciliation/history refresh fix + R9.0.3 TTS health reconciliation + R9.1 IME perception/active telemetry truth + R9.2 autonomous recovery/long-task reconciliation + R9.2.1 adaptive hypothesis reconciliation + R9.3 app integration framework + R9.3.1 screen health reconciliation + R9.3.2 history latency recovery reconciliation + R9.3.3 informational terminal reconciliation + R9.3.4 app integration device acceptance + R9.4 multi-app task orchestration + R9.4.1 screen ownership union reconciliation + R9.5 verified result transfer between app steps + R9.5.1 partial marker provenance reconciliation + R9.5.2 bounded marker observation + R9.5.3 verified action result transfer + R9.6 verified semantic observation fallback + R9.6.1 visual fallback acceptance truth + R9.7 structured screen reading + R9.7.1 conversation routing/terminal truth + R9.7.2 structured router conversation precedence + R9.7.3 action morphology/terminal truth + R9.8 generic verified result transfer + R9.8.1 master full acceptance/diagnostic engine + R9.9 reversible action journal/verified undo + R9.9.1 brightness verified undo device acceptance + R9.9.2 opt-in low-battery controlled proactivity + R10.0 unified screen intelligence + R10.1 local self-diagnostics/self-audit + R10.2 personal search expansion + R10.3 long autonomous tasks/recovery + R10.4 adaptive verified execution loop + R10.5 generalized live adaptive autonomy + R10.6 cross-lane adaptive continuity + R10.6.1 durable goal binding fix + R10.7 cross-lane durable recovery continuity + R10.7.1 isolated acceptance cleanup hardening + R10.8 general-purpose long autonomous objectives + R10.9 dynamic goal decomposition/planner contract + R10.10 adaptive planner production path + R10.11 production replan/durable recovery + R10.12 natural lifecycle recovery/background continuation + R10.13 full process-death recovery + R10.13.1 post-process readiness/reconciliation + R10.13.2 process-death core recovery proof correction + R10.14 perception process isolation/cross-process accessibility bridge + R10.14.1 cross-process visual evidence fix + R10.14.2 lifecycle profile/self-diagnostic truth + R10.14.3 history recovery reconciliation + R10.15 generalized cross-process autonomy hardening + R10.15.1 self-diagnostics routing reconciliation + R10.16 perception process recovery/safe bridge rebind + R10.16.1 restart telemetry reconciliation + R10.17 screen intelligence 2.0 + R10.17.1 acceptance routing reconciliation + R10.18 universal UI action engine + R10.18.1 acceptance target reconciliation + R10.18.2 live target authority reconciliation + R10.18.3 app info target reconciliation + R10.19 autonomous multi-app tasks 2.0 + R10.20 personal search 2.0 + R10.21 document & office engine 2.0 + R10.22 notifications & communication assistant + R10.22.1 notification acceptance visibility reconciliation + R10.21.1 pptx completion evidence reconciliation + R10.23 voice & background 2.0 + R10.24 field hardening + R10.24.1 field hardening reconciliation/device acceptance + R10.24.2 acceptance truth reconciliation + R10.25 cross-process accessibility truth reconciliation + R10.26 capability evidence metadata reconciliation"
 
         // AyanaCommandHistoryStore v2.8 keeps up to 4k chars inline and stores longer
         // results out-of-line. Self-review intentionally remains inline so copied History
