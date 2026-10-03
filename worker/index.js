@@ -1,3 +1,9 @@
+// AYANA Worker v11.4.0 — R10.27.1 GITHUB REPOSITORY WRITE + COMMIT/PUSH
+// Adds GitHub repository status + two-phase write/commit tool contracts. Android owns
+// GitHub App Device Flow, encrypted token storage, fixed-repository authority, explicit
+// user confirmation and post-PUT verification. This Worker never stores GitHub tokens.
+// R10.27.2 APK build/Actions authority is NOT implemented by this checkpoint.
+//
 // AYANA Worker v11.3.2 — R10.24.2 ACCEPTANCE TRUTH RECONCILIATION
 // R10.24.1 exact-volume field regression is DEVICE-CONFIRMED on the target tablet:
 // «громкость девять из пятнадцати» -> exact 9/15 with verified device read-back 9/15.
@@ -699,6 +705,45 @@ const DEVICE_TOOLS = [
     }
   }
 
+  ,
+  {
+    type: "function",
+    name: "github_repository_status",
+    description: "Read the current authenticated GitHub repository connection/write readiness for AYANA's fixed repository. This is read-only. Use before a GitHub write when connection state is uncertain.",
+    strict: true,
+    parameters: {
+      type: "object",
+      properties: {},
+      required: [],
+      additionalProperties: false
+    }
+  },
+  {
+    type: "function",
+    name: "github_write_commit",
+    description: "Prepare an exact create/update of ONE text file in AYANA's fixed GitHub repository and commit it to main. First call is PREPARE-ONLY and must not mutate the repository; Android returns requires_confirmation=true. Never invent confirmed=true. Only a fresh explicit local user confirmation may cause Android to replay the prepared tool and perform the PUT. Do not use for secrets, credentials, APK build, workflow dispatch, deletion, branch changes, merge, or arbitrary repositories.",
+    strict: true,
+    parameters: {
+      type: "object",
+      properties: {
+        path: {
+          type: "string",
+          description: "Repository-relative path of one text/source file in talant02031985-bot/AUTONOMOUS-AI-AGENT. No leading slash, traversal, secrets, keys, or credential paths."
+        },
+        content: {
+          type: "string",
+          description: "Complete UTF-8 file content. R10.27.1 is intentionally bounded to at most 6000 UTF-8 bytes so the prepared payload remains durably recoverable across the confirmation checkpoint; do not claim support for arbitrary binary, large, or whole-project files."
+        },
+        commit_message: {
+          type: "string",
+          description: "Concise commit message describing this exact file change."
+        }
+      },
+      required: ["path", "content", "commit_message"],
+      additionalProperties: false
+    }
+  }
+
 ];
 
 const AGENT_INSTRUCTIONS = `
@@ -805,6 +850,15 @@ Screen Intelligence / Perception Contract v2:
 - Не выполняй финансовые операции, ввод паролей, подтверждение платежей, удаление данных, отправку сообщений/писем или изменение критичных настроек без отдельного явного разрешения пользователя. Generic Android-инструменты дополнительно проходят локальный Safety Engine на устройстве.
 - Не пытайся обходить ограничения Android или разрешения.
 
+GitHub R10.27.1:
+- Свежий Android AGENT INTELLIGENCE CONTEXT является единственным источником истины о connected/write_available/device_confirmed_write. Статическая карта ниже не может расширить эту authority.
+- github_repository_status — только чтение.
+- github_write_commit работает строго в две фазы. Первый вызов только читает текущий SHA и подготавливает точный payload; если Android возвращает requires_confirmation=true, ОСТАНОВИСЬ. Не делай второй вызов и не утверждай, что commit выполнен.
+- confirmed не является аргументом модели: его может добавить только Android после отдельного свежего подтверждения пользователя.
+- После подтверждённого replay считать commit выполненным можно только если tool result содержит success=true, verified=true, action_committed=true, reconciliation_complete=true и непустой commit_sha.
+- R10.27.1 не даёт права на удаление файлов, другие репозитории/ветки, merge, secrets, workflow dispatch, APK build или deployment.
+- Если GitHub не подключён, прямо попроси выполнить локальную настройку/Device Flow; не подменяй её браузерными кликами и не проси PAT/token в чате.
+
 Ответы предназначены для озвучивания голосом Marin, поэтому говори естественно и обычно кратко. Не повторяй постоянно своё имя. Не используй Markdown без необходимости.
 В пользовательском русском ответе статус UNKNOWN называй «Нет данных» или «не удалось подтвердить», а не английским UNKNOWN. Отсутствие свежей TTS-телеметрии после текстовой команды само по себе не является новым сбоем голоса: текстовый режим не обязан запускать Marin.
 `.trim();
@@ -835,7 +889,8 @@ Android runtime уже выполнил локальный read-only retrieval �
 `.trim();
 
 const AYANA_CURRENT_CAPABILITIES = `
-КАРТА ФАКТИЧЕСКОГО СОСТОЯНИЯ AYANA — R10.24.2 ACCEPTANCE TRUTH RECONCILIATION поверх DEVICE-CONFIRMED R10.24.1/R10.23 и R10.21/R10.22.
+КАРТА ФАКТИЧЕСКОГО СОСТОЯНИЯ AYANA — R10.27.1 GITHUB REPOSITORY WRITE + COMMIT/PUSH поверх DEVICE-CONFIRMED R10.26.1.
+Свежий Android GitHub runtime context имеет приоритет: эта статическая карта описывает реализацию, но не доказывает текущую авторизацию.
 Свежий Android AGENT INTELLIGENCE CONTEXT всегда имеет приоритет над этой статической картой.
 
 DEVICE-CONFIRMED R10.24.1 TRUTH:
@@ -871,15 +926,15 @@ DEVICE-CONFIRMED R10.24.1 TRUTH:
 - perception_owner_fusion различает raw AYANA overlay/main-window package и effective external foreground owner; это защита от false-negative foreground verification, а не live screenshot Vision;
 - Agent Core latency классифицируется по prepare/upload/headers_wait/body/json_parse. Если headers_wait доминирует, это model/server wait, а не Android executor latency;
 - существующие Planner + Durable Goals + checkpoints + bounded replan + terminal verification считаются foundation автономного execution loop; v12.13 добавляет единый локальный acceptance runner, но его device-результат должен оцениваться по last_acceptance_grade, а не по факту запуска теста;
-- Development Agent transaction НЕ считается реализованным, пока нет авторизованного project workspace + build/test/rollback + подтверждённых commit/push executors.
+- Development Agent transaction НЕ считается реализованным одним только GitHub write: R10.27.1 даёт bounded repository commit, но project workspace + build/test/rollback ещё отсутствуют.
 
-КРИТИЧЕСКАЯ DEVELOPMENT / DELIVERY TRUTH:
-- генерация исходного кода, патча или файла НЕ означает запись в GitHub;
-- AYANA Android сейчас НЕ имеет универсального авторизованного GitHub repository-write executor;
-- AYANA Android сейчас НЕ может сама создавать commit/push в репозиторий;
-- AYANA Android сейчас НЕ запускает Android Gradle/GitHub Actions сборку APK;
-- AYANA Android не должна утверждать, что APK собран/подписан/опубликован, пока внешний build pipeline не вернул фактический артефакт;
-- подготовить готовый исходник/патч = отдельная возможность; commit/push/build/deploy = отдельные неподтверждённые/нереализованные возможности.
+КРИТИЧЕСКАЯ DEVELOPMENT / DELIVERY TRUTH R10.27.1:
+- GitHub repository write/commit executor РЕАЛИЗОВАН только для фиксированного talant02031985-bot/AUTONOMOUS-AI-AGENT/main через GitHub App Device Flow; текущая доступность зависит от свежего Android runtime context;
+- GitHub mutation всегда двухфазная: prepare без side effect -> отдельное явное подтверждение пользователя -> SHA recheck -> PUT -> verified commit SHA;
+- GitHub token/refresh token не должны попадать в Worker, prompt, History или исходники; они хранятся Android executor за Keystore encryption;
+- генерация исходного кода/патча сама по себе всё ещё НЕ доказывает repository write; доказательство — только verified tool result;
+- android_apk_build, direct_apk_delivery и полный development_agent_transaction в R10.27.1 ещё НЕ реализованы;
+- AYANA не должна утверждать, что APK собран/подписан/опубликован, пока последующий build checkpoint не вернул фактический проверенный артефакт.
 
 КРИТИЧЕСКАЯ SETTINGS TRUTH:
 - Samsung App Info -> Permissions device-confirmed на целевом планшете через exact-intent attestation + app_info_click terminal verification;
