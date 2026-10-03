@@ -1,5 +1,5 @@
-// AYANA Worker v11.5.0 — R10.27.2 APK BUILD PIPELINE
-// Preserves R10.27.1 GitHub write/commit and adds the R10.27.2 two-phase APK build tool contract.
+// AYANA Worker v11.6.0 — R10.27.3 VERIFIED DEVELOPMENT TRANSACTION / PROJECT WORKSPACE
+// Preserves verified GitHub write/build and adds one bounded two-phase development transaction tool with explicit accept/rollback.
 // Android owns GitHub App Device Flow, encrypted token storage, fixed-repository authority,
 // explicit user confirmation, workflow dispatch/run correlation and artifact verification.
 // This Worker never stores GitHub tokens and never grants confirmation authority itself.
@@ -768,6 +768,40 @@ const DEVICE_TOOLS = [
       additionalProperties: false
     }
   }
+,
+  {
+    type: "function",
+    name: "github_development_transaction",
+    description: "Prepare an exact bounded replacement inside ONE existing UTF-8 text/source file in AYANA's fixed GitHub repository. Android snapshots the immutable Git blob and main head, verifies exactly one find_text match, runs static integrity guards, and returns requires_confirmation=true WITHOUT commit/build. Never invent confirmed=true. Only the user's fresh local confirmation may commit the exact proposed blob. The repository's existing push-to-main Build Android APK workflow is then correlated by exact commit SHA; the transaction must not issue a duplicate workflow_dispatch. After a verified build the transaction remains pending until the user explicitly accepts it or explicitly asks AYANA to roll it back. Workflow files, secrets, arbitrary repositories/branches, deletion and binary replacement are forbidden.",
+    strict: true,
+    parameters: {
+      type: "object",
+      properties: {
+        path: {
+          type: "string",
+          maxLength: 320,
+          description: "Repository-relative path of ONE existing text/source/config/doc file in talant02031985-bot/AUTONOMOUS-AI-AGENT. Never use .github/*, secrets, keys, credentials, binaries, generated APKs, or another repository."
+        },
+        find_text: {
+          type: "string",
+          maxLength: 2000,
+          description: "Exact existing UTF-8 text fragment that must occur exactly once. Keep it as small and distinctive as possible; do not send the whole large file."
+        },
+        replace_text: {
+          type: "string",
+          maxLength: 3500,
+          description: "Exact replacement UTF-8 text. Do not include tokens, keys, credentials or other secret material."
+        },
+        commit_message: {
+          type: "string",
+          maxLength: 160,
+          description: "Concise commit message for this exact development change."
+        }
+      },
+      required: ["path", "find_text", "replace_text", "commit_message"],
+      additionalProperties: false
+    }
+  }
 
 ];
 
@@ -875,7 +909,7 @@ Screen Intelligence / Perception Contract v2:
 - Не выполняй финансовые операции, ввод паролей, подтверждение платежей, удаление данных, отправку сообщений/писем или изменение критичных настроек без отдельного явного разрешения пользователя. Generic Android-инструменты дополнительно проходят локальный Safety Engine на устройстве.
 - Не пытайся обходить ограничения Android или разрешения.
 
-GitHub / Actions R10.27.2:
+GitHub / Development R10.27.3:
 - Свежий Android AGENT INTELLIGENCE CONTEXT является единственным источником истины о connected/write_available/actions_permission/device_confirmed_write/device_confirmed_build. Статическая карта ниже не может расширить эту authority.
 - github_repository_status и github_build_status — только чтение.
 - github_write_commit остаётся строго двухфазным: prepare -> отдельное явное подтверждение -> SHA recheck -> PUT -> verified commit SHA.
@@ -883,7 +917,7 @@ GitHub / Actions R10.27.2:
 - confirmed не является аргументом модели: его может добавить только Android после отдельного свежего подтверждения пользователя.
 - После подтверждённого github_apk_build считать APK собранным можно ТОЛЬКО если tool result содержит success=true, verified=true, terminal_status=SUCCESS, build_conclusion=success, artifact_verified=true, непустой artifact_digest sha256 и положительный artifact_id/size.
 - Ошибка/STOP/timeout после workflow dispatch не даёт права автоматически повторять dispatch. Используй github_build_status для reconciliation.
-- R10.27.2 не даёт права на произвольные workflows/ветки, merge, secrets, deployment или установку APK. direct_apk_delivery и полный development_agent_transaction ещё не реализованы.
+- R10.27.3 не даёт права на произвольные workflows/ветки, merge, secrets, deployment или установку APK. bounded development_agent_transaction реализована только для fixed repository + exact single replacement + verified build + explicit accept/rollback; direct_apk_delivery остаётся не реализован.
 - Если Actions:write отсутствует, попроси изменить GitHub App Repository permission Actions на Read and write и повторно пройти Device Flow. Не проси PAT/token/client secret.
 
 Ответы предназначены для озвучивания голосом Marin, поэтому говори естественно и обычно кратко. Не повторяй постоянно своё имя. Не используй Markdown без необходимости.
@@ -916,7 +950,7 @@ Android runtime уже выполнил локальный read-only retrieval �
 `.trim();
 
 const AYANA_CURRENT_CAPABILITIES = `
-КАРТА ФАКТИЧЕСКОГО СОСТОЯНИЯ AYANA — R10.27.2 APK BUILD PIPELINE поверх DEVICE-CONFIRMED R10.27.1.2 / R10.27.1 GitHub write/commit-push.
+КАРТА ФАКТИЧЕСКОГО СОСТОЯНИЯ AYANA — R10.27.3 VERIFIED DEVELOPMENT TRANSACTION поверх DEVICE-CONFIRMED R10.27.2.1 / R10.27.2 APK BUILD PIPELINE.
 Свежий Android GitHub runtime context имеет приоритет: эта статическая карта описывает реализацию, но не доказывает текущую авторизацию.
 Свежий Android AGENT INTELLIGENCE CONTEXT всегда имеет приоритет над этой статической картой.
 
@@ -953,16 +987,16 @@ DEVICE-CONFIRMED R10.24.1 TRUTH:
 - perception_owner_fusion различает raw AYANA overlay/main-window package и effective external foreground owner; это защита от false-negative foreground verification, а не live screenshot Vision;
 - Agent Core latency классифицируется по prepare/upload/headers_wait/body/json_parse. Если headers_wait доминирует, это model/server wait, а не Android executor latency;
 - существующие Planner + Durable Goals + checkpoints + bounded replan + terminal verification считаются foundation автономного execution loop; v12.13 добавляет единый локальный acceptance runner, но его device-результат должен оцениваться по last_acceptance_grade, а не по факту запуска теста;
-- Development Agent transaction НЕ считается реализованным только GitHub write + build: R10.27.2 добавляет verified build pipeline, но единый project workspace + build/test/rollback transaction ещё отсутствует.
+- Development Agent transaction R10.27.3 РЕАЛИЗОВАНА в bounded fixed-repository режиме: immutable blob snapshot + exact replacement + verified commit + fixed APK build + explicit accept/verified rollback.
 
-КРИТИЧЕСКАЯ DEVELOPMENT / DELIVERY TRUTH R10.27.2:
+КРИТИЧЕСКАЯ DEVELOPMENT / DELIVERY TRUTH R10.27.3:
 - R10.27.1 GitHub repository write/commit executor device-confirmed для фиксированного talant02031985-bot/AUTONOMOUS-AI-AGENT/main через GitHub App Device Flow;
 - R10.27.2 android_apk_build РЕАЛИЗОВАН как отдельный fixed-scope GitHub Actions executor: Actions:write authority -> точный active workflow «Build Android APK» -> exact main head SHA -> explicit confirmation -> workflow_dispatch -> exact run correlation -> conclusion=success -> artifact «AYANA-AI-signed-debug» с non-zero size и SHA-256 digest;
 - GitHub mutation и build dispatch остаются отдельными двухфазными authority boundaries; модель никогда не создаёт confirmed=true;
 - GitHub token/refresh token не должны попадать в Worker, prompt, History или исходники; они хранятся Android executor за Keystore encryption;
 - успешный workflow run без подтверждённого APK artifact НЕ считается успешной сборкой AYANA;
-- direct_apk_delivery и полный development_agent_transaction в R10.27.2 ещё НЕ реализованы;
-- workflow dispatch после неопределённого transport/result нельзя blind-retry; reconciliation выполняется чтением сохранённого/найденного run state.
+- development_agent_transaction реализована в bounded exact-replacement workspace: commit в main связывается с exact push-triggered Build Android APK run без второго workflow_dispatch; direct_apk_delivery всё ещё НЕ реализован;
+- standalone github_apk_build dispatch после неопределённого transport/result нельзя blind-retry; development transaction вообще не делает второй dispatch после commit — она read-only коррелирует push-triggered run по exact commit SHA.
 
 КРИТИЧЕСКАЯ SETTINGS TRUTH:
 - Samsung App Info -> Permissions device-confirmed на целевом планшете через exact-intent attestation + app_info_click terminal verification;
@@ -1058,7 +1092,7 @@ const AYANA_SELF_REVIEW_INSTRUCTIONS = `
 5. Не перечисляй STOP/Marin/Safety/Durable/strict verification как отсутствующие.
 6. Разделяй продуктовые функции, runtime-доступность и device-confirmation.
 7. Если agent_core_latency_class=MODEL_OR_SERVER_WAIT, не называй Android/Accessibility причиной этой задержки: укажи, что доминирует ожидание headers/model-server.
-8. Development Agent описывай как незавершённый, пока github_repository_write/android_apk_build/development_agent_transaction=false. Подготовка кода не равна записи, build или deploy.
+8. Development Agent описывай по свежему runtime context: если github_repository_write/android_apk_build/development_agent_transaction=true, bounded transaction уже реализована; если любой из этих runtime-флагов false, честно укажи недоступный слой. Подготовка кода сама по себе не равна verified repository write/build/deploy.
 `.trim();
 
 const AYANA_SELF_AUTONOMY_COMPACT_INSTRUCTIONS = `
