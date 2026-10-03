@@ -63,6 +63,14 @@ import kotlin.math.abs
 
 class AyanaVoiceService : Service() {
 
+    // AYANA v12.59.0 / R10.27.1 GITHUB REPOSITORY WRITE + COMMIT/PUSH.
+    // Builds on DEVICE-CONFIRMED R10.26.1. Adds one fixed-repository GitHub App Device Flow
+    // executor for talant02031985-bot/AUTONOMOUS-AI-AGENT/main. Tokens stay encrypted behind
+    // Android Keystore and never enter Worker/History. Repository mutation is strictly two-phase:
+    // read-only prepare -> fresh local user confirmation -> current-SHA recheck -> PUT -> verified
+    // blob + commit SHA. APK build, workflow dispatch, arbitrary repositories/branches, secrets,
+    // deletion and the full development transaction remain unavailable. ORB/UI are unchanged.
+    //
     // AYANA v12.58.1 / R10.26.1 CAPABILITY EVIDENCE METADATA DETECTOR RECONCILIATION.
     // Device review of the published R10.26 self-audit exposed one residual stale phrase:
     // app_task_removal had device_confirmed=true while its note still said “pending device confirmation”.
@@ -992,6 +1000,14 @@ class AyanaVoiceService : Service() {
         AyanaCapabilityRegistry(
             applicationContext,
             appResolver
+        )
+    }
+
+    // R10.27.1: scoped GitHub App executor. It owns only the fixed AYANA repository
+    // and stores user/refresh tokens encrypted with Android Keystore.
+    private val githubRepositoryExecutor by lazy {
+        AyanaGitHubRepositoryExecutor(
+            applicationContext
         )
     }
 
@@ -4536,6 +4552,18 @@ originalCommand
                     "local_command_safety_blocked:" +
                         commandSafetyDecision.riskName
             )
+            return
+        }
+
+        // R10.27.1 GitHub App setup/status stays deterministic and local. Client ID is
+        // public metadata; access/refresh tokens are never accepted as command text.
+        if (
+            runLocalGitHubSetupOrStatusIfMatched(
+                originalCommand = originalCommand,
+                routingNormalized = routingNormalized,
+                silent = silent
+            )
+        ) {
             return
         }
 
@@ -8952,6 +8980,103 @@ if (
             .trim()
     }
 
+    private fun extractGitHubClientIdConfiguration(
+        command: String
+    ): String? {
+        val patterns =
+            listOf(
+                Regex(
+                    "(?i)^\\s*(?:настрой|сохрани|установи)\\s+(?:github|гитхаб)\\s+(?:app\\s+)?client[_ -]?id\\s+([A-Za-z0-9_.-]{8,160})\\s*$"
+                ),
+                Regex(
+                    "(?i)^\\s*(?:github|гитхаб)\\s+(?:app\\s+)?client[_ -]?id\\s+([A-Za-z0-9_.-]{8,160})\\s*$"
+                )
+            )
+
+        patterns.forEach { pattern ->
+            val match = pattern.find(command)
+            if (match != null) {
+                return match.groupValues.getOrNull(1)?.trim()
+            }
+        }
+
+        return null
+    }
+
+    private fun isGitHubConnectRequest(
+        normalized: String
+    ): Boolean {
+        val c = normalized.trim()
+        return c.matches(
+            Regex(
+                "^(?:подключи|подключить|авторизуй|авторизовать|подсоедини|подсоединить)\\s+(?:github|гитхаб)(?:\\s+(?:к\\s+ayana|к\\s+аяна|для\\s+ayana|для\\s+аяна))?$"
+            )
+        )
+    }
+
+    private fun isGitHubStatusRequest(
+        normalized: String
+    ): Boolean {
+        val c = normalized.trim()
+        return c.matches(
+            Regex(
+                "^(?:(?:проверь|проверить)(?:\\s+подключение)?\\s+(?:github|гитхаб)|(?:статус|состояние)\\s+(?:github|гитхаб)|(?:github|гитхаб)\\s+(?:статус|состояние))$"
+            )
+        )
+    }
+
+    private fun runLocalGitHubSetupOrStatusIfMatched(
+        originalCommand: String,
+        routingNormalized: String,
+        silent: Boolean
+    ): Boolean {
+        val clientId = extractGitHubClientIdConfiguration(originalCommand)
+
+        val result =
+            when {
+                clientId != null ->
+                    githubRepositoryExecutor.configureClientId(clientId)
+
+                isGitHubConnectRequest(routingNormalized) ->
+                    githubRepositoryExecutor.startDeviceFlow()
+
+                isGitHubStatusRequest(routingNormalized) ->
+                    githubRepositoryExecutor.status(allowPendingPoll = true)
+
+                else ->
+                    return false
+            }
+
+        val message =
+            result.optString(
+                "message",
+                if (result.optBoolean("success", false)) {
+                    "GitHub операция выполнена."
+                } else {
+                    "GitHub операция не выполнена."
+                }
+            )
+
+        val successfulSetupStep = result.optBoolean("success", false)
+
+        respondAndResume(
+            text = message,
+            silent = silent,
+            success = successfulSetupStep,
+            technical =
+                JSONObject(result.toString())
+                    .apply {
+                        remove("access_token")
+                        remove("refresh_token")
+                        remove("device_code")
+                    }
+                    .toString()
+                    .take(1800)
+        )
+
+        return true
+    }
+
     private fun unsupportedExecutionCapabilityReason(
         command: String
     ): String? {
@@ -8976,59 +9101,9 @@ if (
             return null
         }
 
-        val githubWrite =
-            (c.contains("github") || c.contains("гитхаб")) &&
-                listOf(
-                    "измени",
-                    "изменить",
-                    "запиши",
-                    "записать",
-                    "обнови",
-                    "обновить",
-                    "загрузи",
-                    "загрузить",
-                    "удали",
-                    "удалить",
-                    "commit",
-                    "коммит",
-                    "push",
-                    "пуш"
-                ).any { c.contains(it) }
-
-        val commitPush =
-            (
-                c.contains("commit") ||
-                    c.contains("коммит") ||
-                    c.contains("push") ||
-                    c.contains("пуш")
-                ) &&
-                listOf(
-                    "сделай",
-                    "сделайте",
-                    "делай",
-                    "делайте",
-                    "сделать",
-                    "выполни",
-                    "выполните",
-                    "выполняй",
-                    "выполняйте",
-                    "выполнить",
-                    "запусти",
-                    "запустить",
-                    "отправь",
-                    "отправить",
-                    "закоммить",
-                    "закоммитьте",
-                    "коммить",
-                    "коммитьте",
-                    "закоммитить",
-                    "запушь",
-                    "запушьте",
-                    "пушь",
-                    "пушьте",
-                    "запушить"
-                ).any { c.contains(it) }
-
+        // R10.27.1: fixed-repository GitHub write/commit is implemented and must
+        // reach Agent Core + the local two-phase GitHub executor. APK build/delivery
+        // remains unavailable until the later R10.27.2 checkpoint.
         val apkBuildOrDelivery =
             (c.contains("apk") || c.contains("апк")) &&
                 (
@@ -9045,25 +9120,14 @@ if (
                         c.contains("передай апк")
                     )
 
-        if (!githubWrite && !commitPush && !apkBuildOrDelivery) {
+        if (!apkBuildOrDelivery) {
             return null
         }
 
-        val unavailable =
-            mutableListOf<String>()
+        return "Эта задача содержит пока недоступный этап сборки/подписания/выдачи готового APK. " +
+            "R10.27.1 уже умеет подготовить и после отдельного подтверждения записать commit в фиксированный GitHub repository, " +
+            "но APK build pipeline будет добавлен отдельно и не должен подменяться ложным SUCCESS."
 
-        if (githubWrite) {
-            unavailable += "запись изменений в GitHub"
-        }
-        if (commitPush) {
-            unavailable += "commit/push"
-        }
-        if (apkBuildOrDelivery) {
-            unavailable += "сборка/подписание/выдача готового APK"
-        }
-
-        return "Эта задача сейчас не может быть выполнена напрямую: в AYANA нет ${unavailable.distinct().joinToString(", ")}. " +
-                "Я могу подготовить исходники или патч, но не буду отмечать отсутствующие repository/build действия как выполненные."
     }
 
     private data class DirectAppDetailFinalGoal(
@@ -33554,37 +33618,82 @@ if (sessionOk) {
     }
 
     private fun acceptanceDevelopmentTruthProbe(): JSONObject {
-        val snapshot = capabilityRegistry.snapshot()
-        val ids =
-            listOf(
-                "development_agent_transaction",
-                "github_repository_write",
-                "github_commit_push",
-                "android_apk_build",
-                "direct_apk_delivery"
+        val snapshot =
+            reconcileGitHubCapabilityRegistry(
+                capabilityRegistry.snapshot()
             )
 
-        val wronglyAdvertised =
-            ids.filter { id ->
-                val item = acceptanceCapability(snapshot, id)
-                item == null ||
-                    item.optBoolean("implemented", true) ||
-                    item.optBoolean("available_now", true)
+        val githubWrite = acceptanceCapability(snapshot, "github_repository_write")
+        val githubCommit = acceptanceCapability(snapshot, "github_commit_push")
+        val development = acceptanceCapability(snapshot, "development_agent_transaction")
+        val apkBuild = acceptanceCapability(snapshot, "android_apk_build")
+        val apkDelivery = acceptanceCapability(snapshot, "direct_apk_delivery")
+        val runtime = githubRepositoryExecutor.runtimeSnapshot()
+
+        val executorSelfTest =
+            try {
+                githubRepositoryExecutor.selfTest()
+            } catch (_: Exception) {
+                false
             }
 
-        val ok = wronglyAdvertised.isEmpty()
+        val runtimeWriteAvailable =
+            runtime.optBoolean("connected", false) &&
+                runtime.optBoolean("repository_write_available", false)
+
+        val runtimeDeviceConfirmed =
+            runtime.optBoolean("device_confirmed_write", false)
+
+        val githubTruthOk =
+            githubWrite != null &&
+                githubCommit != null &&
+                githubWrite.optBoolean("implemented", false) &&
+                githubCommit.optBoolean("implemented", false) &&
+                githubWrite.optBoolean("available_now", false) == runtimeWriteAvailable &&
+                githubCommit.optBoolean("available_now", false) == runtimeWriteAvailable &&
+                githubWrite.optBoolean("device_confirmed", false) == runtimeDeviceConfirmed &&
+                githubCommit.optBoolean("device_confirmed", false) == runtimeDeviceConfirmed
+
+        val futureStagesStillNegative =
+            development != null &&
+                apkBuild != null &&
+                apkDelivery != null &&
+                !development.optBoolean("implemented", true) &&
+                !apkBuild.optBoolean("implemented", true) &&
+                !apkDelivery.optBoolean("implemented", true)
+
+        val scopeOk =
+            runtime.optString("repository") == AyanaGitHubRepositoryExecutor.REPOSITORY_SLUG &&
+                runtime.optString("branch") == AyanaGitHubRepositoryExecutor.BRANCH
+
+        val ok =
+            executorSelfTest &&
+                githubTruthOk &&
+                futureStagesStillNegative &&
+                scopeOk
 
         return acceptanceProbeResult(
             status = if (ok) AyanaAcceptanceTestEngine.STATUS_PASS else AyanaAcceptanceTestEngine.STATUS_FAIL,
             message =
                 if (ok) {
-                    "Development/GitHub/APK ограничения представлены честно: неподтверждённые внешние действия не рекламируются как доступные."
+                    "R10.27.1 development truth корректна: bounded GitHub write/commit реализован, а APK build/full transaction остаются честно недоступными."
                 } else {
-                    "Capability truth ошибочно рекламирует development-возможности: ${wronglyAdvertised.joinToString(", ")}."
+                    "R10.27.1 development capability truth противоречива."
                 },
-            evidenceScope = "negative_capability_truth",
+            evidenceScope = "github_executor_contract_plus_runtime_truth",
             verified = ok,
-            evidence = JSONObject().put("wrongly_advertised", JSONArray(wronglyAdvertised))
+            evidence =
+                JSONObject()
+                    .put("github_executor_version", AyanaGitHubRepositoryExecutor.VERSION)
+                    .put("github_executor_self_test", executorSelfTest)
+                    .put("github_truth_ok", githubTruthOk)
+                    .put("future_stages_still_negative", futureStagesStillNegative)
+                    .put("scope_ok", scopeOk)
+                    .put("repository", runtime.optString("repository"))
+                    .put("branch", runtime.optString("branch"))
+                    .put("connected", runtime.optBoolean("connected", false))
+                    .put("write_available", runtimeWriteAvailable)
+                    .put("device_confirmed_write", runtimeDeviceConfirmed)
         )
     }
 
@@ -34505,15 +34614,15 @@ val ok = targetVerified && restoreVerified
                     intent = explicitUnknownActionIntent
                 )
 
-        val explicitGithubCommitStillUnsupported =
-            !unsupportedExecutionCapabilityReason(
+        val explicitGithubCommitRoutesToExecutor =
+            unsupportedExecutionCapabilityReason(
                 "сделай commit в GitHub"
             ).isNullOrBlank()
 
         // R9.7.3: real device failure — continuous imperative "делай" must be
         // treated as execution intent, not as conversational text.
-        val continuousGithubCommitStillUnsupported =
-            !unsupportedExecutionCapabilityReason(
+        val continuousGithubCommitRoutesToExecutor =
+            unsupportedExecutionCapabilityReason(
                 "делай commit в GitHub"
             ).isNullOrBlank()
 
@@ -34760,8 +34869,8 @@ val ok = targetVerified && restoreVerified
                 githubCriticismNotExecution &&
                 githubDiscussionStructuredBypassOk &&
                 explicitUnknownActionStillFailClosed &&
-                explicitGithubCommitStillUnsupported &&
-                continuousGithubCommitStillUnsupported &&
+                explicitGithubCommitRoutesToExecutor &&
+                continuousGithubCommitRoutesToExecutor &&
                 continuousGithubCommitFailClosed &&
                 continuousGithubNoConversationBypass
 
@@ -34804,9 +34913,9 @@ val ok = targetVerified && restoreVerified
                 },
             message =
                 if (ok) {
-                    "Whole-goal routing guard распознал lifecycle verification, App Detail final target, clipboard/Personal Search routes, semantic-object lifecycle guard, conversation-vs-execution truth для GitHub/commit discussion, conversational terminal reconciliation, fail-closed реальные action-команды, capability-summary guidance, artifact semantic-content/follow-up contract, pure multi-metric fast path и verified-facts reasoning handoff."
+                    "Whole-goal routing guard распознал lifecycle verification, App Detail final target, clipboard/Personal Search routes, semantic-object lifecycle guard, conversation-vs-execution truth для GitHub/commit discussion + executable GitHub route, conversational terminal reconciliation, fail-closed реальные action-команды, capability-summary guidance, artifact semantic-content/follow-up contract, pure multi-metric fast path и verified-facts reasoning handoff."
                 } else {
-                    "Whole-goal routing regression: lifecycle=$lifecycleOk, app_detail=$appDetailOk, metrics=$metricsOk, volume_target=$volumeTargetOk, unsupported_terminal=$unsupportedTerminalOk, github_discussion_route=$githubDiscussionNotExecution, github_criticism_route=$githubCriticismNotExecution, structured_unknown_conversation_bypass=$githubDiscussionStructuredBypassOk, explicit_unknown_action_fail_closed=$explicitUnknownActionStillFailClosed, explicit_github_action=$explicitGithubCommitStillUnsupported, continuous_github_action=$continuousGithubCommitStillUnsupported, continuous_github_fail_closed=$continuousGithubCommitFailClosed, continuous_github_no_bypass=$continuousGithubNoConversationBypass, clipboard_route=$clipboardRoutingOk, lifecycle_semantic_guard=$lifecycleSemanticObjectRejected, refusal_fail_closed=$refusalFailClosed, informational_terminal=$informationalTerminalReconciliationOk, criticism_terminal=$criticismTerminalReconciliationOk, statement_terminal=$statementTerminalReconciliationOk, modal_action_fail_closed=$modalActionTerminalStillFailClosed, desired_action_fail_closed=$desiredActionTerminalStillFailClosed, capability_guidance=$broadCapabilityGuidanceOk, action_terminal_fail_closed=$actionTerminalStillFailClosed, artifact=$artifact, artifact_semantic_content=$artifactSemanticContentOk, artifact_follow_up=$artifactFollowUpContractOk, personal_search_route=$personalSearchRoutingOk, artifact_metric_guard=$artifactMetricsSuppressed, mixed_metric_guard=$mixedSideEffectMetricsSuppressed, pure_metric_local=$pureMetricGoalTerminalLocal, analytical_handoff=$analyticalMetricGoalRequiresHandoff, conditional_handoff=$conditionalMetricGoalRequiresHandoff."
+                    "Whole-goal routing regression: lifecycle=$lifecycleOk, app_detail=$appDetailOk, metrics=$metricsOk, volume_target=$volumeTargetOk, unsupported_terminal=$unsupportedTerminalOk, github_discussion_route=$githubDiscussionNotExecution, github_criticism_route=$githubCriticismNotExecution, structured_unknown_conversation_bypass=$githubDiscussionStructuredBypassOk, explicit_unknown_action_fail_closed=$explicitUnknownActionStillFailClosed, explicit_github_route=$explicitGithubCommitRoutesToExecutor, continuous_github_route=$continuousGithubCommitRoutesToExecutor, continuous_github_fail_closed=$continuousGithubCommitFailClosed, continuous_github_no_bypass=$continuousGithubNoConversationBypass, clipboard_route=$clipboardRoutingOk, lifecycle_semantic_guard=$lifecycleSemanticObjectRejected, refusal_fail_closed=$refusalFailClosed, informational_terminal=$informationalTerminalReconciliationOk, criticism_terminal=$criticismTerminalReconciliationOk, statement_terminal=$statementTerminalReconciliationOk, modal_action_fail_closed=$modalActionTerminalStillFailClosed, desired_action_fail_closed=$desiredActionTerminalStillFailClosed, capability_guidance=$broadCapabilityGuidanceOk, action_terminal_fail_closed=$actionTerminalStillFailClosed, artifact=$artifact, artifact_semantic_content=$artifactSemanticContentOk, artifact_follow_up=$artifactFollowUpContractOk, personal_search_route=$personalSearchRoutingOk, artifact_metric_guard=$artifactMetricsSuppressed, mixed_metric_guard=$mixedSideEffectMetricsSuppressed, pure_metric_local=$pureMetricGoalTerminalLocal, analytical_handoff=$analyticalMetricGoalRequiresHandoff, conditional_handoff=$conditionalMetricGoalRequiresHandoff."
                 },
             evidenceScope = "live_pure_contract",
             verified = ok,
@@ -34825,8 +34934,8 @@ val ok = targetVerified && restoreVerified
                     .put("github_criticism_not_execution", githubCriticismNotExecution)
                     .put("structured_unknown_conversation_bypass_ok", githubDiscussionStructuredBypassOk)
                     .put("explicit_unknown_action_still_fail_closed", explicitUnknownActionStillFailClosed)
-                    .put("explicit_github_commit_still_unsupported", explicitGithubCommitStillUnsupported)
-                    .put("continuous_github_commit_still_unsupported", continuousGithubCommitStillUnsupported)
+                    .put("explicit_github_commit_routes_to_executor", explicitGithubCommitRoutesToExecutor)
+                    .put("continuous_github_commit_routes_to_executor", continuousGithubCommitRoutesToExecutor)
                     .put("continuous_github_commit_fail_closed", continuousGithubCommitFailClosed)
                     .put("continuous_github_no_conversation_bypass", continuousGithubNoConversationBypass)
                     .put("criticism_terminal_reconciliation_ok", criticismTerminalReconciliationOk)
@@ -37829,14 +37938,17 @@ routed.forEach {
     }
 
     private fun acceptanceKnownLimitsProbe(): JSONObject {
-        val snapshot = capabilityRegistry.snapshot()
+        val snapshot =
+            reconcileGitHubCapabilityRegistry(
+                capabilityRegistry.snapshot()
+            )
         val limits = JSONArray()
 
         val labels =
             linkedMapOf(
                 "development_agent_transaction" to "R9.0 transaction contract реализован fail-closed, но авторизованные repository/build/rollback executors ещё отсутствуют",
-                "github_repository_write" to "нет авторизованной записи в GitHub repository",
-                "github_commit_push" to "нет commit/push executor",
+                "github_repository_write" to "R10.27.1 GitHub executor реализован, но текущая authorization/write readiness не подтверждена",
+                "github_commit_push" to "R10.27.1 commit executor реализован, но текущая authorization/write readiness не подтверждена",
                 "android_apk_build" to "AYANA Android не запускает APK build pipeline",
                 "external_mail_calendar_files" to "нет авторизованных внешних mail/calendar/files account executors; R9.3 local app integration не заменяет account API",
                 "video_audio_analysis" to "аудиодорожка видео не анализируется",
@@ -53203,6 +53315,79 @@ val networkPaused =
         return reconciled
     }
 
+    private fun reconcileGitHubCapabilityRegistry(
+        registrySnapshot: JSONObject
+    ): JSONObject {
+        val reconciled =
+            try {
+                JSONObject(registrySnapshot.toString())
+            } catch (_: Exception) {
+                registrySnapshot
+            }
+
+        val runtime =
+            reconciled.optJSONObject("runtime")
+                ?: JSONObject().also {
+                    reconciled.put("runtime", it)
+                }
+
+        val github = githubRepositoryExecutor.runtimeSnapshot()
+        val connected = github.optBoolean("connected", false)
+        val writeAvailable =
+            connected &&
+                github.optBoolean("repository_write_available", false)
+        val deviceConfirmed =
+            github.optBoolean("device_confirmed_write", false)
+
+        runtime
+            .put("github_repository_executor_version", github.optString("version", AyanaGitHubRepositoryExecutor.VERSION))
+            .put("github_repository", github.optString("repository", AyanaGitHubRepositoryExecutor.REPOSITORY_SLUG))
+            .put("github_branch", github.optString("branch", AyanaGitHubRepositoryExecutor.BRANCH))
+            .put("github_client_id_configured", github.optBoolean("client_id_configured", false))
+            .put("github_authorization_pending", github.optBoolean("authorization_pending", false))
+            .put("github_repository_connected", connected)
+            .put("github_repository_write_available", writeAvailable)
+            .put("github_repository_device_confirmed_write", deviceConfirmed)
+            .put("github_repository_last_verified_at_ms", github.optLong("last_verified_at_ms", 0L))
+
+        val capabilities = reconciled.optJSONArray("capabilities") ?: JSONArray()
+
+        for (index in 0 until capabilities.length()) {
+            val item = capabilities.optJSONObject(index) ?: continue
+            when (item.optString("id")) {
+                "github_repository_write",
+                "github_commit_push" -> {
+                    item
+                        .put("implemented", true)
+                        .put("available_now", writeAvailable)
+                        .put("device_confirmed", deviceConfirmed)
+                        .put(
+                            "truth_state",
+                            when {
+                                deviceConfirmed && writeAvailable -> "DEVICE_CONFIRMED_AVAILABLE"
+                                writeAvailable -> "AVAILABLE_UNCONFIRMED"
+                                deviceConfirmed -> "DEVICE_CONFIRMED_UNAVAILABLE_NOW"
+                                else -> "IMPLEMENTED_UNAVAILABLE"
+                            }
+                        )
+                        .put(
+                            "note",
+                            "R10.27.1 fixed-repository GitHub App Device Flow executor; prepare is read-only, mutation requires fresh explicit confirmation and verified blob/commit SHA; repo=${AyanaGitHubRepositoryExecutor.REPOSITORY_SLUG}; branch=${AyanaGitHubRepositoryExecutor.BRANCH}"
+                        )
+                }
+            }
+        }
+
+        return reconciled
+    }
+
+    private fun githubRepositoryTruthContext(): String =
+        try {
+            githubRepositoryExecutor.compactContext()
+        } catch (_: Exception) {
+            "AYANA R10.27.1 GITHUB TRUTH: executor implemented for fixed repository, but current runtime readiness could not be read; do not claim GitHub write."
+        }
+
     private fun crossProcessAccessibilityTruthContext(): String {
         val snapshot =
             try {
@@ -53360,8 +53545,10 @@ val networkPaused =
         // R10.25: Registry v3.2.1 still exposes process-local Accessibility.
         // Reconcile only the audit copy against the verified :perception bridge.
         val registry =
-            reconcileCrossProcessAccessibilityRegistry(
-                registryRaw
+            reconcileGitHubCapabilityRegistry(
+                reconcileCrossProcessAccessibilityRegistry(
+                    registryRaw
+                )
             )
 
         val capabilities =
@@ -53664,6 +53851,26 @@ val networkPaused =
                 .put(
                     "accessibility_connected_cross_process",
                     auditRuntime.optBoolean("accessibility_connected_cross_process", false)
+                )
+                .put(
+                    "github_repository_executor_version",
+                    auditRuntime.optString("github_repository_executor_version", "")
+                )
+                .put(
+                    "github_repository",
+                    auditRuntime.optString("github_repository", "")
+                )
+                .put(
+                    "github_repository_connected",
+                    auditRuntime.optBoolean("github_repository_connected", false)
+                )
+                .put(
+                    "github_repository_write_available",
+                    auditRuntime.optBoolean("github_repository_write_available", false)
+                )
+                .put(
+                    "github_repository_device_confirmed_write",
+                    auditRuntime.optBoolean("github_repository_device_confirmed_write", false)
                 )
                 .put("local_only", true)
                 .put("agent_core_turns", 0)
@@ -55614,6 +55821,16 @@ respondUnsupportedAndResume(
                             "\n"
                         )
 
+                        // R10.27.1: follows the legacy registry and cross-process truth so
+                        // fresh GitHub authentication/write readiness cannot be overstated.
+                        append(
+                            githubRepositoryTruthContext()
+                        )
+
+                        append(
+                            "\n"
+                        )
+
                         append(
                             commandHistoryStore
                                 .contextForAgent(
@@ -56499,7 +56716,8 @@ state = "agent_response",
                                 setOf(
                                     "click_screen_element",
                                     "tap_screen_coordinates",
-                                    "execute_android_plan"
+                                    "execute_android_plan",
+                                    "github_write_commit"
                                 )
                             ) {
                                 arguments.put(
@@ -59916,8 +60134,9 @@ STATE_SUCCESS
                 toolName !in
                 setOf(
                     "click_screen_element",
-                    "tap_screen_coordinates"
-)
+                    "tap_screen_coordinates",
+                    "github_write_commit"
+                )
             ) {
                 durableGoalStore
                     .markPaused(
@@ -59983,6 +60202,39 @@ STATE_SUCCESS
                     "last_tool_args"
                 )
                     ?: JSONObject()
+
+            if (toolName == "github_write_commit") {
+                val prepared =
+                    try {
+                        JSONObject(goal.optString("last_result"))
+                    } catch (_: Exception) {
+                        JSONObject()
+                    }
+
+                if (
+                    prepared.optString("status") != "prepared_waiting_confirmation" ||
+                    !prepared.optBoolean("requires_confirmation", false) ||
+                    prepared.optString("proposed_blob_sha").isBlank()
+                ) {
+                    durableGoalStore.markPaused(
+                        goalId,
+                        "GitHub подтверждение остановлено: подготовленный payload отсутствует или повреждён"
+                    )
+                    respondAndResume(
+                        "GitHub commit не выполнен: точный подготовленный payload не удалось восстановить. Запустите изменение заново.",
+                        silent,
+                        success = false
+                    )
+                    return
+                }
+
+                arguments
+                    .put("_github_expected_sha", prepared.optString("expected_sha"))
+                    .put("_github_expected_missing", prepared.optBoolean("expected_missing", false))
+                    .put("_github_proposed_blob_sha", prepared.optString("proposed_blob_sha"))
+                    .put("_github_prepared_path", prepared.optString("prepared_path"))
+                    .put("_github_prepared_commit_message", prepared.optString("prepared_commit_message"))
+            }
 
             arguments.put(
                 "confirmed",
@@ -62015,7 +62267,8 @@ return ""
                 "click_screen_element",
                 "input_screen_text",
                 "scroll_screen",
-                "tap_screen_coordinates"
+                "tap_screen_coordinates",
+                "github_write_commit"
             )
 
     private fun isSafeAutoResumeTool(
@@ -65052,6 +65305,16 @@ return callAgentCore(
             "set_reminder_enabled" ->
                 "Меняю состояние напоминания…"
 
+            "github_repository_status" ->
+                "Проверяю подключение GitHub…"
+
+            "github_write_commit" ->
+                if (arguments.optBoolean("confirmed", false)) {
+                    "Записываю подтверждённое изменение в GitHub…"
+                } else {
+                    "Подготавливаю GitHub изменение без записи…"
+                }
+
             "execute_android_goal" ->
                 "Выполняю задачу на устройстве…"
 
@@ -65151,7 +65414,8 @@ private fun isSemanticActionResultVerified(
             setOf(
                 "click_screen_element",
                 "tap_screen_coordinates",
-                "execute_android_plan"
+                "execute_android_plan",
+                "github_write_commit"
             )
         ) {
             arguments.put(
@@ -65772,6 +66036,82 @@ private fun isSemanticActionResultVerified(
                                     "down"
                                 )
                         )
+                }
+
+                "github_repository_status" -> {
+                    githubRepositoryExecutor.status(allowPendingPoll = true)
+                }
+
+                "github_write_commit" -> {
+                    val confirmed = arguments.optBoolean("confirmed", false)
+
+                    if (!confirmed) {
+                        githubRepositoryExecutor.writeCommit(
+                            arguments = arguments,
+                            confirmed = false
+                        )
+                    } else {
+                        val dispatchAllowed =
+                            executionKernel.tryBeginIrreversibleDispatch(
+                                kind = "github_contents_commit",
+                                detail =
+                                    "repository=${AyanaGitHubRepositoryExecutor.REPOSITORY_SLUG}; " +
+                                        "branch=${AyanaGitHubRepositoryExecutor.BRANCH}; " +
+                                        "path=${arguments.optString("path").take(320)}"
+                            )
+
+                        if (!dispatchAllowed) {
+                            toolResult(
+                                false,
+                                "GitHub commit остановлен Execution Kernel до внешнего side effect."
+                            )
+                                .put("status", "dispatch_gate_rejected")
+                                .put("action_dispatched", false)
+                                .put("action_committed", false)
+                                .put("reconciliation_complete", true)
+                        } else {
+                            val githubResult =
+                                githubRepositoryExecutor.writeCommit(
+                                    arguments = arguments,
+                                    confirmed = true
+                                )
+
+                            val dispatched =
+                                githubResult.optBoolean("action_dispatched", false)
+                            val committed =
+                                githubResult.optBoolean("action_committed", false)
+                            val reconciliationComplete =
+                                githubResult.optBoolean("reconciliation_complete", false)
+
+                            if (dispatched) {
+                                executionKernel.markIrreversibleDispatchAccepted(
+                                    "GitHub PUT dispatched: ${arguments.optString("path").take(320)}"
+                                )
+                            }
+
+                            executionKernel.markSideEffectReconciliationStarted(
+                                "GitHub commit reconciliation: status=${githubResult.optString("status")}"
+                            )
+
+                            when {
+                                !dispatched ->
+                                    executionKernel.markSideEffectReconciled(
+                                        committed = false,
+                                        detail = "GitHub PUT не был отправлен; side effect отсутствует."
+                                    )
+
+                                reconciliationComplete ->
+                                    executionKernel.markSideEffectReconciled(
+                                        committed = committed,
+                                        detail =
+                                            "GitHub reconciliation complete; committed=$committed; " +
+                                                "sha=${githubResult.optString("commit_sha").take(64)}"
+                                    )
+                            }
+
+                            githubResult
+                        }
+                    }
                 }
 
                 "tap_screen_coordinates" -> {
@@ -71327,9 +71667,9 @@ state
         private const val MASTER_STATUS_MANUAL_REQUIRED =
             "MANUAL_REQUIRED"
 
-        // R10.24 FIELD HARDENING RELEASE TRUTH.
+        // R10.27.1 GITHUB REPOSITORY WRITE RELEASE TRUTH.
         private const val AYANA_VOICE_SERVICE_RELEASE =
-            "v12.58.1 / R10.26.1 CAPABILITY EVIDENCE METADATA DETECTOR RECONCILIATION"
+            "v12.59.0 / R10.27.1 GITHUB REPOSITORY WRITE + COMMIT/PUSH"
 
         private const val AYANA_PERSONAL_SEARCH_ENGINE_RELEASE =
             "v2.0 / R10.20 PERSONAL SEARCH 2.0 + VERIFIED RESULT CONTRACT v2"
@@ -71338,16 +71678,16 @@ state
             "v3.2.1"
 
         private const val AYANA_WORKER_RELEASE =
-            "v11.3.2 / R10.24.2 ACCEPTANCE TRUTH RECONCILIATION"
+            "v11.4.0 / R10.27.1 GITHUB REPOSITORY WRITE + COMMIT/PUSH"
 
         private const val AYANA_ACCEPTED_FEATURE_CHECKPOINT =
-            "R10.25 CROSS-PROCESS ACCESSIBILITY TRUTH RECONCILIATION — DEVICE-CONFIRMED; R10.24.2 + R10.24.1 + R10.23 preserved"
+            "R10.26.1 CAPABILITY EVIDENCE METADATA DETECTOR RECONCILIATION — DEVICE-CONFIRMED; diagnostic closure 17/17 PASS"
 
         private const val AYANA_CURRENT_FEATURE_RELEASE =
-            "R10.26.1 CAPABILITY EVIDENCE METADATA DETECTOR RECONCILIATION — PENDING DEVICE CONFIRMATION"
+            "R10.27.1 GITHUB REPOSITORY WRITE + COMMIT/PUSH — PENDING DEVICE CONFIRMATION"
 
         private const val AYANA_RELEASE_LINEAGE =
-            "Android v12.21.0 / R7.9 truth-hardening + R8.0 multi-attachment + R8.1–R8.4 accepted Personal Global Search stack + R8.5–R8.5.4 capability/evidence truth + R9.0 autonomous agent foundation + R9.0.1 history live-refresh proof fix + R9.0.2 diagnostic reconciliation/history refresh fix + R9.0.3 TTS health reconciliation + R9.1 IME perception/active telemetry truth + R9.2 autonomous recovery/long-task reconciliation + R9.2.1 adaptive hypothesis reconciliation + R9.3 app integration framework + R9.3.1 screen health reconciliation + R9.3.2 history latency recovery reconciliation + R9.3.3 informational terminal reconciliation + R9.3.4 app integration device acceptance + R9.4 multi-app task orchestration + R9.4.1 screen ownership union reconciliation + R9.5 verified result transfer between app steps + R9.5.1 partial marker provenance reconciliation + R9.5.2 bounded marker observation + R9.5.3 verified action result transfer + R9.6 verified semantic observation fallback + R9.6.1 visual fallback acceptance truth + R9.7 structured screen reading + R9.7.1 conversation routing/terminal truth + R9.7.2 structured router conversation precedence + R9.7.3 action morphology/terminal truth + R9.8 generic verified result transfer + R9.8.1 master full acceptance/diagnostic engine + R9.9 reversible action journal/verified undo + R9.9.1 brightness verified undo device acceptance + R9.9.2 opt-in low-battery controlled proactivity + R10.0 unified screen intelligence + R10.1 local self-diagnostics/self-audit + R10.2 personal search expansion + R10.3 long autonomous tasks/recovery + R10.4 adaptive verified execution loop + R10.5 generalized live adaptive autonomy + R10.6 cross-lane adaptive continuity + R10.6.1 durable goal binding fix + R10.7 cross-lane durable recovery continuity + R10.7.1 isolated acceptance cleanup hardening + R10.8 general-purpose long autonomous objectives + R10.9 dynamic goal decomposition/planner contract + R10.10 adaptive planner production path + R10.11 production replan/durable recovery + R10.12 natural lifecycle recovery/background continuation + R10.13 full process-death recovery + R10.13.1 post-process readiness/reconciliation + R10.13.2 process-death core recovery proof correction + R10.14 perception process isolation/cross-process accessibility bridge + R10.14.1 cross-process visual evidence fix + R10.14.2 lifecycle profile/self-diagnostic truth + R10.14.3 history recovery reconciliation + R10.15 generalized cross-process autonomy hardening + R10.15.1 self-diagnostics routing reconciliation + R10.16 perception process recovery/safe bridge rebind + R10.16.1 restart telemetry reconciliation + R10.17 screen intelligence 2.0 + R10.17.1 acceptance routing reconciliation + R10.18 universal UI action engine + R10.18.1 acceptance target reconciliation + R10.18.2 live target authority reconciliation + R10.18.3 app info target reconciliation + R10.19 autonomous multi-app tasks 2.0 + R10.20 personal search 2.0 + R10.21 document & office engine 2.0 + R10.22 notifications & communication assistant + R10.22.1 notification acceptance visibility reconciliation + R10.21.1 pptx completion evidence reconciliation + R10.23 voice & background 2.0 + R10.24 field hardening + R10.24.1 field hardening reconciliation/device acceptance + R10.24.2 acceptance truth reconciliation + R10.25 cross-process accessibility truth reconciliation + R10.26 capability evidence metadata reconciliation + R10.26.1 capability evidence metadata detector reconciliation"
+            "Android v12.21.0 / R7.9 truth-hardening + R8.0 multi-attachment + R8.1–R8.4 accepted Personal Global Search stack + R8.5–R8.5.4 capability/evidence truth + R9.0 autonomous agent foundation + R9.0.1 history live-refresh proof fix + R9.0.2 diagnostic reconciliation/history refresh fix + R9.0.3 TTS health reconciliation + R9.1 IME perception/active telemetry truth + R9.2 autonomous recovery/long-task reconciliation + R9.2.1 adaptive hypothesis reconciliation + R9.3 app integration framework + R9.3.1 screen health reconciliation + R9.3.2 history latency recovery reconciliation + R9.3.3 informational terminal reconciliation + R9.3.4 app integration device acceptance + R9.4 multi-app task orchestration + R9.4.1 screen ownership union reconciliation + R9.5 verified result transfer between app steps + R9.5.1 partial marker provenance reconciliation + R9.5.2 bounded marker observation + R9.5.3 verified action result transfer + R9.6 verified semantic observation fallback + R9.6.1 visual fallback acceptance truth + R9.7 structured screen reading + R9.7.1 conversation routing/terminal truth + R9.7.2 structured router conversation precedence + R9.7.3 action morphology/terminal truth + R9.8 generic verified result transfer + R9.8.1 master full acceptance/diagnostic engine + R9.9 reversible action journal/verified undo + R9.9.1 brightness verified undo device acceptance + R9.9.2 opt-in low-battery controlled proactivity + R10.0 unified screen intelligence + R10.1 local self-diagnostics/self-audit + R10.2 personal search expansion + R10.3 long autonomous tasks/recovery + R10.4 adaptive verified execution loop + R10.5 generalized live adaptive autonomy + R10.6 cross-lane adaptive continuity + R10.6.1 durable goal binding fix + R10.7 cross-lane durable recovery continuity + R10.7.1 isolated acceptance cleanup hardening + R10.8 general-purpose long autonomous objectives + R10.9 dynamic goal decomposition/planner contract + R10.10 adaptive planner production path + R10.11 production replan/durable recovery + R10.12 natural lifecycle recovery/background continuation + R10.13 full process-death recovery + R10.13.1 post-process readiness/reconciliation + R10.13.2 process-death core recovery proof correction + R10.14 perception process isolation/cross-process accessibility bridge + R10.14.1 cross-process visual evidence fix + R10.14.2 lifecycle profile/self-diagnostic truth + R10.14.3 history recovery reconciliation + R10.15 generalized cross-process autonomy hardening + R10.15.1 self-diagnostics routing reconciliation + R10.16 perception process recovery/safe bridge rebind + R10.16.1 restart telemetry reconciliation + R10.17 screen intelligence 2.0 + R10.17.1 acceptance routing reconciliation + R10.18 universal UI action engine + R10.18.1 acceptance target reconciliation + R10.18.2 live target authority reconciliation + R10.18.3 app info target reconciliation + R10.19 autonomous multi-app tasks 2.0 + R10.20 personal search 2.0 + R10.21 document & office engine 2.0 + R10.22 notifications & communication assistant + R10.22.1 notification acceptance visibility reconciliation + R10.21.1 pptx completion evidence reconciliation + R10.23 voice & background 2.0 + R10.24 field hardening + R10.24.1 field hardening reconciliation/device acceptance + R10.24.2 acceptance truth reconciliation + R10.25 cross-process accessibility truth reconciliation + R10.26 capability evidence metadata reconciliation + R10.26.1 capability evidence metadata detector reconciliation + R10.27.1 github repository write/commit-push"
 
         // AyanaCommandHistoryStore v2.8 keeps up to 4k chars inline and stores longer
         // results out-of-line. Self-review intentionally remains inline so copied History
