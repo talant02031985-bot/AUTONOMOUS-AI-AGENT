@@ -4,7 +4,7 @@ import org.json.JSONObject
 import java.util.Locale
 
 /**
- * AYANA Safety Policy v1.3 — ARTIFACT SAFE WRITE.
+ * AYANA Safety Policy v1.3 — R10.27.1 GitHub Repository Write.
  *
  * Local fail-closed guard executed immediately before Agent Core device tools.
  * It is intentionally independent from model instructions: a model mistake must
@@ -102,7 +102,8 @@ class AyanaSafetyPolicy {
             "list_goals",
             "recall_memory",
             "list_memory",
-            "list_reminders" ->
+            "list_reminders",
+            "github_repository_status" ->
                 allow(
                     RISK_READ_ONLY,
                     "read_only"
@@ -125,6 +126,29 @@ class AyanaSafetyPolicy {
                     RISK_SAFE_ACTION,
                     "safe_action"
                 )
+
+            "github_write_commit" ->
+                if (
+                    arguments.optBoolean(
+                        "confirmed",
+                        false
+                    )
+                ) {
+                    // Confirmation was injected only by VoiceService after a fresh
+                    // local user-authored durable-goal confirmation. The policy does
+                    // not trust model-authored `confirmed` fields.
+                    allow(
+                        RISK_CONFIRMATION_REQUIRED,
+                        "github_write_confirmed"
+                    )
+                } else {
+                    // First pass is strictly read-only: the GitHub executor may GET
+                    // current SHA and prepare an exact payload, but PUT is forbidden.
+                    allow(
+                        RISK_READ_ONLY,
+                        "github_prepare_only"
+                    )
+                }
 
             "tap_screen_coordinates" ->
                 if (
@@ -188,7 +212,6 @@ class AyanaSafetyPolicy {
                 )
 
             "forget_memory",
-            "create_artifact",
             "create_reminder",
             "delete_reminder",
             "update_reminder",
@@ -197,11 +220,7 @@ class AyanaSafetyPolicy {
             "cancel_goal" ->
                 allow(
                     RISK_SAFE_ACTION,
-                    if (name == "create_artifact") {
-                        "safe_scoped_artifact_write"
-                    } else {
-                        "local_user_data_action"
-                    }
+                    "local_user_data_action"
                 )
 
             else ->
