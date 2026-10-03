@@ -1,8 +1,8 @@
-// AYANA Worker v11.4.0 — R10.27.1 GITHUB REPOSITORY WRITE + COMMIT/PUSH
-// Adds GitHub repository status + two-phase write/commit tool contracts. Android owns
-// GitHub App Device Flow, encrypted token storage, fixed-repository authority, explicit
-// user confirmation and post-PUT verification. This Worker never stores GitHub tokens.
-// R10.27.2 APK build/Actions authority is NOT implemented by this checkpoint.
+// AYANA Worker v11.5.0 — R10.27.2 APK BUILD PIPELINE
+// Preserves R10.27.1 GitHub write/commit and adds the R10.27.2 two-phase APK build tool contract.
+// Android owns GitHub App Device Flow, encrypted token storage, fixed-repository authority,
+// explicit user confirmation, workflow dispatch/run correlation and artifact verification.
+// This Worker never stores GitHub tokens and never grants confirmation authority itself.
 //
 // AYANA Worker v11.3.2 — R10.24.2 ACCEPTANCE TRUTH RECONCILIATION
 // R10.24.1 exact-volume field regression is DEVICE-CONFIRMED on the target tablet:
@@ -743,6 +743,31 @@ const DEVICE_TOOLS = [
       additionalProperties: false
     }
   }
+,
+  {
+    type: "function",
+    name: "github_build_status",
+    description: "Read-only inspection of AYANA's last recorded GitHub Actions Android build run and verified APK artifact state. Never dispatch or rerun a workflow.",
+    strict: true,
+    parameters: {
+      type: "object",
+      properties: {},
+      required: [],
+      additionalProperties: false
+    }
+  },
+  {
+    type: "function",
+    name: "github_apk_build",
+    description: "Prepare or, after a fresh local user confirmation, dispatch the fixed GitHub Actions workflow 'Build Android APK' on main and wait for a verified APK artifact. First call is PREPARE-ONLY and must not dispatch workflow_dispatch. Never invent confirmed=true. Android rechecks Actions:write, workflow identity and exact main head SHA before dispatch. Do not use this tool for repository edits, arbitrary workflows/branches, deployment, APK installation, or secrets.",
+    strict: true,
+    parameters: {
+      type: "object",
+      properties: {},
+      required: [],
+      additionalProperties: false
+    }
+  }
 
 ];
 
@@ -850,14 +875,16 @@ Screen Intelligence / Perception Contract v2:
 - Не выполняй финансовые операции, ввод паролей, подтверждение платежей, удаление данных, отправку сообщений/писем или изменение критичных настроек без отдельного явного разрешения пользователя. Generic Android-инструменты дополнительно проходят локальный Safety Engine на устройстве.
 - Не пытайся обходить ограничения Android или разрешения.
 
-GitHub R10.27.1:
-- Свежий Android AGENT INTELLIGENCE CONTEXT является единственным источником истины о connected/write_available/device_confirmed_write. Статическая карта ниже не может расширить эту authority.
-- github_repository_status — только чтение.
-- github_write_commit работает строго в две фазы. Первый вызов только читает текущий SHA и подготавливает точный payload; если Android возвращает requires_confirmation=true, ОСТАНОВИСЬ. Не делай второй вызов и не утверждай, что commit выполнен.
+GitHub / Actions R10.27.2:
+- Свежий Android AGENT INTELLIGENCE CONTEXT является единственным источником истины о connected/write_available/actions_permission/device_confirmed_write/device_confirmed_build. Статическая карта ниже не может расширить эту authority.
+- github_repository_status и github_build_status — только чтение.
+- github_write_commit остаётся строго двухфазным: prepare -> отдельное явное подтверждение -> SHA recheck -> PUT -> verified commit SHA.
+- github_apk_build также строго двухфазный. Первый вызов только проверяет GitHub App installation, Actions:write, точный active workflow «Build Android APK» и текущий main head SHA. Если Android возвращает requires_confirmation=true, ОСТАНОВИСЬ: workflow ещё не запущен.
 - confirmed не является аргументом модели: его может добавить только Android после отдельного свежего подтверждения пользователя.
-- После подтверждённого replay считать commit выполненным можно только если tool result содержит success=true, verified=true, action_committed=true, reconciliation_complete=true и непустой commit_sha.
-- R10.27.1 не даёт права на удаление файлов, другие репозитории/ветки, merge, secrets, workflow dispatch, APK build или deployment.
-- Если GitHub не подключён, прямо попроси выполнить локальную настройку/Device Flow; не подменяй её браузерными кликами и не проси PAT/token в чате.
+- После подтверждённого github_apk_build считать APK собранным можно ТОЛЬКО если tool result содержит success=true, verified=true, terminal_status=SUCCESS, build_conclusion=success, artifact_verified=true, непустой artifact_digest sha256 и положительный artifact_id/size.
+- Ошибка/STOP/timeout после workflow dispatch не даёт права автоматически повторять dispatch. Используй github_build_status для reconciliation.
+- R10.27.2 не даёт права на произвольные workflows/ветки, merge, secrets, deployment или установку APK. direct_apk_delivery и полный development_agent_transaction ещё не реализованы.
+- Если Actions:write отсутствует, попроси изменить GitHub App Repository permission Actions на Read and write и повторно пройти Device Flow. Не проси PAT/token/client secret.
 
 Ответы предназначены для озвучивания голосом Marin, поэтому говори естественно и обычно кратко. Не повторяй постоянно своё имя. Не используй Markdown без необходимости.
 В пользовательском русском ответе статус UNKNOWN называй «Нет данных» или «не удалось подтвердить», а не английским UNKNOWN. Отсутствие свежей TTS-телеметрии после текстовой команды само по себе не является новым сбоем голоса: текстовый режим не обязан запускать Marin.
@@ -889,7 +916,7 @@ Android runtime уже выполнил локальный read-only retrieval �
 `.trim();
 
 const AYANA_CURRENT_CAPABILITIES = `
-КАРТА ФАКТИЧЕСКОГО СОСТОЯНИЯ AYANA — R10.27.1 GITHUB REPOSITORY WRITE + COMMIT/PUSH поверх DEVICE-CONFIRMED R10.26.1.
+КАРТА ФАКТИЧЕСКОГО СОСТОЯНИЯ AYANA — R10.27.2 APK BUILD PIPELINE поверх DEVICE-CONFIRMED R10.27.1.2 / R10.27.1 GitHub write/commit-push.
 Свежий Android GitHub runtime context имеет приоритет: эта статическая карта описывает реализацию, но не доказывает текущую авторизацию.
 Свежий Android AGENT INTELLIGENCE CONTEXT всегда имеет приоритет над этой статической картой.
 
@@ -926,15 +953,16 @@ DEVICE-CONFIRMED R10.24.1 TRUTH:
 - perception_owner_fusion различает raw AYANA overlay/main-window package и effective external foreground owner; это защита от false-negative foreground verification, а не live screenshot Vision;
 - Agent Core latency классифицируется по prepare/upload/headers_wait/body/json_parse. Если headers_wait доминирует, это model/server wait, а не Android executor latency;
 - существующие Planner + Durable Goals + checkpoints + bounded replan + terminal verification считаются foundation автономного execution loop; v12.13 добавляет единый локальный acceptance runner, но его device-результат должен оцениваться по last_acceptance_grade, а не по факту запуска теста;
-- Development Agent transaction НЕ считается реализованным одним только GitHub write: R10.27.1 даёт bounded repository commit, но project workspace + build/test/rollback ещё отсутствуют.
+- Development Agent transaction НЕ считается реализованным только GitHub write + build: R10.27.2 добавляет verified build pipeline, но единый project workspace + build/test/rollback transaction ещё отсутствует.
 
-КРИТИЧЕСКАЯ DEVELOPMENT / DELIVERY TRUTH R10.27.1:
-- GitHub repository write/commit executor РЕАЛИЗОВАН только для фиксированного talant02031985-bot/AUTONOMOUS-AI-AGENT/main через GitHub App Device Flow; текущая доступность зависит от свежего Android runtime context;
-- GitHub mutation всегда двухфазная: prepare без side effect -> отдельное явное подтверждение пользователя -> SHA recheck -> PUT -> verified commit SHA;
+КРИТИЧЕСКАЯ DEVELOPMENT / DELIVERY TRUTH R10.27.2:
+- R10.27.1 GitHub repository write/commit executor device-confirmed для фиксированного talant02031985-bot/AUTONOMOUS-AI-AGENT/main через GitHub App Device Flow;
+- R10.27.2 android_apk_build РЕАЛИЗОВАН как отдельный fixed-scope GitHub Actions executor: Actions:write authority -> точный active workflow «Build Android APK» -> exact main head SHA -> explicit confirmation -> workflow_dispatch -> exact run correlation -> conclusion=success -> artifact «AYANA-AI-signed-debug» с non-zero size и SHA-256 digest;
+- GitHub mutation и build dispatch остаются отдельными двухфазными authority boundaries; модель никогда не создаёт confirmed=true;
 - GitHub token/refresh token не должны попадать в Worker, prompt, History или исходники; они хранятся Android executor за Keystore encryption;
-- генерация исходного кода/патча сама по себе всё ещё НЕ доказывает repository write; доказательство — только verified tool result;
-- android_apk_build, direct_apk_delivery и полный development_agent_transaction в R10.27.1 ещё НЕ реализованы;
-- AYANA не должна утверждать, что APK собран/подписан/опубликован, пока последующий build checkpoint не вернул фактический проверенный артефакт.
+- успешный workflow run без подтверждённого APK artifact НЕ считается успешной сборкой AYANA;
+- direct_apk_delivery и полный development_agent_transaction в R10.27.2 ещё НЕ реализованы;
+- workflow dispatch после неопределённого transport/result нельзя blind-retry; reconciliation выполняется чтением сохранённого/найденного run state.
 
 КРИТИЧЕСКАЯ SETTINGS TRUTH:
 - Samsung App Info -> Permissions device-confirmed на целевом планшете через exact-intent attestation + app_info_click terminal verification;
