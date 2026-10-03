@@ -21,7 +21,7 @@ import javax.crypto.SecretKey
 import javax.crypto.spec.GCMParameterSpec
 
 /**
- * AYANA R10.27.2 GitHub Repository + Actions Executor v1.2.
+ * AYANA R10.27.2.1 GitHub Repository + Actions Executor v1.2.1.
  *
  * Security model:
  * - GitHub App Device Flow only. No PAT/client secret is embedded in the APK.
@@ -41,6 +41,13 @@ import javax.crypto.spec.GCMParameterSpec
  * - the exact workflow run is identified without blind re-dispatch;
  * - SUCCESS requires conclusion=success plus one non-expired APK artifact with
  *   an immutable SHA-256 artifact digest.
+ *
+ * R10.27.2.1 hardens PREPARE truth:
+ * - github_apk_build confirmed=false is explicitly read-only even on failure;
+ * - a transient installation-permission read failure cannot be mislabeled as a
+ *   dispatched side effect;
+ * - PREPARE may use a very recent verified Actions:write readiness snapshot only
+ *   to construct the proposal; confirmed dispatch still re-checks live authority.
  *
  * This executor still does not merge branches, delete files, write secrets,
  * install APKs, or broaden authority beyond the fixed repository.
@@ -468,54 +475,73 @@ class AyanaGitHubRepositoryExecutor(
     private fun prepareBuild(): JSONObject {
         val tokenResult = ensureUsableAccessToken()
         if (!tokenResult.optBoolean("success", false)) {
-            return tokenResult
+            return buildPrepareReadOnlyFailure(tokenResult)
         }
 
         val accessToken = tokenResult.optString("access_token")
-        val authority = installationAuthority(accessToken)
 
-        if (!authority.optBoolean("success", false)) {
-            return authority
-        }
+        val cachedAuthority =
+            recentVerifiedActionsWriteAuthority()
+
+        val authority =
+            if (cachedAuthority != null) {
+                cachedAuthority
+            } else {
+                val liveAuthority =
+                    installationAuthority(accessToken)
+
+                if (!liveAuthority.optBoolean("success", false)) {
+                    return buildPrepareReadOnlyFailure(liveAuthority)
+                        .put("live_authority_status", liveAuthority.optString("status"))
+                        .put("live_authority_http_code", liveAuthority.optInt("http_code", -1))
+                }
+
+                JSONObject(liveAuthority.toString())
+                    .put("authority_source", "live_installation")
+                    .put("authority_cache_age_ms", 0L)
+            }
 
         val actionsPermission =
             authority.optString("actions_permission", "none")
                 .lowercase(Locale.ROOT)
 
-        prefs.edit()
-            .putString(KEY_LAST_ACTIONS_PERMISSION, actionsPermission)
-            .putLong(KEY_LAST_ACTIONS_VERIFIED_AT, System.currentTimeMillis())
-            .apply()
+        if (authority.optString("authority_source") == "live_installation") {
+            prefs.edit()
+                .putString(KEY_LAST_ACTIONS_PERMISSION, actionsPermission)
+                .putLong(KEY_LAST_ACTIONS_VERIFIED_AT, System.currentTimeMillis())
+                .apply()
+        }
 
         if (actionsPermission != "write") {
-            return failure(
-                "GitHub App не имеет Actions: Read and write для $REPOSITORY_SLUG. Измените Repository permissions → Actions на Read and write и заново выполните Device Flow."
+            return buildPrepareReadOnlyFailure(
+                failure(
+                    "GitHub App не имеет Actions: Read and write для $REPOSITORY_SLUG. Измените Repository permissions → Actions на Read and write и заново выполните Device Flow."
+                )
+                    .put("status", "actions_write_permission_required")
+                    .put("actions_permission", actionsPermission)
             )
-                .put("status", "actions_write_permission_required")
-                .put("actions_permission", actionsPermission)
-                .put("action_dispatched", false)
-                .put("action_committed", false)
-                .put("reconciliation_complete", true)
         }
 
         val workflow = findBuildWorkflow(accessToken)
         if (!workflow.optBoolean("success", false)) {
-            return workflow
+            return buildPrepareReadOnlyFailure(workflow)
         }
 
         val head = readBranchHead(accessToken)
         if (!head.optBoolean("success", false)) {
-            return head
+            return buildPrepareReadOnlyFailure(head)
         }
 
         val workflowId = workflow.optLong("workflow_id", 0L)
         val headSha = head.optString("head_sha").trim()
 
         if (workflowId <= 0L || headSha.isBlank()) {
-            return failure(
-                "Не удалось зафиксировать точный workflow/head SHA перед сборкой."
+            return buildPrepareReadOnlyFailure(
+                failure(
+                    "Не удалось зафиксировать точный workflow/head SHA перед сборкой."
+                )
+                    .put("status", "build_prepare_incomplete")
             )
-                .put("status", "build_prepare_incomplete")
         }
 
         return JSONObject()
@@ -526,6 +552,8 @@ class AyanaGitHubRepositoryExecutor(
             .put("action_dispatched", false)
             .put("action_committed", false)
             .put("reconciliation_complete", true)
+            .put("side_effect_state", "NONE")
+            .put("phase", "prepare_read_only")
             .put("repository", REPOSITORY_SLUG)
             .put("branch", BRANCH)
             .put("workflow_id", workflowId)
@@ -533,10 +561,63 @@ class AyanaGitHubRepositoryExecutor(
             .put("workflow_state", workflow.optString("workflow_state"))
             .put("head_sha", headSha)
             .put("artifact_name", APK_ARTIFACT_NAME)
+            .put("actions_permission", actionsPermission)
+            .put("authority_source", authority.optString("authority_source", "live_installation"))
+            .put("authority_cache_age_ms", authority.optLong("authority_cache_age_ms", 0L))
             .put(
                 "message",
                 "Сборка APK подготовлена для ${headSha.take(12)} через «$BUILD_WORKFLOW_NAME». Workflow ещё НЕ запущен. Для запуска скажите: «подтверждаю текущую задачу»."
             )
+    }
+
+    private fun buildPrepareReadOnlyFailure(
+        source: JSONObject
+    ): JSONObject =
+        JSONObject(source.toString())
+            .put("requires_confirmation", false)
+            .put("action_dispatched", false)
+            .put("action_committed", false)
+            .put("reconciliation_complete", true)
+            .put("side_effect_state", "NONE")
+            .put("phase", "prepare_read_only")
+
+    private fun recentVerifiedActionsWriteAuthority(): JSONObject? {
+        val permission =
+            prefs.getString(
+                KEY_LAST_ACTIONS_PERMISSION,
+                ""
+            )
+                .orEmpty()
+                .lowercase(Locale.ROOT)
+
+        val verifiedAt =
+            prefs.getLong(
+                KEY_LAST_ACTIONS_VERIFIED_AT,
+                0L
+            )
+
+        val now = System.currentTimeMillis()
+        val ageMs =
+            if (verifiedAt > 0L) {
+                (now - verifiedAt).coerceAtLeast(0L)
+            } else {
+                Long.MAX_VALUE
+            }
+
+        if (
+            permission != "write" ||
+            verifiedAt <= 0L ||
+            ageMs > BUILD_PREPARE_AUTHORITY_CACHE_MS
+        ) {
+            return null
+        }
+
+        return JSONObject()
+            .put("success", true)
+            .put("verified", true)
+            .put("actions_permission", "write")
+            .put("authority_source", "recent_verified_actions_status")
+            .put("authority_cache_age_ms", ageMs)
     }
 
     private fun dispatchAndMonitorBuild(
@@ -1133,11 +1214,18 @@ class AyanaGitHubRepositoryExecutor(
             )
 
         if (!response.optBoolean("http_success", false)) {
+            val httpCode = response.optInt("http_code", -1)
             return failure(
                 "Не удалось проверить GitHub App installation permissions."
             )
                 .put("status", "installation_permissions_unavailable")
-                .put("http_code", response.optInt("http_code", -1))
+                .put("http_code", httpCode)
+                .put("network_failure", httpCode < 0)
+                .put("error", response.optString("error").take(320))
+                .put("action_dispatched", false)
+                .put("action_committed", false)
+                .put("reconciliation_complete", true)
+                .put("side_effect_state", "NONE")
         }
 
         val body = response.optJSONObject("body") ?: JSONObject()
@@ -2491,7 +2579,7 @@ class AyanaGitHubRepositoryExecutor(
             .put("message", message)
 
     companion object {
-        const val VERSION = "1.2"
+        const val VERSION = "1.2.1"
 
         const val OWNER = "talant02031985-bot"
         const val REPO = "AUTONOMOUS-AI-AGENT"
@@ -2541,6 +2629,7 @@ class AyanaGitHubRepositoryExecutor(
         private const val KEY_LAST_BUILD_VERIFIED_AT = "last_build_verified_at"
 
         private const val RUNTIME_FRESHNESS_MS = 15L * 60L * 1000L
+        private const val BUILD_PREPARE_AUTHORITY_CACHE_MS = 5L * 60L * 1000L
         private const val TOKEN_REFRESH_SKEW_MS = 2L * 60L * 1000L
         private const val MAX_INLINE_CONTENT_BYTES = 6_000
         private const val MAX_PATH_CHARS = 320
