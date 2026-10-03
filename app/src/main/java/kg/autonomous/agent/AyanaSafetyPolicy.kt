@@ -4,7 +4,7 @@ import org.json.JSONObject
 import java.util.Locale
 
 /**
- * AYANA Safety Policy v1.3 — R10.27.1 GitHub Repository Write.
+ * AYANA Safety Policy v1.4 — R10.27.2 GitHub Actions APK Build.
  *
  * Local fail-closed guard executed immediately before Agent Core device tools.
  * It is intentionally independent from model instructions: a model mistake must
@@ -103,7 +103,8 @@ class AyanaSafetyPolicy {
             "recall_memory",
             "list_memory",
             "list_reminders",
-            "github_repository_status" ->
+            "github_repository_status",
+            "github_build_status" ->
                 allow(
                     RISK_READ_ONLY,
                     "read_only"
@@ -147,6 +148,29 @@ class AyanaSafetyPolicy {
                     allow(
                         RISK_READ_ONLY,
                         "github_prepare_only"
+                    )
+                }
+
+            "github_apk_build" ->
+                if (
+                    arguments.optBoolean(
+                        "confirmed",
+                        false
+                    )
+                ) {
+                    // A GitHub Actions workflow consumes remote compute and may use
+                    // repository signing secrets. Only the fresh local confirmation
+                    // replay may dispatch it; model-authored confirmed=true is ignored.
+                    allow(
+                        RISK_CONFIRMATION_REQUIRED,
+                        "github_build_confirmed"
+                    )
+                } else {
+                    // First pass may only verify the exact workflow/head/authority
+                    // and persist the build plan. No workflow_dispatch is allowed.
+                    allow(
+                        RISK_READ_ONLY,
+                        "github_build_prepare_only"
                     )
                 }
 

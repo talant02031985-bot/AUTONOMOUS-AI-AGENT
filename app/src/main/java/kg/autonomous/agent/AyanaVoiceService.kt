@@ -63,13 +63,14 @@ import kotlin.math.abs
 
 class AyanaVoiceService : Service() {
 
-    // AYANA v12.59.0 / R10.27.1 GITHUB REPOSITORY WRITE + COMMIT/PUSH.
-    // Builds on DEVICE-CONFIRMED R10.26.1. Adds one fixed-repository GitHub App Device Flow
-    // executor for talant02031985-bot/AUTONOMOUS-AI-AGENT/main. Tokens stay encrypted behind
-    // Android Keystore and never enter Worker/History. Repository mutation is strictly two-phase:
-    // read-only prepare -> fresh local user confirmation -> current-SHA recheck -> PUT -> verified
-    // blob + commit SHA. APK build, workflow dispatch, arbitrary repositories/branches, secrets,
-    // deletion and the full development transaction remain unavailable. ORB/UI are unchanged.
+    // AYANA v12.60.0 / R10.27.2 APK BUILD PIPELINE.
+    // Builds on DEVICE-CONFIRMED R10.27.1.2 / R10.27.1 GitHub write/commit. Adds one fixed-scope
+    // GitHub Actions build executor for talant02031985-bot/AUTONOMOUS-AI-AGENT/main and the exact
+    // active workflow “Build Android APK”. Build authority is strictly two-phase: read-only prepare
+    // -> fresh local user confirmation -> Actions:write/workflow/head-SHA recheck -> workflow_dispatch
+    // -> exact run correlation -> conclusion=success -> immutable APK artifact proof with SHA-256 digest.
+    // No arbitrary workflow/branch, blind redispatch, direct APK delivery/install or full development
+    // transaction is added here. GitHub tokens stay Keystore-encrypted; ORB/UI are unchanged.
     //
     // AYANA v12.58.1 / R10.26.1 CAPABILITY EVIDENCE METADATA DETECTOR RECONCILIATION.
     // Device review of the published R10.26 self-audit exposed one residual stale phrase:
@@ -9025,6 +9026,54 @@ if (
         )
     }
 
+    private fun isGitHubActionsReadinessRequest(
+        normalized: String
+    ): Boolean {
+        val c = normalized.trim()
+        val mentionsActions =
+            c.contains("github actions") ||
+                c.contains("гитхаб actions") ||
+                c.contains("github экшен") ||
+                c.contains("гитхаб экшен")
+        val readiness =
+            c.contains("готов") ||
+                c.contains("доступ") ||
+                c.contains("разреш") ||
+                c.contains("проверь") ||
+                c.contains("проверить")
+
+        return mentionsActions &&
+            readiness &&
+            !c.contains("собери") &&
+            !c.contains("собрать") &&
+            !c.contains("запусти") &&
+            !c.contains("запустить")
+    }
+
+    private fun isGitHubBuildStatusRequest(
+        normalized: String
+    ): Boolean {
+        val c = normalized.trim()
+        val buildMention =
+            c.contains("сборк") ||
+                c.contains("build")
+        val githubMention =
+            c.contains("github") ||
+                c.contains("гитхаб")
+        val statusIntent =
+            c.contains("проверь") ||
+                c.contains("проверить") ||
+                c.contains("статус") ||
+                c.contains("состояние") ||
+                c.contains("готова ли") ||
+                c.contains("готов ли")
+
+        return buildMention &&
+            githubMention &&
+            statusIntent &&
+            !c.contains("готовност")
+    }
+
     private fun runLocalGitHubSetupOrStatusIfMatched(
         originalCommand: String,
         routingNormalized: String,
@@ -9039,6 +9088,12 @@ if (
 
                 isGitHubConnectRequest(routingNormalized) ->
                     githubRepositoryExecutor.startDeviceFlow()
+
+                isGitHubBuildStatusRequest(routingNormalized) ->
+                    githubRepositoryExecutor.buildStatus()
+
+                isGitHubActionsReadinessRequest(routingNormalized) ->
+                    githubRepositoryExecutor.actionsStatus()
 
                 isGitHubStatusRequest(routingNormalized) ->
                     githubRepositoryExecutor.status(allowPendingPoll = true)
@@ -9101,32 +9156,32 @@ if (
             return null
         }
 
-        // R10.27.1: fixed-repository GitHub write/commit is implemented and must
-        // reach Agent Core + the local two-phase GitHub executor. APK build/delivery
-        // remains unavailable until the later R10.27.2 checkpoint.
-        val apkBuildOrDelivery =
+        // R10.27.2: fixed GitHub Actions APK build is now implemented and must reach
+        // Agent Core + the two-phase github_apk_build executor. Only direct delivery /
+        // download / installation remains unsupported in this checkpoint.
+        val apkDeliveryOrInstall =
             (c.contains("apk") || c.contains("апк")) &&
                 (
-                    c.contains("собери") ||
-                        c.contains("собрать") ||
-                        c.contains("сборк") ||
-                        c.contains("подпиши") ||
-                        c.contains("подписать") ||
-                        c.contains("готовый apk") ||
-                        c.contains("готовый апк") ||
-                        c.contains("дай мне apk") ||
+                    c.contains("дай мне apk") ||
                         c.contains("дай мне апк") ||
                         c.contains("передай apk") ||
-                        c.contains("передай апк")
+                        c.contains("передай апк") ||
+                        c.contains("отправь apk") ||
+                        c.contains("отправь апк") ||
+                        c.contains("скачай apk") ||
+                        c.contains("скачай апк") ||
+                        c.contains("установи apk") ||
+                        c.contains("установи апк") ||
+                        c.contains("установить apk") ||
+                        c.contains("установить апк")
                     )
 
-        if (!apkBuildOrDelivery) {
+        if (!apkDeliveryOrInstall) {
             return null
         }
 
-        return "Эта задача содержит пока недоступный этап сборки/подписания/выдачи готового APK. " +
-            "R10.27.1 уже умеет подготовить и после отдельного подтверждения записать commit в фиксированный GitHub repository, " +
-            "но APK build pipeline будет добавлен отдельно и не должен подменяться ложным SUCCESS."
+        return "R10.27.2 уже умеет запустить и доказательно проверить APK build через фиксированный GitHub Actions workflow, " +
+            "но прямое скачивание/передача/установка APK на планшет пока не реализованы и не должны подменяться ложным SUCCESS."
 
     }
 
@@ -33643,6 +33698,11 @@ if (sessionOk) {
 
         val runtimeDeviceConfirmed =
             runtime.optBoolean("device_confirmed_write", false)
+        val runtimeBuildAvailable =
+            runtime.optBoolean("connected", false) &&
+                runtime.optBoolean("actions_write_available", false)
+        val runtimeBuildDeviceConfirmed =
+            runtime.optBoolean("device_confirmed_build", false)
 
         val githubTruthOk =
             githubWrite != null &&
@@ -33654,12 +33714,16 @@ if (sessionOk) {
                 githubWrite.optBoolean("device_confirmed", false) == runtimeDeviceConfirmed &&
                 githubCommit.optBoolean("device_confirmed", false) == runtimeDeviceConfirmed
 
+        val apkBuildTruthOk =
+            apkBuild != null &&
+                apkBuild.optBoolean("implemented", false) &&
+                apkBuild.optBoolean("available_now", false) == runtimeBuildAvailable &&
+                apkBuild.optBoolean("device_confirmed", false) == runtimeBuildDeviceConfirmed
+
         val futureStagesStillNegative =
             development != null &&
-                apkBuild != null &&
                 apkDelivery != null &&
                 !development.optBoolean("implemented", true) &&
-                !apkBuild.optBoolean("implemented", true) &&
                 !apkDelivery.optBoolean("implemented", true)
 
         val scopeOk =
@@ -33669,6 +33733,7 @@ if (sessionOk) {
         val ok =
             executorSelfTest &&
                 githubTruthOk &&
+                apkBuildTruthOk &&
                 futureStagesStillNegative &&
                 scopeOk
 
@@ -33676,17 +33741,18 @@ if (sessionOk) {
             status = if (ok) AyanaAcceptanceTestEngine.STATUS_PASS else AyanaAcceptanceTestEngine.STATUS_FAIL,
             message =
                 if (ok) {
-                    "R10.27.1 development truth корректна: bounded GitHub write/commit реализован, а APK build/full transaction остаются честно недоступными."
+                    "R10.27.2 development truth корректна: bounded GitHub write/commit и fixed GitHub Actions APK build реализованы; direct APK delivery/full transaction остаются честно недоступными."
                 } else {
-                    "R10.27.1 development capability truth противоречива."
+                    "R10.27.2 development capability truth противоречива."
                 },
-            evidenceScope = "github_executor_contract_plus_runtime_truth",
+            evidenceScope = "github_actions_executor_contract_plus_runtime_truth",
             verified = ok,
             evidence =
                 JSONObject()
                     .put("github_executor_version", AyanaGitHubRepositoryExecutor.VERSION)
                     .put("github_executor_self_test", executorSelfTest)
                     .put("github_truth_ok", githubTruthOk)
+                    .put("apk_build_truth_ok", apkBuildTruthOk)
                     .put("future_stages_still_negative", futureStagesStillNegative)
                     .put("scope_ok", scopeOk)
                     .put("repository", runtime.optString("repository"))
@@ -33694,6 +33760,11 @@ if (sessionOk) {
                     .put("connected", runtime.optBoolean("connected", false))
                     .put("write_available", runtimeWriteAvailable)
                     .put("device_confirmed_write", runtimeDeviceConfirmed)
+                    .put("actions_permission", runtime.optString("actions_permission", "unknown"))
+                    .put("actions_write_available", runtimeBuildAvailable)
+                    .put("device_confirmed_build", runtimeBuildDeviceConfirmed)
+                    .put("last_build_run_id", runtime.optLong("last_build_run_id", 0L))
+                    .put("last_build_artifact_digest", runtime.optString("last_build_artifact_digest", ""))
         )
     }
 
@@ -37946,10 +38017,10 @@ routed.forEach {
 
         val labels =
             linkedMapOf(
-                "development_agent_transaction" to "R9.0 transaction contract реализован fail-closed, но авторизованные repository/build/rollback executors ещё отсутствуют",
+                "development_agent_transaction" to "R9.0 transaction contract реализован fail-closed; R10.27.1 GitHub write и R10.27.2 build executors есть, но единый project workspace + test/rollback transaction ещё не реализован",
                 "github_repository_write" to "R10.27.1 GitHub executor реализован, но текущая authorization/write readiness не подтверждена",
                 "github_commit_push" to "R10.27.1 commit executor реализован, но текущая authorization/write readiness не подтверждена",
-                "android_apk_build" to "AYANA Android не запускает APK build pipeline",
+                "android_apk_build" to "R10.27.2 APK build executor реализован, но текущая Actions:write readiness ещё не подтверждена",
                 "external_mail_calendar_files" to "нет авторизованных внешних mail/calendar/files account executors; R9.3 local app integration не заменяет account API",
                 "video_audio_analysis" to "аудиодорожка видео не анализируется",
                 "offline_llm" to "полноценный offline LLM отсутствует",
@@ -53338,6 +53409,11 @@ val networkPaused =
                 github.optBoolean("repository_write_available", false)
         val deviceConfirmed =
             github.optBoolean("device_confirmed_write", false)
+        val actionsWriteAvailable =
+            connected &&
+                github.optBoolean("actions_write_available", false)
+        val buildDeviceConfirmed =
+            github.optBoolean("device_confirmed_build", false)
 
         runtime
             .put("github_repository_executor_version", github.optString("version", AyanaGitHubRepositoryExecutor.VERSION))
@@ -53349,6 +53425,18 @@ val networkPaused =
             .put("github_repository_write_available", writeAvailable)
             .put("github_repository_device_confirmed_write", deviceConfirmed)
             .put("github_repository_last_verified_at_ms", github.optLong("last_verified_at_ms", 0L))
+            .put("github_actions_permission", github.optString("actions_permission", "unknown"))
+            .put("github_actions_write_available", actionsWriteAvailable)
+            .put("github_actions_last_verified_at_ms", github.optLong("actions_last_verified_at_ms", 0L))
+            .put("github_apk_build_device_confirmed", buildDeviceConfirmed)
+            .put("github_apk_build_last_run_id", github.optLong("last_build_run_id", 0L))
+            .put("github_apk_build_last_head_sha", github.optString("last_build_head_sha", ""))
+            .put("github_apk_build_last_status", github.optString("last_build_status", ""))
+            .put("github_apk_build_last_conclusion", github.optString("last_build_conclusion", ""))
+            .put("github_apk_build_last_artifact_id", github.optLong("last_build_artifact_id", 0L))
+            .put("github_apk_build_last_artifact_digest", github.optString("last_build_artifact_digest", ""))
+            .put("github_apk_build_last_artifact_size_bytes", github.optLong("last_build_artifact_size_bytes", 0L))
+            .put("github_apk_build_last_verified_at_ms", github.optLong("last_build_verified_at_ms", 0L))
 
         val capabilities = reconciled.optJSONArray("capabilities") ?: JSONArray()
 
@@ -53375,6 +53463,26 @@ val networkPaused =
                             "R10.27.1 fixed-repository GitHub App Device Flow executor; prepare is read-only, mutation requires fresh explicit confirmation and verified blob/commit SHA; repo=${AyanaGitHubRepositoryExecutor.REPOSITORY_SLUG}; branch=${AyanaGitHubRepositoryExecutor.BRANCH}"
                         )
                 }
+
+                "android_apk_build" -> {
+                    item
+                        .put("implemented", true)
+                        .put("available_now", actionsWriteAvailable)
+                        .put("device_confirmed", buildDeviceConfirmed)
+                        .put(
+                            "truth_state",
+                            when {
+                                buildDeviceConfirmed && actionsWriteAvailable -> "DEVICE_CONFIRMED_AVAILABLE"
+                                actionsWriteAvailable -> "AVAILABLE_UNCONFIRMED"
+                                buildDeviceConfirmed -> "DEVICE_CONFIRMED_UNAVAILABLE_NOW"
+                                else -> "IMPLEMENTED_UNAVAILABLE"
+                            }
+                        )
+                        .put(
+                            "note",
+                            "R10.27.2 fixed GitHub Actions APK build executor: exact workflow=${AyanaGitHubRepositoryExecutor.BUILD_WORKFLOW_NAME}; branch=${AyanaGitHubRepositoryExecutor.BRANCH}; explicit confirmation before workflow_dispatch; SUCCESS requires completed conclusion=success plus verified artifact=${AyanaGitHubRepositoryExecutor.APK_ARTIFACT_NAME} with non-zero size and SHA-256 digest"
+                        )
+                }
             }
         }
 
@@ -53385,7 +53493,7 @@ val networkPaused =
         try {
             githubRepositoryExecutor.compactContext()
         } catch (_: Exception) {
-            "AYANA R10.27.1 GITHUB TRUTH: executor implemented for fixed repository, but current runtime readiness could not be read; do not claim GitHub write."
+            "AYANA R10.27.2 GITHUB/ACTIONS TRUTH: fixed-repository write and fixed-workflow APK build executors are implemented, but current runtime readiness could not be read; do not claim write/build availability."
         }
 
     private fun crossProcessAccessibilityTruthContext(): String {
@@ -53871,6 +53979,34 @@ val networkPaused =
                 .put(
                     "github_repository_device_confirmed_write",
                     auditRuntime.optBoolean("github_repository_device_confirmed_write", false)
+                )
+                .put(
+                    "github_actions_permission",
+                    auditRuntime.optString("github_actions_permission", "unknown")
+                )
+                .put(
+                    "github_actions_write_available",
+                    auditRuntime.optBoolean("github_actions_write_available", false)
+                )
+                .put(
+                    "github_apk_build_device_confirmed",
+                    auditRuntime.optBoolean("github_apk_build_device_confirmed", false)
+                )
+                .put(
+                    "github_apk_build_last_run_id",
+                    auditRuntime.optLong("github_apk_build_last_run_id", 0L)
+                )
+                .put(
+                    "github_apk_build_last_conclusion",
+                    auditRuntime.optString("github_apk_build_last_conclusion", "")
+                )
+                .put(
+                    "github_apk_build_last_artifact_id",
+                    auditRuntime.optLong("github_apk_build_last_artifact_id", 0L)
+                )
+                .put(
+                    "github_apk_build_last_artifact_digest",
+                    auditRuntime.optString("github_apk_build_last_artifact_digest", "")
                 )
                 .put("local_only", true)
                 .put("agent_core_turns", 0)
@@ -56724,7 +56860,8 @@ state = "agent_response",
                                     "click_screen_element",
                                     "tap_screen_coordinates",
                                     "execute_android_plan",
-                                    "github_write_commit"
+                                    "github_write_commit",
+                                    "github_apk_build"
                                 )
                             ) {
                                 arguments.put(
@@ -60168,7 +60305,8 @@ STATE_SUCCESS
                 setOf(
                     "click_screen_element",
                     "tap_screen_coordinates",
-                    "github_write_commit"
+                    "github_write_commit",
+                    "github_apk_build"
                 )
             ) {
                 durableGoalStore
@@ -60239,6 +60377,9 @@ STATE_SUCCESS
             var githubPreparedProof: JSONObject? =
                 null
 
+            var githubBuildPreparedProof: JSONObject? =
+                null
+
             if (toolName == "github_write_commit") {
                 val prepared =
                     try {
@@ -60273,6 +60414,49 @@ STATE_SUCCESS
                     .put("_github_proposed_blob_sha", prepared.optString("proposed_blob_sha"))
                     .put("_github_prepared_path", prepared.optString("prepared_path"))
                     .put("_github_prepared_commit_message", prepared.optString("prepared_commit_message"))
+            }
+
+            if (toolName == "github_apk_build") {
+                val prepared =
+                    try {
+                        JSONObject(goal.optString("last_result"))
+                    } catch (_: Exception) {
+                        JSONObject()
+                    }
+
+                githubBuildPreparedProof =
+                    prepared
+
+                val preparedWorkflowId =
+                    prepared.optLong("workflow_id", 0L)
+                val preparedWorkflowName =
+                    prepared.optString("workflow_name").trim()
+                val preparedHeadSha =
+                    prepared.optString("head_sha").trim()
+
+                if (
+                    prepared.optString("status") != "build_prepared_waiting_confirmation" ||
+                    !prepared.optBoolean("requires_confirmation", false) ||
+                    preparedWorkflowId <= 0L ||
+                    preparedWorkflowName != AyanaGitHubRepositoryExecutor.BUILD_WORKFLOW_NAME ||
+                    preparedHeadSha.isBlank()
+                ) {
+                    durableGoalStore.markPaused(
+                        goalId,
+                        "GitHub Actions подтверждение остановлено: точный prepared build payload отсутствует или повреждён"
+                    )
+                    respondAndResume(
+                        "Сборка APK не запущена: подготовленный GitHub Actions payload не удалось восстановить. Запустите сборку заново.",
+                        silent,
+                        success = false
+                    )
+                    return
+                }
+
+                arguments
+                    .put("_github_build_workflow_id", preparedWorkflowId)
+                    .put("_github_build_workflow_name", preparedWorkflowName)
+                    .put("_github_build_head_sha", preparedHeadSha)
             }
 
             arguments.put(
@@ -60408,6 +60592,222 @@ STATE_SUCCESS
                     "Подтверждённое действие выполнено, но я остановила дальнейшую цель: новое состояние не удалось надёжно сохранить.",
                     silent,
                     success = false
+                )
+                return
+            }
+
+            // R10.27.2 VERIFIED APK BUILD TERMINAL TRUTH.
+            // A fresh confirmation authorizes exactly the already-prepared fixed workflow
+            // dispatch. Once the executor has correlated the run and verified a successful
+            // immutable APK artifact, the build objective is complete locally. Do not send
+            // the confirmed build back through Agent Core: that could rewrite factual
+            // GitHub Actions evidence into a generic completion/refusal outcome.
+            if (toolName == "github_apk_build") {
+                val preparedProof =
+                    githubBuildPreparedProof
+                        ?: JSONObject()
+
+                val preparedWorkflowId =
+                    preparedProof.optLong("workflow_id", 0L)
+                val preparedWorkflowName =
+                    preparedProof.optString("workflow_name").trim()
+                val preparedHeadSha =
+                    preparedProof.optString("head_sha").trim()
+                val artifactDigest =
+                    result.optString("artifact_digest").trim()
+                val runId =
+                    result.optLong("run_id", 0L)
+                val artifactId =
+                    result.optLong("artifact_id", 0L)
+                val artifactSize =
+                    result.optLong("artifact_size_bytes", 0L)
+
+                val verifiedApkBuild =
+                    result.optBoolean("success", false) &&
+                        result.optBoolean("verified", false) &&
+                        result.optString("terminal_status") == "SUCCESS" &&
+                        result.optString("status") == "verified_apk_build" &&
+                        result.optBoolean("action_dispatched", false) &&
+                        result.optBoolean("action_committed", false) &&
+                        result.optBoolean("reconciliation_complete", false) &&
+                        result.optString("side_effect_state") == "VERIFIED_COMMITTED" &&
+                        result.optString("side_effect_kind") == "github_actions_build_dispatch" &&
+                        result.optString("repository") == AyanaGitHubRepositoryExecutor.REPOSITORY_SLUG &&
+                        result.optString("branch") == AyanaGitHubRepositoryExecutor.BRANCH &&
+                        preparedWorkflowId > 0L &&
+                        result.optLong("workflow_id", 0L) == preparedWorkflowId &&
+                        preparedWorkflowName == AyanaGitHubRepositoryExecutor.BUILD_WORKFLOW_NAME &&
+                        result.optString("workflow_name") == preparedWorkflowName &&
+                        preparedHeadSha.isNotBlank() &&
+                        result.optString("head_sha") == preparedHeadSha &&
+                        result.optString("build_status") == "completed" &&
+                        result.optString("build_conclusion") == "success" &&
+                        result.optBoolean("artifact_verified", false) &&
+                        result.optString("artifact_name") == AyanaGitHubRepositoryExecutor.APK_ARTIFACT_NAME &&
+                        runId > 0L &&
+                        artifactId > 0L &&
+                        artifactSize > 0L &&
+                        Regex("^sha256:[0-9a-fA-F]{64}$").matches(artifactDigest)
+
+                if (!verifiedApkBuild) {
+                    durableGoalStore
+                        .markPaused(
+                            goalId,
+                            "GitHub Actions build завершён, но terminal artifact proof недостаточен для VERIFIED SUCCESS"
+                        )
+
+                    commandHistoryStore.addEvent(
+                        activeCommandHistoryId,
+                        state = "github_apk_build_terminal_unverified",
+                        message = "GitHub Actions confirmation не получила полный APK terminal proof",
+                        details = result.toString().take(2000)
+                    )
+
+                    currentDurableGoalId =
+                        null
+
+                    respondAndResume(
+                        result.optString(
+                            "message",
+                            "GitHub Actions build требует проверки: terminal artifact proof неполный."
+                        ),
+                        silent,
+                        success = false,
+                        technical = result.toString()
+                    )
+                    return
+                }
+
+                val terminalMessage =
+                    result.optString(
+                        "message",
+                        "APK build подтверждён: run=$runId; artifact=${AyanaGitHubRepositoryExecutor.APK_ARTIFACT_NAME}."
+                    )
+
+                val confirmationTaskGraph =
+                    AyanaAutonomousTaskGraph.restore(
+                        snapshot = afterConfirmation.optJSONObject("task_graph"),
+                        fallbackGoal = afterConfirmation.optString("command"),
+                        plannerEnvelope = afterConfirmation.optJSONObject("planner_envelope")
+                    )
+
+                confirmationTaskGraph.recordToolDispatch(
+                    toolName = "github_apk_build",
+                    signature =
+                        "github_apk_build|confirmed|$preparedWorkflowId|${preparedHeadSha.take(20)}|$runId",
+                    mayMutate = true
+                )
+
+                confirmationTaskGraph.recordToolResult(
+                    toolName = "github_apk_build",
+                    success = true,
+                    verified = true,
+                    terminalStatus = "SUCCESS",
+                    evidence = result.toString().take(1400),
+                    actionDispatched = true
+                )
+
+                confirmationTaskGraph.finish(
+                    success = true,
+                    terminalStatus = "SUCCESS",
+                    finalEvidence = terminalMessage
+                )
+
+                val confirmationAdaptiveLoop =
+                    AyanaAdaptiveExecutionLoop.restore(
+                        snapshot = afterConfirmation.optJSONObject("adaptive_execution_loop"),
+                        fallbackObjective = afterConfirmation.optString("command"),
+                        fallbackExecutionLane = "agent_core",
+                        fallbackAuthorityContext =
+                            "worker_schema+safety_policy+registered_executor"
+                    )
+
+                confirmationAdaptiveLoop.recordResult(
+                    toolName = "github_apk_build",
+                    arguments = arguments,
+                    beforeStateFingerprint =
+                        AyanaAdaptiveExecutionLoop.fingerprintState(
+                            preparedProof.toString()
+                        ),
+                    afterStateFingerprint =
+                        AyanaAdaptiveExecutionLoop.fingerprintState(
+                            result.toString()
+                        ),
+                    success = true,
+                    verified = true,
+                    actionDispatched = true,
+                    actionCommitted = true,
+                    reconciliationComplete = true,
+                    evidence = terminalMessage
+                )
+
+                val adaptiveTerminal =
+                    confirmationAdaptiveLoop.markTerminal(
+                        verified = true,
+                        evidence = terminalMessage
+                    )
+
+                val confirmationCrossLane =
+                    AyanaCrossLaneAdaptiveContinuity.restore(
+                        snapshot = afterConfirmation.optJSONObject("cross_lane_continuity"),
+                        fallbackObjective = afterConfirmation.optString("command"),
+                        adaptiveLoop = confirmationAdaptiveLoop,
+                        fallbackAuthorityCeiling =
+                            AyanaCrossLaneAdaptiveContinuity.defaultUnifiedAuthorityCeiling()
+                    )
+
+                val terminalCheckpoint =
+                    try {
+                        durableGoalStore.checkpoint(
+                            goalId,
+                            JSONObject()
+                                .put("task_graph", confirmationTaskGraph.persistenceSnapshot())
+                                .put("adaptive_execution_loop", confirmationAdaptiveLoop.persistenceSnapshot())
+                                .put(
+                                    "cross_lane_continuity",
+                                    confirmationCrossLane.persistenceSnapshot(confirmationAdaptiveLoop)
+                                )
+                                .put("last_result", result.toString())
+                                .put("last_checkpoint", "github_build_confirmation_verified_terminal")
+                        )
+                    } catch (error: Exception) {
+                        commandHistoryStore.addEvent(
+                            activeCommandHistoryId,
+                            state = "goal_checkpoint_error",
+                            message = "APK build подтверждён, но terminal checkpoint не сохранён",
+                            details = error.message.orEmpty().take(220)
+                        )
+                        null
+                    }
+
+                commandHistoryStore.addEvent(
+                    activeCommandHistoryId,
+                    state = "github_apk_build_verified_terminal",
+                    message = "GitHub Actions APK build и immutable artifact физически подтверждены",
+                    details =
+                        (
+                            "workflow_id=$preparedWorkflowId; head_sha=$preparedHeadSha; run_id=$runId; " +
+                                "artifact_id=$artifactId; artifact_size=$artifactSize; artifact_digest=$artifactDigest; " +
+                                "adaptive_terminal_allowed=${adaptiveTerminal.optBoolean("allowed", false)}; " +
+                                "terminal_checkpoint_saved=${terminalCheckpoint != null}"
+                        ).take(1800)
+                )
+
+                commandHistoryStore.addEvent(
+                    activeCommandHistoryId,
+                    state = "task_graph_terminal",
+                    message = "R9.2 Autonomous Task Graph v2 завершён VERIFIED GitHub Actions APK build",
+                    details = confirmationTaskGraph.compactSummary()
+                )
+
+                completeCurrentDurableGoal(terminalMessage)
+
+                respondAndResume(
+                    terminalMessage,
+                    silent,
+                    success = true,
+                    terminalStatus = AyanaCommandHistoryStore.STATUS_SUCCESS,
+                    technical = result.toString()
                 )
                 return
             }
@@ -62565,7 +62965,8 @@ return ""
                 "input_screen_text",
                 "scroll_screen",
                 "tap_screen_coordinates",
-                "github_write_commit"
+                "github_write_commit",
+                "github_apk_build"
             )
 
     private fun isSafeAutoResumeTool(
@@ -65605,6 +66006,16 @@ return callAgentCore(
             "github_repository_status" ->
                 "Проверяю подключение GitHub…"
 
+            "github_build_status" ->
+                "Проверяю GitHub Actions сборку…"
+
+            "github_apk_build" ->
+                if (arguments.optBoolean("confirmed", false)) {
+                    "Запускаю и проверяю подтверждённую сборку APK…"
+                } else {
+                    "Подготавливаю GitHub Actions сборку без запуска…"
+                }
+
             "github_write_commit" ->
                 if (arguments.optBoolean("confirmed", false)) {
                     "Записываю подтверждённое изменение в GitHub…"
@@ -65712,7 +66123,8 @@ private fun isSemanticActionResultVerified(
                 "click_screen_element",
                 "tap_screen_coordinates",
                 "execute_android_plan",
-                "github_write_commit"
+                "github_write_commit",
+                "github_apk_build"
             )
         ) {
             arguments.put(
@@ -66337,6 +66749,91 @@ private fun isSemanticActionResultVerified(
 
                 "github_repository_status" -> {
                     githubRepositoryExecutor.status(allowPendingPoll = true)
+                }
+
+                "github_build_status" -> {
+                    githubRepositoryExecutor.buildStatus()
+                }
+
+                "github_apk_build" -> {
+                    val confirmed = arguments.optBoolean("confirmed", false)
+
+                    if (!confirmed) {
+                        githubRepositoryExecutor.buildApk(
+                            arguments = arguments,
+                            confirmed = false
+                        )
+                    } else {
+                        val dispatchAllowed =
+                            executionKernel.tryBeginIrreversibleDispatch(
+                                kind = "github_actions_build_dispatch",
+                                detail =
+                                    "repository=${AyanaGitHubRepositoryExecutor.REPOSITORY_SLUG}; " +
+                                        "branch=${AyanaGitHubRepositoryExecutor.BRANCH}; " +
+                                        "workflow=${AyanaGitHubRepositoryExecutor.BUILD_WORKFLOW_NAME}; " +
+                                        "head_sha=${arguments.optString("_github_build_head_sha").take(64)}"
+                            )
+
+                        if (!dispatchAllowed) {
+                            toolResult(
+                                false,
+                                "GitHub Actions build остановлен Execution Kernel до workflow dispatch."
+                            )
+                                .put("status", "dispatch_gate_rejected")
+                                .put("action_dispatched", false)
+                                .put("action_committed", false)
+                                .put("reconciliation_complete", true)
+                        } else {
+                            val buildResult =
+                                githubRepositoryExecutor.buildApk(
+                                    arguments = arguments,
+                                    confirmed = true,
+                                    shouldCancel = {
+                                        cancelRequested ||
+                                            Thread.currentThread().isInterrupted
+                                    }
+                                )
+
+                            val dispatched =
+                                buildResult.optBoolean("action_dispatched", false)
+                            val committed =
+                                buildResult.optBoolean("action_committed", false)
+                            val reconciliationComplete =
+                                buildResult.optBoolean("reconciliation_complete", false)
+
+                            if (dispatched) {
+                                executionKernel.markIrreversibleDispatchAccepted(
+                                    "GitHub Actions workflow_dispatch accepted: " +
+                                        "workflow=${AyanaGitHubRepositoryExecutor.BUILD_WORKFLOW_NAME}; " +
+                                        "head=${arguments.optString("_github_build_head_sha").take(64)}"
+                                )
+                            }
+
+                            executionKernel.markSideEffectReconciliationStarted(
+                                "GitHub Actions build reconciliation: status=${buildResult.optString("status")}"
+                            )
+
+                            when {
+                                !dispatched ->
+                                    executionKernel.markSideEffectReconciled(
+                                        committed = false,
+                                        detail = "GitHub Actions workflow_dispatch не был отправлен; side effect отсутствует."
+                                    )
+
+                                reconciliationComplete ->
+                                    executionKernel.markSideEffectReconciled(
+                                        committed = committed,
+                                        detail =
+                                            "GitHub Actions reconciliation complete; committed=$committed; " +
+                                                "run_id=${buildResult.optLong("run_id", 0L)}; " +
+                                                "conclusion=${buildResult.optString("build_conclusion")}; " +
+                                                "artifact_id=${buildResult.optLong("artifact_id", 0L)}"
+                                    )
+                            }
+
+                            buildResult
+                        }
+                    }
                 }
 
                 "github_write_commit" -> {
@@ -71964,9 +72461,9 @@ state
         private const val MASTER_STATUS_MANUAL_REQUIRED =
             "MANUAL_REQUIRED"
 
-        // R10.27.1.2 GITHUB VERIFIED-COMMIT COMPLETION TRUTH.
+        // R10.27.2 APK BUILD PIPELINE.
         private const val AYANA_VOICE_SERVICE_RELEASE =
-            "v12.59.2 / R10.27.1.2 GITHUB VERIFIED-COMMIT COMPLETION TRUTH"
+            "v12.60.0 / R10.27.2 APK BUILD PIPELINE"
 
         private const val AYANA_PERSONAL_SEARCH_ENGINE_RELEASE =
             "v2.0 / R10.20 PERSONAL SEARCH 2.0 + VERIFIED RESULT CONTRACT v2"
@@ -71975,16 +72472,16 @@ state
             "v3.2.1"
 
         private const val AYANA_WORKER_RELEASE =
-            "v11.4.0 / R10.27.1 GITHUB REPOSITORY WRITE + COMMIT/PUSH"
+            "v11.5.0 / R10.27.2 APK BUILD PIPELINE"
 
         private const val AYANA_ACCEPTED_FEATURE_CHECKPOINT =
-            "R10.26.1 CAPABILITY EVIDENCE METADATA DETECTOR RECONCILIATION — DEVICE-CONFIRMED; diagnostic closure 17/17 PASS"
+            "R10.27.1.2 / R10.27.1 GITHUB REPOSITORY WRITE + COMMIT/PUSH — DEVICE-CONFIRMED; R10.26.1 preserved"
 
         private const val AYANA_CURRENT_FEATURE_RELEASE =
-            "R10.27.1.2 GITHUB VERIFIED-COMMIT COMPLETION TRUTH — PENDING DEVICE CONFIRMATION"
+            "R10.27.2 APK BUILD PIPELINE — PENDING DEVICE CONFIRMATION"
 
         private const val AYANA_RELEASE_LINEAGE =
-            "Android v12.21.0 / R7.9 truth-hardening + R8.0 multi-attachment + R8.1–R8.4 accepted Personal Global Search stack + R8.5–R8.5.4 capability/evidence truth + R9.0 autonomous agent foundation + R9.0.1 history live-refresh proof fix + R9.0.2 diagnostic reconciliation/history refresh fix + R9.0.3 TTS health reconciliation + R9.1 IME perception/active telemetry truth + R9.2 autonomous recovery/long-task reconciliation + R9.2.1 adaptive hypothesis reconciliation + R9.3 app integration framework + R9.3.1 screen health reconciliation + R9.3.2 history latency recovery reconciliation + R9.3.3 informational terminal reconciliation + R9.3.4 app integration device acceptance + R9.4 multi-app task orchestration + R9.4.1 screen ownership union reconciliation + R9.5 verified result transfer between app steps + R9.5.1 partial marker provenance reconciliation + R9.5.2 bounded marker observation + R9.5.3 verified action result transfer + R9.6 verified semantic observation fallback + R9.6.1 visual fallback acceptance truth + R9.7 structured screen reading + R9.7.1 conversation routing/terminal truth + R9.7.2 structured router conversation precedence + R9.7.3 action morphology/terminal truth + R9.8 generic verified result transfer + R9.8.1 master full acceptance/diagnostic engine + R9.9 reversible action journal/verified undo + R9.9.1 brightness verified undo device acceptance + R9.9.2 opt-in low-battery controlled proactivity + R10.0 unified screen intelligence + R10.1 local self-diagnostics/self-audit + R10.2 personal search expansion + R10.3 long autonomous tasks/recovery + R10.4 adaptive verified execution loop + R10.5 generalized live adaptive autonomy + R10.6 cross-lane adaptive continuity + R10.6.1 durable goal binding fix + R10.7 cross-lane durable recovery continuity + R10.7.1 isolated acceptance cleanup hardening + R10.8 general-purpose long autonomous objectives + R10.9 dynamic goal decomposition/planner contract + R10.10 adaptive planner production path + R10.11 production replan/durable recovery + R10.12 natural lifecycle recovery/background continuation + R10.13 full process-death recovery + R10.13.1 post-process readiness/reconciliation + R10.13.2 process-death core recovery proof correction + R10.14 perception process isolation/cross-process accessibility bridge + R10.14.1 cross-process visual evidence fix + R10.14.2 lifecycle profile/self-diagnostic truth + R10.14.3 history recovery reconciliation + R10.15 generalized cross-process autonomy hardening + R10.15.1 self-diagnostics routing reconciliation + R10.16 perception process recovery/safe bridge rebind + R10.16.1 restart telemetry reconciliation + R10.17 screen intelligence 2.0 + R10.17.1 acceptance routing reconciliation + R10.18 universal UI action engine + R10.18.1 acceptance target reconciliation + R10.18.2 live target authority reconciliation + R10.18.3 app info target reconciliation + R10.19 autonomous multi-app tasks 2.0 + R10.20 personal search 2.0 + R10.21 document & office engine 2.0 + R10.22 notifications & communication assistant + R10.22.1 notification acceptance visibility reconciliation + R10.21.1 pptx completion evidence reconciliation + R10.23 voice & background 2.0 + R10.24 field hardening + R10.24.1 field hardening reconciliation/device acceptance + R10.24.2 acceptance truth reconciliation + R10.25 cross-process accessibility truth reconciliation + R10.26 capability evidence metadata reconciliation + R10.26.1 capability evidence metadata detector reconciliation + R10.27.1 github repository write/commit-push + R10.27.1.1 github confirmation terminal truth + R10.27.1.2 github verified-commit completion truth"
+            "Android v12.21.0 / R7.9 truth-hardening + R8.0 multi-attachment + R8.1–R8.4 accepted Personal Global Search stack + R8.5–R8.5.4 capability/evidence truth + R9.0 autonomous agent foundation + R9.0.1 history live-refresh proof fix + R9.0.2 diagnostic reconciliation/history refresh fix + R9.0.3 TTS health reconciliation + R9.1 IME perception/active telemetry truth + R9.2 autonomous recovery/long-task reconciliation + R9.2.1 adaptive hypothesis reconciliation + R9.3 app integration framework + R9.3.1 screen health reconciliation + R9.3.2 history latency recovery reconciliation + R9.3.3 informational terminal reconciliation + R9.3.4 app integration device acceptance + R9.4 multi-app task orchestration + R9.4.1 screen ownership union reconciliation + R9.5 verified result transfer between app steps + R9.5.1 partial marker provenance reconciliation + R9.5.2 bounded marker observation + R9.5.3 verified action result transfer + R9.6 verified semantic observation fallback + R9.6.1 visual fallback acceptance truth + R9.7 structured screen reading + R9.7.1 conversation routing/terminal truth + R9.7.2 structured router conversation precedence + R9.7.3 action morphology/terminal truth + R9.8 generic verified result transfer + R9.8.1 master full acceptance/diagnostic engine + R9.9 reversible action journal/verified undo + R9.9.1 brightness verified undo device acceptance + R9.9.2 opt-in low-battery controlled proactivity + R10.0 unified screen intelligence + R10.1 local self-diagnostics/self-audit + R10.2 personal search expansion + R10.3 long autonomous tasks/recovery + R10.4 adaptive verified execution loop + R10.5 generalized live adaptive autonomy + R10.6 cross-lane adaptive continuity + R10.6.1 durable goal binding fix + R10.7 cross-lane durable recovery continuity + R10.7.1 isolated acceptance cleanup hardening + R10.8 general-purpose long autonomous objectives + R10.9 dynamic goal decomposition/planner contract + R10.10 adaptive planner production path + R10.11 production replan/durable recovery + R10.12 natural lifecycle recovery/background continuation + R10.13 full process-death recovery + R10.13.1 post-process readiness/reconciliation + R10.13.2 process-death core recovery proof correction + R10.14 perception process isolation/cross-process accessibility bridge + R10.14.1 cross-process visual evidence fix + R10.14.2 lifecycle profile/self-diagnostic truth + R10.14.3 history recovery reconciliation + R10.15 generalized cross-process autonomy hardening + R10.15.1 self-diagnostics routing reconciliation + R10.16 perception process recovery/safe bridge rebind + R10.16.1 restart telemetry reconciliation + R10.17 screen intelligence 2.0 + R10.17.1 acceptance routing reconciliation + R10.18 universal UI action engine + R10.18.1 acceptance target reconciliation + R10.18.2 live target authority reconciliation + R10.18.3 app info target reconciliation + R10.19 autonomous multi-app tasks 2.0 + R10.20 personal search 2.0 + R10.21 document & office engine 2.0 + R10.22 notifications & communication assistant + R10.22.1 notification acceptance visibility reconciliation + R10.21.1 pptx completion evidence reconciliation + R10.23 voice & background 2.0 + R10.24 field hardening + R10.24.1 field hardening reconciliation/device acceptance + R10.24.2 acceptance truth reconciliation + R10.25 cross-process accessibility truth reconciliation + R10.26 capability evidence metadata reconciliation + R10.26.1 capability evidence metadata detector reconciliation + R10.27.1 github repository write/commit-push + R10.27.1.1 github confirmation terminal truth + R10.27.1.2 github verified-commit completion truth + R10.27.2 apk build pipeline"
 
         // AyanaCommandHistoryStore v2.8 keeps up to 4k chars inline and stores longer
         // results out-of-line. Self-review intentionally remains inline so copied History

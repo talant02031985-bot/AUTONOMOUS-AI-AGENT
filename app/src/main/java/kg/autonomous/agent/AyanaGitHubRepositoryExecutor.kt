@@ -6,6 +6,7 @@ import android.net.Uri
 import android.security.keystore.KeyGenParameterSpec
 import android.security.keystore.KeyProperties
 import android.util.Base64
+import org.json.JSONArray
 import org.json.JSONObject
 import java.net.HttpURLConnection
 import java.net.URL
@@ -20,7 +21,7 @@ import javax.crypto.SecretKey
 import javax.crypto.spec.GCMParameterSpec
 
 /**
- * AYANA R10.27.1 GitHub Repository Executor v1.1.
+ * AYANA R10.27.2 GitHub Repository + Actions Executor v1.2.
  *
  * Security model:
  * - GitHub App Device Flow only. No PAT/client secret is embedded in the APK.
@@ -33,8 +34,16 @@ import javax.crypto.spec.GCMParameterSpec
  *   plus a non-empty commit SHA; transport ambiguity is reconciled by re-reading
  *   repository state and commit provenance instead of blind retry.
  *
- * This executor does not build APKs, trigger CI, merge branches, delete files,
- * write secrets, or broaden authority beyond the fixed repository.
+ * R10.27.2 adds a separately confirmed GitHub Actions build lane:
+ * - fixed workflow name and fixed main branch only;
+ * - prepare is read-only and proves the installed GitHub App has Actions:write;
+ * - dispatch is possible only on the explicit confirmed durable replay;
+ * - the exact workflow run is identified without blind re-dispatch;
+ * - SUCCESS requires conclusion=success plus one non-expired APK artifact with
+ *   an immutable SHA-256 artifact digest.
+ *
+ * This executor still does not merge branches, delete files, write secrets,
+ * install APKs, or broaden authority beyond the fixed repository.
  */
 class AyanaGitHubRepositoryExecutor(
     context: Context
@@ -168,7 +177,10 @@ class AyanaGitHubRepositoryExecutor(
     fun status(
         allowPendingPoll: Boolean = true
     ): JSONObject {
-        if (allowPendingPoll && !hasUsableAccessToken()) {
+        if (allowPendingPoll && hasPendingAuthorization()) {
+            // R10.27.2: allow a fresh Device Flow to replace an older still-valid
+            // token after GitHub App permissions were expanded (for example,
+            // adding Actions:write). This keeps re-authorization explicit.
             pollPendingAuthorization()
         }
 
@@ -215,10 +227,22 @@ class AyanaGitHubRepositoryExecutor(
         val permissions = body.optJSONObject("permissions") ?: JSONObject()
         val push = permissions.optBoolean("push", false)
 
+        val installationAuthority =
+            installationAuthority(accessToken)
+
+        val actionsPermission =
+            if (installationAuthority.optBoolean("success", false)) {
+                installationAuthority.optString("actions_permission", "none")
+                    .lowercase(Locale.ROOT)
+            } else {
+                "unknown"
+            }
+
         recordRuntime(
             connected = true,
             writeAvailable = push,
-            error = if (push) "" else "repository_push_permission_missing"
+            error = if (push) "" else "repository_push_permission_missing",
+            actionsPermission = actionsPermission
         )
 
         return JSONObject()
@@ -228,6 +252,8 @@ class AyanaGitHubRepositoryExecutor(
             .put("connected", true)
             .put("repository_access_verified", true)
             .put("repository_write_available", push)
+            .put("actions_permission", actionsPermission)
+            .put("actions_write_available", actionsPermission == "write")
             .put("repository", REPOSITORY_SLUG)
             .put("branch", BRANCH)
             .put("login", body.optJSONObject("owner")?.optString("login").orEmpty())
@@ -307,6 +333,1128 @@ class AyanaGitHubRepositoryExecutor(
         )
     }
 
+
+    fun actionsStatus(): JSONObject {
+        val tokenResult = ensureUsableAccessToken()
+        if (!tokenResult.optBoolean("success", false)) {
+            return JSONObject(tokenResult.toString())
+                .put("repository", REPOSITORY_SLUG)
+                .put("branch", BRANCH)
+                .put("workflow_name", BUILD_WORKFLOW_NAME)
+        }
+
+        val accessToken = tokenResult.optString("access_token")
+        val authority = installationAuthority(accessToken)
+
+        if (!authority.optBoolean("success", false)) {
+            return authority
+                .put("repository", REPOSITORY_SLUG)
+                .put("branch", BRANCH)
+                .put("workflow_name", BUILD_WORKFLOW_NAME)
+        }
+
+        val workflow = findBuildWorkflow(accessToken)
+        val actionsPermission =
+            authority.optString("actions_permission", "none")
+                .lowercase(Locale.ROOT)
+        val actionsWrite = actionsPermission == "write"
+        val workflowReady = workflow.optBoolean("success", false)
+
+        prefs.edit()
+            .putString(KEY_LAST_ACTIONS_PERMISSION, actionsPermission)
+            .putLong(KEY_LAST_ACTIONS_VERIFIED_AT, System.currentTimeMillis())
+            .apply()
+
+        return JSONObject()
+            .put("success", true)
+            .put("verified", true)
+            .put(
+                "status",
+                when {
+                    !workflowReady -> "build_workflow_unavailable"
+                    !actionsWrite -> "actions_write_permission_required"
+                    else -> "build_dispatch_ready"
+                }
+            )
+            .put("repository", REPOSITORY_SLUG)
+            .put("branch", BRANCH)
+            .put("repository_selected", authority.optBoolean("repository_selected", false))
+            .put("installation_id", authority.optLong("installation_id", 0L))
+            .put("contents_permission", authority.optString("contents_permission", "none"))
+            .put("actions_permission", actionsPermission)
+            .put("actions_write_available", actionsWrite)
+            .put("workflow_ready", workflowReady)
+            .put("workflow_id", workflow.optLong("workflow_id", 0L))
+            .put("workflow_name", workflow.optString("workflow_name", BUILD_WORKFLOW_NAME))
+            .put("workflow_state", workflow.optString("workflow_state"))
+            .put("workflow_path", workflow.optString("workflow_path"))
+            .put("artifact_name", APK_ARTIFACT_NAME)
+            .put(
+                "message",
+                when {
+                    !workflowReady ->
+                        "GitHub Actions подключён, но workflow «$BUILD_WORKFLOW_NAME» не удалось однозначно подтвердить."
+                    !actionsWrite ->
+                        "Для запуска сборки AYANA GitHub App требуется Repository permission: Actions → Read and write. После изменения разрешения переподключите GitHub через Device Flow."
+                    else ->
+                        "GitHub Actions готов: AYANA может подготовить запуск «$BUILD_WORKFLOW_NAME» для $REPOSITORY_SLUG/$BRANCH."
+                }
+            )
+    }
+
+    fun buildApk(
+        arguments: JSONObject,
+        confirmed: Boolean,
+        shouldCancel: () -> Boolean = { false }
+    ): JSONObject {
+        if (!confirmed) {
+            return prepareBuild()
+        }
+
+        val preparedWorkflowId =
+            arguments.optLong("_github_build_workflow_id", 0L)
+        val preparedHeadSha =
+            arguments.optString("_github_build_head_sha").trim()
+        val preparedWorkflowName =
+            arguments.optString("_github_build_workflow_name").trim()
+
+        if (
+            preparedWorkflowId <= 0L ||
+            preparedHeadSha.isBlank() ||
+            preparedWorkflowName != BUILD_WORKFLOW_NAME
+        ) {
+            return failure(
+                "GitHub Actions build payload повреждён или неполон. Нужна новая подготовка и новое подтверждение."
+            )
+                .put("status", "prepared_build_payload_invalid")
+                .put("requires_confirmation", false)
+        }
+
+        return dispatchAndMonitorBuild(
+            workflowId = preparedWorkflowId,
+            expectedHeadSha = preparedHeadSha,
+            shouldCancel = shouldCancel
+        )
+    }
+
+    fun buildStatus(): JSONObject {
+        val tokenResult = ensureUsableAccessToken()
+        if (!tokenResult.optBoolean("success", false)) {
+            return tokenResult
+        }
+
+        val runId = prefs.getLong(KEY_LAST_BUILD_RUN_ID, 0L)
+        if (runId <= 0L) {
+            return JSONObject()
+                .put("success", true)
+                .put("verified", true)
+                .put("status", "no_recorded_build")
+                .put("repository", REPOSITORY_SLUG)
+                .put("branch", BRANCH)
+                .put("workflow_name", BUILD_WORKFLOW_NAME)
+                .put("message", "AYANA ещё не сохранила идентификатор GitHub Actions build run.")
+        }
+
+        val accessToken = tokenResult.optString("access_token")
+        val expectedHeadSha = prefs.getString(KEY_LAST_BUILD_HEAD_SHA, "").orEmpty()
+        return inspectBuildRun(
+            accessToken = accessToken,
+            runId = runId,
+            expectedHeadSha = expectedHeadSha,
+            expectedWorkflowId = prefs.getLong(KEY_LAST_BUILD_WORKFLOW_ID, 0L)
+        )
+    }
+
+    private fun prepareBuild(): JSONObject {
+        val tokenResult = ensureUsableAccessToken()
+        if (!tokenResult.optBoolean("success", false)) {
+            return tokenResult
+        }
+
+        val accessToken = tokenResult.optString("access_token")
+        val authority = installationAuthority(accessToken)
+
+        if (!authority.optBoolean("success", false)) {
+            return authority
+        }
+
+        val actionsPermission =
+            authority.optString("actions_permission", "none")
+                .lowercase(Locale.ROOT)
+
+        prefs.edit()
+            .putString(KEY_LAST_ACTIONS_PERMISSION, actionsPermission)
+            .putLong(KEY_LAST_ACTIONS_VERIFIED_AT, System.currentTimeMillis())
+            .apply()
+
+        if (actionsPermission != "write") {
+            return failure(
+                "GitHub App не имеет Actions: Read and write для $REPOSITORY_SLUG. Измените Repository permissions → Actions на Read and write и заново выполните Device Flow."
+            )
+                .put("status", "actions_write_permission_required")
+                .put("actions_permission", actionsPermission)
+                .put("action_dispatched", false)
+                .put("action_committed", false)
+                .put("reconciliation_complete", true)
+        }
+
+        val workflow = findBuildWorkflow(accessToken)
+        if (!workflow.optBoolean("success", false)) {
+            return workflow
+        }
+
+        val head = readBranchHead(accessToken)
+        if (!head.optBoolean("success", false)) {
+            return head
+        }
+
+        val workflowId = workflow.optLong("workflow_id", 0L)
+        val headSha = head.optString("head_sha").trim()
+
+        if (workflowId <= 0L || headSha.isBlank()) {
+            return failure(
+                "Не удалось зафиксировать точный workflow/head SHA перед сборкой."
+            )
+                .put("status", "build_prepare_incomplete")
+        }
+
+        return JSONObject()
+            .put("success", true)
+            .put("verified", true)
+            .put("status", "build_prepared_waiting_confirmation")
+            .put("requires_confirmation", true)
+            .put("action_dispatched", false)
+            .put("action_committed", false)
+            .put("reconciliation_complete", true)
+            .put("repository", REPOSITORY_SLUG)
+            .put("branch", BRANCH)
+            .put("workflow_id", workflowId)
+            .put("workflow_name", BUILD_WORKFLOW_NAME)
+            .put("workflow_state", workflow.optString("workflow_state"))
+            .put("head_sha", headSha)
+            .put("artifact_name", APK_ARTIFACT_NAME)
+            .put(
+                "message",
+                "Сборка APK подготовлена для ${headSha.take(12)} через «$BUILD_WORKFLOW_NAME». Workflow ещё НЕ запущен. Для запуска скажите: «подтверждаю текущую задачу»."
+            )
+    }
+
+    private fun dispatchAndMonitorBuild(
+        workflowId: Long,
+        expectedHeadSha: String,
+        shouldCancel: () -> Boolean
+    ): JSONObject {
+        val tokenResult = ensureUsableAccessToken()
+        if (!tokenResult.optBoolean("success", false)) {
+            return tokenResult
+        }
+
+        val accessToken = tokenResult.optString("access_token")
+        val authority = installationAuthority(accessToken)
+
+        if (
+            !authority.optBoolean("success", false) ||
+            authority.optString("actions_permission", "none")
+                .lowercase(Locale.ROOT) != "write"
+        ) {
+            return failure(
+                "GitHub Actions build остановлен до dispatch: Actions:write больше не подтверждён."
+            )
+                .put("status", "actions_authority_changed")
+                .put("action_dispatched", false)
+                .put("action_committed", false)
+                .put("reconciliation_complete", true)
+        }
+
+        val workflow = findBuildWorkflow(accessToken)
+        if (
+            !workflow.optBoolean("success", false) ||
+            workflow.optLong("workflow_id", 0L) != workflowId
+        ) {
+            return failure(
+                "GitHub Actions build остановлен: workflow изменился после подготовки."
+            )
+                .put("status", "workflow_state_changed")
+                .put("action_dispatched", false)
+                .put("action_committed", false)
+                .put("reconciliation_complete", true)
+        }
+
+        val head = readBranchHead(accessToken)
+        if (
+            !head.optBoolean("success", false) ||
+            head.optString("head_sha").trim() != expectedHeadSha
+        ) {
+            return failure(
+                "GitHub Actions build остановлен: main изменился после подготовки. Нужна новая подготовка и новое подтверждение."
+            )
+                .put("status", "build_head_changed")
+                .put("expected_head_sha", expectedHeadSha)
+                .put("actual_head_sha", head.optString("head_sha"))
+                .put("action_dispatched", false)
+                .put("action_committed", false)
+                .put("reconciliation_complete", true)
+        }
+
+        val baseline =
+            listWorkflowRuns(
+                accessToken = accessToken,
+                workflowId = workflowId,
+                headSha = expectedHeadSha
+            )
+
+        if (!baseline.optBoolean("success", false)) {
+            return baseline
+        }
+
+        val baselineIds = mutableSetOf<Long>()
+        val baselineRuns = baseline.optJSONArray("runs") ?: JSONArray()
+        for (index in 0 until baselineRuns.length()) {
+            val id = baselineRuns.optJSONObject(index)?.optLong("id", 0L) ?: 0L
+            if (id > 0L) baselineIds += id
+        }
+
+        if (shouldCancel()) {
+            return failure("Сборка отменена до GitHub dispatch.")
+                .put("status", "build_cancelled_before_dispatch")
+                .put("action_dispatched", false)
+                .put("action_committed", false)
+                .put("reconciliation_complete", true)
+        }
+
+        val dispatch =
+            githubJsonRequest(
+                method = "POST",
+                apiPath =
+                    "/repos/$OWNER/$REPO/actions/workflows/$workflowId/dispatches",
+                accessToken = accessToken,
+                body = JSONObject().put("ref", BRANCH)
+            )
+
+        val dispatched =
+            dispatch.optBoolean("request_dispatched", false)
+
+        if (!dispatch.optBoolean("http_success", false)) {
+            return failure(
+                "GitHub Actions workflow dispatch не подтверждён: HTTP ${dispatch.optInt("http_code", -1)} ${dispatch.optString("error").take(240)}"
+            )
+                .put("status", "workflow_dispatch_failed")
+                .put("http_code", dispatch.optInt("http_code", -1))
+                .put("action_dispatched", dispatched)
+                .put("action_committed", dispatched)
+                .put("reconciliation_complete", !dispatched)
+                .put(
+                    "side_effect_state",
+                    if (dispatched) "DISPATCHED_UNVERIFIED" else "NONE"
+                )
+                .put("side_effect_kind", "github_actions_build_dispatch")
+        }
+
+        val dispatchBody =
+            dispatch.optJSONObject("body")
+                ?: JSONObject()
+
+        val directRunId =
+            dispatchBody.optLong("workflow_run_id", 0L)
+
+        if (directRunId > 0L) {
+            // GitHub API 2026-03-10 returns the created workflow run identity
+            // directly from workflow_dispatch. Persist it immediately so STOP or
+            // process loss can reconcile by read-only run lookup without re-dispatch.
+            prefs.edit()
+                .putLong(KEY_LAST_BUILD_RUN_ID, directRunId)
+                .putString(KEY_LAST_BUILD_HEAD_SHA, expectedHeadSha)
+                .putLong(KEY_LAST_BUILD_WORKFLOW_ID, workflowId)
+                .putString(KEY_LAST_BUILD_RUN_URL, dispatchBody.optString("html_url"))
+                .putLong(KEY_LAST_BUILD_STARTED_AT, System.currentTimeMillis())
+                .putString(KEY_LAST_BUILD_STATUS, "dispatched")
+                .putString(KEY_LAST_BUILD_CONCLUSION, "")
+                .apply()
+        }
+
+        val runLookupDeadline =
+            System.currentTimeMillis() + BUILD_RUN_DISCOVERY_TIMEOUT_MS
+
+        var run: JSONObject? = null
+
+        while (System.currentTimeMillis() <= runLookupDeadline) {
+            if (shouldCancel()) {
+                return failure(
+                    "GitHub Actions workflow уже отправлен, но локальное ожидание остановлено. Повторять dispatch автоматически нельзя; используйте «проверь сборку GitHub»."
+                )
+                    .put("status", "build_monitor_cancelled_after_dispatch")
+                    .put("run_id", directRunId)
+                    .put("action_dispatched", true)
+                    .put("action_committed", true)
+                    .put("reconciliation_complete", false)
+                    .put("side_effect_state", "VERIFIED_COMMITTED")
+                    .put("side_effect_kind", "github_actions_build_dispatch")
+            }
+
+            if (directRunId > 0L) {
+                val direct =
+                    githubJsonRequest(
+                        method = "GET",
+                        apiPath = "/repos/$OWNER/$REPO/actions/runs/$directRunId",
+                        accessToken = accessToken
+                    )
+
+                if (direct.optBoolean("http_success", false)) {
+                    val item = direct.optJSONObject("body") ?: JSONObject()
+                    val exactIdentity =
+                        item.optLong("id", 0L) == directRunId &&
+                            item.optLong("workflow_id", 0L) == workflowId &&
+                            item.optString("event") == "workflow_dispatch" &&
+                            item.optString("head_branch") == BRANCH &&
+                            item.optString("head_sha") == expectedHeadSha &&
+                            item.optString("name") == BUILD_WORKFLOW_NAME
+
+                    if (!exactIdentity) {
+                        return failure(
+                            "GitHub workflow_dispatch вернул run id, но его workflow/branch/head identity не совпала с подготовленным build."
+                        )
+                            .put("status", "build_run_identity_mismatch")
+                            .put("run_id", directRunId)
+                            .put("action_dispatched", true)
+                            .put("action_committed", true)
+                            .put("reconciliation_complete", true)
+                            .put("side_effect_state", "VERIFIED_COMMITTED")
+                            .put("side_effect_kind", "github_actions_build_dispatch")
+                    }
+
+                    run = item
+                    break
+                }
+            } else {
+                // Compatibility fallback for a GitHub deployment that acknowledges
+                // workflow_dispatch without returning the run id. Correlate only by
+                // exact new run + workflow + event + branch + head SHA. Never guess.
+                val listed =
+                    listWorkflowRuns(
+                        accessToken = accessToken,
+                        workflowId = workflowId,
+                        headSha = expectedHeadSha
+                    )
+
+                if (listed.optBoolean("success", false)) {
+                    val candidates = mutableListOf<JSONObject>()
+                    val runs = listed.optJSONArray("runs") ?: JSONArray()
+                    for (index in 0 until runs.length()) {
+                        val item = runs.optJSONObject(index) ?: continue
+                        val id = item.optLong("id", 0L)
+                        if (
+                            id > 0L &&
+                            id !in baselineIds &&
+                            item.optLong("workflow_id", 0L) == workflowId &&
+                            item.optString("event") == "workflow_dispatch" &&
+                            item.optString("head_branch") == BRANCH &&
+                            item.optString("head_sha") == expectedHeadSha &&
+                            item.optString("name") == BUILD_WORKFLOW_NAME
+                        ) {
+                            candidates += item
+                        }
+                    }
+
+                    if (candidates.size > 1) {
+                        return failure(
+                            "После workflow dispatch найдено несколько новых подходящих build runs. AYANA не будет угадывать, какой из них её."
+                        )
+                            .put("status", "build_run_ambiguous")
+                            .put("candidate_count", candidates.size)
+                            .put("action_dispatched", true)
+                            .put("action_committed", true)
+                            .put("reconciliation_complete", false)
+                            .put("side_effect_state", "VERIFIED_COMMITTED")
+                            .put("side_effect_kind", "github_actions_build_dispatch")
+                    }
+
+                    if (candidates.size == 1) {
+                        run = candidates.first()
+                        break
+                    }
+                }
+            }
+
+            try {
+                Thread.sleep(BUILD_RUN_DISCOVERY_POLL_MS)
+            } catch (_: InterruptedException) {
+                Thread.currentThread().interrupt()
+                break
+            }
+        }
+
+        if (run == null) {
+            return failure(
+                "Workflow dispatch принят GitHub, но точный build run не удалось доказательно прочитать. Повторный dispatch запрещён; используйте «проверь сборку GitHub»."
+            )
+                .put("status", "build_run_not_identified")
+                .put("run_id", directRunId)
+                .put("action_dispatched", true)
+                .put("action_committed", true)
+                .put("reconciliation_complete", false)
+                .put("side_effect_state", "VERIFIED_COMMITTED")
+                .put("side_effect_kind", "github_actions_build_dispatch")
+        }
+
+        val identifiedRun = run
+
+        val runId = identifiedRun.optLong("id", 0L)
+        val runUrl = identifiedRun.optString("html_url")
+        val runNumber = identifiedRun.optLong("run_number", 0L)
+
+        prefs.edit()
+            .putLong(KEY_LAST_BUILD_RUN_ID, runId)
+            .putString(KEY_LAST_BUILD_HEAD_SHA, expectedHeadSha)
+            .putLong(KEY_LAST_BUILD_WORKFLOW_ID, workflowId)
+            .putString(KEY_LAST_BUILD_RUN_URL, runUrl)
+            .putLong(KEY_LAST_BUILD_STARTED_AT, System.currentTimeMillis())
+            .putString(KEY_LAST_BUILD_STATUS, identifiedRun.optString("status"))
+            .putString(KEY_LAST_BUILD_CONCLUSION, identifiedRun.optString("conclusion"))
+            .apply()
+
+        val buildDeadline =
+            System.currentTimeMillis() + BUILD_COMPLETION_TIMEOUT_MS
+
+        while (System.currentTimeMillis() <= buildDeadline) {
+            if (shouldCancel()) {
+                return JSONObject()
+                    .put("success", false)
+                    .put("verified", true)
+                    .put("status", "build_monitor_cancelled")
+                    .put("action_dispatched", true)
+                    .put("action_committed", true)
+                    .put("reconciliation_complete", false)
+                    .put("side_effect_state", "VERIFIED_COMMITTED")
+                    .put("side_effect_kind", "github_actions_build_dispatch")
+                    .put("repository", REPOSITORY_SLUG)
+                    .put("branch", BRANCH)
+                    .put("workflow_id", workflowId)
+                    .put("workflow_name", BUILD_WORKFLOW_NAME)
+                    .put("head_sha", expectedHeadSha)
+                    .put("run_id", runId)
+                    .put("run_number", runNumber)
+                    .put("run_url", runUrl)
+                    .put(
+                        "message",
+                        "Локальное ожидание остановлено, но GitHub Actions run уже запущен. Повторять dispatch нельзя; позже скажите «проверь сборку GitHub»."
+                    )
+            }
+
+            val inspected =
+                inspectBuildRun(
+                    accessToken = accessToken,
+                    runId = runId,
+                    expectedHeadSha = expectedHeadSha,
+                    expectedWorkflowId = workflowId
+                )
+
+            val inspectedStatus =
+                inspected.optString("status")
+
+            if (inspectedStatus == "verified_apk_build") {
+                return inspected
+                    .put("action_dispatched", true)
+                    .put("action_committed", true)
+                    .put("reconciliation_complete", true)
+                    .put("side_effect_state", "VERIFIED_COMMITTED")
+                    .put("side_effect_kind", "github_actions_build_dispatch")
+            }
+
+            if (
+                inspected.optString("build_status") == "completed" &&
+                inspected.optString("build_conclusion") != "success"
+            ) {
+                return inspected
+                    .put("action_dispatched", true)
+                    .put("action_committed", true)
+                    .put("reconciliation_complete", true)
+                    .put("side_effect_state", "VERIFIED_COMMITTED")
+                    .put("side_effect_kind", "github_actions_build_dispatch")
+            }
+
+            val transientArtifactState =
+                inspectedStatus in
+                    setOf(
+                        "apk_artifact_pending",
+                        "apk_artifact_digest_pending"
+                    )
+
+            if (
+                !inspected.optBoolean("success", false) &&
+                inspectedStatus !in setOf("build_running", "build_queued") &&
+                !transientArtifactState
+            ) {
+                val definitiveFailure =
+                    inspectedStatus in
+                        setOf(
+                            "build_failed",
+                            "apk_artifact_ambiguous",
+                            "apk_artifact_provenance_mismatch",
+                            "build_run_identity_mismatch"
+                        )
+
+                return inspected
+                    .put("action_dispatched", true)
+                    .put("action_committed", true)
+                    .put("reconciliation_complete", definitiveFailure)
+                    .put("side_effect_state", "VERIFIED_COMMITTED")
+                    .put("side_effect_kind", "github_actions_build_dispatch")
+            }
+
+            try {
+                Thread.sleep(BUILD_POLL_INTERVAL_MS)
+            } catch (_: InterruptedException) {
+                Thread.currentThread().interrupt()
+                break
+            }
+        }
+
+        return JSONObject()
+            .put("success", false)
+            .put("verified", true)
+            .put("status", "build_reconciliation_timeout")
+            .put("action_dispatched", true)
+            .put("action_committed", true)
+            .put("reconciliation_complete", false)
+            .put("side_effect_state", "VERIFIED_COMMITTED")
+            .put("side_effect_kind", "github_actions_build_dispatch")
+            .put("repository", REPOSITORY_SLUG)
+            .put("branch", BRANCH)
+            .put("workflow_id", workflowId)
+            .put("workflow_name", BUILD_WORKFLOW_NAME)
+            .put("head_sha", expectedHeadSha)
+            .put("run_id", runId)
+            .put("run_number", runNumber)
+            .put("run_url", runUrl)
+            .put(
+                "message",
+                "GitHub Actions build/artifact proof не завершился в лимит ожидания. Повторять dispatch нельзя; используйте «проверь сборку GitHub»."
+            )
+    }
+
+    private fun inspectBuildRun(
+        accessToken: String,
+        runId: Long,
+        expectedHeadSha: String,
+        expectedWorkflowId: Long
+    ): JSONObject {
+        val response =
+            githubJsonRequest(
+                method = "GET",
+                apiPath = "/repos/$OWNER/$REPO/actions/runs/$runId",
+                accessToken = accessToken
+            )
+
+        if (!response.optBoolean("http_success", false)) {
+            return failure(
+                "Не удалось прочитать GitHub Actions run $runId: HTTP ${response.optInt("http_code", -1)}."
+            )
+                .put("status", "build_run_read_failed")
+                .put("run_id", runId)
+        }
+
+        val run = response.optJSONObject("body") ?: JSONObject()
+        val status = run.optString("status")
+        val conclusion = run.optString("conclusion")
+        val headSha = run.optString("head_sha")
+        val workflowName = run.optString("name")
+        val workflowId = run.optLong("workflow_id", 0L)
+        val event = run.optString("event")
+        val branch = run.optString("head_branch")
+        val identityVerified =
+            headSha.isNotBlank() &&
+                (expectedHeadSha.isBlank() || headSha == expectedHeadSha) &&
+                workflowName == BUILD_WORKFLOW_NAME &&
+                workflowId > 0L &&
+                (expectedWorkflowId <= 0L || workflowId == expectedWorkflowId) &&
+                branch == BRANCH &&
+                event == "workflow_dispatch"
+
+        prefs.edit()
+            .putLong(KEY_LAST_BUILD_RUN_ID, runId)
+            .putString(KEY_LAST_BUILD_HEAD_SHA, headSha)
+            .putString(KEY_LAST_BUILD_RUN_URL, run.optString("html_url"))
+            .putString(KEY_LAST_BUILD_STATUS, status)
+            .putString(KEY_LAST_BUILD_CONCLUSION, conclusion)
+            .apply()
+
+        if (!identityVerified) {
+            return failure(
+                "GitHub Actions run не соответствует ожидаемому workflow/branch/head SHA."
+            )
+                .put("status", "build_run_identity_mismatch")
+                .put("run_id", runId)
+                .put("workflow_name", workflowName)
+                .put("workflow_id", workflowId)
+                .put("expected_workflow_id", expectedWorkflowId)
+                .put("head_sha", headSha)
+                .put("branch", branch)
+                .put("event", event)
+        }
+
+        if (status != "completed") {
+            return JSONObject()
+                .put("success", true)
+                .put("verified", true)
+                .put(
+                    "status",
+                    if (status == "queued" || status == "waiting" || status == "pending") {
+                        "build_queued"
+                    } else {
+                        "build_running"
+                    }
+                )
+                .put("build_status", status)
+                .put("build_conclusion", conclusion)
+                .put("repository", REPOSITORY_SLUG)
+                .put("branch", BRANCH)
+                .put("workflow_name", BUILD_WORKFLOW_NAME)
+                .put("workflow_id", workflowId)
+                .put("head_sha", headSha)
+                .put("run_id", runId)
+                .put("run_number", run.optLong("run_number", 0L))
+                .put("run_url", run.optString("html_url"))
+                .put(
+                    "message",
+                    "GitHub Actions сборка ${run.optLong("run_number", 0L)}: $status."
+                )
+        }
+
+        if (conclusion != "success") {
+            prefs.edit()
+                .putBoolean(KEY_DEVICE_CONFIRMED_BUILD, false)
+                .apply()
+
+            return JSONObject()
+                .put("success", false)
+                .put("verified", true)
+                .put("terminal_status", "ERROR")
+                .put("status", "build_failed")
+                .put("build_status", status)
+                .put("build_conclusion", conclusion)
+                .put("artifact_verified", false)
+                .put("repository", REPOSITORY_SLUG)
+                .put("branch", BRANCH)
+                .put("workflow_name", BUILD_WORKFLOW_NAME)
+                .put("workflow_id", workflowId)
+                .put("head_sha", headSha)
+                .put("run_id", runId)
+                .put("run_number", run.optLong("run_number", 0L))
+                .put("run_url", run.optString("html_url"))
+                .put(
+                    "message",
+                    "GitHub Actions сборка завершилась неуспешно: conclusion=${conclusion.ifBlank { "unknown" }}."
+                )
+        }
+
+        val artifact = verifyBuildArtifact(
+            accessToken = accessToken,
+            runId = runId,
+            expectedHeadSha = headSha
+        )
+
+        if (!artifact.optBoolean("success", false)) {
+            return artifact
+                .put("terminal_status", "ERROR")
+                .put("build_status", status)
+                .put("build_conclusion", conclusion)
+                .put("repository", REPOSITORY_SLUG)
+                .put("branch", BRANCH)
+                .put("workflow_name", BUILD_WORKFLOW_NAME)
+                .put("workflow_id", workflowId)
+                .put("run_id", runId)
+                .put("run_number", run.optLong("run_number", 0L))
+                .put("run_url", run.optString("html_url"))
+                .put("head_sha", headSha)
+        }
+
+        if (!artifact.optBoolean("artifact_verified", false)) {
+            return artifact
+                .put("build_status", status)
+                .put("build_conclusion", conclusion)
+                .put("repository", REPOSITORY_SLUG)
+                .put("branch", BRANCH)
+                .put("workflow_name", BUILD_WORKFLOW_NAME)
+                .put("workflow_id", workflowId)
+                .put("head_sha", headSha)
+                .put("run_id", runId)
+                .put("run_number", run.optLong("run_number", 0L))
+                .put("run_url", run.optString("html_url"))
+        }
+
+        val artifactId = artifact.optLong("artifact_id", 0L)
+        val artifactDigest = artifact.optString("artifact_digest")
+        val artifactSize = artifact.optLong("artifact_size_bytes", 0L)
+
+        prefs.edit()
+            .putBoolean(KEY_DEVICE_CONFIRMED_BUILD, true)
+            .putLong(KEY_LAST_BUILD_ARTIFACT_ID, artifactId)
+            .putString(KEY_LAST_BUILD_ARTIFACT_DIGEST, artifactDigest)
+            .putLong(KEY_LAST_BUILD_ARTIFACT_SIZE, artifactSize)
+            .putLong(KEY_LAST_BUILD_VERIFIED_AT, System.currentTimeMillis())
+            .apply()
+
+        return JSONObject()
+            .put("success", true)
+            .put("verified", true)
+            .put("terminal_status", "SUCCESS")
+            .put("status", "verified_apk_build")
+            .put("build_status", status)
+            .put("build_conclusion", conclusion)
+            .put("build_completed", true)
+            .put("artifact_verified", true)
+            .put("repository", REPOSITORY_SLUG)
+            .put("branch", BRANCH)
+            .put("workflow_name", BUILD_WORKFLOW_NAME)
+            .put("workflow_id", workflowId)
+            .put("head_sha", headSha)
+            .put("run_id", runId)
+            .put("run_number", run.optLong("run_number", 0L))
+            .put("run_url", run.optString("html_url"))
+            .put("artifact_id", artifactId)
+            .put("artifact_name", APK_ARTIFACT_NAME)
+            .put("artifact_size_bytes", artifactSize)
+            .put("artifact_digest", artifactDigest)
+            .put("artifact_url", artifact.optString("artifact_url"))
+            .put(
+                "message",
+                "GitHub Actions APK build подтверждён: run=${run.optLong("run_number", 0L)}, artifact=$APK_ARTIFACT_NAME, size=$artifactSize, digest=${artifactDigest.take(20)}…"
+            )
+    }
+
+    private fun installationAuthority(
+        accessToken: String
+    ): JSONObject {
+        val response =
+            githubJsonRequest(
+                method = "GET",
+                apiPath = "/user/installations?per_page=100",
+                accessToken = accessToken
+            )
+
+        if (!response.optBoolean("http_success", false)) {
+            return failure(
+                "Не удалось проверить GitHub App installation permissions."
+            )
+                .put("status", "installation_permissions_unavailable")
+                .put("http_code", response.optInt("http_code", -1))
+        }
+
+        val body = response.optJSONObject("body") ?: JSONObject()
+        val installations = body.optJSONArray("installations") ?: JSONArray()
+
+        for (index in 0 until installations.length()) {
+            val installation = installations.optJSONObject(index) ?: continue
+            val account =
+                installation.optJSONObject("account")
+                    ?.optString("login")
+                    .orEmpty()
+
+            if (!account.equals(OWNER, ignoreCase = true)) continue
+
+            val installationId = installation.optLong("id", 0L)
+            if (installationId <= 0L) continue
+
+            val repos =
+                githubJsonRequest(
+                    method = "GET",
+                    apiPath =
+                        "/user/installations/$installationId/repositories?per_page=100",
+                    accessToken = accessToken
+                )
+
+            if (!repos.optBoolean("http_success", false)) continue
+
+            val repoArray =
+                repos.optJSONObject("body")
+                    ?.optJSONArray("repositories")
+                    ?: JSONArray()
+
+            var selected = false
+            for (repoIndex in 0 until repoArray.length()) {
+                val repo = repoArray.optJSONObject(repoIndex) ?: continue
+                if (
+                    repo.optString("full_name")
+                        .equals(REPOSITORY_SLUG, ignoreCase = true)
+                ) {
+                    selected = true
+                    break
+                }
+            }
+
+            if (!selected) continue
+
+            val permissions =
+                installation.optJSONObject("permissions")
+                    ?: JSONObject()
+
+            return JSONObject()
+                .put("success", true)
+                .put("verified", true)
+                .put("installation_id", installationId)
+                .put("repository_selected", true)
+                .put("contents_permission", permissions.optString("contents", "none"))
+                .put("actions_permission", permissions.optString("actions", "none"))
+                .put("repository_selection", installation.optString("repository_selection"))
+                .put("app_slug", installation.optString("app_slug"))
+        }
+
+        return failure(
+            "Не найдена GitHub App installation, которая одновременно охватывает $REPOSITORY_SLUG."
+        )
+            .put("status", "target_installation_not_found")
+    }
+
+    private fun findBuildWorkflow(
+        accessToken: String
+    ): JSONObject {
+        val response =
+            githubJsonRequest(
+                method = "GET",
+                apiPath = "/repos/$OWNER/$REPO/actions/workflows?per_page=100",
+                accessToken = accessToken
+            )
+
+        if (!response.optBoolean("http_success", false)) {
+            return failure(
+                "Не удалось прочитать GitHub Actions workflows: HTTP ${response.optInt("http_code", -1)}."
+            )
+                .put("status", "workflow_list_failed")
+                .put("http_code", response.optInt("http_code", -1))
+        }
+
+        val workflows =
+            response.optJSONObject("body")
+                ?.optJSONArray("workflows")
+                ?: JSONArray()
+
+        val matches = mutableListOf<JSONObject>()
+
+        for (index in 0 until workflows.length()) {
+            val workflow = workflows.optJSONObject(index) ?: continue
+            if (workflow.optString("name") == BUILD_WORKFLOW_NAME) {
+                matches += workflow
+            }
+        }
+
+        if (matches.size != 1) {
+            return failure(
+                if (matches.isEmpty()) {
+                    "Workflow «$BUILD_WORKFLOW_NAME» не найден."
+                } else {
+                    "Найдено несколько workflows с именем «$BUILD_WORKFLOW_NAME»; выбор неоднозначен."
+                }
+            )
+                .put(
+                    "status",
+                    if (matches.isEmpty()) "build_workflow_missing" else "build_workflow_ambiguous"
+                )
+                .put("match_count", matches.size)
+        }
+
+        val workflow = matches.first()
+        val workflowId = workflow.optLong("id", 0L)
+        val state = workflow.optString("state")
+        if (workflowId <= 0L || state != "active") {
+            return failure(
+                "Workflow «$BUILD_WORKFLOW_NAME» найден, но не active."
+            )
+                .put("status", "build_workflow_inactive")
+                .put("workflow_id", workflowId)
+                .put("workflow_state", state)
+        }
+
+        return JSONObject()
+            .put("success", true)
+            .put("verified", true)
+            .put("workflow_id", workflowId)
+            .put("workflow_name", workflow.optString("name"))
+            .put("workflow_state", state)
+            .put("workflow_path", workflow.optString("path"))
+            .put("workflow_html_url", workflow.optString("html_url"))
+    }
+
+    private fun readBranchHead(
+        accessToken: String
+    ): JSONObject {
+        val response =
+            githubJsonRequest(
+                method = "GET",
+                apiPath = "/repos/$OWNER/$REPO/commits/${urlEncode(BRANCH)}",
+                accessToken = accessToken
+            )
+
+        if (!response.optBoolean("http_success", false)) {
+            return failure(
+                "Не удалось прочитать текущий head $BRANCH перед сборкой."
+            )
+                .put("status", "branch_head_read_failed")
+                .put("http_code", response.optInt("http_code", -1))
+        }
+
+        val sha =
+            response.optJSONObject("body")
+                ?.optString("sha")
+                .orEmpty()
+                .trim()
+
+        if (!FULL_GIT_SHA.matches(sha)) {
+            return failure(
+                "GitHub вернул некорректный head SHA для $BRANCH."
+            )
+                .put("status", "invalid_branch_head_sha")
+        }
+
+        return JSONObject()
+            .put("success", true)
+            .put("verified", true)
+            .put("head_sha", sha)
+    }
+
+    private fun listWorkflowRuns(
+        accessToken: String,
+        workflowId: Long,
+        headSha: String
+    ): JSONObject {
+        val response =
+            githubJsonRequest(
+                method = "GET",
+                apiPath =
+                    "/repos/$OWNER/$REPO/actions/workflows/$workflowId/runs" +
+                        "?event=workflow_dispatch" +
+                        "&branch=${urlEncode(BRANCH)}" +
+                        "&head_sha=${urlEncode(headSha)}" +
+                        "&per_page=20",
+                accessToken = accessToken
+            )
+
+        if (!response.optBoolean("http_success", false)) {
+            return failure(
+                "Не удалось прочитать workflow runs: HTTP ${response.optInt("http_code", -1)}."
+            )
+                .put("status", "workflow_runs_read_failed")
+                .put("http_code", response.optInt("http_code", -1))
+        }
+
+        val runs =
+            response.optJSONObject("body")
+                ?.optJSONArray("workflow_runs")
+                ?: JSONArray()
+
+        return JSONObject()
+            .put("success", true)
+            .put("verified", true)
+            .put("runs", runs)
+    }
+
+    private fun verifyBuildArtifact(
+        accessToken: String,
+        runId: Long,
+        expectedHeadSha: String
+    ): JSONObject {
+        val response =
+            githubJsonRequest(
+                method = "GET",
+                apiPath = "/repos/$OWNER/$REPO/actions/runs/$runId/artifacts?per_page=100",
+                accessToken = accessToken
+            )
+
+        if (!response.optBoolean("http_success", false)) {
+            return failure(
+                "Build завершён, но список GitHub Actions artifacts недоступен."
+            )
+                .put("status", "build_artifact_list_failed")
+                .put("artifact_verified", false)
+        }
+
+        val artifacts =
+            response.optJSONObject("body")
+                ?.optJSONArray("artifacts")
+                ?: JSONArray()
+
+        val matches = mutableListOf<JSONObject>()
+        for (index in 0 until artifacts.length()) {
+            val artifact = artifacts.optJSONObject(index) ?: continue
+            if (
+                artifact.optString("name") == APK_ARTIFACT_NAME &&
+                !artifact.optBoolean("expired", true)
+            ) {
+                matches += artifact
+            }
+        }
+
+        if (matches.isEmpty()) {
+            return JSONObject()
+                .put("success", true)
+                .put("verified", true)
+                .put("status", "apk_artifact_pending")
+                .put("artifact_verified", false)
+                .put("artifact_match_count", 0)
+                .put(
+                    "message",
+                    "GitHub Actions run уже успешен; ожидаю публикацию artifact «$APK_ARTIFACT_NAME»."
+                )
+        }
+
+        if (matches.size > 1) {
+            return failure(
+                "В build run найдено несколько artifacts «$APK_ARTIFACT_NAME»; результат неоднозначен."
+            )
+                .put("status", "apk_artifact_ambiguous")
+                .put("artifact_verified", false)
+                .put("artifact_match_count", matches.size)
+        }
+
+        val artifact = matches.first()
+        val artifactId = artifact.optLong("id", 0L)
+        val size = artifact.optLong("size_in_bytes", 0L)
+        val digest = artifact.optString("digest").trim()
+        val workflowRun = artifact.optJSONObject("workflow_run") ?: JSONObject()
+
+        val provenanceVerified =
+            artifactId > 0L &&
+                workflowRun.optLong("id", 0L) == runId &&
+                workflowRun.optString("head_branch") == BRANCH &&
+                workflowRun.optString("head_sha") == expectedHeadSha
+
+        if (!provenanceVerified) {
+            return failure(
+                "APK artifact найден, но его run/head provenance не совпадает с подтверждённой сборкой."
+            )
+                .put("status", "apk_artifact_provenance_mismatch")
+                .put("artifact_verified", false)
+                .put("artifact_id", artifactId)
+                .put("artifact_size_bytes", size)
+                .put("artifact_digest", digest)
+        }
+
+        if (size <= 0L || !ARTIFACT_SHA256.matches(digest)) {
+            return JSONObject()
+                .put("success", true)
+                .put("verified", true)
+                .put("status", "apk_artifact_digest_pending")
+                .put("artifact_verified", false)
+                .put("artifact_id", artifactId)
+                .put("artifact_size_bytes", size)
+                .put("artifact_digest", digest)
+                .put(
+                    "message",
+                    "APK artifact уже виден, но immutable size/digest proof ещё не готов."
+                )
+        }
+
+        return JSONObject()
+            .put("success", true)
+            .put("verified", true)
+            .put("artifact_verified", true)
+            .put("artifact_id", artifactId)
+            .put("artifact_name", APK_ARTIFACT_NAME)
+            .put("artifact_size_bytes", size)
+            .put("artifact_digest", digest)
+            .put("artifact_url", artifact.optString("url"))
+            .put("archive_download_url", artifact.optString("archive_download_url"))
+    }
+
     fun runtimeSnapshot(): JSONObject {
         val now = System.currentTimeMillis()
         val lastVerifiedAt = prefs.getLong(KEY_LAST_VERIFIED_AT, 0L)
@@ -327,28 +1475,51 @@ class AyanaGitHubRepositoryExecutor(
             .put("runtime_fresh", fresh)
             .put("device_confirmed_write", prefs.getBoolean(KEY_DEVICE_CONFIRMED_WRITE, false))
             .put("last_commit_sha", prefs.getString(KEY_LAST_COMMIT_SHA, "").orEmpty())
+            .put("actions_permission", prefs.getString(KEY_LAST_ACTIONS_PERMISSION, "unknown").orEmpty())
+            .put("actions_write_available", prefs.getString(KEY_LAST_ACTIONS_PERMISSION, "") == "write")
+            .put("actions_last_verified_at_ms", prefs.getLong(KEY_LAST_ACTIONS_VERIFIED_AT, 0L))
+            .put("android_apk_build_implemented", true)
+            .put("device_confirmed_build", prefs.getBoolean(KEY_DEVICE_CONFIRMED_BUILD, false))
+            .put("last_build_run_id", prefs.getLong(KEY_LAST_BUILD_RUN_ID, 0L))
+            .put("last_build_head_sha", prefs.getString(KEY_LAST_BUILD_HEAD_SHA, "").orEmpty())
+            .put("last_build_run_url", prefs.getString(KEY_LAST_BUILD_RUN_URL, "").orEmpty())
+            .put("last_build_status", prefs.getString(KEY_LAST_BUILD_STATUS, "").orEmpty())
+            .put("last_build_conclusion", prefs.getString(KEY_LAST_BUILD_CONCLUSION, "").orEmpty())
+            .put("last_build_artifact_id", prefs.getLong(KEY_LAST_BUILD_ARTIFACT_ID, 0L))
+            .put("last_build_artifact_digest", prefs.getString(KEY_LAST_BUILD_ARTIFACT_DIGEST, "").orEmpty())
+            .put("last_build_artifact_size_bytes", prefs.getLong(KEY_LAST_BUILD_ARTIFACT_SIZE, 0L))
+            .put("last_build_verified_at_ms", prefs.getLong(KEY_LAST_BUILD_VERIFIED_AT, 0L))
             .put("last_error", prefs.getString(KEY_LAST_ERROR, "").orEmpty())
     }
 
     fun compactContext(): String {
         val runtime = runtimeSnapshot()
         return buildString {
-            append("AYANA R10.27.1 GITHUB TRUTH: ")
+            append("AYANA R10.27.2 GITHUB/ACTIONS TRUTH: ")
             append("github_repository_write_implemented=true; ")
             append("github_commit_push_implemented=true; ")
+            append("android_apk_build_implemented=true; ")
             append("repository=")
             append(REPOSITORY_SLUG)
             append("; branch=")
             append(BRANCH)
-            append("; client_id_configured=")
-            append(runtime.optBoolean("client_id_configured", false))
             append("; connected=")
             append(runtime.optBoolean("connected", false))
             append("; write_available=")
             append(runtime.optBoolean("repository_write_available", false))
             append("; device_confirmed_write=")
             append(runtime.optBoolean("device_confirmed_write", false))
-            append(". GitHub mutation is two-phase: prepare is read-only; commit requires fresh explicit local user confirmation and current-SHA recheck. Never claim commit/push unless tool result has success=true, verified=true, action_committed=true and non-empty commit_sha. android_apk_build=false; development_agent_transaction=false.")
+            append("; actions_permission=")
+            append(runtime.optString("actions_permission", "unknown"))
+            append("; actions_write_available=")
+            append(runtime.optBoolean("actions_write_available", false))
+            append("; device_confirmed_build=")
+            append(runtime.optBoolean("device_confirmed_build", false))
+            append(". GitHub file mutation remains two-phase. APK build is a separate two-phase authority: prepare is read-only, confirmed replay dispatches exactly «")
+            append(BUILD_WORKFLOW_NAME)
+            append("» on main and SUCCESS requires completed conclusion=success plus verified artifact «")
+            append(APK_ARTIFACT_NAME)
+            append("» with non-zero size and SHA-256 artifact digest. direct_apk_delivery=false; development_agent_transaction=false.")
         }
     }
 
@@ -361,7 +1532,11 @@ class AyanaGitHubRepositoryExecutor(
         return okPath.optBoolean("success", false) &&
             !badTraversal.optBoolean("success", true) &&
             !badSecret.optBoolean("success", true) &&
-            knownBlob == "b6fc4c620b67d95f953a5c1c1230aaab5db5a1b0"
+            knownBlob == "b6fc4c620b67d95f953a5c1c1230aaab5db5a1b0" &&
+            FULL_GIT_SHA.matches("d9021dd8d9fff77fec938ccc2119e1393baf85ce") &&
+            ARTIFACT_SHA256.matches(
+                "sha256:cfc3236bdad15b5898bca8408945c9e19e1917da8704adc20eaa618444290a8c"
+            )
     }
 
     private fun prepareWrite(
@@ -1190,14 +2365,23 @@ class AyanaGitHubRepositoryExecutor(
     private fun recordRuntime(
         connected: Boolean,
         writeAvailable: Boolean,
-        error: String
+        error: String,
+        actionsPermission: String? = null
     ) {
-        prefs.edit()
-            .putBoolean(KEY_LAST_CONNECTED, connected)
-            .putBoolean(KEY_LAST_WRITE_AVAILABLE, writeAvailable)
-            .putLong(KEY_LAST_VERIFIED_AT, System.currentTimeMillis())
-            .putString(KEY_LAST_ERROR, error.take(400))
-            .apply()
+        val editor =
+            prefs.edit()
+                .putBoolean(KEY_LAST_CONNECTED, connected)
+                .putBoolean(KEY_LAST_WRITE_AVAILABLE, writeAvailable)
+                .putLong(KEY_LAST_VERIFIED_AT, System.currentTimeMillis())
+                .putString(KEY_LAST_ERROR, error.take(400))
+
+        if (actionsPermission != null) {
+            editor
+                .putString(KEY_LAST_ACTIONS_PERMISSION, actionsPermission)
+                .putLong(KEY_LAST_ACTIONS_VERIFIED_AT, System.currentTimeMillis())
+        }
+
+        editor.apply()
     }
 
     private fun securePut(
@@ -1307,12 +2491,14 @@ class AyanaGitHubRepositoryExecutor(
             .put("message", message)
 
     companion object {
-        const val VERSION = "1.1"
+        const val VERSION = "1.2"
 
         const val OWNER = "talant02031985-bot"
         const val REPO = "AUTONOMOUS-AI-AGENT"
         const val BRANCH = "main"
         const val REPOSITORY_SLUG = "$OWNER/$REPO"
+        const val BUILD_WORKFLOW_NAME = "Build Android APK"
+        const val APK_ARTIFACT_NAME = "AYANA-AI-signed-debug"
 
         private const val GITHUB_API_VERSION = "2026-03-10"
         private const val PREFS_NAME = "ayana_github_repository_executor_v1"
@@ -1338,13 +2524,40 @@ class AyanaGitHubRepositoryExecutor(
         private const val KEY_DEVICE_CONFIRMED_WRITE = "device_confirmed_write"
         private const val KEY_LAST_COMMIT_SHA = "last_commit_sha"
 
+        private const val KEY_LAST_ACTIONS_PERMISSION = "last_actions_permission"
+        private const val KEY_LAST_ACTIONS_VERIFIED_AT = "last_actions_verified_at"
+
+        private const val KEY_DEVICE_CONFIRMED_BUILD = "device_confirmed_build"
+        private const val KEY_LAST_BUILD_RUN_ID = "last_build_run_id"
+        private const val KEY_LAST_BUILD_HEAD_SHA = "last_build_head_sha"
+        private const val KEY_LAST_BUILD_WORKFLOW_ID = "last_build_workflow_id"
+        private const val KEY_LAST_BUILD_RUN_URL = "last_build_run_url"
+        private const val KEY_LAST_BUILD_STARTED_AT = "last_build_started_at"
+        private const val KEY_LAST_BUILD_STATUS = "last_build_status"
+        private const val KEY_LAST_BUILD_CONCLUSION = "last_build_conclusion"
+        private const val KEY_LAST_BUILD_ARTIFACT_ID = "last_build_artifact_id"
+        private const val KEY_LAST_BUILD_ARTIFACT_DIGEST = "last_build_artifact_digest"
+        private const val KEY_LAST_BUILD_ARTIFACT_SIZE = "last_build_artifact_size"
+        private const val KEY_LAST_BUILD_VERIFIED_AT = "last_build_verified_at"
+
         private const val RUNTIME_FRESHNESS_MS = 15L * 60L * 1000L
         private const val TOKEN_REFRESH_SKEW_MS = 2L * 60L * 1000L
         private const val MAX_INLINE_CONTENT_BYTES = 6_000
         private const val MAX_PATH_CHARS = 320
         private const val MAX_COMMIT_MESSAGE_CHARS = 160
 
+        private const val BUILD_RUN_DISCOVERY_TIMEOUT_MS = 90_000L
+        private const val BUILD_RUN_DISCOVERY_POLL_MS = 2_500L
+        private const val BUILD_COMPLETION_TIMEOUT_MS = 20L * 60L * 1000L
+        private const val BUILD_POLL_INTERVAL_MS = 5_000L
+
         private val VALID_CLIENT_ID =
             Regex("^[A-Za-z0-9_.-]{8,160}$")
+
+        private val FULL_GIT_SHA =
+            Regex("^[0-9a-fA-F]{40}$")
+
+        private val ARTIFACT_SHA256 =
+            Regex("^sha256:[0-9a-fA-F]{64}$")
     }
 }
