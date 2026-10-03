@@ -4,7 +4,7 @@ import org.json.JSONObject
 import java.util.Locale
 
 /**
- * AYANA Safety Policy v1.4 — R10.27.2 GitHub Actions APK Build.
+ * AYANA Safety Policy v1.5 — R10.27.3 Verified Development Transaction.
  *
  * Local fail-closed guard executed immediately before Agent Core device tools.
  * It is intentionally independent from model instructions: a model mistake must
@@ -104,7 +104,8 @@ class AyanaSafetyPolicy {
             "list_memory",
             "list_reminders",
             "github_repository_status",
-            "github_build_status" ->
+            "github_build_status",
+            "github_development_transaction_status" ->
                 allow(
                     RISK_READ_ONLY,
                     "read_only"
@@ -173,6 +174,70 @@ class AyanaSafetyPolicy {
                         "github_build_prepare_only"
                     )
                 }
+
+            "github_development_transaction" ->
+                if (
+                    arguments.optBoolean(
+                        "confirmed",
+                        false
+                    )
+                ) {
+                    // The fresh local confirmation authorizes the already-prepared
+                    // exact repository patch plus its bound fixed APK build. It does
+                    // not authorize arbitrary path/workflow/branch changes.
+                    allow(
+                        RISK_CONFIRMATION_REQUIRED,
+                        "development_transaction_confirmed"
+                    )
+                } else {
+                    // PREPARE only reads repository/blob/workflow/head truth and
+                    // computes a deterministic proposed blob. No commit/build dispatch.
+                    allow(
+                        RISK_READ_ONLY,
+                        "development_transaction_prepare_only"
+                    )
+                }
+
+            "github_development_transaction_control" -> {
+                val action =
+                    arguments.optString("action")
+                        .trim()
+                        .lowercase(Locale.ROOT)
+
+                when (action) {
+                    "status" ->
+                        allow(
+                            RISK_READ_ONLY,
+                            "development_transaction_status"
+                        )
+
+                    "accept",
+                    "cancel" ->
+                        // These only finalize local transaction state. They never
+                        // write repository content or dispatch a workflow.
+                        allow(
+                            RISK_SAFE_ACTION,
+                            "development_transaction_local_finalize"
+                        )
+
+                    "rollback" ->
+                        if (arguments.optBoolean("confirmed", false)) {
+                            allow(
+                                RISK_CONFIRMATION_REQUIRED,
+                                "development_transaction_rollback_confirmed"
+                            )
+                        } else {
+                            confirmation(
+                                "Rollback development transaction требует явной локальной команды пользователя."
+                            )
+                        }
+
+                    else ->
+                        prohibit(
+                            "Неизвестное действие управления development transaction."
+                        )
+                }
+            }
 
             "tap_screen_coordinates" ->
                 if (

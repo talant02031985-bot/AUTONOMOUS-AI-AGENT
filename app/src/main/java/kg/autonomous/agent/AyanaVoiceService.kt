@@ -63,14 +63,13 @@ import kotlin.math.abs
 
 class AyanaVoiceService : Service() {
 
-    // AYANA v12.60.1 / R10.27.2.1 APK BUILD PREPARE READ-ONLY TRUTH.
-    // Builds on DEVICE-CONFIRMED R10.27.1.2 / R10.27.1 GitHub write/commit. Adds one fixed-scope
-    // GitHub Actions build executor for talant02031985-bot/AUTONOMOUS-AI-AGENT/main and the exact
-    // active workflow “Build Android APK”. Build authority is strictly two-phase: read-only prepare
-    // -> fresh local user confirmation -> Actions:write/workflow/head-SHA recheck -> workflow_dispatch
-    // -> exact run correlation -> conclusion=success -> immutable APK artifact proof with SHA-256 digest.
-    // No arbitrary workflow/branch, blind redispatch, direct APK delivery/install or full development
-    // transaction is added here. GitHub tokens stay Keystore-encrypted; ORB/UI are unchanged.
+    // AYANA v12.61.0 / R10.27.3 VERIFIED DEVELOPMENT TRANSACTION / PROJECT WORKSPACE.
+    // Builds on DEVICE-CONFIRMED R10.27.2.1 / R10.27.2 APK BUILD PIPELINE. Adds one bounded
+    // fixed-repository development transaction: immutable blob snapshot -> exact single replacement ->
+    // static integrity checks -> fresh local confirmation -> verified commit -> fixed APK build ->
+    // explicit accept or verified rollback. No arbitrary workflow/branch, blind redispatch, secrets,
+    // direct APK delivery/install or unbounded project mutation is added. GitHub tokens stay
+    // Keystore-encrypted; ORB/UI are unchanged.
     //
     // AYANA v12.58.1 / R10.26.1 CAPABILITY EVIDENCE METADATA DETECTOR RECONCILIATION.
     // Device review of the published R10.26 self-audit exposed one residual stale phrase:
@@ -9074,6 +9073,51 @@ if (
             !c.contains("готовност")
     }
 
+    private fun isDevelopmentTransactionStatusRequest(
+        normalized: String
+    ): Boolean {
+        val c = normalized.trim()
+        return c.contains("транзакц") &&
+            c.contains("разработ") &&
+            (
+                c.contains("проверь") ||
+                    c.contains("проверить") ||
+                    c.contains("статус") ||
+                    c.contains("состояние")
+                ) &&
+            !c.contains("откат") &&
+            !c.contains("прими") &&
+            !c.contains("принять") &&
+            !c.contains("отмени")
+    }
+
+    private fun isDevelopmentTransactionAcceptRequest(
+        normalized: String
+    ): Boolean {
+        val c = normalized.trim()
+        return c.matches(
+            Regex("^(?:прими|принять|подтверди принятие|подтвердить принятие)\\s+(?:текущую\\s+)?транзакц\\p{L}*\\s+разработ\\p{L}*$")
+        )
+    }
+
+    private fun isDevelopmentTransactionRollbackRequest(
+        normalized: String
+    ): Boolean {
+        val c = normalized.trim()
+        return c.matches(
+            Regex("^(?:откати|откатить|верни назад)\\s+(?:текущую\\s+)?транзакц\\p{L}*\\s+разработ\\p{L}*$")
+        )
+    }
+
+    private fun isDevelopmentTransactionCancelPreparedRequest(
+        normalized: String
+    ): Boolean {
+        val c = normalized.trim()
+        return c.matches(
+            Regex("^(?:отмени|отменить)\\s+(?:текущую\\s+)?транзакц\\p{L}*\\s+разработ\\p{L}*$")
+        )
+    }
+
     private fun runLocalGitHubSetupOrStatusIfMatched(
         originalCommand: String,
         routingNormalized: String,
@@ -9089,6 +9133,30 @@ if (
                 isGitHubConnectRequest(routingNormalized) ->
                     githubRepositoryExecutor.startDeviceFlow()
 
+                isDevelopmentTransactionRollbackRequest(routingNormalized) ->
+                    executeAgentTool(
+                        "github_development_transaction_control",
+                        JSONObject().put("action", "rollback"),
+                        trustedUserConfirmation = true
+                    )
+
+                isDevelopmentTransactionAcceptRequest(routingNormalized) ->
+                    executeAgentTool(
+                        "github_development_transaction_control",
+                        JSONObject().put("action", "accept"),
+                        trustedUserConfirmation = true
+                    )
+
+                isDevelopmentTransactionCancelPreparedRequest(routingNormalized) ->
+                    executeAgentTool(
+                        "github_development_transaction_control",
+                        JSONObject().put("action", "cancel"),
+                        trustedUserConfirmation = true
+                    )
+
+                isDevelopmentTransactionStatusRequest(routingNormalized) ->
+                    githubRepositoryExecutor.developmentTransactionStatus()
+
                 isGitHubBuildStatusRequest(routingNormalized) ->
                     githubRepositoryExecutor.buildStatus()
 
@@ -9101,6 +9169,18 @@ if (
                 else ->
                     return false
             }
+
+        if (
+            result.optBoolean("success", false) &&
+            result.optString("status") in
+                setOf(
+                    "development_transaction_accepted",
+                    "development_transaction_rolled_back",
+                    "development_transaction_cancelled"
+                )
+        ) {
+            finalizeDevelopmentTransactionDurableGoal(result)
+        }
 
         val message =
             result.optString(
@@ -9132,6 +9212,58 @@ if (
         return true
     }
 
+    private fun finalizeDevelopmentTransactionDurableGoal(
+        result: JSONObject
+    ) {
+        val transactionId = result.optString("transaction_id").trim()
+        if (transactionId.isBlank()) return
+
+        val goals =
+            try {
+                durableGoalStore.getRecoverableJson(20)
+            } catch (_: Exception) {
+                JSONArray()
+            }
+
+        for (index in 0 until goals.length()) {
+            val goal = goals.optJSONObject(index) ?: continue
+            if (goal.optString("last_tool_name") != "github_development_transaction") continue
+
+            val lastResult =
+                try {
+                    JSONObject(goal.optString("last_result"))
+                } catch (_: Exception) {
+                    JSONObject()
+                }
+
+            if (lastResult.optString("transaction_id") != transactionId) continue
+
+            val goalId = goal.optString("id")
+            try {
+                if (result.optString("status") == "development_transaction_cancelled") {
+                    durableGoalStore.markCancelled(
+                        goalId,
+                        "Development transaction отменена до GitHub mutation."
+                    )
+                } else {
+                    durableGoalStore.markCompleted(
+                        goalId,
+                        result.optString("message", "Development transaction завершена.")
+                    )
+                }
+
+                commandHistoryStore.addEvent(
+                    activeCommandHistoryId,
+                    state = "development_transaction_goal_finalized",
+                    message = result.optString("status"),
+                    details = "goal_id=$goalId; transaction_id=$transactionId"
+                )
+            } catch (_: Exception) {
+            }
+            break
+        }
+    }
+
     private fun unsupportedExecutionCapabilityReason(
         command: String
     ): String? {
@@ -9156,7 +9288,7 @@ if (
             return null
         }
 
-        // R10.27.2: fixed GitHub Actions APK build is now implemented and must reach
+        // R10.27.3: GitHub write, fixed APK build and bounded development transaction are implemented and must reach
         // Agent Core + the two-phase github_apk_build executor. Only direct delivery /
         // download / installation remains unsupported in this checkpoint.
         val apkDeliveryOrInstall =
@@ -9180,7 +9312,7 @@ if (
             return null
         }
 
-        return "R10.27.2 уже умеет запустить и доказательно проверить APK build через фиксированный GitHub Actions workflow, " +
+        return "R10.27.3 уже умеет commit/push, доказательно проверить APK build и выполнять bounded development transaction с rollback, " +
             "но прямое скачивание/передача/установка APK на планшет пока не реализованы и не должны подменяться ложным SUCCESS."
 
     }
@@ -30980,43 +31112,54 @@ AyanaAcceptanceTestEngine.PROBE_NOTIFICATION_ROUTING ->
                 false
             }
 
+        val developmentRuntime =
+            try {
+                githubRepositoryExecutor.runtimeSnapshot()
+            } catch (_: Exception) {
+                JSONObject()
+            }
+
+        val developmentRuntimeReady =
+            developmentRuntime.optBoolean("connected", false) &&
+                developmentRuntime.optBoolean("repository_write_available", false) &&
+                developmentRuntime.optBoolean("actions_write_available", false)
+
         val developmentAvailability =
             developmentTransactionContract.evaluate(
                 AyanaDevelopmentTransactionContract.Availability(
-                    repositoryAuthorized = false,
-                    writeExecutorAvailable = false,
-                    commitPushExecutorAvailable = false,
-                    buildExecutorAvailable = false,
-                    artifactVerifierAvailable = false,
-                    rollbackExecutorAvailable = false
+                    repositoryAuthorized = developmentRuntimeReady,
+                    writeExecutorAvailable = developmentRuntimeReady,
+                    commitPushExecutorAvailable = developmentRuntimeReady,
+                    buildExecutorAvailable = developmentRuntimeReady,
+                    artifactVerifierAvailable = developmentRuntimeReady,
+                    rollbackExecutorAvailable = developmentRuntimeReady
                 )
             )
 
         add(
             id = "R9-FOUND-004",
-            title = "Development transaction fail-closed foundation",
+            title = "Development transaction fail-closed/live-authority foundation",
             critical = true,
             ok =
                 developmentOk &&
-                    !developmentAvailability.optBoolean(
-                        "ready",
-                        true
-                    ),
+                    developmentAvailability.optBoolean("ready", false) == developmentRuntimeReady,
             message =
                 if (
                     developmentOk &&
-                    !developmentAvailability.optBoolean(
-                        "ready",
-                        true
-                    )
+                    developmentAvailability.optBoolean("ready", false) == developmentRuntimeReady
                 ) {
-                    "Development transaction contract exists and correctly remains unavailable without authorized executors."
+                    if (developmentRuntimeReady) {
+                        "Development transaction contract правильно открылся только при подтверждённых repository/build/rollback executors."
+                    } else {
+                        "Development transaction contract корректно fail-closed при отсутствии текущей repository/build authority."
+                    }
                 } else {
-                    "Development transaction contract does not fail closed."
+                    "Development transaction contract/runtime authority truth противоречива."
                 },
             evidence =
                 JSONObject()
                     .put("version", AyanaDevelopmentTransactionContract.VERSION)
+                    .put("runtime_ready", developmentRuntimeReady)
                     .put(
                         "current_availability",
                         developmentAvailability
@@ -33703,6 +33846,10 @@ if (sessionOk) {
                 runtime.optBoolean("actions_write_available", false)
         val runtimeBuildDeviceConfirmed =
             runtime.optBoolean("device_confirmed_build", false)
+        val runtimeDevelopmentAvailable =
+            runtimeWriteAvailable && runtimeBuildAvailable
+        val runtimeDevelopmentDeviceConfirmed =
+            runtime.optBoolean("development_transaction_device_confirmed", false)
 
         val githubTruthOk =
             githubWrite != null &&
@@ -33720,10 +33867,14 @@ if (sessionOk) {
                 apkBuild.optBoolean("available_now", false) == runtimeBuildAvailable &&
                 apkBuild.optBoolean("device_confirmed", false) == runtimeBuildDeviceConfirmed
 
-        val futureStagesStillNegative =
+        val developmentTruthOk =
             development != null &&
-                apkDelivery != null &&
-                !development.optBoolean("implemented", true) &&
+                development.optBoolean("implemented", false) &&
+                development.optBoolean("available_now", false) == runtimeDevelopmentAvailable &&
+                development.optBoolean("device_confirmed", false) == runtimeDevelopmentDeviceConfirmed
+
+        val futureStagesStillNegative =
+            apkDelivery != null &&
                 !apkDelivery.optBoolean("implemented", true)
 
         val scopeOk =
@@ -33734,6 +33885,7 @@ if (sessionOk) {
             executorSelfTest &&
                 githubTruthOk &&
                 apkBuildTruthOk &&
+                developmentTruthOk &&
                 futureStagesStillNegative &&
                 scopeOk
 
@@ -33741,9 +33893,9 @@ if (sessionOk) {
             status = if (ok) AyanaAcceptanceTestEngine.STATUS_PASS else AyanaAcceptanceTestEngine.STATUS_FAIL,
             message =
                 if (ok) {
-                    "R10.27.2 development truth корректна: bounded GitHub write/commit и fixed GitHub Actions APK build реализованы; direct APK delivery/full transaction остаются честно недоступными."
+                    "R10.27.3 development truth корректна: bounded GitHub write/commit, fixed APK build и verified development transaction с accept/rollback реализованы; direct APK delivery остаётся честно недоступным."
                 } else {
-                    "R10.27.2 development capability truth противоречива."
+                    "R10.27.3 development capability truth противоречива."
                 },
             evidenceScope = "github_actions_executor_contract_plus_runtime_truth",
             verified = ok,
@@ -33753,6 +33905,7 @@ if (sessionOk) {
                     .put("github_executor_self_test", executorSelfTest)
                     .put("github_truth_ok", githubTruthOk)
                     .put("apk_build_truth_ok", apkBuildTruthOk)
+                    .put("development_truth_ok", developmentTruthOk)
                     .put("future_stages_still_negative", futureStagesStillNegative)
                     .put("scope_ok", scopeOk)
                     .put("repository", runtime.optString("repository"))
@@ -33763,6 +33916,9 @@ if (sessionOk) {
                     .put("actions_permission", runtime.optString("actions_permission", "unknown"))
                     .put("actions_write_available", runtimeBuildAvailable)
                     .put("device_confirmed_build", runtimeBuildDeviceConfirmed)
+                    .put("development_transaction_available", runtimeDevelopmentAvailable)
+                    .put("development_transaction_device_confirmed", runtimeDevelopmentDeviceConfirmed)
+                    .put("development_transaction_status", runtime.optString("development_transaction_status", "none"))
                     .put("last_build_run_id", runtime.optLong("last_build_run_id", 0L))
                     .put("last_build_artifact_digest", runtime.optString("last_build_artifact_digest", ""))
         )
@@ -38017,7 +38173,7 @@ routed.forEach {
 
         val labels =
             linkedMapOf(
-                "development_agent_transaction" to "R9.0 transaction contract реализован fail-closed; R10.27.1 GitHub write и R10.27.2 build executors есть, но единый project workspace + test/rollback transaction ещё не реализован",
+                "development_agent_transaction" to "R10.27.3 development transaction реализована, но текущая GitHub Contents:write/Actions:write authority ещё не подтверждена",
                 "github_repository_write" to "R10.27.1 GitHub executor реализован, но текущая authorization/write readiness не подтверждена",
                 "github_commit_push" to "R10.27.1 commit executor реализован, но текущая authorization/write readiness не подтверждена",
                 "android_apk_build" to "R10.27.2 APK build executor реализован, но текущая Actions:write readiness ещё не подтверждена",
@@ -53414,6 +53570,10 @@ val networkPaused =
                 github.optBoolean("actions_write_available", false)
         val buildDeviceConfirmed =
             github.optBoolean("device_confirmed_build", false)
+        val developmentAvailable =
+            writeAvailable && actionsWriteAvailable
+        val developmentDeviceConfirmed =
+            github.optBoolean("development_transaction_device_confirmed", false)
 
         runtime
             .put("github_repository_executor_version", github.optString("version", AyanaGitHubRepositoryExecutor.VERSION))
@@ -53431,12 +53591,20 @@ val networkPaused =
             .put("github_apk_build_device_confirmed", buildDeviceConfirmed)
             .put("github_apk_build_last_run_id", github.optLong("last_build_run_id", 0L))
             .put("github_apk_build_last_head_sha", github.optString("last_build_head_sha", ""))
+            .put("github_apk_build_last_event", github.optString("last_build_event", ""))
             .put("github_apk_build_last_status", github.optString("last_build_status", ""))
             .put("github_apk_build_last_conclusion", github.optString("last_build_conclusion", ""))
             .put("github_apk_build_last_artifact_id", github.optLong("last_build_artifact_id", 0L))
             .put("github_apk_build_last_artifact_digest", github.optString("last_build_artifact_digest", ""))
             .put("github_apk_build_last_artifact_size_bytes", github.optLong("last_build_artifact_size_bytes", 0L))
             .put("github_apk_build_last_verified_at_ms", github.optLong("last_build_verified_at_ms", 0L))
+            .put("development_transaction_implemented", true)
+            .put("development_transaction_available", developmentAvailable)
+            .put("development_transaction_device_confirmed", developmentDeviceConfirmed)
+            .put("development_transaction_status", github.optString("development_transaction_status", "none"))
+            .put("development_transaction_id", github.optString("development_transaction_id", ""))
+            .put("development_transaction_last_commit_sha", github.optString("development_transaction_last_commit_sha", ""))
+            .put("development_transaction_last_rollback_commit_sha", github.optString("development_transaction_last_rollback_commit_sha", ""))
 
         val capabilities = reconciled.optJSONArray("capabilities") ?: JSONArray()
 
@@ -53461,6 +53629,26 @@ val networkPaused =
                         .put(
                             "note",
                             "R10.27.1 fixed-repository GitHub App Device Flow executor; prepare is read-only, mutation requires fresh explicit confirmation and verified blob/commit SHA; repo=${AyanaGitHubRepositoryExecutor.REPOSITORY_SLUG}; branch=${AyanaGitHubRepositoryExecutor.BRANCH}"
+                        )
+                }
+
+                "development_agent_transaction" -> {
+                    item
+                        .put("implemented", true)
+                        .put("available_now", developmentAvailable)
+                        .put("device_confirmed", developmentDeviceConfirmed)
+                        .put(
+                            "truth_state",
+                            when {
+                                developmentDeviceConfirmed && developmentAvailable -> "DEVICE_CONFIRMED_AVAILABLE"
+                                developmentAvailable -> "AVAILABLE_UNCONFIRMED"
+                                developmentDeviceConfirmed -> "DEVICE_CONFIRMED_UNAVAILABLE_NOW"
+                                else -> "IMPLEMENTED_UNAVAILABLE"
+                            }
+                        )
+                        .put(
+                            "note",
+                            "R10.27.3 bounded project-workspace transaction: immutable Git blob snapshot -> exact single replacement -> static integrity checks -> fresh confirmation -> verified commit -> exact push-triggered fixed APK build (no duplicate workflow_dispatch) -> explicit accept or verified rollback; workflows/secrets/arbitrary repos remain blocked"
                         )
                 }
 
@@ -53493,7 +53681,7 @@ val networkPaused =
         try {
             githubRepositoryExecutor.compactContext()
         } catch (_: Exception) {
-            "AYANA R10.27.2 GITHUB/ACTIONS TRUTH: fixed-repository write and fixed-workflow APK build executors are implemented, but current runtime readiness could not be read; do not claim write/build availability."
+            "AYANA R10.27.3 GITHUB/DEVELOPMENT TRUTH: fixed repository write, fixed APK build and bounded verified development transaction are implemented, but current runtime readiness could not be read; do not claim availability."
         }
 
     private fun crossProcessAccessibilityTruthContext(): String {
@@ -56854,7 +57042,7 @@ state = "agent_response",
                             // A model-provided confirmed=true is never trusted.
                             // Fresh approval is injected only by resumeDurableGoal() after
                             // an explicit Android-side user confirmation.
-                            // R10.27.2.1: while confirmed=false, GitHub write/build tools
+                            // R10.27.3: while confirmed=false, GitHub write/build/development tools
                             // are prepare-only read operations and must never be classified
                             // as dispatched side effects if a read fails.
                             if (
@@ -56864,7 +57052,8 @@ state = "agent_response",
                                     "tap_screen_coordinates",
                                     "execute_android_plan",
                                     "github_write_commit",
-                                    "github_apk_build"
+                                    "github_apk_build",
+                                    "github_development_transaction"
                                 )
                             ) {
                                 arguments.put(
@@ -57039,7 +57228,8 @@ state = "agent_response",
                                         toolName in
                                             setOf(
                                                 "github_write_commit",
-                                                "github_apk_build"
+                                                "github_apk_build",
+                                                "github_development_transaction"
                                             ) &&
                                             !arguments.optBoolean(
                                                 "confirmed",
@@ -60320,7 +60510,8 @@ STATE_SUCCESS
                     "click_screen_element",
                     "tap_screen_coordinates",
                     "github_write_commit",
-                    "github_apk_build"
+                    "github_apk_build",
+                    "github_development_transaction"
                 )
             ) {
                 durableGoalStore
@@ -60392,6 +60583,9 @@ STATE_SUCCESS
                 null
 
             var githubBuildPreparedProof: JSONObject? =
+                null
+
+            var githubDevelopmentPreparedProof: JSONObject? =
                 null
 
             if (toolName == "github_write_commit") {
@@ -60473,6 +60667,46 @@ STATE_SUCCESS
                     .put("_github_build_head_sha", preparedHeadSha)
             }
 
+            if (toolName == "github_development_transaction") {
+                val prepared =
+                    try {
+                        JSONObject(goal.optString("last_result"))
+                    } catch (_: Exception) {
+                        JSONObject()
+                    }
+
+                githubDevelopmentPreparedProof = prepared
+
+                val transactionId = prepared.optString("transaction_id").trim()
+                val preparedHeadSha = prepared.optString("base_head_sha").trim()
+                val originalBlobSha = prepared.optString("original_blob_sha").trim()
+                val proposedBlobSha = prepared.optString("proposed_blob_sha").trim()
+                val workflowId = prepared.optLong("workflow_id", 0L)
+
+                if (
+                    prepared.optString("status") != "development_transaction_prepared_waiting_confirmation" ||
+                    !prepared.optBoolean("requires_confirmation", false) ||
+                    transactionId.isBlank() ||
+                    preparedHeadSha.isBlank() ||
+                    originalBlobSha.isBlank() ||
+                    proposedBlobSha.isBlank() ||
+                    workflowId <= 0L
+                ) {
+                    durableGoalStore.markPaused(
+                        goalId,
+                        "Development transaction confirmation остановлена: prepared transaction proof отсутствует или повреждён"
+                    )
+                    respondAndResume(
+                        "Development transaction не выполнена: точный PREPARE proof не удалось восстановить. Запустите transaction заново.",
+                        silent,
+                        success = false
+                    )
+                    return
+                }
+
+                arguments.put("_github_dev_transaction_id", transactionId)
+            }
+
             arguments.put(
                 "confirmed",
                 true
@@ -60491,6 +60725,52 @@ STATE_SUCCESS
                     arguments,
                     trustedUserConfirmation = true
                 )
+
+            // R10.27.3 fail-closed transaction rollback truth. If the proposed
+            // commit's CI build definitively failed and the executor already restored
+            // the immutable original blob + verified the rollback build, the original
+            // development objective is ERROR but the rollback itself is complete.
+            // Do not leave a phantom paused goal that might replay the transaction.
+            if (
+                toolName == "github_development_transaction" &&
+                !result.optBoolean("success", false) &&
+                result.optBoolean("verified", false) &&
+                result.optString("status") == "development_transaction_build_failed_rolled_back" &&
+                result.optBoolean("repository_restored", false) &&
+                result.optBoolean("rollback_build_verified", false) &&
+                result.optBoolean("action_committed", false) &&
+                result.optBoolean("reconciliation_complete", false)
+            ) {
+                try {
+                    durableGoalStore.markFailed(
+                        goalId,
+                        result.optString(
+                            "message",
+                            "Development transaction build failed; verified rollback completed."
+                        )
+                    )
+                } catch (_: Exception) {
+                }
+
+                commandHistoryStore.addEvent(
+                    activeCommandHistoryId,
+                    state = "development_transaction_failed_rolled_back",
+                    message = "Build изменения не прошёл; verified rollback завершён",
+                    details = result.toString().take(1800)
+                )
+
+                currentDurableGoalId = null
+                respondAndResume(
+                    result.optString(
+                        "message",
+                        "Development transaction не принята: build завершился ошибкой, исходное состояние доказательно восстановлено."
+                    ),
+                    silent,
+                    success = false,
+                    technical = result.toString()
+                )
+                return
+            }
 
             if (
                 !result.optBoolean(
@@ -60606,6 +60886,135 @@ STATE_SUCCESS
                     "Подтверждённое действие выполнено, но я остановила дальнейшую цель: новое состояние не удалось надёжно сохранить.",
                     silent,
                     success = false
+                )
+                return
+            }
+
+            // R10.27.3 VERIFIED DEVELOPMENT TRANSACTION INTERMEDIATE TRUTH.
+            // Commit + CI success is not yet the final transaction result. Keep the
+            // Durable Goal paused until the user explicitly ACCEPTS or ROLLS BACK.
+            if (toolName == "github_development_transaction") {
+                val preparedProof =
+                    githubDevelopmentPreparedProof
+                        ?: JSONObject()
+                val transactionId = preparedProof.optString("transaction_id").trim()
+                val resultTransactionId = result.optString("transaction_id").trim()
+                val artifactDigest = result.optString("artifact_digest").trim()
+
+                val waitingAcceptanceVerified =
+                    result.optBoolean("success", false) &&
+                        result.optBoolean("verified", false) &&
+                        result.optString("status") == "development_transaction_waiting_acceptance" &&
+                        result.optBoolean("requires_acceptance", false) &&
+                        result.optBoolean("action_dispatched", false) &&
+                        result.optBoolean("action_committed", false) &&
+                        result.optBoolean("reconciliation_complete", false) &&
+                        result.optString("side_effect_state") == "VERIFIED_COMMITTED" &&
+                        result.optString("side_effect_kind") == "github_development_transaction" &&
+                        transactionId.isNotBlank() &&
+                        resultTransactionId == transactionId &&
+                        result.optString("repository") == AyanaGitHubRepositoryExecutor.REPOSITORY_SLUG &&
+                        result.optString("branch") == AyanaGitHubRepositoryExecutor.BRANCH &&
+                        result.optString("path") == preparedProof.optString("path") &&
+                        result.optString("original_blob_sha") == preparedProof.optString("original_blob_sha") &&
+                        result.optString("proposed_blob_sha") == preparedProof.optString("proposed_blob_sha") &&
+                        result.optString("commit_sha").matches(Regex("^[0-9a-fA-F]{40}$")) &&
+                        result.optString("build_status") == "completed" &&
+                        result.optString("build_conclusion") == "success" &&
+                        result.optBoolean("artifact_verified", false) &&
+                        result.optLong("run_id", 0L) > 0L &&
+                        result.optLong("artifact_id", 0L) > 0L &&
+                        result.optLong("artifact_size_bytes", 0L) > 0L &&
+                        Regex("^sha256:[0-9a-fA-F]{64}$").matches(artifactDigest)
+
+                if (!waitingAcceptanceVerified) {
+                    durableGoalStore.markPaused(
+                        goalId,
+                        "Development transaction commit/build выполнены, но waiting-acceptance proof недостаточен"
+                    )
+                    currentDurableGoalId = null
+                    respondAndResume(
+                        result.optString(
+                            "message",
+                            "Development transaction требует reconciliation: terminal proof неполный."
+                        ),
+                        silent,
+                        success = false,
+                        technical = result.toString()
+                    )
+                    return
+                }
+
+                val transactionTaskGraph =
+                    AyanaAutonomousTaskGraph.restore(
+                        snapshot = afterConfirmation.optJSONObject("task_graph"),
+                        fallbackGoal = afterConfirmation.optString("command"),
+                        plannerEnvelope = afterConfirmation.optJSONObject("planner_envelope")
+                    )
+
+                transactionTaskGraph.recordToolDispatch(
+                    toolName = "github_development_transaction",
+                    signature =
+                        "github_development_transaction|confirmed|$transactionId|${result.optString("commit_sha").take(20)}",
+                    mayMutate = true
+                )
+                transactionTaskGraph.recordToolResult(
+                    toolName = "github_development_transaction",
+                    success = true,
+                    verified = true,
+                    terminalStatus = "BLOCKED",
+                    evidence = result.toString().take(1400),
+                    actionDispatched = true
+                )
+                transactionTaskGraph.pause("development_transaction_waiting_accept_or_rollback")
+
+                val waitingCheckpoint =
+                    try {
+                        durableGoalStore.checkpoint(
+                            goalId,
+                            JSONObject()
+                                .put("status", AyanaDurableGoalStore.STATUS_PAUSED)
+                                .put("requires_confirmation", false)
+                                .put("safe_auto_resume", false)
+                                .put("task_graph", transactionTaskGraph.persistenceSnapshot())
+                                .put("last_result", result.toString())
+                                .put("last_checkpoint", "development_transaction_waiting_acceptance")
+                                .put(
+                                    "last_error",
+                                    "Ожидается явный выбор пользователя: принять или откатить development transaction"
+                                )
+                        )
+                    } catch (_: Exception) {
+                        null
+                    }
+
+                commandHistoryStore.addEvent(
+                    activeCommandHistoryId,
+                    state = "development_transaction_waiting_acceptance",
+                    message = "Commit и APK build подтверждены; transaction ждёт accept/rollback",
+                    details =
+                        (
+                            "transaction_id=$transactionId; commit_sha=${result.optString("commit_sha")}; " +
+                                "run_id=${result.optLong("run_id", 0L)}; artifact_id=${result.optLong("artifact_id", 0L)}; " +
+                                "checkpoint_saved=${waitingCheckpoint != null}"
+                            ).take(1400)
+                )
+
+                commandHistoryStore.addEvent(
+                    activeCommandHistoryId,
+                    state = "task_graph_terminal",
+                    message = "R9.2 Autonomous Task Graph v2 PAUSED для development accept/rollback",
+                    details = transactionTaskGraph.compactSummary()
+                )
+
+                currentDurableGoalId = null
+
+                respondAndResume(
+                    result.optString("message"),
+                    silent,
+                    success = false,
+                    terminalStatus = AyanaCommandHistoryStore.STATUS_BLOCKED,
+                    technical = result.toString()
                 )
                 return
             }
@@ -62980,7 +63389,8 @@ return ""
                 "scroll_screen",
                 "tap_screen_coordinates",
                 "github_write_commit",
-                "github_apk_build"
+                "github_apk_build",
+                "github_development_transaction"
             )
 
     private fun isSafeAutoResumeTool(
@@ -66030,6 +66440,21 @@ return callAgentCore(
                     "Подготавливаю GitHub Actions сборку без запуска…"
                 }
 
+            "github_development_transaction" ->
+                if (arguments.optBoolean("confirmed", false)) {
+                    "Выполняю подтверждённую development transaction: commit → APK build…"
+                } else {
+                    "Подготавливаю development transaction без GitHub mutation…"
+                }
+
+            "github_development_transaction_control" ->
+                when (arguments.optString("action")) {
+                    "rollback" -> "Откатываю development transaction и проверяю rollback build…"
+                    "accept" -> "Принимаю проверенную development transaction…"
+                    "cancel" -> "Отменяю подготовленную development transaction…"
+                    else -> "Проверяю development transaction…"
+                }
+
             "github_write_commit" ->
                 if (arguments.optBoolean("confirmed", false)) {
                     "Записываю подтверждённое изменение в GitHub…"
@@ -66138,7 +66563,9 @@ private fun isSemanticActionResultVerified(
                 "tap_screen_coordinates",
                 "execute_android_plan",
                 "github_write_commit",
-                "github_apk_build"
+                "github_apk_build",
+                "github_development_transaction",
+                "github_development_transaction_control"
             )
         ) {
             arguments.put(
@@ -66847,6 +67274,147 @@ private fun isSemanticActionResultVerified(
 
                             buildResult
                         }
+                    }
+                }
+
+                "github_development_transaction" -> {
+                    val confirmed = arguments.optBoolean("confirmed", false)
+
+                    if (!confirmed) {
+                        githubRepositoryExecutor.developmentTransaction(
+                            arguments = arguments,
+                            confirmed = false
+                        )
+                    } else {
+                        val dispatchAllowed =
+                            executionKernel.tryBeginIrreversibleDispatch(
+                                kind = "github_development_transaction",
+                                detail =
+                                    "repository=${AyanaGitHubRepositoryExecutor.REPOSITORY_SLUG}; " +
+                                        "branch=${AyanaGitHubRepositoryExecutor.BRANCH}; " +
+                                        "transaction_id=${arguments.optString("_github_dev_transaction_id").take(120)}"
+                            )
+
+                        if (!dispatchAllowed) {
+                            toolResult(
+                                false,
+                                "Development transaction остановлена Execution Kernel до внешнего side effect."
+                            )
+                                .put("status", "dispatch_gate_rejected")
+                                .put("action_dispatched", false)
+                                .put("action_committed", false)
+                                .put("reconciliation_complete", true)
+                        } else {
+                            val txResult =
+                                githubRepositoryExecutor.developmentTransaction(
+                                    arguments = arguments,
+                                    confirmed = true,
+                                    shouldCancel = {
+                                        cancelRequested ||
+                                            Thread.currentThread().isInterrupted
+                                    }
+                                )
+
+                            val dispatched = txResult.optBoolean("action_dispatched", false)
+                            val committed = txResult.optBoolean("action_committed", false)
+                            val reconciliationComplete = txResult.optBoolean("reconciliation_complete", false)
+
+                            if (dispatched) {
+                                executionKernel.markIrreversibleDispatchAccepted(
+                                    "GitHub development transaction external mutation accepted: " +
+                                        "transaction_id=${txResult.optString("transaction_id").take(120)}"
+                                )
+                            }
+
+                            executionKernel.markSideEffectReconciliationStarted(
+                                "GitHub development transaction reconciliation: status=${txResult.optString("status")}"
+                            )
+
+                            when {
+                                !dispatched ->
+                                    executionKernel.markSideEffectReconciled(
+                                        committed = false,
+                                        detail = "Development transaction mutation не отправлялась."
+                                    )
+
+                                reconciliationComplete ->
+                                    executionKernel.markSideEffectReconciled(
+                                        committed = committed,
+                                        detail =
+                                            "Development transaction reconciliation complete; committed=$committed; " +
+                                                "status=${txResult.optString("status")}; " +
+                                                "commit=${txResult.optString("commit_sha").take(40)}"
+                                    )
+                            }
+
+                            txResult
+                        }
+                    }
+                }
+
+                "github_development_transaction_control" -> {
+                    when (arguments.optString("action").trim().lowercase(Locale.ROOT)) {
+                        "status" ->
+                            githubRepositoryExecutor.developmentTransactionStatus()
+
+                        "accept" ->
+                            githubRepositoryExecutor.acceptDevelopmentTransaction()
+
+                        "cancel" ->
+                            githubRepositoryExecutor.cancelPreparedDevelopmentTransaction()
+
+                        "rollback" -> {
+                            val dispatchAllowed =
+                                executionKernel.tryBeginIrreversibleDispatch(
+                                    kind = "github_development_transaction_rollback",
+                                    detail = "explicit verified rollback for fixed AYANA repository"
+                                )
+
+                            if (!dispatchAllowed) {
+                                toolResult(
+                                    false,
+                                    "Development rollback остановлен Execution Kernel до внешнего side effect."
+                                )
+                                    .put("status", "dispatch_gate_rejected")
+                                    .put("action_dispatched", false)
+                                    .put("action_committed", false)
+                                    .put("reconciliation_complete", true)
+                            } else {
+                                val rollback =
+                                    githubRepositoryExecutor.rollbackDevelopmentTransaction(
+                                        shouldCancel = {
+                                            cancelRequested ||
+                                                Thread.currentThread().isInterrupted
+                                        }
+                                    )
+
+                                val dispatched = rollback.optBoolean("action_dispatched", false)
+                                val committed = rollback.optBoolean("action_committed", false)
+                                val reconciliationComplete = rollback.optBoolean("reconciliation_complete", false)
+
+                                if (dispatched) {
+                                    executionKernel.markIrreversibleDispatchAccepted(
+                                        "GitHub development rollback commit/build dispatched"
+                                    )
+                                }
+                                executionKernel.markSideEffectReconciliationStarted(
+                                    "GitHub development rollback reconciliation: status=${rollback.optString("status")}"
+                                )
+                                if (!dispatched || reconciliationComplete) {
+                                    executionKernel.markSideEffectReconciled(
+                                        committed = committed,
+                                        detail =
+                                            "Development rollback reconciliation complete=${reconciliationComplete}; committed=$committed; " +
+                                                "rollback_commit=${rollback.optString("rollback_commit_sha").take(40)}"
+                                    )
+                                }
+                                rollback
+                            }
+                        }
+
+                        else ->
+                            toolResult(false, "Неизвестное действие development transaction control.")
+                                .put("status", "development_transaction_control_unknown")
                     }
                 }
 
@@ -72475,9 +73043,9 @@ state
         private const val MASTER_STATUS_MANUAL_REQUIRED =
             "MANUAL_REQUIRED"
 
-        // R10.27.2 APK BUILD PIPELINE.
+        // R10.27.3 VERIFIED DEVELOPMENT TRANSACTION / PROJECT WORKSPACE.
         private const val AYANA_VOICE_SERVICE_RELEASE =
-            "v12.60.1 / R10.27.2.1 APK BUILD PREPARE READ-ONLY TRUTH"
+            "v12.61.0 / R10.27.3 VERIFIED DEVELOPMENT TRANSACTION"
 
         private const val AYANA_PERSONAL_SEARCH_ENGINE_RELEASE =
             "v2.0 / R10.20 PERSONAL SEARCH 2.0 + VERIFIED RESULT CONTRACT v2"
@@ -72486,16 +73054,16 @@ state
             "v3.2.1"
 
         private const val AYANA_WORKER_RELEASE =
-            "v11.5.0 / R10.27.2 APK BUILD PIPELINE"
+            "v11.6.0 / R10.27.3 VERIFIED DEVELOPMENT TRANSACTION"
 
         private const val AYANA_ACCEPTED_FEATURE_CHECKPOINT =
-            "R10.27.1.2 / R10.27.1 GITHUB REPOSITORY WRITE + COMMIT/PUSH — DEVICE-CONFIRMED; R10.26.1 preserved"
+            "R10.27.2.1 / R10.27.2 APK BUILD PIPELINE — DEVICE-CONFIRMED; R10.27.1.2 and R10.26.1 preserved"
 
         private const val AYANA_CURRENT_FEATURE_RELEASE =
-            "R10.27.2.1 APK BUILD PREPARE READ-ONLY TRUTH — PENDING DEVICE CONFIRMATION"
+            "R10.27.3 VERIFIED DEVELOPMENT TRANSACTION — PENDING DEVICE CONFIRMATION"
 
         private const val AYANA_RELEASE_LINEAGE =
-            "Android v12.21.0 / R7.9 truth-hardening + R8.0 multi-attachment + R8.1–R8.4 accepted Personal Global Search stack + R8.5–R8.5.4 capability/evidence truth + R9.0 autonomous agent foundation + R9.0.1 history live-refresh proof fix + R9.0.2 diagnostic reconciliation/history refresh fix + R9.0.3 TTS health reconciliation + R9.1 IME perception/active telemetry truth + R9.2 autonomous recovery/long-task reconciliation + R9.2.1 adaptive hypothesis reconciliation + R9.3 app integration framework + R9.3.1 screen health reconciliation + R9.3.2 history latency recovery reconciliation + R9.3.3 informational terminal reconciliation + R9.3.4 app integration device acceptance + R9.4 multi-app task orchestration + R9.4.1 screen ownership union reconciliation + R9.5 verified result transfer between app steps + R9.5.1 partial marker provenance reconciliation + R9.5.2 bounded marker observation + R9.5.3 verified action result transfer + R9.6 verified semantic observation fallback + R9.6.1 visual fallback acceptance truth + R9.7 structured screen reading + R9.7.1 conversation routing/terminal truth + R9.7.2 structured router conversation precedence + R9.7.3 action morphology/terminal truth + R9.8 generic verified result transfer + R9.8.1 master full acceptance/diagnostic engine + R9.9 reversible action journal/verified undo + R9.9.1 brightness verified undo device acceptance + R9.9.2 opt-in low-battery controlled proactivity + R10.0 unified screen intelligence + R10.1 local self-diagnostics/self-audit + R10.2 personal search expansion + R10.3 long autonomous tasks/recovery + R10.4 adaptive verified execution loop + R10.5 generalized live adaptive autonomy + R10.6 cross-lane adaptive continuity + R10.6.1 durable goal binding fix + R10.7 cross-lane durable recovery continuity + R10.7.1 isolated acceptance cleanup hardening + R10.8 general-purpose long autonomous objectives + R10.9 dynamic goal decomposition/planner contract + R10.10 adaptive planner production path + R10.11 production replan/durable recovery + R10.12 natural lifecycle recovery/background continuation + R10.13 full process-death recovery + R10.13.1 post-process readiness/reconciliation + R10.13.2 process-death core recovery proof correction + R10.14 perception process isolation/cross-process accessibility bridge + R10.14.1 cross-process visual evidence fix + R10.14.2 lifecycle profile/self-diagnostic truth + R10.14.3 history recovery reconciliation + R10.15 generalized cross-process autonomy hardening + R10.15.1 self-diagnostics routing reconciliation + R10.16 perception process recovery/safe bridge rebind + R10.16.1 restart telemetry reconciliation + R10.17 screen intelligence 2.0 + R10.17.1 acceptance routing reconciliation + R10.18 universal UI action engine + R10.18.1 acceptance target reconciliation + R10.18.2 live target authority reconciliation + R10.18.3 app info target reconciliation + R10.19 autonomous multi-app tasks 2.0 + R10.20 personal search 2.0 + R10.21 document & office engine 2.0 + R10.22 notifications & communication assistant + R10.22.1 notification acceptance visibility reconciliation + R10.21.1 pptx completion evidence reconciliation + R10.23 voice & background 2.0 + R10.24 field hardening + R10.24.1 field hardening reconciliation/device acceptance + R10.24.2 acceptance truth reconciliation + R10.25 cross-process accessibility truth reconciliation + R10.26 capability evidence metadata reconciliation + R10.26.1 capability evidence metadata detector reconciliation + R10.27.1 github repository write/commit-push + R10.27.1.1 github confirmation terminal truth + R10.27.1.2 github verified-commit completion truth + R10.27.2 apk build pipeline + R10.27.2.1 apk build prepare read-only truth"
+            "Android v12.21.0 / R7.9 truth-hardening + R8.0 multi-attachment + R8.1–R8.4 accepted Personal Global Search stack + R8.5–R8.5.4 capability/evidence truth + R9.0 autonomous agent foundation + R9.0.1 history live-refresh proof fix + R9.0.2 diagnostic reconciliation/history refresh fix + R9.0.3 TTS health reconciliation + R9.1 IME perception/active telemetry truth + R9.2 autonomous recovery/long-task reconciliation + R9.2.1 adaptive hypothesis reconciliation + R9.3 app integration framework + R9.3.1 screen health reconciliation + R9.3.2 history latency recovery reconciliation + R9.3.3 informational terminal reconciliation + R9.3.4 app integration device acceptance + R9.4 multi-app task orchestration + R9.4.1 screen ownership union reconciliation + R9.5 verified result transfer between app steps + R9.5.1 partial marker provenance reconciliation + R9.5.2 bounded marker observation + R9.5.3 verified action result transfer + R9.6 verified semantic observation fallback + R9.6.1 visual fallback acceptance truth + R9.7 structured screen reading + R9.7.1 conversation routing/terminal truth + R9.7.2 structured router conversation precedence + R9.7.3 action morphology/terminal truth + R9.8 generic verified result transfer + R9.8.1 master full acceptance/diagnostic engine + R9.9 reversible action journal/verified undo + R9.9.1 brightness verified undo device acceptance + R9.9.2 opt-in low-battery controlled proactivity + R10.0 unified screen intelligence + R10.1 local self-diagnostics/self-audit + R10.2 personal search expansion + R10.3 long autonomous tasks/recovery + R10.4 adaptive verified execution loop + R10.5 generalized live adaptive autonomy + R10.6 cross-lane adaptive continuity + R10.6.1 durable goal binding fix + R10.7 cross-lane durable recovery continuity + R10.7.1 isolated acceptance cleanup hardening + R10.8 general-purpose long autonomous objectives + R10.9 dynamic goal decomposition/planner contract + R10.10 adaptive planner production path + R10.11 production replan/durable recovery + R10.12 natural lifecycle recovery/background continuation + R10.13 full process-death recovery + R10.13.1 post-process readiness/reconciliation + R10.13.2 process-death core recovery proof correction + R10.14 perception process isolation/cross-process accessibility bridge + R10.14.1 cross-process visual evidence fix + R10.14.2 lifecycle profile/self-diagnostic truth + R10.14.3 history recovery reconciliation + R10.15 generalized cross-process autonomy hardening + R10.15.1 self-diagnostics routing reconciliation + R10.16 perception process recovery/safe bridge rebind + R10.16.1 restart telemetry reconciliation + R10.17 screen intelligence 2.0 + R10.17.1 acceptance routing reconciliation + R10.18 universal UI action engine + R10.18.1 acceptance target reconciliation + R10.18.2 live target authority reconciliation + R10.18.3 app info target reconciliation + R10.19 autonomous multi-app tasks 2.0 + R10.20 personal search 2.0 + R10.21 document & office engine 2.0 + R10.22 notifications & communication assistant + R10.22.1 notification acceptance visibility reconciliation + R10.21.1 pptx completion evidence reconciliation + R10.23 voice & background 2.0 + R10.24 field hardening + R10.24.1 field hardening reconciliation/device acceptance + R10.24.2 acceptance truth reconciliation + R10.25 cross-process accessibility truth reconciliation + R10.26 capability evidence metadata reconciliation + R10.26.1 capability evidence metadata detector reconciliation + R10.27.1 github repository write/commit-push + R10.27.1.1 github confirmation terminal truth + R10.27.1.2 github verified-commit completion truth + R10.27.2 apk build pipeline + R10.27.2.1 apk build prepare read-only truth + R10.27.3 verified development transaction/project workspace"
 
         // AyanaCommandHistoryStore v2.8 keeps up to 4k chars inline and stores longer
         // results out-of-line. Self-review intentionally remains inline so copied History

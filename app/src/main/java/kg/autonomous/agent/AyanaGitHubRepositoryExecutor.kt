@@ -21,7 +21,7 @@ import javax.crypto.SecretKey
 import javax.crypto.spec.GCMParameterSpec
 
 /**
- * AYANA R10.27.2.1 GitHub Repository + Actions Executor v1.2.1.
+ * AYANA R10.27.3 GitHub Repository + Actions + Development Transaction Executor v1.3.0.
  *
  * Security model:
  * - GitHub App Device Flow only. No PAT/client secret is embedded in the APK.
@@ -49,8 +49,14 @@ import javax.crypto.spec.GCMParameterSpec
  * - PREPARE may use a very recent verified Actions:write readiness snapshot only
  *   to construct the proposal; confirmed dispatch still re-checks live authority.
  *
- * This executor still does not merge branches, delete files, write secrets,
- * install APKs, or broaden authority beyond the fixed repository.
+ * R10.27.3 composes the already verified repository-write and APK-build lanes into
+ * one bounded development transaction for exact text replacements in existing files:
+ * snapshot -> exact patch -> static integrity checks -> explicit confirmation -> commit
+ * -> verified APK build -> explicit accept OR verified rollback. Large repository files
+ * are read by immutable Git blob SHA; only a bounded patch is carried in Durable Goal.
+ *
+ * This executor still does not merge branches, delete files, edit workflows, write
+ * secrets, install APKs, or broaden authority beyond the fixed repository.
  */
 class AyanaGitHubRepositoryExecutor(
     context: Context
@@ -444,6 +450,453 @@ class AyanaGitHubRepositoryExecutor(
         )
     }
 
+    fun developmentTransaction(
+        arguments: JSONObject,
+        confirmed: Boolean,
+        shouldCancel: () -> Boolean = { false }
+    ): JSONObject {
+        return if (!confirmed) {
+            prepareDevelopmentTransaction(arguments)
+        } else {
+            confirmDevelopmentTransaction(
+                arguments = arguments,
+                shouldCancel = shouldCancel
+            )
+        }
+    }
+
+    fun developmentTransactionStatus(): JSONObject {
+        val transactionId =
+            prefs.getString(KEY_DEV_TX_ID, "")
+                .orEmpty()
+                .trim()
+
+        val status =
+            prefs.getString(KEY_DEV_TX_STATUS, "none")
+                .orEmpty()
+                .ifBlank { "none" }
+
+        if (
+            transactionId.isNotBlank() &&
+            status in
+                setOf(
+                    DEV_TX_STATUS_BUILDING,
+                    DEV_TX_STATUS_BUILD_RECONCILIATION_REQUIRED,
+                    DEV_TX_STATUS_ROLLBACK_BUILDING,
+                    DEV_TX_STATUS_ROLLBACK_BUILD_FAILED
+                )
+        ) {
+            val reconciled = reconcileDevelopmentTransactionStatusReadOnly()
+            if (reconciled != null) return reconciled
+        }
+
+        if (transactionId.isBlank() || status == "none") {
+            return JSONObject()
+                .put("success", true)
+                .put("verified", true)
+                .put("status", "no_development_transaction")
+                .put("active", false)
+                .put("repository", REPOSITORY_SLUG)
+                .put("branch", BRANCH)
+                .put("message", "Сейчас нет сохранённой development transaction.")
+        }
+
+        return JSONObject()
+            .put("success", true)
+            .put("verified", true)
+            .put("status", status)
+            .put("active", status in ACTIVE_DEV_TX_STATUSES)
+            .put("transaction_id", transactionId)
+            .put("repository", REPOSITORY_SLUG)
+            .put("branch", BRANCH)
+            .put("path", prefs.getString(KEY_DEV_TX_PATH, "").orEmpty())
+            .put("base_head_sha", prefs.getString(KEY_DEV_TX_BASE_HEAD_SHA, "").orEmpty())
+            .put("original_blob_sha", prefs.getString(KEY_DEV_TX_ORIGINAL_BLOB_SHA, "").orEmpty())
+            .put("proposed_blob_sha", prefs.getString(KEY_DEV_TX_PROPOSED_BLOB_SHA, "").orEmpty())
+            .put("commit_sha", prefs.getString(KEY_DEV_TX_COMMIT_SHA, "").orEmpty())
+            .put("workflow_id", prefs.getLong(KEY_DEV_TX_WORKFLOW_ID, 0L))
+            .put("build_run_id", prefs.getLong(KEY_DEV_TX_BUILD_RUN_ID, 0L))
+            .put("artifact_id", prefs.getLong(KEY_DEV_TX_ARTIFACT_ID, 0L))
+            .put("artifact_digest", prefs.getString(KEY_DEV_TX_ARTIFACT_DIGEST, "").orEmpty())
+            .put("rollback_commit_sha", prefs.getString(KEY_DEV_TX_ROLLBACK_COMMIT_SHA, "").orEmpty())
+            .put("updated_at_ms", prefs.getLong(KEY_DEV_TX_UPDATED_AT, 0L))
+            .put(
+                "message",
+                when (status) {
+                    DEV_TX_STATUS_PREPARED ->
+                        "Development transaction подготовлена и ждёт отдельного подтверждения."
+                    DEV_TX_STATUS_WAITING_ACCEPTANCE ->
+                        "Изменение и APK build подтверждены. Нужен выбор: принять или откатить transaction."
+                    DEV_TX_STATUS_BUILD_RECONCILIATION_REQUIRED ->
+                        "Commit выполнен, но build требует read-only reconciliation. Повторный dispatch запрещён."
+                    DEV_TX_STATUS_ACCEPTED ->
+                        "Последняя development transaction принята пользователем."
+                    DEV_TX_STATUS_ROLLED_BACK ->
+                        "Последняя development transaction доказательно откатана."
+                    else ->
+                        "Development transaction status: $status"
+                }
+            )
+    }
+
+    /**
+     * Read-only recovery for a transaction whose commit already exists but whose
+     * build proof was interrupted/ambiguous. Never dispatches a workflow and never
+     * writes repository content. It can only advance persisted transaction truth
+     * after observing the exact push-triggered run for the saved commit SHA.
+     */
+    private fun reconcileDevelopmentTransactionStatusReadOnly(): JSONObject? {
+        val state = loadDevelopmentTransactionState()
+        if (!state.optBoolean("success", false)) return null
+
+        val status = state.optString("status")
+        val rollbackMode =
+            status in
+                setOf(
+                    DEV_TX_STATUS_ROLLBACK_BUILDING,
+                    DEV_TX_STATUS_ROLLBACK_BUILD_FAILED
+                )
+
+        val expectedHeadSha =
+            if (rollbackMode) {
+                state.optString("rollback_commit_sha")
+            } else {
+                state.optString("commit_sha")
+            }
+        val workflowId = state.optLong("workflow_id", 0L)
+
+        if (!FULL_GIT_SHA.matches(expectedHeadSha) || workflowId <= 0L) {
+            return null
+        }
+
+        val tokenResult = ensureUsableAccessToken()
+        if (!tokenResult.optBoolean("success", false)) {
+            return JSONObject(state.toString())
+                .put("success", true)
+                .put("verified", true)
+                .put("active", true)
+                .put("reconciliation_attempted", true)
+                .put("reconciliation_observation_available", false)
+                .put(
+                    "message",
+                    "Development transaction сохранена, но сейчас не удалось выполнить read-only GitHub build reconciliation. Новый dispatch не выполнялся."
+                )
+        }
+
+        val accessToken = tokenResult.optString("access_token")
+        var runId =
+            if (
+                prefs.getString(KEY_LAST_BUILD_HEAD_SHA, "").orEmpty() == expectedHeadSha &&
+                prefs.getString(KEY_LAST_BUILD_EVENT, "").orEmpty() == "push"
+            ) {
+                prefs.getLong(KEY_LAST_BUILD_RUN_ID, 0L)
+            } else {
+                0L
+            }
+
+        if (runId <= 0L) {
+            val listed =
+                listWorkflowRuns(
+                    accessToken = accessToken,
+                    workflowId = workflowId,
+                    headSha = expectedHeadSha,
+                    event = "push"
+                )
+
+            if (!listed.optBoolean("success", false)) {
+                return JSONObject(state.toString())
+                    .put("success", true)
+                    .put("verified", true)
+                    .put("active", true)
+                    .put("reconciliation_attempted", true)
+                    .put("reconciliation_observation_available", false)
+                    .put("message", "Transaction build пока не удалось прочитать; никаких повторных mutation/dispatch не выполнено.")
+            }
+
+            val matches = mutableListOf<JSONObject>()
+            val runs = listed.optJSONArray("runs") ?: JSONArray()
+            for (index in 0 until runs.length()) {
+                val item = runs.optJSONObject(index) ?: continue
+                if (
+                    item.optLong("id", 0L) > 0L &&
+                    item.optLong("workflow_id", 0L) == workflowId &&
+                    item.optString("event") == "push" &&
+                    item.optString("head_branch") == BRANCH &&
+                    item.optString("head_sha") == expectedHeadSha &&
+                    item.optString("name") == BUILD_WORKFLOW_NAME
+                ) {
+                    matches += item
+                }
+            }
+
+            if (matches.size != 1) {
+                return JSONObject(state.toString())
+                    .put("success", true)
+                    .put("verified", true)
+                    .put("active", true)
+                    .put("reconciliation_attempted", true)
+                    .put("reconciliation_observation_available", matches.isNotEmpty())
+                    .put("candidate_run_count", matches.size)
+                    .put(
+                        "message",
+                        if (matches.isEmpty()) {
+                            "Exact push-triggered build run ещё не виден; AYANA ничего не повторяет."
+                        } else {
+                            "Найдено несколько подходящих build runs; AYANA не угадывает identity."
+                        }
+                    )
+            }
+
+            runId = matches.first().optLong("id", 0L)
+            prefs.edit()
+                .putLong(KEY_LAST_BUILD_RUN_ID, runId)
+                .putString(KEY_LAST_BUILD_HEAD_SHA, expectedHeadSha)
+                .putLong(KEY_LAST_BUILD_WORKFLOW_ID, workflowId)
+                .putString(KEY_LAST_BUILD_EVENT, "push")
+                .putString(KEY_LAST_BUILD_RUN_URL, matches.first().optString("html_url"))
+                .apply()
+        }
+
+        val inspected =
+            inspectBuildRun(
+                accessToken = accessToken,
+                runId = runId,
+                expectedHeadSha = expectedHeadSha,
+                expectedWorkflowId = workflowId,
+                expectedEvent = "push"
+            )
+
+        if (inspected.optString("status") == "verified_apk_build") {
+            if (rollbackMode) {
+                prefs.edit()
+                    .putString(KEY_DEV_TX_STATUS, DEV_TX_STATUS_ROLLED_BACK)
+                    .putLong(KEY_DEV_TX_BUILD_RUN_ID, inspected.optLong("run_id", 0L))
+                    .putLong(KEY_DEV_TX_ARTIFACT_ID, inspected.optLong("artifact_id", 0L))
+                    .putString(KEY_DEV_TX_ARTIFACT_DIGEST, inspected.optString("artifact_digest"))
+                    .putLong(KEY_DEV_TX_ARTIFACT_SIZE, inspected.optLong("artifact_size_bytes", 0L))
+                    .putLong(KEY_DEV_TX_UPDATED_AT, System.currentTimeMillis())
+                    .putBoolean(KEY_DEVICE_CONFIRMED_TRANSACTION, true)
+                    .apply()
+
+                return JSONObject(inspected.toString())
+                    .put("success", true)
+                    .put("verified", true)
+                    .put("terminal_status", "SUCCESS")
+                    .put("status", "development_transaction_rolled_back")
+                    .put("transaction_id", state.optString("transaction_id"))
+                    .put("path", state.optString("path"))
+                    .put("original_blob_sha", state.optString("original_blob_sha"))
+                    .put("rollback_commit_sha", expectedHeadSha)
+                    .put("repository_restored", true)
+                    .put("rollback_build_verified", true)
+                    .put("action_dispatched", false)
+                    .put("action_committed", false)
+                    .put("reconciliation_complete", true)
+                    .put("side_effect_state", "NONE")
+                    .put("reconciliation_read_only", true)
+                    .put("message", "Rollback build доказательно подтверждён read-only reconciliation; transaction полностью откатана.")
+            }
+
+            prefs.edit()
+                .putString(KEY_DEV_TX_STATUS, DEV_TX_STATUS_WAITING_ACCEPTANCE)
+                .putLong(KEY_DEV_TX_BUILD_RUN_ID, inspected.optLong("run_id", 0L))
+                .putLong(KEY_DEV_TX_ARTIFACT_ID, inspected.optLong("artifact_id", 0L))
+                .putString(KEY_DEV_TX_ARTIFACT_DIGEST, inspected.optString("artifact_digest"))
+                .putLong(KEY_DEV_TX_ARTIFACT_SIZE, inspected.optLong("artifact_size_bytes", 0L))
+                .putLong(KEY_DEV_TX_UPDATED_AT, System.currentTimeMillis())
+                .apply()
+
+            return JSONObject(inspected.toString())
+                .put("success", true)
+                .put("verified", true)
+                .put("terminal_status", "BLOCKED")
+                .put("status", "development_transaction_waiting_acceptance")
+                .put("transaction_id", state.optString("transaction_id"))
+                .put("path", state.optString("path"))
+                .put("original_blob_sha", state.optString("original_blob_sha"))
+                .put("proposed_blob_sha", state.optString("proposed_blob_sha"))
+                .put("commit_sha", expectedHeadSha)
+                .put("requires_acceptance", true)
+                .put("action_dispatched", false)
+                .put("action_committed", false)
+                .put("reconciliation_complete", true)
+                .put("side_effect_state", "NONE")
+                .put("reconciliation_read_only", true)
+                .put("message", "Commit уже существовал; read-only reconciliation доказала успешный APK build. Transaction ждёт: принять или откатить.")
+        }
+
+        if (
+            inspected.optString("build_status") == "completed" &&
+            inspected.optString("build_conclusion").isNotBlank() &&
+            inspected.optString("build_conclusion") != "success"
+        ) {
+            return JSONObject(inspected.toString())
+                .put("success", true)
+                .put("verified", true)
+                .put("status", if (rollbackMode) DEV_TX_STATUS_ROLLBACK_BUILD_FAILED else DEV_TX_STATUS_BUILD_RECONCILIATION_REQUIRED)
+                .put("transaction_id", state.optString("transaction_id"))
+                .put("path", state.optString("path"))
+                .put("active", true)
+                .put("rollback_available", !rollbackMode)
+                .put("reconciliation_read_only", true)
+                .put("message", "Build завершён неуспешно; read-only reconciliation подтверждена. Новый dispatch не выполнялся.")
+        }
+
+        return JSONObject(state.toString())
+            .put("success", true)
+            .put("verified", true)
+            .put("active", true)
+            .put("reconciliation_attempted", true)
+            .put("reconciliation_read_only", true)
+            .put("build_run_id", runId)
+            .put("build_status", inspected.optString("build_status"))
+            .put("build_conclusion", inspected.optString("build_conclusion"))
+            .put("message", "Development transaction build ещё выполняется/ожидается; никаких повторных mutation/dispatch не выполнено.")
+    }
+
+    fun acceptDevelopmentTransaction(): JSONObject {
+        val state = loadDevelopmentTransactionState()
+        if (!state.optBoolean("success", false)) {
+            return state
+        }
+
+        if (state.optString("status") != DEV_TX_STATUS_WAITING_ACCEPTANCE) {
+            return failure(
+                "Принять можно только transaction, у которой commit и APK build уже доказательно завершены."
+            )
+                .put("status", "development_transaction_not_waiting_acceptance")
+                .put("action_dispatched", false)
+                .put("action_committed", false)
+                .put("reconciliation_complete", true)
+        }
+
+        val tokenResult = ensureUsableAccessToken()
+        if (!tokenResult.optBoolean("success", false)) {
+            return tokenResult
+                .put("action_dispatched", false)
+                .put("action_committed", false)
+                .put("reconciliation_complete", true)
+        }
+
+        val accessToken = tokenResult.optString("access_token")
+        val path = state.optString("path")
+        val current = readRepositoryPath(path, accessToken)
+        if (!current.optBoolean("success", false)) {
+            return current
+                .put("action_dispatched", false)
+                .put("action_committed", false)
+                .put("reconciliation_complete", true)
+        }
+
+        val proposedBlobSha = state.optString("proposed_blob_sha")
+        if (
+            !current.optBoolean("exists", false) ||
+            current.optString("sha") != proposedBlobSha
+        ) {
+            return failure(
+                "Development transaction не принята: целевой файл изменился после проверенной сборки. Сначала нужна фактическая сверка/новая transaction."
+            )
+                .put("status", "development_transaction_accept_state_changed")
+                .put("expected_blob_sha", proposedBlobSha)
+                .put("actual_blob_sha", current.optString("sha"))
+                .put("action_dispatched", false)
+                .put("action_committed", false)
+                .put("reconciliation_complete", true)
+        }
+
+        val now = System.currentTimeMillis()
+        prefs.edit()
+            .putString(KEY_DEV_TX_STATUS, DEV_TX_STATUS_ACCEPTED)
+            .putLong(KEY_DEV_TX_UPDATED_AT, now)
+            .putBoolean(KEY_DEVICE_CONFIRMED_TRANSACTION, true)
+            .apply()
+
+        return JSONObject()
+            .put("success", true)
+            .put("verified", true)
+            .put("terminal_status", "SUCCESS")
+            .put("status", "development_transaction_accepted")
+            .put("transaction_id", state.optString("transaction_id"))
+            .put("repository", REPOSITORY_SLUG)
+            .put("branch", BRANCH)
+            .put("path", path)
+            .put("commit_sha", state.optString("commit_sha"))
+            .put("build_run_id", state.optLong("build_run_id", 0L))
+            .put("artifact_id", state.optLong("artifact_id", 0L))
+            .put("artifact_digest", state.optString("artifact_digest"))
+            .put("action_dispatched", false)
+            .put("action_committed", false)
+            .put("reconciliation_complete", true)
+            .put("side_effect_state", "NONE")
+            .put("message", "Development transaction принята. Проверенный commit сохранён в main.")
+    }
+
+    fun rollbackDevelopmentTransaction(
+        shouldCancel: () -> Boolean = { false }
+    ): JSONObject {
+        val state = loadDevelopmentTransactionState()
+        if (!state.optBoolean("success", false)) {
+            return state
+        }
+
+        if (
+            state.optString("status") !in
+            setOf(
+                DEV_TX_STATUS_WAITING_ACCEPTANCE,
+                DEV_TX_STATUS_BUILD_RECONCILIATION_REQUIRED
+            )
+        ) {
+            return failure(
+                "Откат доступен только для transaction с уже выполненным commit, которая ещё не принята."
+            )
+                .put("status", "development_transaction_rollback_not_available")
+                .put("action_dispatched", false)
+                .put("action_committed", false)
+                .put("reconciliation_complete", true)
+        }
+
+        return rollbackDevelopmentTransactionInternal(
+            state = state,
+            shouldCancel = shouldCancel,
+            explicitUserRollback = true,
+            trigger = "explicit_user_rollback"
+        )
+    }
+
+    fun cancelPreparedDevelopmentTransaction(): JSONObject {
+        val state = loadDevelopmentTransactionState()
+        if (!state.optBoolean("success", false)) {
+            return state
+        }
+
+        if (state.optString("status") != DEV_TX_STATUS_PREPARED) {
+            return failure(
+                "Эта development transaction уже вышла из PREPARE. После commit её можно только принять или доказательно откатить."
+            )
+                .put("status", "development_transaction_cancel_not_available")
+                .put("action_dispatched", false)
+                .put("action_committed", false)
+                .put("reconciliation_complete", true)
+        }
+
+        prefs.edit()
+            .putString(KEY_DEV_TX_STATUS, DEV_TX_STATUS_CANCELLED)
+            .putLong(KEY_DEV_TX_UPDATED_AT, System.currentTimeMillis())
+            .apply()
+
+        return JSONObject()
+            .put("success", true)
+            .put("verified", true)
+            .put("terminal_status", "SUCCESS")
+            .put("status", "development_transaction_cancelled")
+            .put("transaction_id", state.optString("transaction_id"))
+            .put("action_dispatched", false)
+            .put("action_committed", false)
+            .put("reconciliation_complete", true)
+            .put("side_effect_state", "NONE")
+            .put("message", "Подготовленная development transaction отменена; GitHub не изменялся.")
+    }
+
     fun buildStatus(): JSONObject {
         val tokenResult = ensureUsableAccessToken()
         if (!tokenResult.optBoolean("success", false)) {
@@ -468,8 +921,949 @@ class AyanaGitHubRepositoryExecutor(
             accessToken = accessToken,
             runId = runId,
             expectedHeadSha = expectedHeadSha,
-            expectedWorkflowId = prefs.getLong(KEY_LAST_BUILD_WORKFLOW_ID, 0L)
+            expectedWorkflowId = prefs.getLong(KEY_LAST_BUILD_WORKFLOW_ID, 0L),
+            expectedEvent =
+                prefs.getString(KEY_LAST_BUILD_EVENT, "workflow_dispatch")
+                    .orEmpty()
+                    .ifBlank { "workflow_dispatch" }
         )
+    }
+
+    private fun prepareDevelopmentTransaction(
+        arguments: JSONObject
+    ): JSONObject {
+        val existingStatus =
+            prefs.getString(KEY_DEV_TX_STATUS, "none")
+                .orEmpty()
+
+        if (existingStatus in ACTIVE_DEV_TX_STATUSES) {
+            return failure(
+                "Уже есть незавершённая development transaction. Сначала проверьте её статус и примите, откатите или отмените подготовку."
+            )
+                .put("status", "development_transaction_already_active")
+                .put("transaction_id", prefs.getString(KEY_DEV_TX_ID, "").orEmpty())
+                .put("current_transaction_status", existingStatus)
+                .put("requires_confirmation", false)
+                .put("action_dispatched", false)
+                .put("action_committed", false)
+                .put("reconciliation_complete", true)
+                .put("side_effect_state", "NONE")
+                .put("phase", "prepare_read_only")
+        }
+
+        val pathResult = validateDevelopmentTransactionPath(arguments.optString("path"))
+        if (!pathResult.optBoolean("success", false)) {
+            return developmentPrepareFailure(pathResult)
+        }
+
+        val path = pathResult.optString("path")
+        val findText = arguments.optString("find_text")
+        val replaceText = arguments.optString("replace_text")
+        val findBytes = findText.toByteArray(StandardCharsets.UTF_8)
+        val replaceBytes = replaceText.toByteArray(StandardCharsets.UTF_8)
+        val patchBytes = findBytes.size + replaceBytes.size
+
+        if (
+            findText.isBlank() ||
+            findBytes.size > MAX_TRANSACTION_FIND_BYTES ||
+            replaceBytes.size > MAX_TRANSACTION_REPLACE_BYTES ||
+            patchBytes > MAX_TRANSACTION_PATCH_BYTES
+        ) {
+            return developmentPrepareFailure(
+                failure(
+                    "Development patch слишком большой или find_text пуст. R10.27.3 хранит только bounded exact replacement в Durable Goal."
+                )
+                    .put("status", "development_patch_out_of_bounds")
+                    .put("find_bytes", findBytes.size)
+                    .put("replace_bytes", replaceBytes.size)
+                    .put("max_patch_bytes", MAX_TRANSACTION_PATCH_BYTES)
+            )
+        }
+
+        if (containsSensitiveMaterial(replaceText)) {
+            return developmentPrepareFailure(
+                failure(
+                    "Development transaction заблокирована: replacement похож на секрет/ключ/token material."
+                )
+                    .put("status", "development_patch_sensitive_material")
+            )
+        }
+
+        val commitMessage =
+            arguments.optString("commit_message")
+                .trim()
+                .ifBlank { "AYANA development transaction: $path" }
+                .take(MAX_COMMIT_MESSAGE_CHARS)
+
+        val tokenResult = ensureUsableAccessToken()
+        if (!tokenResult.optBoolean("success", false)) {
+            return developmentPrepareFailure(tokenResult)
+        }
+
+        val accessToken = tokenResult.optString("access_token")
+        val authority = installationAuthority(accessToken)
+        if (!authority.optBoolean("success", false)) {
+            return developmentPrepareFailure(authority)
+        }
+
+        val contentsWrite =
+            authority.optString("contents_permission", "none")
+                .lowercase(Locale.ROOT) == "write"
+        val actionsWrite =
+            authority.optString("actions_permission", "none")
+                .lowercase(Locale.ROOT) == "write"
+
+        if (!contentsWrite || !actionsWrite) {
+            return developmentPrepareFailure(
+                failure(
+                    "Development transaction требует одновременно Contents:write и Actions:write для фиксированного AYANA repository."
+                )
+                    .put("status", "development_transaction_authority_unavailable")
+                    .put("contents_permission", authority.optString("contents_permission", "none"))
+                    .put("actions_permission", authority.optString("actions_permission", "none"))
+            )
+        }
+
+        val workflow = findBuildWorkflow(accessToken)
+        if (!workflow.optBoolean("success", false)) {
+            return developmentPrepareFailure(workflow)
+        }
+
+        val head = readBranchHead(accessToken)
+        if (!head.optBoolean("success", false)) {
+            return developmentPrepareFailure(head)
+        }
+
+        val source = readRepositoryFileText(path, accessToken)
+        if (!source.optBoolean("success", false)) {
+            return developmentPrepareFailure(source)
+        }
+
+        val originalText = source.optString("text")
+        val originalBlobSha = source.optString("sha")
+        val matchCount = countOccurrences(originalText, findText)
+
+        if (matchCount != 1) {
+            return developmentPrepareFailure(
+                failure(
+                    "Exact replacement остановлен: find_text должен встречаться ровно один раз, найдено $matchCount."
+                )
+                    .put("status", "development_exact_match_count_invalid")
+                    .put("match_count", matchCount)
+            )
+        }
+
+        val start = originalText.indexOf(findText)
+        val proposedText =
+            originalText.substring(0, start) +
+                replaceText +
+                originalText.substring(start + findText.length)
+        val proposedBytes = proposedText.toByteArray(StandardCharsets.UTF_8)
+
+        val checks =
+            developmentStaticChecks(
+                path = path,
+                originalBytes = source.optString("blob_base64").let {
+                    try { Base64.decode(it, Base64.NO_WRAP) } catch (_: Exception) { ByteArray(0) }
+                },
+                proposedBytes = proposedBytes,
+                matchCount = matchCount
+            )
+
+        if (!checks.optBoolean("passed", false)) {
+            return developmentPrepareFailure(
+                failure(
+                    "Development static integrity checks не прошли; commit не подготовлен."
+                )
+                    .put("status", "development_static_checks_failed")
+                    .put("static_checks", checks)
+            )
+        }
+
+        val proposedBlobSha = gitBlobSha(proposedBytes)
+        val baseHeadSha = head.optString("head_sha")
+        val workflowId = workflow.optLong("workflow_id", 0L)
+        val transactionId =
+            "devtx-${System.currentTimeMillis()}-${proposedBlobSha.take(10)}"
+
+        persistDevelopmentTransactionPrepared(
+            transactionId = transactionId,
+            path = path,
+            findText = findText,
+            replaceText = replaceText,
+            commitMessage = commitMessage,
+            baseHeadSha = baseHeadSha,
+            originalBlobSha = originalBlobSha,
+            proposedBlobSha = proposedBlobSha,
+            workflowId = workflowId
+        )
+
+        return JSONObject()
+            .put("success", true)
+            .put("verified", true)
+            .put("status", "development_transaction_prepared_waiting_confirmation")
+            .put("requires_confirmation", true)
+            .put("transaction_id", transactionId)
+            .put("repository", REPOSITORY_SLUG)
+            .put("branch", BRANCH)
+            .put("path", path)
+            .put("base_head_sha", baseHeadSha)
+            .put("original_blob_sha", originalBlobSha)
+            .put("proposed_blob_sha", proposedBlobSha)
+            .put("workflow_id", workflowId)
+            .put("workflow_name", BUILD_WORKFLOW_NAME)
+            .put("artifact_name", APK_ARTIFACT_NAME)
+            .put("static_checks_passed", true)
+            .put("static_checks", checks)
+            .put("action_dispatched", false)
+            .put("action_committed", false)
+            .put("reconciliation_complete", true)
+            .put("side_effect_state", "NONE")
+            .put("phase", "prepare_read_only")
+            .put(
+                "message",
+                "Development transaction подготовлена для $path на head ${baseHeadSha.take(12)}. GitHub ещё НЕ изменён и workflow НЕ запущен. Для commit+build скажите: «подтверждаю текущую задачу»."
+            )
+    }
+
+    private fun confirmDevelopmentTransaction(
+        arguments: JSONObject,
+        shouldCancel: () -> Boolean
+    ): JSONObject {
+        val requestedTransactionId =
+            arguments.optString("_github_dev_transaction_id")
+                .trim()
+        val state = loadDevelopmentTransactionState()
+
+        if (!state.optBoolean("success", false)) {
+            return state
+        }
+
+        if (
+            requestedTransactionId.isBlank() ||
+            requestedTransactionId != state.optString("transaction_id") ||
+            state.optString("status") != DEV_TX_STATUS_PREPARED
+        ) {
+            return failure(
+                "Подтверждённая development transaction не совпадает с сохранённым PREPARE state. Нужна новая подготовка."
+            )
+                .put("status", "development_transaction_prepared_payload_mismatch")
+                .put("action_dispatched", false)
+                .put("action_committed", false)
+                .put("reconciliation_complete", true)
+        }
+
+        val tokenResult = ensureUsableAccessToken()
+        if (!tokenResult.optBoolean("success", false)) {
+            return tokenResult
+                .put("action_dispatched", false)
+                .put("action_committed", false)
+                .put("reconciliation_complete", true)
+        }
+
+        val accessToken = tokenResult.optString("access_token")
+        val authority = installationAuthority(accessToken)
+        if (
+            !authority.optBoolean("success", false) ||
+            authority.optString("contents_permission", "none").lowercase(Locale.ROOT) != "write" ||
+            authority.optString("actions_permission", "none").lowercase(Locale.ROOT) != "write"
+        ) {
+            return failure(
+                "Development transaction остановлена до mutation: Contents:write/Actions:write больше не подтверждены."
+            )
+                .put("status", "development_transaction_authority_changed")
+                .put("action_dispatched", false)
+                .put("action_committed", false)
+                .put("reconciliation_complete", true)
+        }
+
+        val workflowId = state.optLong("workflow_id", 0L)
+        val workflow = findBuildWorkflow(accessToken)
+        if (
+            !workflow.optBoolean("success", false) ||
+            workflow.optLong("workflow_id", 0L) != workflowId
+        ) {
+            return failure(
+                "Development transaction остановлена: фиксированный APK workflow изменился после PREPARE."
+            )
+                .put("status", "development_transaction_workflow_changed")
+                .put("action_dispatched", false)
+                .put("action_committed", false)
+                .put("reconciliation_complete", true)
+        }
+
+        val baseHeadSha = state.optString("base_head_sha")
+        val head = readBranchHead(accessToken)
+        if (
+            !head.optBoolean("success", false) ||
+            head.optString("head_sha") != baseHeadSha
+        ) {
+            return failure(
+                "Development transaction остановлена: main изменился после PREPARE. Нужна новая подготовка и новое подтверждение."
+            )
+                .put("status", "development_transaction_head_changed")
+                .put("expected_head_sha", baseHeadSha)
+                .put("actual_head_sha", head.optString("head_sha"))
+                .put("action_dispatched", false)
+                .put("action_committed", false)
+                .put("reconciliation_complete", true)
+        }
+
+        val path = state.optString("path")
+        val currentSource = readRepositoryFileText(path, accessToken)
+        if (!currentSource.optBoolean("success", false)) {
+            return currentSource
+                .put("action_dispatched", false)
+                .put("action_committed", false)
+                .put("reconciliation_complete", true)
+        }
+
+        val originalBlobSha = state.optString("original_blob_sha")
+        if (currentSource.optString("sha") != originalBlobSha) {
+            return failure(
+                "Development transaction остановлена: целевой файл изменился после PREPARE."
+            )
+                .put("status", "development_transaction_file_changed")
+                .put("expected_blob_sha", originalBlobSha)
+                .put("actual_blob_sha", currentSource.optString("sha"))
+                .put("action_dispatched", false)
+                .put("action_committed", false)
+                .put("reconciliation_complete", true)
+        }
+
+        val findText = state.optString("find_text")
+        val replaceText = state.optString("replace_text")
+        val currentText = currentSource.optString("text")
+        if (countOccurrences(currentText, findText) != 1) {
+            return failure(
+                "Development transaction остановлена: exact replacement больше не однозначен."
+            )
+                .put("status", "development_transaction_exact_match_changed")
+                .put("action_dispatched", false)
+                .put("action_committed", false)
+                .put("reconciliation_complete", true)
+        }
+
+        val start = currentText.indexOf(findText)
+        val proposedText =
+            currentText.substring(0, start) +
+                replaceText +
+                currentText.substring(start + findText.length)
+        val proposedBytes = proposedText.toByteArray(StandardCharsets.UTF_8)
+        val proposedBlobSha = gitBlobSha(proposedBytes)
+
+        if (proposedBlobSha != state.optString("proposed_blob_sha")) {
+            return failure(
+                "Development transaction остановлена: proposed blob больше не совпадает с PREPARE proof."
+            )
+                .put("status", "development_transaction_proposed_blob_mismatch")
+                .put("action_dispatched", false)
+                .put("action_committed", false)
+                .put("reconciliation_complete", true)
+        }
+
+        if (shouldCancel()) {
+            return failure("Development transaction отменена до commit.")
+                .put("status", "development_transaction_cancelled_before_commit")
+                .put("action_dispatched", false)
+                .put("action_committed", false)
+                .put("reconciliation_complete", true)
+        }
+
+        val commitResult =
+            commitPrepared(
+                path = path,
+                contentBytes = proposedBytes,
+                commitMessage = state.optString("commit_message"),
+                expectedSha = originalBlobSha,
+                expectedMissing = false,
+                proposedBlobSha = proposedBlobSha
+            )
+
+        if (!commitResult.optBoolean("success", false)) {
+            return JSONObject(commitResult.toString())
+                .put("status", "development_transaction_commit_failed")
+                .put("transaction_id", state.optString("transaction_id"))
+                .put("side_effect_kind", "github_development_transaction")
+        }
+
+        val commitSha = commitResult.optString("commit_sha").trim()
+        if (!FULL_GIT_SHA.matches(commitSha)) {
+            return failure(
+                "Development transaction commit response не содержит валидный commit SHA."
+            )
+                .put("status", "development_transaction_commit_sha_invalid")
+                .put("action_dispatched", true)
+                .put("action_committed", true)
+                .put("reconciliation_complete", false)
+                .put("side_effect_state", "VERIFIED_COMMITTED")
+                .put("side_effect_kind", "github_development_transaction")
+        }
+
+        prefs.edit()
+            .putString(KEY_DEV_TX_STATUS, DEV_TX_STATUS_BUILDING)
+            .putString(KEY_DEV_TX_COMMIT_SHA, commitSha)
+            .putLong(KEY_DEV_TX_UPDATED_AT, System.currentTimeMillis())
+            .apply()
+
+        // The fixed Build Android APK workflow already triggers on push to main.
+        // The verified commit above is therefore the build trigger. Do NOT issue a second
+        // workflow_dispatch here: correlate and verify the exact push-triggered run instead.
+        val buildResult =
+            monitorPushBuildForCommit(
+                workflowId = workflowId,
+                expectedHeadSha = commitSha,
+                shouldCancel = shouldCancel
+            )
+
+        val verifiedBuild =
+            buildResult.optBoolean("success", false) &&
+                buildResult.optBoolean("verified", false) &&
+                buildResult.optString("status") == "verified_apk_build" &&
+                buildResult.optString("build_status") == "completed" &&
+                buildResult.optString("build_conclusion") == "success" &&
+                buildResult.optBoolean("artifact_verified", false) &&
+                buildResult.optLong("run_id", 0L) > 0L &&
+                buildResult.optLong("artifact_id", 0L) > 0L &&
+                buildResult.optLong("artifact_size_bytes", 0L) > 0L &&
+                ARTIFACT_SHA256.matches(buildResult.optString("artifact_digest"))
+
+        if (verifiedBuild) {
+            prefs.edit()
+                .putString(KEY_DEV_TX_STATUS, DEV_TX_STATUS_WAITING_ACCEPTANCE)
+                .putLong(KEY_DEV_TX_BUILD_RUN_ID, buildResult.optLong("run_id", 0L))
+                .putLong(KEY_DEV_TX_ARTIFACT_ID, buildResult.optLong("artifact_id", 0L))
+                .putString(KEY_DEV_TX_ARTIFACT_DIGEST, buildResult.optString("artifact_digest"))
+                .putLong(KEY_DEV_TX_ARTIFACT_SIZE, buildResult.optLong("artifact_size_bytes", 0L))
+                .putLong(KEY_DEV_TX_UPDATED_AT, System.currentTimeMillis())
+                .apply()
+
+            return JSONObject(buildResult.toString())
+                .put("success", true)
+                .put("verified", true)
+                .put("terminal_status", "BLOCKED")
+                .put("status", "development_transaction_waiting_acceptance")
+                .put("transaction_id", state.optString("transaction_id"))
+                .put("path", path)
+                .put("original_blob_sha", originalBlobSha)
+                .put("proposed_blob_sha", proposedBlobSha)
+                .put("commit_sha", commitSha)
+                .put("requires_acceptance", true)
+                .put("requires_confirmation", false)
+                .put("action_dispatched", true)
+                .put("action_committed", true)
+                .put("reconciliation_complete", true)
+                .put("side_effect_state", "VERIFIED_COMMITTED")
+                .put("side_effect_kind", "github_development_transaction")
+                .put(
+                    "message",
+                    "Development transaction commit и APK build подтверждены. Изменение ещё не принято окончательно. После проверки скажите «прими текущую транзакцию разработки» или «откати текущую транзакцию разработки»."
+                )
+        }
+
+        val buildDefinitivelyFailed =
+            buildResult.optString("build_status") == "completed" &&
+                buildResult.optString("build_conclusion").isNotBlank() &&
+                buildResult.optString("build_conclusion") != "success" &&
+                buildResult.optBoolean("reconciliation_complete", false)
+
+        if (buildDefinitivelyFailed) {
+            val rollbackState =
+                JSONObject(state.toString())
+                    .put("status", DEV_TX_STATUS_BUILDING)
+                    .put("commit_sha", commitSha)
+            return rollbackDevelopmentTransactionInternal(
+                state = rollbackState,
+                shouldCancel = shouldCancel,
+                explicitUserRollback = false,
+                trigger = "verified_build_failure"
+            )
+                .put("original_build_status", buildResult.optString("build_status"))
+                .put("original_build_conclusion", buildResult.optString("build_conclusion"))
+                .put("original_build_run_id", buildResult.optLong("run_id", 0L))
+        }
+
+        prefs.edit()
+            .putString(KEY_DEV_TX_STATUS, DEV_TX_STATUS_BUILD_RECONCILIATION_REQUIRED)
+            .putLong(KEY_DEV_TX_BUILD_RUN_ID, buildResult.optLong("run_id", 0L))
+            .putLong(KEY_DEV_TX_UPDATED_AT, System.currentTimeMillis())
+            .apply()
+
+        return JSONObject(buildResult.toString())
+            .put("success", false)
+            .put("verified", buildResult.optBoolean("verified", false))
+            .put("status", "development_transaction_build_reconciliation_required")
+            .put("transaction_id", state.optString("transaction_id"))
+            .put("path", path)
+            .put("commit_sha", commitSha)
+            .put("rollback_available", true)
+            .put("action_dispatched", true)
+            .put("action_committed", true)
+            .put("reconciliation_complete", false)
+            .put("side_effect_state", "VERIFIED_COMMITTED")
+            .put("side_effect_kind", "github_development_transaction")
+            .put(
+                "message",
+                "Development commit выполнен, но build proof не завершён. Повторный dispatch запрещён. Проверьте transaction/build status; при необходимости выполните явный rollback."
+            )
+    }
+
+    private fun rollbackDevelopmentTransactionInternal(
+        state: JSONObject,
+        shouldCancel: () -> Boolean,
+        explicitUserRollback: Boolean,
+        trigger: String
+    ): JSONObject {
+        val tokenResult = ensureUsableAccessToken()
+        if (!tokenResult.optBoolean("success", false)) {
+            return tokenResult
+        }
+
+        val accessToken = tokenResult.optString("access_token")
+        val path = state.optString("path")
+        val originalBlobSha = state.optString("original_blob_sha")
+        val proposedBlobSha = state.optString("proposed_blob_sha")
+        val workflowId = state.optLong("workflow_id", 0L)
+
+        val current = readRepositoryPath(path, accessToken)
+        if (!current.optBoolean("success", false)) {
+            return current
+        }
+
+        if (
+            !current.optBoolean("exists", false) ||
+            current.optString("sha") != proposedBlobSha
+        ) {
+            prefs.edit()
+                .putString(KEY_DEV_TX_STATUS, DEV_TX_STATUS_ROLLBACK_BLOCKED)
+                .putLong(KEY_DEV_TX_UPDATED_AT, System.currentTimeMillis())
+                .apply()
+
+            return failure(
+                "Rollback остановлен: целевой файл уже изменился после transaction commit. AYANA не будет затирать чужое изменение."
+            )
+                .put("status", "development_transaction_rollback_state_changed")
+                .put("expected_blob_sha", proposedBlobSha)
+                .put("actual_blob_sha", current.optString("sha"))
+                .put("action_dispatched", false)
+                .put("action_committed", false)
+                .put("reconciliation_complete", true)
+        }
+
+        val original = readGitBlobText(originalBlobSha, accessToken)
+        if (!original.optBoolean("success", false)) {
+            return original
+        }
+
+        val originalBytes =
+            try {
+                Base64.decode(original.optString("blob_base64"), Base64.NO_WRAP)
+            } catch (_: Exception) {
+                ByteArray(0)
+            }
+
+        if (
+            originalBytes.isEmpty() &&
+            original.optLong("size", -1L) != 0L
+        ) {
+            return failure("Rollback snapshot decode failed.")
+                .put("status", "development_transaction_rollback_snapshot_invalid")
+        }
+
+        if (shouldCancel() && !explicitUserRollback) {
+            return failure("Automatic rollback остановлен до rollback commit.")
+                .put("status", "development_transaction_rollback_cancelled_before_commit")
+                .put("action_dispatched", false)
+                .put("action_committed", false)
+                .put("reconciliation_complete", true)
+        }
+
+        val rollbackCommit =
+            commitPrepared(
+                path = path,
+                contentBytes = originalBytes,
+                commitMessage =
+                    "AYANA rollback: " +
+                        state.optString("commit_message")
+                            .ifBlank { "development transaction" }
+                            .take(120),
+                expectedSha = proposedBlobSha,
+                expectedMissing = false,
+                proposedBlobSha = originalBlobSha
+            )
+
+        if (!rollbackCommit.optBoolean("success", false)) {
+            prefs.edit()
+                .putString(KEY_DEV_TX_STATUS, DEV_TX_STATUS_ROLLBACK_BLOCKED)
+                .putLong(KEY_DEV_TX_UPDATED_AT, System.currentTimeMillis())
+                .apply()
+            return JSONObject(rollbackCommit.toString())
+                .put("status", "development_transaction_rollback_commit_failed")
+                .put("transaction_id", state.optString("transaction_id"))
+                .put("side_effect_kind", "github_development_transaction_rollback")
+        }
+
+        val rollbackCommitSha = rollbackCommit.optString("commit_sha").trim()
+        if (!FULL_GIT_SHA.matches(rollbackCommitSha)) {
+            return failure("Rollback commit SHA не подтверждён.")
+                .put("status", "development_transaction_rollback_commit_sha_invalid")
+                .put("action_dispatched", true)
+                .put("action_committed", true)
+                .put("reconciliation_complete", false)
+                .put("side_effect_state", "VERIFIED_COMMITTED")
+                .put("side_effect_kind", "github_development_transaction_rollback")
+        }
+
+        prefs.edit()
+            .putString(KEY_DEV_TX_ROLLBACK_COMMIT_SHA, rollbackCommitSha)
+            .putString(KEY_DEV_TX_STATUS, DEV_TX_STATUS_ROLLBACK_BUILDING)
+            .putLong(KEY_DEV_TX_UPDATED_AT, System.currentTimeMillis())
+            .apply()
+
+        // Rollback commit also triggers the fixed workflow by push. Never create a
+        // duplicate manual dispatch; verify the exact rollback-commit push run.
+        val rollbackBuild =
+            monitorPushBuildForCommit(
+                workflowId = workflowId,
+                expectedHeadSha = rollbackCommitSha,
+                shouldCancel = shouldCancel
+            )
+
+        val rollbackBuildVerified =
+            rollbackBuild.optBoolean("success", false) &&
+                rollbackBuild.optString("status") == "verified_apk_build" &&
+                rollbackBuild.optString("build_conclusion") == "success" &&
+                rollbackBuild.optBoolean("artifact_verified", false) &&
+                ARTIFACT_SHA256.matches(rollbackBuild.optString("artifact_digest"))
+
+        if (!rollbackBuildVerified) {
+            prefs.edit()
+                .putString(KEY_DEV_TX_STATUS, DEV_TX_STATUS_ROLLBACK_BUILD_FAILED)
+                .putLong(KEY_DEV_TX_UPDATED_AT, System.currentTimeMillis())
+                .apply()
+
+            return JSONObject(rollbackBuild.toString())
+                .put("success", false)
+                .put("status", "development_transaction_rollback_build_unverified")
+                .put("transaction_id", state.optString("transaction_id"))
+                .put("path", path)
+                .put("rollback_commit_sha", rollbackCommitSha)
+                .put("repository_restored", true)
+                .put("rollback_build_verified", false)
+                .put("action_dispatched", true)
+                .put("action_committed", true)
+                .put("reconciliation_complete", false)
+                .put("side_effect_state", "VERIFIED_COMMITTED")
+                .put("side_effect_kind", "github_development_transaction_rollback")
+                .put(
+                    "message",
+                    "Repository content откатан к исходному blob, но rollback APK build не получил полного verified proof. Повторный dispatch запрещён."
+                )
+        }
+
+        prefs.edit()
+            .putString(KEY_DEV_TX_STATUS, DEV_TX_STATUS_ROLLED_BACK)
+            .putLong(KEY_DEV_TX_BUILD_RUN_ID, rollbackBuild.optLong("run_id", 0L))
+            .putLong(KEY_DEV_TX_ARTIFACT_ID, rollbackBuild.optLong("artifact_id", 0L))
+            .putString(KEY_DEV_TX_ARTIFACT_DIGEST, rollbackBuild.optString("artifact_digest"))
+            .putLong(KEY_DEV_TX_ARTIFACT_SIZE, rollbackBuild.optLong("artifact_size_bytes", 0L))
+            .putLong(KEY_DEV_TX_UPDATED_AT, System.currentTimeMillis())
+            .putBoolean(KEY_DEVICE_CONFIRMED_TRANSACTION, true)
+            .apply()
+
+        return JSONObject(rollbackBuild.toString())
+            .put("success", explicitUserRollback)
+            .put("verified", true)
+            .put("terminal_status", if (explicitUserRollback) "SUCCESS" else "ERROR")
+            .put(
+                "status",
+                if (explicitUserRollback) {
+                    "development_transaction_rolled_back"
+                } else {
+                    "development_transaction_build_failed_rolled_back"
+                }
+            )
+            .put("transaction_id", state.optString("transaction_id"))
+            .put("path", path)
+            .put("original_blob_sha", originalBlobSha)
+            .put("rollback_commit_sha", rollbackCommitSha)
+            .put("repository_restored", true)
+            .put("rollback_build_verified", true)
+            .put("rollback_trigger", trigger)
+            .put("action_dispatched", true)
+            .put("action_committed", true)
+            .put("reconciliation_complete", true)
+            .put("side_effect_state", "VERIFIED_COMMITTED")
+            .put("side_effect_kind", "github_development_transaction_rollback")
+            .put(
+                "message",
+                if (explicitUserRollback) {
+                    "Development transaction доказательно откатана: исходный blob восстановлен, rollback commit и APK build подтверждены."
+                } else {
+                    "APK build изменения завершился неуспешно; AYANA доказательно восстановила исходный blob и подтвердила rollback APK build."
+                }
+            )
+    }
+
+    private fun validateDevelopmentTransactionPath(
+        rawPath: String
+    ): JSONObject {
+        val base = validatePath(rawPath)
+        if (!base.optBoolean("success", false)) {
+            return base
+        }
+
+        val path = base.optString("path")
+        val lower = path.lowercase(Locale.ROOT)
+
+        if (lower.startsWith(".github/")) {
+            return failure(
+                "Development transaction не изменяет .github/workflows или другую GitHub control-plane конфигурацию."
+            )
+                .put("status", "development_transaction_control_plane_path_blocked")
+        }
+
+        val extensionAllowed =
+            TRANSACTION_ALLOWED_EXTENSIONS.any { lower.endsWith(it) }
+
+        if (!extensionAllowed) {
+            return failure(
+                "Development transaction R10.27.3 разрешает только текстовые source/config/doc файлы из bounded allow-list."
+            )
+                .put("status", "development_transaction_extension_blocked")
+        }
+
+        return JSONObject(base.toString())
+            .put("success", true)
+            .put("verified", true)
+    }
+
+    private fun readRepositoryFileText(
+        path: String,
+        accessToken: String
+    ): JSONObject {
+        val metadata = readRepositoryPath(path, accessToken)
+        if (!metadata.optBoolean("success", false)) {
+            return metadata
+        }
+
+        if (!metadata.optBoolean("exists", false)) {
+            return failure(
+                "Development transaction требует существующий файл, чтобы rollback имел immutable snapshot."
+            )
+                .put("status", "development_transaction_existing_file_required")
+        }
+
+        val size = metadata.optLong("size", -1L)
+        if (size < 0L || size > MAX_TRANSACTION_FILE_BYTES) {
+            return failure(
+                "Файл $path слишком большой для bounded R10.27.3 workspace: $size байт."
+            )
+                .put("status", "development_transaction_file_too_large")
+                .put("size_bytes", size)
+                .put("max_bytes", MAX_TRANSACTION_FILE_BYTES)
+        }
+
+        return readGitBlobText(
+            sha = metadata.optString("sha"),
+            accessToken = accessToken
+        )
+            .put("path", path)
+    }
+
+    private fun readGitBlobText(
+        sha: String,
+        accessToken: String
+    ): JSONObject {
+        if (!FULL_GIT_SHA.matches(sha)) {
+            return failure("Git blob SHA invalid.")
+                .put("status", "development_transaction_blob_sha_invalid")
+        }
+
+        val response =
+            githubJsonRequest(
+                method = "GET",
+                apiPath = "/repos/$OWNER/$REPO/git/blobs/$sha",
+                accessToken = accessToken
+            )
+
+        if (!response.optBoolean("http_success", false)) {
+            return failure(
+                "Не удалось прочитать immutable Git blob $sha: HTTP ${response.optInt("http_code", -1)}."
+            )
+                .put("status", "development_transaction_blob_read_failed")
+                .put("http_code", response.optInt("http_code", -1))
+        }
+
+        val body = response.optJSONObject("body") ?: JSONObject()
+        val encoding = body.optString("encoding")
+        val content = body.optString("content")
+        val bytes =
+            try {
+                if (encoding == "base64") {
+                    Base64.decode(content, Base64.DEFAULT)
+                } else {
+                    ByteArray(0)
+                }
+            } catch (_: Exception) {
+                ByteArray(0)
+            }
+
+        val declaredSize = body.optLong("size", -1L)
+        if (
+            encoding != "base64" ||
+            declaredSize < 0L ||
+            declaredSize > MAX_TRANSACTION_FILE_BYTES ||
+            (declaredSize > 0L && bytes.isEmpty()) ||
+            bytes.size.toLong() != declaredSize ||
+            gitBlobSha(bytes) != sha.lowercase(Locale.ROOT)
+        ) {
+            return failure(
+                "Immutable Git blob не прошёл size/SHA verification."
+            )
+                .put("status", "development_transaction_blob_verification_failed")
+                .put("declared_size", declaredSize)
+                .put("decoded_size", bytes.size)
+        }
+
+        val text = String(bytes, StandardCharsets.UTF_8)
+        if (!text.toByteArray(StandardCharsets.UTF_8).contentEquals(bytes)) {
+            return failure(
+                "Development transaction поддерживает только валидный UTF-8 text source."
+            )
+                .put("status", "development_transaction_non_utf8_file")
+        }
+
+        return JSONObject()
+            .put("success", true)
+            .put("verified", true)
+            .put("sha", sha.lowercase(Locale.ROOT))
+            .put("size", bytes.size)
+            .put("text", text)
+            .put("blob_base64", Base64.encodeToString(bytes, Base64.NO_WRAP))
+    }
+
+    private fun developmentStaticChecks(
+        path: String,
+        originalBytes: ByteArray,
+        proposedBytes: ByteArray,
+        matchCount: Int
+    ): JSONObject {
+        val proposedText = String(proposedBytes, StandardCharsets.UTF_8)
+        val utf8RoundTrip = proposedText.toByteArray(StandardCharsets.UTF_8).contentEquals(proposedBytes)
+        val originalKnown = originalBytes.isNotEmpty() || proposedBytes.isEmpty()
+        val noNul = proposedBytes.none { it == 0.toByte() }
+        val sizeOk = proposedBytes.size.toLong() <= MAX_TRANSACTION_FILE_BYTES
+        val exactMatch = matchCount == 1
+        val changed = !originalBytes.contentEquals(proposedBytes)
+        val pathAllowed = validateDevelopmentTransactionPath(path).optBoolean("success", false)
+
+        return JSONObject()
+            .put("passed", utf8RoundTrip && noNul && sizeOk && exactMatch && changed && pathAllowed && originalKnown)
+            .put("utf8_round_trip", utf8RoundTrip)
+            .put("no_nul", noNul)
+            .put("size_within_limit", sizeOk)
+            .put("exact_match_count", matchCount)
+            .put("content_changed", changed)
+            .put("path_allowed", pathAllowed)
+            .put("original_snapshot_loaded", originalKnown)
+            .put("proposed_size_bytes", proposedBytes.size)
+    }
+
+    private fun countOccurrences(
+        text: String,
+        needle: String
+    ): Int {
+        if (needle.isEmpty()) return 0
+        var count = 0
+        var from = 0
+        while (true) {
+            val index = text.indexOf(needle, from)
+            if (index < 0) break
+            count++
+            if (count > 1_000) break
+            from = index + needle.length
+        }
+        return count
+    }
+
+    private fun containsSensitiveMaterial(
+        text: String
+    ): Boolean =
+        SENSITIVE_PATCH_PATTERNS.any { it.containsMatchIn(text) }
+
+    private fun developmentPrepareFailure(
+        source: JSONObject
+    ): JSONObject =
+        JSONObject(source.toString())
+            .put("requires_confirmation", false)
+            .put("action_dispatched", false)
+            .put("action_committed", false)
+            .put("reconciliation_complete", true)
+            .put("side_effect_state", "NONE")
+            .put("phase", "prepare_read_only")
+
+    private fun persistDevelopmentTransactionPrepared(
+        transactionId: String,
+        path: String,
+        findText: String,
+        replaceText: String,
+        commitMessage: String,
+        baseHeadSha: String,
+        originalBlobSha: String,
+        proposedBlobSha: String,
+        workflowId: Long
+    ) {
+        val now = System.currentTimeMillis()
+        prefs.edit()
+            .putString(KEY_DEV_TX_ID, transactionId)
+            .putString(KEY_DEV_TX_STATUS, DEV_TX_STATUS_PREPARED)
+            .putString(KEY_DEV_TX_PATH, path)
+            .putString(KEY_DEV_TX_FIND_TEXT, findText)
+            .putString(KEY_DEV_TX_REPLACE_TEXT, replaceText)
+            .putString(KEY_DEV_TX_COMMIT_MESSAGE, commitMessage)
+            .putString(KEY_DEV_TX_BASE_HEAD_SHA, baseHeadSha)
+            .putString(KEY_DEV_TX_ORIGINAL_BLOB_SHA, originalBlobSha)
+            .putString(KEY_DEV_TX_PROPOSED_BLOB_SHA, proposedBlobSha)
+            .putLong(KEY_DEV_TX_WORKFLOW_ID, workflowId)
+            .putString(KEY_DEV_TX_COMMIT_SHA, "")
+            .putLong(KEY_DEV_TX_BUILD_RUN_ID, 0L)
+            .putLong(KEY_DEV_TX_ARTIFACT_ID, 0L)
+            .putString(KEY_DEV_TX_ARTIFACT_DIGEST, "")
+            .putLong(KEY_DEV_TX_ARTIFACT_SIZE, 0L)
+            .putString(KEY_DEV_TX_ROLLBACK_COMMIT_SHA, "")
+            .putLong(KEY_DEV_TX_CREATED_AT, now)
+            .putLong(KEY_DEV_TX_UPDATED_AT, now)
+            .apply()
+    }
+
+    private fun loadDevelopmentTransactionState(): JSONObject {
+        val transactionId = prefs.getString(KEY_DEV_TX_ID, "").orEmpty().trim()
+        val status = prefs.getString(KEY_DEV_TX_STATUS, "none").orEmpty()
+        if (transactionId.isBlank() || status == "none") {
+            return failure("Нет сохранённой development transaction.")
+                .put("status", "no_development_transaction")
+        }
+
+        return JSONObject()
+            .put("success", true)
+            .put("verified", true)
+            .put("transaction_id", transactionId)
+            .put("status", status)
+            .put("path", prefs.getString(KEY_DEV_TX_PATH, "").orEmpty())
+            .put("find_text", prefs.getString(KEY_DEV_TX_FIND_TEXT, "").orEmpty())
+            .put("replace_text", prefs.getString(KEY_DEV_TX_REPLACE_TEXT, "").orEmpty())
+            .put("commit_message", prefs.getString(KEY_DEV_TX_COMMIT_MESSAGE, "").orEmpty())
+            .put("base_head_sha", prefs.getString(KEY_DEV_TX_BASE_HEAD_SHA, "").orEmpty())
+            .put("original_blob_sha", prefs.getString(KEY_DEV_TX_ORIGINAL_BLOB_SHA, "").orEmpty())
+            .put("proposed_blob_sha", prefs.getString(KEY_DEV_TX_PROPOSED_BLOB_SHA, "").orEmpty())
+            .put("workflow_id", prefs.getLong(KEY_DEV_TX_WORKFLOW_ID, 0L))
+            .put("commit_sha", prefs.getString(KEY_DEV_TX_COMMIT_SHA, "").orEmpty())
+            .put("build_run_id", prefs.getLong(KEY_DEV_TX_BUILD_RUN_ID, 0L))
+            .put("artifact_id", prefs.getLong(KEY_DEV_TX_ARTIFACT_ID, 0L))
+            .put("artifact_digest", prefs.getString(KEY_DEV_TX_ARTIFACT_DIGEST, "").orEmpty())
+            .put("artifact_size_bytes", prefs.getLong(KEY_DEV_TX_ARTIFACT_SIZE, 0L))
+            .put("rollback_commit_sha", prefs.getString(KEY_DEV_TX_ROLLBACK_COMMIT_SHA, "").orEmpty())
     }
 
     private fun prepareBuild(): JSONObject {
@@ -620,6 +2014,283 @@ class AyanaGitHubRepositoryExecutor(
             .put("authority_cache_age_ms", ageMs)
     }
 
+    /**
+     * R10.27.3 transaction build verifier.
+     *
+     * The fixed AYANA workflow already has push-to-main CI. The repository commit is
+     * therefore the build trigger. This path NEVER calls workflow_dispatch; it only
+     * correlates the exact push-triggered run by workflow + branch + commit SHA and
+     * verifies the immutable APK artifact. This prevents duplicate CI builds.
+     */
+    private fun monitorPushBuildForCommit(
+        workflowId: Long,
+        expectedHeadSha: String,
+        shouldCancel: () -> Boolean
+    ): JSONObject {
+        if (workflowId <= 0L || !FULL_GIT_SHA.matches(expectedHeadSha)) {
+            return failure("Push-build correlation payload invalid.")
+                .put("status", "transaction_push_build_payload_invalid")
+                .put("action_dispatched", false)
+                .put("action_committed", true)
+                .put("reconciliation_complete", false)
+                .put("side_effect_state", "VERIFIED_COMMITTED")
+                .put("side_effect_kind", "github_contents_commit")
+        }
+
+        val tokenResult = ensureUsableAccessToken()
+        if (!tokenResult.optBoolean("success", false)) {
+            return tokenResult
+                .put("action_dispatched", false)
+                .put("action_committed", true)
+                .put("reconciliation_complete", false)
+                .put("side_effect_state", "VERIFIED_COMMITTED")
+                .put("side_effect_kind", "github_contents_commit")
+        }
+
+        val accessToken = tokenResult.optString("access_token")
+        val authority = installationAuthority(accessToken)
+        if (
+            !authority.optBoolean("success", false) ||
+            authority.optString("actions_permission", "none")
+                .lowercase(Locale.ROOT) != "write"
+        ) {
+            return failure(
+                "Commit уже выполнен, но Actions authority больше не подтверждён; build reconciliation остановлена без нового dispatch."
+            )
+                .put("status", "transaction_push_build_authority_unavailable")
+                .put("action_dispatched", false)
+                .put("action_committed", true)
+                .put("reconciliation_complete", false)
+                .put("side_effect_state", "VERIFIED_COMMITTED")
+                .put("side_effect_kind", "github_contents_commit")
+        }
+
+        val workflow = findBuildWorkflow(accessToken)
+        if (
+            !workflow.optBoolean("success", false) ||
+            workflow.optLong("workflow_id", 0L) != workflowId
+        ) {
+            return failure(
+                "Commit уже выполнен, но фиксированный APK workflow изменился; build reconciliation остановлена."
+            )
+                .put("status", "transaction_push_build_workflow_changed")
+                .put("action_dispatched", false)
+                .put("action_committed", true)
+                .put("reconciliation_complete", false)
+                .put("side_effect_state", "VERIFIED_COMMITTED")
+                .put("side_effect_kind", "github_contents_commit")
+        }
+
+        val discoveryDeadline =
+            System.currentTimeMillis() + BUILD_RUN_DISCOVERY_TIMEOUT_MS
+        var run: JSONObject? = null
+
+        while (System.currentTimeMillis() <= discoveryDeadline) {
+            if (shouldCancel()) {
+                return failure(
+                    "Commit уже выполнен; локальное ожидание push-triggered build остановлено. Новый commit или workflow dispatch автоматически не выполняется."
+                )
+                    .put("status", "transaction_push_build_monitor_cancelled")
+                    .put("action_dispatched", false)
+                    .put("action_committed", true)
+                    .put("reconciliation_complete", false)
+                    .put("side_effect_state", "VERIFIED_COMMITTED")
+                    .put("side_effect_kind", "github_contents_commit")
+            }
+
+            val listed =
+                listWorkflowRuns(
+                    accessToken = accessToken,
+                    workflowId = workflowId,
+                    headSha = expectedHeadSha,
+                    event = "push"
+                )
+
+            if (listed.optBoolean("success", false)) {
+                val candidates = mutableListOf<JSONObject>()
+                val runs = listed.optJSONArray("runs") ?: JSONArray()
+                for (index in 0 until runs.length()) {
+                    val item = runs.optJSONObject(index) ?: continue
+                    if (
+                        item.optLong("id", 0L) > 0L &&
+                        item.optLong("workflow_id", 0L) == workflowId &&
+                        item.optString("event") == "push" &&
+                        item.optString("head_branch") == BRANCH &&
+                        item.optString("head_sha") == expectedHeadSha &&
+                        item.optString("name") == BUILD_WORKFLOW_NAME
+                    ) {
+                        candidates += item
+                    }
+                }
+
+                if (candidates.size > 1) {
+                    return failure(
+                        "Для exact commit SHA найдено несколько push-triggered build runs. AYANA не будет угадывать run identity."
+                    )
+                        .put("status", "transaction_push_build_run_ambiguous")
+                        .put("candidate_count", candidates.size)
+                        .put("action_dispatched", false)
+                        .put("action_committed", true)
+                        .put("reconciliation_complete", false)
+                        .put("side_effect_state", "VERIFIED_COMMITTED")
+                        .put("side_effect_kind", "github_contents_commit")
+                }
+
+                if (candidates.size == 1) {
+                    run = candidates.first()
+                    break
+                }
+            }
+
+            try {
+                Thread.sleep(BUILD_RUN_DISCOVERY_POLL_MS)
+            } catch (_: InterruptedException) {
+                Thread.currentThread().interrupt()
+                break
+            }
+        }
+
+        if (run == null) {
+            return failure(
+                "Commit подтверждён, но exact push-triggered APK build run не найден в лимит ожидания. AYANA не запускает второй workflow вслепую."
+            )
+                .put("status", "transaction_push_build_run_not_found")
+                .put("repository", REPOSITORY_SLUG)
+                .put("branch", BRANCH)
+                .put("workflow_id", workflowId)
+                .put("head_sha", expectedHeadSha)
+                .put("action_dispatched", false)
+                .put("action_committed", true)
+                .put("reconciliation_complete", false)
+                .put("side_effect_state", "VERIFIED_COMMITTED")
+                .put("side_effect_kind", "github_contents_commit")
+        }
+
+        val identifiedRun = run
+        val runId = identifiedRun.optLong("id", 0L)
+        val runNumber = identifiedRun.optLong("run_number", 0L)
+        val runUrl = identifiedRun.optString("html_url")
+
+        prefs.edit()
+            .putLong(KEY_LAST_BUILD_RUN_ID, runId)
+            .putString(KEY_LAST_BUILD_HEAD_SHA, expectedHeadSha)
+            .putLong(KEY_LAST_BUILD_WORKFLOW_ID, workflowId)
+            .putString(KEY_LAST_BUILD_EVENT, "push")
+            .putString(KEY_LAST_BUILD_RUN_URL, runUrl)
+            .putLong(KEY_LAST_BUILD_STARTED_AT, System.currentTimeMillis())
+            .putString(KEY_LAST_BUILD_STATUS, identifiedRun.optString("status"))
+            .putString(KEY_LAST_BUILD_CONCLUSION, identifiedRun.optString("conclusion"))
+            .apply()
+
+        val buildDeadline =
+            System.currentTimeMillis() + BUILD_COMPLETION_TIMEOUT_MS
+
+        while (System.currentTimeMillis() <= buildDeadline) {
+            if (shouldCancel()) {
+                return JSONObject()
+                    .put("success", false)
+                    .put("verified", true)
+                    .put("status", "transaction_push_build_monitor_cancelled")
+                    .put("repository", REPOSITORY_SLUG)
+                    .put("branch", BRANCH)
+                    .put("workflow_id", workflowId)
+                    .put("workflow_name", BUILD_WORKFLOW_NAME)
+                    .put("head_sha", expectedHeadSha)
+                    .put("run_id", runId)
+                    .put("run_number", runNumber)
+                    .put("run_url", runUrl)
+                    .put("action_dispatched", false)
+                    .put("action_committed", true)
+                    .put("reconciliation_complete", false)
+                    .put("side_effect_state", "VERIFIED_COMMITTED")
+                    .put("side_effect_kind", "github_contents_commit")
+                    .put(
+                        "message",
+                        "Commit и push-triggered build уже существуют; локальное ожидание остановлено. Новый dispatch не выполняется."
+                    )
+            }
+
+            val inspected =
+                inspectBuildRun(
+                    accessToken = accessToken,
+                    runId = runId,
+                    expectedHeadSha = expectedHeadSha,
+                    expectedWorkflowId = workflowId,
+                    expectedEvent = "push"
+                )
+
+            val inspectedStatus = inspected.optString("status")
+            if (inspectedStatus == "verified_apk_build") {
+                return inspected
+                    .put("action_dispatched", false)
+                    .put("action_committed", true)
+                    .put("reconciliation_complete", true)
+                    .put("side_effect_state", "VERIFIED_COMMITTED")
+                    .put("side_effect_kind", "github_contents_commit")
+                    .put("build_trigger", "push")
+            }
+
+            if (
+                inspected.optString("build_status") == "completed" &&
+                inspected.optString("build_conclusion") != "success"
+            ) {
+                return inspected
+                    .put("action_dispatched", false)
+                    .put("action_committed", true)
+                    .put("reconciliation_complete", true)
+                    .put("side_effect_state", "VERIFIED_COMMITTED")
+                    .put("side_effect_kind", "github_contents_commit")
+                    .put("build_trigger", "push")
+            }
+
+            val transientArtifactState =
+                inspectedStatus in
+                    setOf(
+                        "build_artifact_list_failed",
+                        "build_artifact_missing",
+                        "build_artifact_digest_missing"
+                    )
+
+            if (
+                !inspected.optBoolean("success", false) &&
+                !transientArtifactState
+            ) {
+                return inspected
+                    .put("action_dispatched", false)
+                    .put("action_committed", true)
+                    .put("reconciliation_complete", false)
+                    .put("side_effect_state", "VERIFIED_COMMITTED")
+                    .put("side_effect_kind", "github_contents_commit")
+                    .put("build_trigger", "push")
+            }
+
+            try {
+                Thread.sleep(BUILD_POLL_INTERVAL_MS)
+            } catch (_: InterruptedException) {
+                Thread.currentThread().interrupt()
+                break
+            }
+        }
+
+        return failure(
+            "Push-triggered GitHub Actions build/artifact proof не завершился в лимит ожидания. Новый workflow dispatch запрещён."
+        )
+            .put("status", "transaction_push_build_timeout")
+            .put("repository", REPOSITORY_SLUG)
+            .put("branch", BRANCH)
+            .put("workflow_id", workflowId)
+            .put("workflow_name", BUILD_WORKFLOW_NAME)
+            .put("head_sha", expectedHeadSha)
+            .put("run_id", runId)
+            .put("run_number", runNumber)
+            .put("run_url", runUrl)
+            .put("action_dispatched", false)
+            .put("action_committed", true)
+            .put("reconciliation_complete", false)
+            .put("side_effect_state", "VERIFIED_COMMITTED")
+            .put("side_effect_kind", "github_contents_commit")
+    }
+
     private fun dispatchAndMonitorBuild(
         workflowId: Long,
         expectedHeadSha: String,
@@ -746,6 +2417,7 @@ class AyanaGitHubRepositoryExecutor(
                 .putLong(KEY_LAST_BUILD_RUN_ID, directRunId)
                 .putString(KEY_LAST_BUILD_HEAD_SHA, expectedHeadSha)
                 .putLong(KEY_LAST_BUILD_WORKFLOW_ID, workflowId)
+                .putString(KEY_LAST_BUILD_EVENT, "workflow_dispatch")
                 .putString(KEY_LAST_BUILD_RUN_URL, dispatchBody.optString("html_url"))
                 .putLong(KEY_LAST_BUILD_STARTED_AT, System.currentTimeMillis())
                 .putString(KEY_LAST_BUILD_STATUS, "dispatched")
@@ -887,6 +2559,7 @@ class AyanaGitHubRepositoryExecutor(
             .putLong(KEY_LAST_BUILD_RUN_ID, runId)
             .putString(KEY_LAST_BUILD_HEAD_SHA, expectedHeadSha)
             .putLong(KEY_LAST_BUILD_WORKFLOW_ID, workflowId)
+            .putString(KEY_LAST_BUILD_EVENT, "workflow_dispatch")
             .putString(KEY_LAST_BUILD_RUN_URL, runUrl)
             .putLong(KEY_LAST_BUILD_STARTED_AT, System.currentTimeMillis())
             .putString(KEY_LAST_BUILD_STATUS, identifiedRun.optString("status"))
@@ -1017,7 +2690,8 @@ class AyanaGitHubRepositoryExecutor(
         accessToken: String,
         runId: Long,
         expectedHeadSha: String,
-        expectedWorkflowId: Long
+        expectedWorkflowId: Long,
+        expectedEvent: String = "workflow_dispatch"
     ): JSONObject {
         val response =
             githubJsonRequest(
@@ -1049,7 +2723,7 @@ class AyanaGitHubRepositoryExecutor(
                 workflowId > 0L &&
                 (expectedWorkflowId <= 0L || workflowId == expectedWorkflowId) &&
                 branch == BRANCH &&
-                event == "workflow_dispatch"
+                event == expectedEvent
 
         prefs.edit()
             .putLong(KEY_LAST_BUILD_RUN_ID, runId)
@@ -1402,14 +3076,15 @@ class AyanaGitHubRepositoryExecutor(
     private fun listWorkflowRuns(
         accessToken: String,
         workflowId: Long,
-        headSha: String
+        headSha: String,
+        event: String = "workflow_dispatch"
     ): JSONObject {
         val response =
             githubJsonRequest(
                 method = "GET",
                 apiPath =
                     "/repos/$OWNER/$REPO/actions/workflows/$workflowId/runs" +
-                        "?event=workflow_dispatch" +
+                        "?event=${urlEncode(event)}" +
                         "&branch=${urlEncode(BRANCH)}" +
                         "&head_sha=${urlEncode(headSha)}" +
                         "&per_page=20",
@@ -1570,6 +3245,7 @@ class AyanaGitHubRepositoryExecutor(
             .put("device_confirmed_build", prefs.getBoolean(KEY_DEVICE_CONFIRMED_BUILD, false))
             .put("last_build_run_id", prefs.getLong(KEY_LAST_BUILD_RUN_ID, 0L))
             .put("last_build_head_sha", prefs.getString(KEY_LAST_BUILD_HEAD_SHA, "").orEmpty())
+            .put("last_build_event", prefs.getString(KEY_LAST_BUILD_EVENT, "").orEmpty())
             .put("last_build_run_url", prefs.getString(KEY_LAST_BUILD_RUN_URL, "").orEmpty())
             .put("last_build_status", prefs.getString(KEY_LAST_BUILD_STATUS, "").orEmpty())
             .put("last_build_conclusion", prefs.getString(KEY_LAST_BUILD_CONCLUSION, "").orEmpty())
@@ -1577,16 +3253,23 @@ class AyanaGitHubRepositoryExecutor(
             .put("last_build_artifact_digest", prefs.getString(KEY_LAST_BUILD_ARTIFACT_DIGEST, "").orEmpty())
             .put("last_build_artifact_size_bytes", prefs.getLong(KEY_LAST_BUILD_ARTIFACT_SIZE, 0L))
             .put("last_build_verified_at_ms", prefs.getLong(KEY_LAST_BUILD_VERIFIED_AT, 0L))
+            .put("development_transaction_implemented", true)
+            .put("development_transaction_status", prefs.getString(KEY_DEV_TX_STATUS, "none").orEmpty())
+            .put("development_transaction_id", prefs.getString(KEY_DEV_TX_ID, "").orEmpty())
+            .put("development_transaction_device_confirmed", prefs.getBoolean(KEY_DEVICE_CONFIRMED_TRANSACTION, false))
+            .put("development_transaction_last_commit_sha", prefs.getString(KEY_DEV_TX_COMMIT_SHA, "").orEmpty())
+            .put("development_transaction_last_rollback_commit_sha", prefs.getString(KEY_DEV_TX_ROLLBACK_COMMIT_SHA, "").orEmpty())
             .put("last_error", prefs.getString(KEY_LAST_ERROR, "").orEmpty())
     }
 
     fun compactContext(): String {
         val runtime = runtimeSnapshot()
         return buildString {
-            append("AYANA R10.27.2 GITHUB/ACTIONS TRUTH: ")
+            append("AYANA R10.27.3 GITHUB/DEVELOPMENT TRUTH: ")
             append("github_repository_write_implemented=true; ")
             append("github_commit_push_implemented=true; ")
             append("android_apk_build_implemented=true; ")
+            append("development_agent_transaction_implemented=true; ")
             append("repository=")
             append(REPOSITORY_SLUG)
             append("; branch=")
@@ -1603,11 +3286,13 @@ class AyanaGitHubRepositoryExecutor(
             append(runtime.optBoolean("actions_write_available", false))
             append("; device_confirmed_build=")
             append(runtime.optBoolean("device_confirmed_build", false))
-            append(". GitHub file mutation remains two-phase. APK build is a separate two-phase authority: prepare is read-only, confirmed replay dispatches exactly «")
+            append("; development_transaction_device_confirmed=")
+            append(runtime.optBoolean("development_transaction_device_confirmed", false))
+            append(". GitHub file mutation remains two-phase. Standalone APK build is a separate two-phase authority: prepare is read-only, confirmed replay dispatches exactly «")
             append(BUILD_WORKFLOW_NAME)
             append("» on main and SUCCESS requires completed conclusion=success plus verified artifact «")
             append(APK_ARTIFACT_NAME)
-            append("» with non-zero size and SHA-256 artifact digest. direct_apk_delivery=false; development_agent_transaction=false.")
+            append("» with non-zero size and SHA-256 artifact digest. Development transaction composes immutable file snapshot + exact bounded replacement + commit; that commit's existing push-to-main CI run is correlated by exact SHA without a duplicate workflow_dispatch, then the transaction requires explicit accept or verified rollback. direct_apk_delivery=false.")
         }
     }
 
@@ -1615,11 +3300,18 @@ class AyanaGitHubRepositoryExecutor(
         val okPath = validatePath("app/src/main/java/kg/autonomous/agent/Test.kt")
         val badTraversal = validatePath("../secret.txt")
         val badSecret = validatePath("app/ayana-release.jks")
+        val devPath = validateDevelopmentTransactionPath("app/src/main/java/kg/autonomous/agent/Test.kt")
+        val devWorkflowBlocked = validateDevelopmentTransactionPath(".github/workflows/build-apk.yml")
         val bytes = "hello".toByteArray(StandardCharsets.UTF_8)
         val knownBlob = gitBlobSha(bytes)
         return okPath.optBoolean("success", false) &&
             !badTraversal.optBoolean("success", true) &&
             !badSecret.optBoolean("success", true) &&
+            devPath.optBoolean("success", false) &&
+            !devWorkflowBlocked.optBoolean("success", true) &&
+            countOccurrences("abc abc", "abc") == 2 &&
+            !containsSensitiveMaterial("ordinary Kotlin text") &&
+            containsSensitiveMaterial("-----BEGIN PRIVATE KEY-----") &&
             knownBlob == "b6fc4c620b67d95f953a5c1c1230aaab5db5a1b0" &&
             FULL_GIT_SHA.matches("d9021dd8d9fff77fec938ccc2119e1393baf85ce") &&
             ARTIFACT_SHA256.matches(
@@ -2579,7 +4271,7 @@ class AyanaGitHubRepositoryExecutor(
             .put("message", message)
 
     companion object {
-        const val VERSION = "1.2.1"
+        const val VERSION = "1.3.0"
 
         const val OWNER = "talant02031985-bot"
         const val REPO = "AUTONOMOUS-AI-AGENT"
@@ -2619,6 +4311,7 @@ class AyanaGitHubRepositoryExecutor(
         private const val KEY_LAST_BUILD_RUN_ID = "last_build_run_id"
         private const val KEY_LAST_BUILD_HEAD_SHA = "last_build_head_sha"
         private const val KEY_LAST_BUILD_WORKFLOW_ID = "last_build_workflow_id"
+        private const val KEY_LAST_BUILD_EVENT = "last_build_event"
         private const val KEY_LAST_BUILD_RUN_URL = "last_build_run_url"
         private const val KEY_LAST_BUILD_STARTED_AT = "last_build_started_at"
         private const val KEY_LAST_BUILD_STATUS = "last_build_status"
@@ -2627,6 +4320,26 @@ class AyanaGitHubRepositoryExecutor(
         private const val KEY_LAST_BUILD_ARTIFACT_DIGEST = "last_build_artifact_digest"
         private const val KEY_LAST_BUILD_ARTIFACT_SIZE = "last_build_artifact_size"
         private const val KEY_LAST_BUILD_VERIFIED_AT = "last_build_verified_at"
+        private const val KEY_DEV_TX_ID = "development_transaction_id"
+        private const val KEY_DEV_TX_STATUS = "development_transaction_status"
+        private const val KEY_DEV_TX_PATH = "development_transaction_path"
+        private const val KEY_DEV_TX_FIND_TEXT = "development_transaction_find_text"
+        private const val KEY_DEV_TX_REPLACE_TEXT = "development_transaction_replace_text"
+        private const val KEY_DEV_TX_COMMIT_MESSAGE = "development_transaction_commit_message"
+        private const val KEY_DEV_TX_BASE_HEAD_SHA = "development_transaction_base_head_sha"
+        private const val KEY_DEV_TX_ORIGINAL_BLOB_SHA = "development_transaction_original_blob_sha"
+        private const val KEY_DEV_TX_PROPOSED_BLOB_SHA = "development_transaction_proposed_blob_sha"
+        private const val KEY_DEV_TX_WORKFLOW_ID = "development_transaction_workflow_id"
+        private const val KEY_DEV_TX_COMMIT_SHA = "development_transaction_commit_sha"
+        private const val KEY_DEV_TX_BUILD_RUN_ID = "development_transaction_build_run_id"
+        private const val KEY_DEV_TX_ARTIFACT_ID = "development_transaction_artifact_id"
+        private const val KEY_DEV_TX_ARTIFACT_DIGEST = "development_transaction_artifact_digest"
+        private const val KEY_DEV_TX_ARTIFACT_SIZE = "development_transaction_artifact_size"
+        private const val KEY_DEV_TX_ROLLBACK_COMMIT_SHA = "development_transaction_rollback_commit_sha"
+        private const val KEY_DEV_TX_CREATED_AT = "development_transaction_created_at"
+        private const val KEY_DEV_TX_UPDATED_AT = "development_transaction_updated_at"
+        private const val KEY_DEVICE_CONFIRMED_TRANSACTION = "development_transaction_device_confirmed"
+
 
         private const val RUNTIME_FRESHNESS_MS = 15L * 60L * 1000L
         private const val BUILD_PREPARE_AUTHORITY_CACHE_MS = 5L * 60L * 1000L
@@ -2634,6 +4347,48 @@ class AyanaGitHubRepositoryExecutor(
         private const val MAX_INLINE_CONTENT_BYTES = 6_000
         private const val MAX_PATH_CHARS = 320
         private const val MAX_COMMIT_MESSAGE_CHARS = 160
+        private const val MAX_TRANSACTION_FIND_BYTES = 2_000
+        private const val MAX_TRANSACTION_REPLACE_BYTES = 3_500
+        private const val MAX_TRANSACTION_PATCH_BYTES = 5_000
+        private const val MAX_TRANSACTION_FILE_BYTES = 5_000_000L
+
+        private const val DEV_TX_STATUS_PREPARED = "prepared"
+        private const val DEV_TX_STATUS_BUILDING = "building"
+        private const val DEV_TX_STATUS_WAITING_ACCEPTANCE = "waiting_acceptance"
+        private const val DEV_TX_STATUS_BUILD_RECONCILIATION_REQUIRED = "build_reconciliation_required"
+        private const val DEV_TX_STATUS_ROLLBACK_BUILDING = "rollback_building"
+        private const val DEV_TX_STATUS_ROLLBACK_BLOCKED = "rollback_blocked"
+        private const val DEV_TX_STATUS_ROLLBACK_BUILD_FAILED = "rollback_build_failed"
+        private const val DEV_TX_STATUS_ACCEPTED = "accepted"
+        private const val DEV_TX_STATUS_ROLLED_BACK = "rolled_back"
+        private const val DEV_TX_STATUS_CANCELLED = "cancelled"
+
+        private val ACTIVE_DEV_TX_STATUSES =
+            setOf(
+                DEV_TX_STATUS_PREPARED,
+                DEV_TX_STATUS_BUILDING,
+                DEV_TX_STATUS_WAITING_ACCEPTANCE,
+                DEV_TX_STATUS_BUILD_RECONCILIATION_REQUIRED,
+                DEV_TX_STATUS_ROLLBACK_BUILDING,
+                DEV_TX_STATUS_ROLLBACK_BLOCKED,
+                DEV_TX_STATUS_ROLLBACK_BUILD_FAILED
+            )
+
+        private val TRANSACTION_ALLOWED_EXTENSIONS =
+            setOf(
+                ".kt", ".java", ".json", ".xml", ".gradle", ".kts",
+                ".properties", ".txt", ".md", ".yml", ".yaml"
+            )
+
+        private val SENSITIVE_PATCH_PATTERNS =
+            listOf(
+                Regex("-----BEGIN\\s+(?:RSA\\s+|EC\\s+|OPENSSH\\s+)?PRIVATE KEY-----", RegexOption.IGNORE_CASE),
+                Regex("\\bgithub_pat_[A-Za-z0-9_]{20,}\\b"),
+                Regex("\\bgh[pousr]_[A-Za-z0-9]{20,}\\b"),
+                Regex("\\bsk-[A-Za-z0-9_-]{20,}\\b"),
+                Regex("\\bAKIA[0-9A-Z]{16}\\b")
+            )
+
 
         private const val BUILD_RUN_DISCOVERY_TIMEOUT_MS = 90_000L
         private const val BUILD_RUN_DISCOVERY_POLL_MS = 2_500L
