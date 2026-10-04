@@ -10,7 +10,7 @@ import org.json.JSONArray
 import org.json.JSONObject
 
 /**
- * AYANA Device Capability Registry v3.5 — R10.27.6 CONTROLLED PROACTIVITY 2.0 TRUTH.
+ * AYANA Device Capability Registry v3.6 — R10.28.2 PROJECTS TRUTH.
  *
  * Single machine-readable source of truth for:
  * 1) what this build implements;
@@ -721,6 +721,81 @@ class AyanaCapabilityRegistry(
                 false
             }
 
+        // R10.28 PROJECTS runtime truth.
+        val projectStore =
+            try {
+                AyanaProjectStore(
+                    appContext
+                )
+            } catch (_: Exception) {
+                null
+            }
+
+        val projectContextManager =
+            try {
+                projectStore
+                    ?.let {
+                        AyanaProjectContextManager(
+                            it
+                        )
+                    }
+            } catch (_: Exception) {
+                null
+            }
+
+        val projectDataScope =
+            try {
+                projectStore
+                    ?.let {
+                        AyanaProjectDataScope(
+                            appContext,
+                            it
+                        )
+                    }
+            } catch (_: Exception) {
+                null
+            }
+
+        val projectStoreSelfTest =
+            try {
+                projectStore?.selfTest() == true
+            } catch (_: Exception) {
+                false
+            }
+
+        val projectContextSelfTest =
+            try {
+                projectContextManager?.selfTest() == true
+            } catch (_: Exception) {
+                false
+            }
+
+        val projectDataScopeSelfTest =
+            try {
+                projectDataScope?.selfTest() == true
+            } catch (_: Exception) {
+                false
+            }
+
+        val activeProject =
+            try {
+                projectStore?.activeProject()
+            } catch (_: Exception) {
+                null
+            }
+
+        val projectCount =
+            try {
+                projectStore
+                    ?.list(
+                        includeArchived = false
+                    )
+                    ?.size
+                    ?: 0
+            } catch (_: Exception) {
+                0
+            }
+
         val microphonePermission =
             appContext
                 .checkSelfPermission(
@@ -895,6 +970,54 @@ class AyanaCapabilityRegistry(
                 .put(
                     "controlled_proactivity_v2_runtime_available",
                     notificationPermission
+                )
+                .put(
+                    "projects_store_version",
+                    AyanaProjectStore.VERSION
+                )
+                .put(
+                    "projects_context_version",
+                    AyanaProjectContextManager.VERSION
+                )
+                .put(
+                    "projects_data_scope_version",
+                    AyanaProjectDataScope.VERSION
+                )
+                .put(
+                    "projects_store_self_test",
+                    projectStoreSelfTest
+                )
+                .put(
+                    "projects_context_self_test",
+                    projectContextSelfTest
+                )
+                .put(
+                    "projects_data_scope_self_test",
+                    projectDataScopeSelfTest
+                )
+                .put(
+                    "projects_count",
+                    projectCount
+                )
+                .put(
+                    "active_project_id",
+                    activeProject?.projectId ?: ""
+                )
+                .put(
+                    "active_project_name",
+                    activeProject?.name ?: ""
+                )
+                .put(
+                    "project_default_search_scope",
+                    if (activeProject == null) {
+                        "GLOBAL"
+                    } else {
+                        "CURRENT_PROJECT"
+                    }
+                )
+                .put(
+                    "cross_project_access_default",
+                    "BLOCKED"
                 )
                 .put(
                     "notification_listener_access",
@@ -1532,6 +1655,22 @@ class AyanaCapabilityRegistry(
 
         capability(
             capabilities,
+            "projects_isolated_workspaces",
+            implemented = true,
+            available =
+                projectStoreSelfTest &&
+                    projectContextSelfTest &&
+                    projectDataScopeSelfTest,
+            deviceConfirmed = prefs.getBoolean(
+                "capability_confirmed_projects_isolated_workspaces",
+                false
+            ),
+            note =
+                "R10.28 named project workspaces with durable active_project_id, physically isolated Memory/History/Tasks/Durable Goals, CURRENT_PROJECT default scope and fail-closed cross-project access; device confirmation requires A/B isolation proof"
+        )
+
+        capability(
+            capabilities,
             "image_upload_to_ayana",
             implemented = true,
             available = true,
@@ -1875,7 +2014,7 @@ class AyanaCapabilityRegistry(
             )
 
             append(
-                "document_understanding=true; artifact_generation=true; artifact_formats=txt,docx,pdf,xlsx,jpeg,graph_jpeg; docx_style_preserving_transform=true; docx_translation=true; docx_translation_targets=ru,en,ky,de,fr,es,tr; external_mail_calendar_files=false; offline_llm=false; controlled_proactivity_v2=true; unrestricted_broad_proactivity=false; "
+                "document_understanding=true; artifact_generation=true; artifact_formats=txt,docx,pdf,xlsx,jpeg,graph_jpeg; docx_style_preserving_transform=true; docx_translation=true; docx_translation_targets=ru,en,ky,de,fr,es,tr; external_mail_calendar_files=false; offline_llm=false; controlled_proactivity_v2=true; unrestricted_broad_proactivity=false; projects_isolated_workspaces=true; cross_project_access_default=blocked; "
             )
 
             append(
@@ -2304,7 +2443,7 @@ class AyanaCapabilityRegistry(
     companion object {
 
         const val BUILD_LABEL =
-            "v12.64.0_r10_27_6_controlled_proactivity_2_0"
+            "v12.65.0_r10_28_2_projects_data_scope"
 
         private const val PREFS_NAME =
             "ayana_capability_runtime_v11"

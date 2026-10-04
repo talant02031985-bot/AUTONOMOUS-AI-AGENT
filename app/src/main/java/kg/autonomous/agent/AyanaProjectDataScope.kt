@@ -5,24 +5,10 @@ import java.io.File
 import java.util.concurrent.ConcurrentHashMap
 
 /**
- * AYANA Project Data Scope v1.0 — R10.28.1.
+ * AYANA Project Data Scope v1.1 — R10.28.2.
  *
- * Creates physically isolated instances of existing accepted AYANA stores
- * without changing their implementations.
- *
- * Covered in this slice:
- * - memory
- * - command history
- * - tasks
- * - durable goals
- * - generic project files root
- *
- * Not covered here:
- * - alarm/reminder dispatch binding to project_id
- * - Personal Search scoping
- * - multimodal attachment ownership
- * - VoiceService routing
- * Those are integrated in subsequent R10.28 slices.
+ * Physically isolates accepted AYANA stores by giving each project a dedicated
+ * Android Context/filesDir. Global stores keep their original legacy paths.
  */
 class AyanaProjectDataScope(
     context: Context,
@@ -44,6 +30,30 @@ class AyanaProjectDataScope(
 
     private val cache =
         ConcurrentHashMap<String, Stores>()
+
+    private val globalMemoryStore by lazy {
+        AyanaMemoryStore(
+            appContext
+        )
+    }
+
+    private val globalHistoryStore by lazy {
+        AyanaCommandHistoryStore(
+            appContext
+        )
+    }
+
+    private val globalTaskStore by lazy {
+        AyanaTaskStore(
+            appContext
+        )
+    }
+
+    private val globalDurableGoalStore by lazy {
+        AyanaDurableGoalStore(
+            appContext
+        )
+    }
 
     fun currentProjectStores(): Stores? {
         val project =
@@ -76,29 +86,17 @@ class AyanaProjectDataScope(
         }
     }
 
-    /**
-     * Global stores remain exactly the legacy accepted stores and legacy paths.
-     * This preserves backward compatibility for users who have no active project.
-     */
     fun globalMemory(): AyanaMemoryStore =
-        AyanaMemoryStore(
-            appContext
-        )
+        globalMemoryStore
 
     fun globalHistory(): AyanaCommandHistoryStore =
-        AyanaCommandHistoryStore(
-            appContext
-        )
+        globalHistoryStore
 
     fun globalTasks(): AyanaTaskStore =
-        AyanaTaskStore(
-            appContext
-        )
+        globalTaskStore
 
     fun globalDurableGoals(): AyanaDurableGoalStore =
-        AyanaDurableGoalStore(
-            appContext
-        )
+        globalDurableGoalStore
 
     fun projectFilesRoot(
         projectId: String
@@ -120,9 +118,6 @@ class AyanaProjectDataScope(
         cache.clear()
     }
 
-    /**
-     * Filesystem isolation proof only. No user data is mutated.
-     */
     fun selfTest(): Boolean =
         try {
             val projects =
@@ -195,6 +190,6 @@ class AyanaProjectDataScope(
     }
 
     companion object {
-        const val VERSION = "1.0"
+        const val VERSION = "1.1"
     }
 }

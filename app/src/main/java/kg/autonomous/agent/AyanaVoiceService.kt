@@ -63,6 +63,12 @@ import kotlin.math.abs
 
 class AyanaVoiceService : Service() {
 
+// AYANA v12.65.0 / R10.28.2 PROJECT COMMANDS + PROJECT-AWARE DATA SCOPE.
+// Adds durable active_project_id, deterministic create/list/current/switch/leave commands,
+// command-lifetime project binding and physically isolated Memory/History/Tasks/Durable Goals.
+// Global mode preserves legacy store paths. Cross-project data is fail-closed by default.
+// ORB/visualizer unchanged.
+//
 // AYANA v12.64.0 / R10.27.6 CONTROLLED PROACTIVITY 2.0.
 // Adds one bounded durable opt-in proactivity runtime for battery/power/network events,
 // edge-trigger + cooldown/no-replay truth, verified notification delivery and deterministic
@@ -890,13 +896,49 @@ class AyanaVoiceService : Service() {
     private val conversationHistory =
         mutableListOf<Pair<String, String>>()
 
-    // Persistent command diagnostics. One active command at a time is expected
-    // because the voice service enters BUSY mode while a task is running.
-    private val commandHistoryStore by lazy {
-        AyanaCommandHistoryStore(
+    // R10.28 PROJECTS. Project metadata is global; domain data is physically
+    // scoped by AyanaProjectDataScope. A command snapshots its project before
+    // History begins so a later project switch cannot rewrite provenance.
+    private val projectStore by lazy {
+        AyanaProjectStore(
             applicationContext
         )
     }
+
+    private val projectContextManager by lazy {
+        AyanaProjectContextManager(
+            projectStore
+        )
+    }
+
+    private val projectDataScope by lazy {
+        AyanaProjectDataScope(
+            applicationContext,
+            projectStore
+        )
+    }
+
+    private val projectCommandRouter by lazy {
+        AyanaProjectCommandRouter(
+            projectStore,
+            projectContextManager
+        )
+    }
+
+    @Volatile
+    private var activeCommandProjectId:
+        String? = null
+
+    private val commandHistoryStore: AyanaCommandHistoryStore
+        get() =
+            activeCommandProjectId
+                ?.let {
+                    projectDataScope
+                        .forProject(it)
+                        ?.history
+                }
+                ?: projectDataScope
+                    .globalHistory()
 
     @Volatile
     private var activeCommandHistoryId:
@@ -963,14 +1005,23 @@ class AyanaVoiceService : Service() {
     private var confirmedPreExecutionOriginal =
         ""
 
-    // AUTONOMOUS CORE v10: persistent state of the currently executing
-    // multi-step device goal. v11 keeps multiple recoverable goals instead of
-    // destroying an older paused goal when a new goal starts.
-    private val durableGoalStore by lazy {
-        AyanaDurableGoalStore(
-            applicationContext
-        )
-    }
+    // R10.28 PROJECTS: durable goals are isolated physically per active project.
+    // Outside a running command, persisted active_project_id selects the recovery scope.
+    private val durableGoalStore: AyanaDurableGoalStore
+        get() {
+            val projectId =
+                activeCommandProjectId
+                    ?: projectStore.activeProjectId()
+
+            return projectId
+                ?.let {
+                    projectDataScope
+                        .forProject(it)
+                        ?.durableGoals
+                }
+                ?: projectDataScope
+                    .globalDurableGoals()
+        }
 
     // Device Intelligence v11.1: all direct/Agent/Goal app launches use the observed map
     // through AyanaAppResolver; legacy package lists are validated hints only.
@@ -1071,17 +1122,40 @@ private val visualScreenEvidence by lazy {
     private var recoveryDispatchPending =
         false
 
-    private val memoryStore by lazy {
-        AyanaMemoryStore(
-            applicationContext
-        )
-    }
+    // R10.28 PROJECTS: memory/tasks follow the command's frozen project scope.
+    // When idle they follow persisted active_project_id. No active project keeps
+    // the exact legacy global stores and paths.
+    private val memoryStore: AyanaMemoryStore
+        get() {
+            val projectId =
+                activeCommandProjectId
+                    ?: projectStore.activeProjectId()
 
-    private val taskStore by lazy {
-        AyanaTaskStore(
-            applicationContext
-        )
-    }
+            return projectId
+                ?.let {
+                    projectDataScope
+                        .forProject(it)
+                        ?.memory
+                }
+                ?: projectDataScope
+                    .globalMemory()
+        }
+
+    private val taskStore: AyanaTaskStore
+        get() {
+            val projectId =
+                activeCommandProjectId
+                    ?: projectStore.activeProjectId()
+
+            return projectId
+                ?.let {
+                    projectDataScope
+                        .forProject(it)
+                        ?.tasks
+                }
+                ?: projectDataScope
+                    .globalTasks()
+        }
 
     private val deviceContentSearchEngine by lazy {
         AyanaDeviceContentSearchEngine(
@@ -1119,17 +1193,19 @@ private val visualScreenEvidence by lazy {
         )
     }
 
-    private val personalSearchEngine by lazy {
-        AyanaPersonalSearchEngine(
-            context = applicationContext,
-            memoryStore = memoryStore,
-            taskStore = taskStore,
-            historyStore = commandHistoryStore,
-            deviceContentSearchEngine = deviceContentSearchEngine,
-            documentContentIndexEngine = documentContentIndexEngine,
-            imageContentIndexEngine = imageContentIndexEngine
-        )
-    }
+    // Do not cache Personal Search across project switches: its Memory/Tasks/History
+    // dependencies must be rebound to the current command project every time.
+    private val personalSearchEngine: AyanaPersonalSearchEngine
+        get() =
+            AyanaPersonalSearchEngine(
+                context = applicationContext,
+                memoryStore = memoryStore,
+                taskStore = taskStore,
+                historyStore = commandHistoryStore,
+                deviceContentSearchEngine = deviceContentSearchEngine,
+                documentContentIndexEngine = documentContentIndexEngine,
+                imageContentIndexEngine = imageContentIndexEngine
+            )
 
     // R10.22 local notification/communication policy layer. It reads only the
     // already-authorized NotificationListener result and never owns message sending.
@@ -4217,6 +4293,9 @@ mainHandler.postDelayed(
             activeCommandToken =
                 ++commandGeneration
 
+            activeCommandProjectId =
+                projectStore.activeProjectId()
+
             activeCommandHistoryId =
                 commandHistoryStore.begin(
                     command =
@@ -4230,6 +4309,8 @@ mainHandler.postDelayed(
                             "voice"
                         }
                 )
+
+            recordActiveProjectHistoryBinding()
 
             beginExecutionSession(
                 objective = originalCommand,
@@ -4279,11 +4360,16 @@ mainHandler.postDelayed(
         activeCommandToken =
             ++commandGeneration
 
+        activeCommandProjectId =
+            projectStore.activeProjectId()
+
         activeCommandHistoryId =
             commandHistoryStore.begin(
                 command = originalCommand,
                 source = if (silent) "text" else "voice"
             )
+
+        recordActiveProjectHistoryBinding()
 
         beginExecutionSession(
             objective = originalCommand,
@@ -4312,6 +4398,21 @@ mainHandler.postDelayed(
             },
             STATE_THINKING
         )
+
+        // R10.28 PROJECTS deterministic control owns project-management commands
+        // before durable-goal/app/Agent Core routing. The command History remains
+        // bound to the project that was active when this turn started.
+        if (
+            projectCommandRouter.isCandidate(
+                originalCommand
+            )
+        ) {
+            runProjectCommand(
+                command = originalCommand,
+                silent = silent
+            )
+            return
+        }
 
         if (
             isDurableGoalStatusPhrase(
@@ -12120,6 +12221,118 @@ timeoutMs
             }
         }
     }
+
+    private fun recordActiveProjectHistoryBinding() {
+        val historyId =
+            activeCommandHistoryId
+                ?: return
+
+        val projectId =
+            activeCommandProjectId
+
+        val project =
+            projectId
+                ?.let {
+                    projectStore
+                        .getById(it)
+                }
+
+        commandHistoryStore.addEvent(
+            historyId,
+            state = "project_scope_bound",
+            message =
+                if (project == null) {
+                    "Команда привязана к глобальному контексту AYANA"
+                } else {
+                    "Команда привязана к проекту «${project.name}»"
+                },
+            details =
+                "r10_28=true; " +
+                    "project_id=${project?.projectId.orEmpty()}; " +
+                    "project_name=${project?.name.orEmpty()}; " +
+                    "scope=${if (project == null) "GLOBAL" else "CURRENT_PROJECT"}; " +
+                    "cross_project_access_default=BLOCKED"
+        )
+    }
+
+
+    private fun runProjectCommand(
+        command: String,
+        silent: Boolean
+    ) {
+        executionPhase(
+            phase = "project_control",
+            executor = "project_command_router"
+        )
+
+        val result =
+            try {
+                projectCommandRouter
+                    .tryHandle(
+                        command
+                    )
+            } catch (error: Exception) {
+                respondAndResume(
+                    text = "Не удалось обработать команду проекта.",
+                    silent = silent,
+                    success = false,
+                    technical =
+                        "r10_28=true; error=${error.message.orEmpty().take(300)}"
+                )
+                return
+            }
+
+        if (!result.handled) {
+            return
+        }
+
+        commandHistoryStore.addEvent(
+            activeCommandHistoryId,
+            state =
+                if (result.success) {
+                    "project_command_verified"
+                } else {
+                    "project_command_failed"
+                },
+            message = result.message.take(500),
+            details = result.technical.take(1800)
+        )
+
+        if (result.success) {
+            respondAndResume(
+                text = result.message,
+                silent = silent,
+                success = true,
+                technical = result.technical
+            )
+            return
+        }
+
+        val terminal =
+            when (
+                result.terminalStatus
+                    .trim()
+                    .uppercase(Locale.ROOT)
+            ) {
+                "BLOCKED" ->
+                    AyanaCommandHistoryStore.STATUS_BLOCKED
+
+                "UNSUPPORTED" ->
+                    AyanaCommandHistoryStore.STATUS_UNSUPPORTED
+
+                else ->
+                    AyanaCommandHistoryStore.STATUS_ERROR
+            }
+
+        respondAndResume(
+            text = result.message,
+            silent = silent,
+            success = false,
+            terminalStatus = terminal,
+            technical = result.technical
+        )
+    }
+
 
     private fun runControlledProactivityV2Command(
         command: String,
@@ -21265,6 +21478,9 @@ executeCommand(
 
         activeCommandToken =
             ++commandGeneration
+
+        activeCommandProjectId =
+            projectStore.activeProjectId()
 
         activeCommandHistoryId =
             commandHistoryStore.begin(
@@ -56569,6 +56785,16 @@ val activeNetwork =
                             "\n"
                         )
 
+                        // R10.28: bounded active-project identity and isolation contract.
+                        append(
+                            projectContextManager
+                                .compactContextForAgent()
+                        )
+
+                        append(
+                            "\n"
+                        )
+
                         append(
                             agentConversationGuidance(
                                 message
@@ -60527,11 +60753,16 @@ commandHistoryStore.addEvent(
         activeCommandToken =
             ++commandGeneration
 
+        activeCommandProjectId =
+            projectStore.activeProjectId()
+
         activeCommandHistoryId =
             commandHistoryStore.begin(
                 command = command,
                 source = if (silent) "text" else "voice"
             )
+
+        recordActiveProjectHistoryBinding()
 
         beginExecutionSession(
             objective = command,
@@ -60550,6 +60781,11 @@ commandHistoryStore.addEvent(
         goal: JSONObject,
         silent: Boolean
     ): Boolean {
+
+        if (activeCommandProjectId == null) {
+            activeCommandProjectId =
+                projectStore.activeProjectId()
+        }
 
         if (activeCommandHistoryId != null) {
             return true
@@ -64397,11 +64633,15 @@ return try {
             try {
                 JSONObject(manifestText)
             } catch (_: Exception) {
+                activeCommandProjectId =
+                    projectStore.activeProjectId()
+
                 activeCommandHistoryId =
                     commandHistoryStore.begin(
                         command = "$prompt [мультимодальное вложение]",
                         source = "text"
                     )
+                recordActiveProjectHistoryBinding()
                 beginExecutionSession(
                     objective = prompt,
                     source = "text",
@@ -64461,11 +64701,15 @@ return try {
                 manifest = manifest
             )
         ) {
+            activeCommandProjectId =
+                projectStore.activeProjectId()
+
             activeCommandHistoryId =
                 commandHistoryStore.begin(
                     command = "$prompt [несколько вложений]",
                     source = "text"
                 )
+            recordActiveProjectHistoryBinding()
             beginExecutionSession(
                 objective = prompt,
                 source = "text",
@@ -64494,11 +64738,16 @@ return try {
         agentPreviousResponseId =
             null
 
+        activeCommandProjectId =
+            projectStore.activeProjectId()
+
         activeCommandHistoryId =
             commandHistoryStore.begin(
                 command = "$prompt [мультимодальное вложение]",
                 source = "text"
             )
+
+        recordActiveProjectHistoryBinding()
 
         beginExecutionSession(
             objective = prompt,
@@ -64817,11 +65066,16 @@ Regex("(?:на|в)\\s+(?:английск(?:ий|ого|ом)|английски
             .take(160)
             .ifBlank { "document.docx" }
 
+        activeCommandProjectId =
+            projectStore.activeProjectId()
+
         activeCommandHistoryId =
             commandHistoryStore.begin(
                 command = "$prompt [DOCX перевод: $displayName]",
                 source = "text"
             )
+
+        recordActiveProjectHistoryBinding()
 
         beginExecutionSession(
             objective = prompt,
@@ -72856,6 +73110,8 @@ terminalStatus: String? = null
 
         activeCommandHistoryId =
             null
+        activeCommandProjectId =
+            null
 
         pendingPresentationSuccess =
             false
@@ -72905,6 +73161,8 @@ terminalStatus: String? = null
         )
 
         activeCommandHistoryId =
+            null
+        activeCommandProjectId =
             null
 
         broadcastStatus(
@@ -73298,6 +73556,8 @@ terminalStatus: String? = null
 
             activeCommandHistoryId =
                 null
+            activeCommandProjectId =
+                null
         }
 
         agentPreviousResponseId =
@@ -73534,6 +73794,8 @@ state
 
             activeCommandHistoryId =
                 null
+            activeCommandProjectId =
+                null
         }
 
         broadcastStatus(
@@ -73702,25 +73964,25 @@ state
 
         // R10.27.4 VIDEO AUDIO ANALYSIS.
         private const val AYANA_VOICE_SERVICE_RELEASE =
-            "v12.64.1 / R10.27.6.1 PROACTIVITY TEXT UI RESPONSE TRUTH"
+            "v12.65.0 / R10.28.2 PROJECT COMMANDS + PROJECT-AWARE DATA SCOPE"
 
         private const val AYANA_PERSONAL_SEARCH_ENGINE_RELEASE =
             "v2.0 / R10.20 PERSONAL SEARCH 2.0 + VERIFIED RESULT CONTRACT v2"
 
         private const val AYANA_CAPABILITY_REGISTRY_RELEASE =
-            "v3.5 / R10.27.6 CONTROLLED PROACTIVITY 2.0 TRUTH"
+            "v3.6 / R10.28.2 PROJECTS TRUTH"
 
         private const val AYANA_WORKER_RELEASE =
             "v11.7.0 / R10.27.4 VIDEO AUDIO ANALYSIS"
 
         private const val AYANA_ACCEPTED_FEATURE_CHECKPOINT =
-            "R10.27.5 VERIFIED INTERNET SPEED — FUNCTIONALLY DEVICE-CONFIRMED; minor CANCELLED-history issue deferred; R10.27.4 + R10.27.3.1 + R10.27.2.1 + R10.27.1.2 preserved"
+            "R10.27.6 CONTROLLED PROACTIVITY 2.0 — DEVICE-CONFIRMED ACCEPTED"
 
         private const val AYANA_CURRENT_FEATURE_RELEASE =
-            "R10.27.6.1 PROACTIVITY TEXT UI RESPONSE TRUTH — BUILD / DEVICE CONFIRMATION PENDING"
+            "R10.28.2 PROJECT COMMANDS + PROJECT-AWARE DATA SCOPE — BUILD / DEVICE CONFIRMATION PENDING"
 
         private const val AYANA_RELEASE_LINEAGE =
-            "Android v12.21.0 / R7.9 truth-hardening + R8.0 multi-attachment + R8.1–R8.4 accepted Personal Global Search stack + R8.5–R8.5.4 capability/evidence truth + R9.0 autonomous agent foundation + R9.0.1 history live-refresh proof fix + R9.0.2 diagnostic reconciliation/history refresh fix + R9.0.3 TTS health reconciliation + R9.1 IME perception/active telemetry truth + R9.2 autonomous recovery/long-task reconciliation + R9.2.1 adaptive hypothesis reconciliation + R9.3 app integration framework + R9.3.1 screen health reconciliation + R9.3.2 history latency recovery reconciliation + R9.3.3 informational terminal reconciliation + R9.3.4 app integration device acceptance + R9.4 multi-app task orchestration + R9.4.1 screen ownership union reconciliation + R9.5 verified result transfer between app steps + R9.5.1 partial marker provenance reconciliation + R9.5.2 bounded marker observation + R9.5.3 verified action result transfer + R9.6 verified semantic observation fallback + R9.6.1 visual fallback acceptance truth + R9.7 structured screen reading + R9.7.1 conversation routing/terminal truth + R9.7.2 structured router conversation precedence + R9.7.3 action morphology/terminal truth + R9.8 generic verified result transfer + R9.8.1 master full acceptance/diagnostic engine + R9.9 reversible action journal/verified undo + R9.9.1 brightness verified undo device acceptance + R9.9.2 opt-in low-battery controlled proactivity + R10.0 unified screen intelligence + R10.1 local self-diagnostics/self-audit + R10.2 personal search expansion + R10.3 long autonomous tasks/recovery + R10.4 adaptive verified execution loop + R10.5 generalized live adaptive autonomy + R10.6 cross-lane adaptive continuity + R10.6.1 durable goal binding fix + R10.7 cross-lane durable recovery continuity + R10.7.1 isolated acceptance cleanup hardening + R10.8 general-purpose long autonomous objectives + R10.9 dynamic goal decomposition/planner contract + R10.10 adaptive planner production path + R10.11 production replan/durable recovery + R10.12 natural lifecycle recovery/background continuation + R10.13 full process-death recovery + R10.13.1 post-process readiness/reconciliation + R10.13.2 process-death core recovery proof correction + R10.14 perception process isolation/cross-process accessibility bridge + R10.14.1 cross-process visual evidence fix + R10.14.2 lifecycle profile/self-diagnostic truth + R10.14.3 history recovery reconciliation + R10.15 generalized cross-process autonomy hardening + R10.15.1 self-diagnostics routing reconciliation + R10.16 perception process recovery/safe bridge rebind + R10.16.1 restart telemetry reconciliation + R10.17 screen intelligence 2.0 + R10.17.1 acceptance routing reconciliation + R10.18 universal UI action engine + R10.18.1 acceptance target reconciliation + R10.18.2 live target authority reconciliation + R10.18.3 app info target reconciliation + R10.19 autonomous multi-app tasks 2.0 + R10.20 personal search 2.0 + R10.21 document & office engine 2.0 + R10.22 notifications & communication assistant + R10.22.1 notification acceptance visibility reconciliation + R10.21.1 pptx completion evidence reconciliation + R10.23 voice & background 2.0 + R10.24 field hardening + R10.24.1 field hardening reconciliation/device acceptance + R10.24.2 acceptance truth reconciliation + R10.25 cross-process accessibility truth reconciliation + R10.26 capability evidence metadata reconciliation + R10.26.1 capability evidence metadata detector reconciliation + R10.27.1 github repository write/commit-push + R10.27.1.1 github confirmation terminal truth + R10.27.1.2 github verified-commit completion truth + R10.27.2 apk build pipeline + R10.27.2.1 apk build prepare read-only truth + R10.27.3 verified development transaction/project workspace + R10.27.3.1 waiting-acceptance terminal truth + R10.27.4 video audio analysis + R10.27.5 verified internet speed + R10.27.6 controlled proactivity 2.0"
+            "Android v12.21.0 / R7.9 truth-hardening + R8.0 multi-attachment + R8.1–R8.4 accepted Personal Global Search stack + R8.5–R8.5.4 capability/evidence truth + R9.0 autonomous agent foundation + R9.0.1 history live-refresh proof fix + R9.0.2 diagnostic reconciliation/history refresh fix + R9.0.3 TTS health reconciliation + R9.1 IME perception/active telemetry truth + R9.2 autonomous recovery/long-task reconciliation + R9.2.1 adaptive hypothesis reconciliation + R9.3 app integration framework + R9.3.1 screen health reconciliation + R9.3.2 history latency recovery reconciliation + R9.3.3 informational terminal reconciliation + R9.3.4 app integration device acceptance + R9.4 multi-app task orchestration + R9.4.1 screen ownership union reconciliation + R9.5 verified result transfer between app steps + R9.5.1 partial marker provenance reconciliation + R9.5.2 bounded marker observation + R9.5.3 verified action result transfer + R9.6 verified semantic observation fallback + R9.6.1 visual fallback acceptance truth + R9.7 structured screen reading + R9.7.1 conversation routing/terminal truth + R9.7.2 structured router conversation precedence + R9.7.3 action morphology/terminal truth + R9.8 generic verified result transfer + R9.8.1 master full acceptance/diagnostic engine + R9.9 reversible action journal/verified undo + R9.9.1 brightness verified undo device acceptance + R9.9.2 opt-in low-battery controlled proactivity + R10.0 unified screen intelligence + R10.1 local self-diagnostics/self-audit + R10.2 personal search expansion + R10.3 long autonomous tasks/recovery + R10.4 adaptive verified execution loop + R10.5 generalized live adaptive autonomy + R10.6 cross-lane adaptive continuity + R10.6.1 durable goal binding fix + R10.7 cross-lane durable recovery continuity + R10.7.1 isolated acceptance cleanup hardening + R10.8 general-purpose long autonomous objectives + R10.9 dynamic goal decomposition/planner contract + R10.10 adaptive planner production path + R10.11 production replan/durable recovery + R10.12 natural lifecycle recovery/background continuation + R10.13 full process-death recovery + R10.13.1 post-process readiness/reconciliation + R10.13.2 process-death core recovery proof correction + R10.14 perception process isolation/cross-process accessibility bridge + R10.14.1 cross-process visual evidence fix + R10.14.2 lifecycle profile/self-diagnostic truth + R10.14.3 history recovery reconciliation + R10.15 generalized cross-process autonomy hardening + R10.15.1 self-diagnostics routing reconciliation + R10.16 perception process recovery/safe bridge rebind + R10.16.1 restart telemetry reconciliation + R10.17 screen intelligence 2.0 + R10.17.1 acceptance routing reconciliation + R10.18 universal UI action engine + R10.18.1 acceptance target reconciliation + R10.18.2 live target authority reconciliation + R10.18.3 app info target reconciliation + R10.19 autonomous multi-app tasks 2.0 + R10.20 personal search 2.0 + R10.21 document & office engine 2.0 + R10.22 notifications & communication assistant + R10.22.1 notification acceptance visibility reconciliation + R10.21.1 pptx completion evidence reconciliation + R10.23 voice & background 2.0 + R10.24 field hardening + R10.24.1 field hardening reconciliation/device acceptance + R10.24.2 acceptance truth reconciliation + R10.25 cross-process accessibility truth reconciliation + R10.26 capability evidence metadata reconciliation + R10.26.1 capability evidence metadata detector reconciliation + R10.27.1 github repository write/commit-push + R10.27.1.1 github confirmation terminal truth + R10.27.1.2 github verified-commit completion truth + R10.27.2 apk build pipeline + R10.27.2.1 apk build prepare read-only truth + R10.27.3 verified development transaction/project workspace + R10.27.3.1 waiting-acceptance terminal truth + R10.27.4 video audio analysis + R10.27.5 verified internet speed + R10.27.6 controlled proactivity 2.0 + R10.28 projects core + R10.28.1 project data scope + R10.28.2 project commands/project-aware data scope"
 
         // AyanaCommandHistoryStore v2.8 keeps up to 4k chars inline and stores longer
         // results out-of-line. Self-review intentionally remains inline so copied History
