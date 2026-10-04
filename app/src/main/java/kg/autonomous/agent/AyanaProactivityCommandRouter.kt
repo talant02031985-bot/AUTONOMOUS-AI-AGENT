@@ -312,6 +312,10 @@ class AyanaProactivityCommandRouter(
             .trim()
             .lowercase(Locale.ROOT)
             .replace('ё', 'е')
+            // R10.27.6 router v1.0.2:
+            // ignore sentence-final punctuation without touching internal 2.0, %, Wi-Fi, etc.
+            .replace(Regex("[.!?,;:…]+$"), "")
+            .trim()
             .replace(Regex("\\s+"), " ")
 
     private fun notHandled(): Result =
