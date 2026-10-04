@@ -3,28 +3,33 @@ package kg.autonomous.agent
 import android.content.Context
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
+import android.media.MediaCodec
+import android.media.MediaExtractor
+import android.media.MediaFormat
 import android.media.MediaMetadataRetriever
+import android.media.MediaMuxer
 import android.net.Uri
 import android.provider.OpenableColumns
 import org.json.JSONArray
 import org.json.JSONObject
 import java.io.File
 import java.io.FileOutputStream
+import java.nio.ByteBuffer
 import java.util.Locale
 import java.util.UUID
 import kotlin.math.roundToInt
 
 /**
- * AYANA Multimodal Attachment Manager v1.2 — MULTI-ATTACHMENT BATCH INTAKE.
+ * AYANA Multimodal Attachment Manager v1.2 — VIDEO AUDIO EXTRACTION.
  *
  * Security / reliability contract:
  * - never exposes arbitrary user filesystem paths to the service/Worker;
  * - immediately stages content into AYANA's private cache;
  * - normalizes images/video frames to bounded JPEGs;
  * - allow-lists document extensions and enforces byte limits;
- * - video v1 is VISUAL analysis only: bounded sampled frames, no audio claims;
- * - manifests contain only cache paths owned by AYANA and are revalidated by VoiceService;
- * - one picker action may stage a bounded batch of attachments without weakening per-item limits.
+ * - video v1.2 keeps bounded sampled frames and also stages a bounded lossless audio-track remux when available;
+ * - audio extraction never records from the microphone and never exposes an arbitrary filesystem path;
+ * - manifests contain only cache paths owned by AYANA and are revalidated by VoiceService.
  */
 class AyanaMultimodalAttachmentManager(
     context: Context
@@ -61,78 +66,6 @@ class AyanaMultimodalAttachmentManager(
         }
     }
 
-    /**
-     * Stage one bounded picker selection as either the original single attachment
-     * or one batch manifest. The batch is all-or-nothing: if any selected item
-     * fails validation/preparation, every already staged sibling is deleted.
-     */
-    fun prepareBatch(uris: List<Uri>): PreparedAttachment {
-        val uniqueUris =
-            uris
-                .distinctBy { it.toString() }
-                .take(MAX_BATCH_ITEMS + 1)
-
-        if (uniqueUris.isEmpty()) {
-            throw IllegalArgumentException("Файлы не выбраны.")
-        }
-        if (uniqueUris.size > MAX_BATCH_ITEMS) {
-            throw IllegalArgumentException(
-                "За один раз можно выбрать не более $MAX_BATCH_ITEMS файлов."
-            )
-        }
-        if (uniqueUris.size == 1) {
-            return prepare(uniqueUris.first())
-        }
-
-        val prepared = mutableListOf<PreparedAttachment>()
-        try {
-            var totalStagedBytes = 0L
-            var totalVideoFrames = 0
-            uniqueUris.forEach { uri ->
-                val item = prepare(uri)
-                prepared += item
-                totalStagedBytes += stagedBytes(item.manifest)
-                totalVideoFrames += stagedFrameCount(item.manifest)
-                if (totalStagedBytes > MAX_BATCH_STAGED_BYTES) {
-                    throw IllegalArgumentException(
-                        "Общий объём подготовленных вложений слишком большой. Максимум 8 МБ за одну отправку."
-                    )
-                }
-                if (totalVideoFrames > MAX_BATCH_VIDEO_FRAMES) {
-                    throw IllegalArgumentException(
-                        "В одном пакете слишком много видеокадров. Уменьшите количество выбранных видео."
-                    )
-                }
-            }
-
-            val items = JSONArray()
-            prepared.forEach { item ->
-                items.put(JSONObject(item.manifest.toString()))
-            }
-
-            val manifest =
-                JSONObject()
-                    .put("version", MANIFEST_VERSION)
-                    .put("kind", KIND_BATCH)
-                    .put("display_name", "Вложения: ${prepared.size}")
-                    .put("mime_type", BATCH_MIME_TYPE)
-                    .put("item_count", prepared.size)
-                    .put("total_staged_bytes", totalStagedBytes)
-                    .put("total_video_frames", totalVideoFrames)
-                    .put("items", items)
-
-            return PreparedAttachment(
-                kind = KIND_BATCH,
-                displayName = "Вложения: ${prepared.size}",
-                mimeType = BATCH_MIME_TYPE,
-                manifest = manifest
-            )
-        } catch (error: Exception) {
-            prepared.forEach { cleanupPrepared(it.manifest) }
-            throw error
-        }
-    }
-
     fun cleanupPrepared(manifest: JSONObject?) {
         if (manifest == null) return
         try {
@@ -145,6 +78,9 @@ class AyanaMultimodalAttachmentManager(
                     for (i in 0 until frames.length()) {
                         deleteOwnedPath(frames.optJSONObject(i)?.optString("path").orEmpty())
                     }
+                    deleteOwnedPath(
+                        manifest.optJSONObject("audio")?.optString("path").orEmpty()
+                    )
                 }
                 KIND_BATCH -> {
                     val items = manifest.optJSONArray("items") ?: JSONArray()
@@ -243,9 +179,6 @@ class AyanaMultimodalAttachmentManager(
                     throw IllegalStateException("Не удалось подготовить изображение.")
                 }
             }
-        } catch (error: Exception) {
-            target.delete()
-            throw error
         } finally {
             if (normalized !== bitmap) normalized.recycle()
             bitmap.recycle()
@@ -280,13 +213,7 @@ class AyanaMultimodalAttachmentManager(
 
         val safeExtension = if (extension.isBlank()) ".bin" else ".${extension.take(12)}"
         val target = newCacheFile("document", safeExtension)
-        val copied =
-            try {
-                copyUriWithLimit(uri, target, MAX_STAGED_FILE_BYTES)
-            } catch (error: Exception) {
-                target.delete()
-                throw error
-            }
+        val copied = copyUriWithLimit(uri, target, MAX_STAGED_FILE_BYTES)
 
         if (copied <= 0L) {
             target.delete()
@@ -312,6 +239,7 @@ class AyanaMultimodalAttachmentManager(
 
         val retriever = MediaMetadataRetriever()
         val frameFiles = mutableListOf<File>()
+        var audioFile: File? = null
         try {
             retriever.setDataSource(appContext, uri)
             val durationMs = retriever
@@ -323,7 +251,7 @@ class AyanaMultimodalAttachmentManager(
                 throw IllegalArgumentException("Не удалось определить длительность видео.")
             }
             if (durationMs > MAX_VIDEO_DURATION_MS) {
-                throw IllegalArgumentException("Для визуального анализа видео пока поддерживается длительность до 30 минут.")
+                throw IllegalArgumentException("Для анализа видео пока поддерживается длительность до 30 минут.")
             }
 
             val desiredFrames = if (durationMs <= 60_000L) 6 else 8
@@ -375,6 +303,22 @@ class AyanaMultimodalAttachmentManager(
                 throw IllegalArgumentException("Не удалось извлечь достаточно кадров из этого видео.")
             }
 
+            val audio =
+                try {
+                    extractAudioTrack(uri)
+                } catch (error: Exception) {
+                    AudioStageResult(
+                        available = false,
+                        file = null,
+                        mimeType = "",
+                        sizeBytes = 0L,
+                        sourceMimeType = "",
+                        reason = error.message.orEmpty().take(180).ifBlank { "audio_extract_failed" }
+                    )
+                }
+
+            audioFile = audio.file
+
             val manifest = JSONObject()
                 .put("version", MANIFEST_VERSION)
                 .put("kind", KIND_VIDEO_VISUAL)
@@ -382,9 +326,29 @@ class AyanaMultimodalAttachmentManager(
                 .put("mime_type", metadata.mimeType.ifBlank { "video/*" })
                 .put("source_size_bytes", metadata.sizeBytes)
                 .put("duration_ms", durationMs)
-                .put("analysis_scope", "visual_sampled_frames_only")
-                .put("audio_analysis", false)
+                .put(
+                    "analysis_scope",
+                    if (audio.available) {
+                        "visual_sampled_frames_plus_audio_transcription"
+                    } else {
+                        "visual_sampled_frames_only"
+                    }
+                )
+                .put("audio_analysis", audio.available)
+                .put("audio_status", if (audio.available) "staged" else audio.reason.ifBlank { "unavailable" })
                 .put("frames", frames)
+
+            if (audio.available && audio.file != null) {
+                manifest.put(
+                    "audio",
+                    JSONObject()
+                        .put("path", audio.file.absolutePath)
+                        .put("mime_type", audio.mimeType)
+                        .put("source_mime_type", audio.sourceMimeType)
+                        .put("size_bytes", audio.sizeBytes)
+                        .put("container", "mpeg4_audio_track_remux")
+                )
+            }
 
             return PreparedAttachment(
                 KIND_VIDEO_VISUAL,
@@ -394,58 +358,142 @@ class AyanaMultimodalAttachmentManager(
             )
         } catch (error: Exception) {
             frameFiles.forEach { it.delete() }
+            audioFile?.delete()
             throw error
         } finally {
             try { retriever.release() } catch (_: Exception) { }
         }
     }
 
-    private fun stagedFrameCount(manifest: JSONObject): Int {
-        return when (manifest.optString("kind")) {
-            KIND_VIDEO_VISUAL ->
-                manifest.optJSONArray("frames")?.length() ?: 0
+    private data class AudioStageResult(
+        val available: Boolean,
+        val file: File?,
+        val mimeType: String,
+        val sizeBytes: Long,
+        val sourceMimeType: String,
+        val reason: String
+    )
 
-            KIND_BATCH -> {
-                val items = manifest.optJSONArray("items") ?: JSONArray()
-                var total = 0
-                for (i in 0 until items.length()) {
-                    items.optJSONObject(i)?.let { total += stagedFrameCount(it) }
+    private fun extractAudioTrack(uri: Uri): AudioStageResult {
+        val extractor = MediaExtractor()
+        var muxer: MediaMuxer? = null
+        var target: File? = null
+        var muxerStarted = false
+        try {
+            extractor.setDataSource(appContext, uri, null)
+
+            var audioTrackIndex = -1
+            var sourceMime = ""
+            var audioFormat: MediaFormat? = null
+
+            for (index in 0 until extractor.trackCount) {
+                val format = extractor.getTrackFormat(index)
+                val mime = format.getString(MediaFormat.KEY_MIME).orEmpty()
+                if (mime.startsWith("audio/")) {
+                    audioTrackIndex = index
+                    sourceMime = mime
+                    audioFormat = format
+                    break
                 }
-                total
             }
 
-            else -> 0
-        }
-    }
-
-    private fun stagedBytes(manifest: JSONObject): Long {
-        return when (manifest.optString("kind")) {
-            KIND_IMAGE, KIND_DOCUMENT ->
-                manifest.optLong("size_bytes", 0L).coerceAtLeast(0L)
-
-            KIND_VIDEO_VISUAL -> {
-                val frames = manifest.optJSONArray("frames") ?: JSONArray()
-                var total = 0L
-                for (i in 0 until frames.length()) {
-                    total += frames
-                        .optJSONObject(i)
-                        ?.optLong("size_bytes", 0L)
-                        ?.coerceAtLeast(0L)
-                        ?: 0L
-                }
-                total
+            if (audioTrackIndex < 0 || audioFormat == null) {
+                return AudioStageResult(
+                    available = false,
+                    file = null,
+                    mimeType = "",
+                    sizeBytes = 0L,
+                    sourceMimeType = "",
+                    reason = "no_audio_track"
+                )
             }
 
-            KIND_BATCH -> {
-                val items = manifest.optJSONArray("items") ?: JSONArray()
-                var total = 0L
-                for (i in 0 until items.length()) {
-                    items.optJSONObject(i)?.let { total += stagedBytes(it) }
+            target = newCacheFile("video_audio", ".m4a")
+            muxer = MediaMuxer(
+                target.absolutePath,
+                MediaMuxer.OutputFormat.MUXER_OUTPUT_MPEG_4
+            )
+
+            val outputTrack = muxer.addTrack(audioFormat)
+            muxer.start()
+            muxerStarted = true
+            extractor.selectTrack(audioTrackIndex)
+
+            val declaredMax =
+                if (audioFormat.containsKey(MediaFormat.KEY_MAX_INPUT_SIZE)) {
+                    audioFormat.getInteger(MediaFormat.KEY_MAX_INPUT_SIZE)
+                } else {
+                    AUDIO_EXTRACTOR_DEFAULT_BUFFER_BYTES
                 }
-                total
+            val bufferSize =
+                declaredMax
+                    .coerceAtLeast(AUDIO_EXTRACTOR_DEFAULT_BUFFER_BYTES)
+                    .coerceAtMost(AUDIO_EXTRACTOR_MAX_BUFFER_BYTES)
+            val buffer = ByteBuffer.allocateDirect(bufferSize)
+            val info = MediaCodec.BufferInfo()
+            var payloadBytes = 0L
+
+            while (true) {
+                buffer.clear()
+                val sampleSize = extractor.readSampleData(buffer, 0)
+                if (sampleSize < 0) break
+                if (sampleSize > buffer.capacity()) {
+                    throw IllegalArgumentException("audio_sample_too_large")
+                }
+
+                payloadBytes += sampleSize.toLong()
+                if (payloadBytes > MAX_VIDEO_AUDIO_BYTES) {
+                    throw IllegalArgumentException("audio_track_too_large")
+                }
+
+                info.offset = 0
+                info.size = sampleSize
+                info.presentationTimeUs = extractor.sampleTime.coerceAtLeast(0L)
+                info.flags = extractor.sampleFlags
+                muxer.writeSampleData(outputTrack, buffer, info)
+                if (!extractor.advance()) break
             }
 
-            else -> 0L
+            muxer.stop()
+            muxerStarted = false
+            muxer.release()
+            muxer = null
+
+            val size = target.length()
+            if (payloadBytes <= 0L || size <= 0L || size > MAX_VIDEO_AUDIO_BYTES) {
+                target.delete()
+                return AudioStageResult(
+                    available = false,
+                    file = null,
+                    mimeType = "",
+                    sizeBytes = 0L,
+                    sourceMimeType = sourceMime,
+                    reason = "audio_extract_empty_or_oversized"
+                )
+            }
+
+            return AudioStageResult(
+                available = true,
+                file = target,
+                mimeType = "audio/mp4",
+                sizeBytes = size,
+                sourceMimeType = sourceMime,
+                reason = "staged"
+            )
+        } catch (error: Exception) {
+            try { if (muxerStarted) muxer?.stop() } catch (_: Exception) { }
+            try { muxer?.release() } catch (_: Exception) { }
+            target?.delete()
+            return AudioStageResult(
+                available = false,
+                file = null,
+                mimeType = "",
+                sizeBytes = 0L,
+                sourceMimeType = "",
+                reason = error.message.orEmpty().take(180).ifBlank { "audio_extract_failed" }
+            )
+        } finally {
+            try { extractor.release() } catch (_: Exception) { }
         }
     }
 
@@ -540,7 +588,6 @@ class AyanaMultimodalAttachmentManager(
         const val KIND_DOCUMENT = "document"
         const val KIND_VIDEO_VISUAL = "video_visual"
         const val KIND_BATCH = "batch"
-        const val BATCH_MIME_TYPE = "application/x-ayana-attachment-batch"
 
         /**
          * Decide whether a currently selected attachment belongs to this text command.
@@ -639,9 +686,6 @@ class AyanaMultimodalAttachmentManager(
 
         private const val MANIFEST_VERSION = 2
         private const val CACHE_DIR_NAME = "ayana_multimodal"
-        const val MAX_BATCH_ITEMS = 8
-        private const val MAX_BATCH_STAGED_BYTES = 8L * 1024L * 1024L
-        private const val MAX_BATCH_VIDEO_FRAMES = 24
         private const val CACHE_TTL_MS = 24L * 60L * 60L * 1000L
         private const val MAX_DISPLAY_NAME_CHARS = 160
         private const val MAX_SOURCE_IMAGE_BYTES = 30L * 1024L * 1024L
@@ -649,6 +693,9 @@ class AyanaMultimodalAttachmentManager(
         private const val MAX_SOURCE_VIDEO_BYTES = 500L * 1024L * 1024L
         private const val MAX_VIDEO_DURATION_MS = 30L * 60L * 1000L
         private const val MAX_VIDEO_FRAME_TOTAL_BYTES = 6L * 1024L * 1024L
+        private const val MAX_VIDEO_AUDIO_BYTES = 5L * 1024L * 1024L
+        private const val AUDIO_EXTRACTOR_DEFAULT_BUFFER_BYTES = 256 * 1024
+        private const val AUDIO_EXTRACTOR_MAX_BUFFER_BYTES = 2 * 1024 * 1024
         private const val MAX_IMAGE_DIMENSION = 1800
         private const val MAX_VIDEO_FRAME_DIMENSION = 1280
         private const val IMAGE_JPEG_QUALITY = 88

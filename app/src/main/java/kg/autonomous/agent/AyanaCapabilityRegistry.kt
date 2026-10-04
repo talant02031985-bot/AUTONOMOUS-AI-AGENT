@@ -10,7 +10,7 @@ import org.json.JSONArray
 import org.json.JSONObject
 
 /**
- * AYANA Device Capability Registry v3.2.1 — SCHEMA RESTORE + PERSISTED RUNTIME EVIDENCE TRUTH.
+ * AYANA Device Capability Registry v3.3 — R10.27.4 VIDEO AUDIO ANALYSIS TRUTH.
  *
  * Single machine-readable source of truth for:
  * 1) what this build implements;
@@ -34,46 +34,6 @@ class AyanaCapabilityRegistry(
             PREFS_NAME,
             Context.MODE_PRIVATE
         )
-
-
-    /**
-     * v3.2: persist only machine-verified capability evidence.
-     * Callers must pass verified=true only after a concrete executor has reconciled
-     * the result on this device. Source-code presence alone is never enough.
-     */
-    fun recordCapabilityEvidence(
-        capabilityId: String,
-        detail: String,
-        verified: Boolean
-    ) {
-        val id =
-            capabilityId
-                .trim()
-                .lowercase()
-
-        if (
-            !verified ||
-            id.isBlank() ||
-            !CAPABILITY_ID_REGEX.matches(id)
-        ) {
-            return
-        }
-
-        prefs.edit()
-            .putBoolean(
-                KEY_CAPABILITY_CONFIRMED_PREFIX + id,
-                true
-            )
-            .putLong(
-                KEY_CAPABILITY_CONFIRMED_AT_PREFIX + id,
-                System.currentTimeMillis()
-            )
-            .putString(
-                KEY_CAPABILITY_CONFIRMED_DETAIL_PREFIX + id,
-                detail.take(500)
-            )
-            .apply()
-    }
 
     fun recordAgentCoreResult(
         success: Boolean,
@@ -814,48 +774,26 @@ class AyanaCapabilityRegistry(
                 emptyList()
             }
 
-        // v3.2 migration: retain already proven device truth across the upgrade.
-        // Only raw history events with explicit executor + VERIFIED_COMMITTED evidence
-        // qualify; user-visible SUCCESS text alone is never enough.
-        recoverVerifiedCapabilityEvidenceFromHistory(
-            recentHistory
-        )
-
         val lastRecord =
             recentHistory
                 .firstOrNull()
 
-        val recentErrorRecords =
+        val lastErrorRecord =
             recentHistory
-                .filter {
+                .firstOrNull {
                     it.optString(
                         "status"
                     ) ==
                         "error"
                 }
 
-        val intentionalProbeErrors =
-            recentErrorRecords
-                .filter { record ->
-                    isIntentionalDiagnosticProbe(
-                        record
-                    )
-                }
-
-        val operationalErrorRecords =
-            recentErrorRecords
-                .filterNot { record ->
-                    isIntentionalDiagnosticProbe(
-                        record
-                    )
-                }
-
-        val lastErrorRecord =
-            operationalErrorRecords
-                .firstOrNull()
-
         val recentErrorCount =
-            operationalErrorRecords.size
+            recentHistory.count {
+                it.optString(
+                    "status"
+                ) ==
+                    "error"
+            }
 
         val now =
             System.currentTimeMillis()
@@ -1270,18 +1208,6 @@ class AyanaCapabilityRegistry(
                     recentErrorCount
                 )
                 .put(
-                    "recent_raw_error_count",
-                    recentErrorRecords.size
-                )
-                .put(
-                    "recent_intentional_probe_error_count",
-                    intentionalProbeErrors.size
-                )
-                .put(
-                    "runtime_confirmed_capability_ids",
-                    persistedCapabilityEvidenceIds()
-                )
-                .put(
                     "last_command_status",
                     lastRecord
                         ?.optString(
@@ -1406,7 +1332,7 @@ class AyanaCapabilityRegistry(
             implemented = true,
             available = true,
             deviceConfirmed = false,
-            note = "local ClipboardManager write with exact read-back verification; v3.2 persists device-confirmed evidence only after a verified runtime round-trip"
+            note = "v12.11 local ClipboardManager write with read-back verification"
         )
 
         capability(
@@ -1557,16 +1483,16 @@ class AyanaCapabilityRegistry(
             implemented = true,
             available = true,
             deviceConfirmed = true,
-            note = "device-confirmed visual sampled-frame analysis only; video audio track is not analyzed"
+            note = "sampled-frame visual analysis remains device-confirmed; R10.27.4 candidate can additionally fuse a bounded video-audio transcript when the selected video exposes a supported audio track"
         )
 
         capability(
             capabilities,
             "video_audio_analysis",
-            implemented = false,
-            available = false,
+            implemented = true,
+            available = true,
             deviceConfirmed = false,
-            note = "v11.6 does not transcribe or analyze the video's audio track"
+            note = "R10.27.4 candidate stages a bounded private-cache audio track, transcribes it through the dedicated Worker transcription path, and fuses transcript + sampled frames; pending device acceptance"
         )
 
         capability(
@@ -1693,42 +1619,6 @@ class AyanaCapabilityRegistry(
             available = true,
             deviceConfirmed = false,
             note = "existing Planner/Durable Goals/checkpoints/bounded replan/terminal verification are treated as one controlled execution loop; full multi-step acceptance still required"
-        )
-
-        capability(
-            capabilities,
-            "whole_goal_routing_guard",
-            implemented = true,
-            available = true,
-            deviceConfirmed = false,
-            note = "v12.14+ whole-goal routing preserves lifecycle verification, semantic-object guards and terminal criteria without greedy interception; production contract is covered by FUNC-013"
-        )
-
-        capability(
-            capabilities,
-            "artifact_whole_goal_orchestration",
-            implemented = true,
-            available = true,
-            deviceConfirmed = false,
-            note = "artifact requests retain ownership of the complete user goal through Agent Core handoff, create_artifact execution, semantic-content validation and verified publish; production contract is covered by FUNC-013"
-        )
-
-        capability(
-            capabilities,
-            "agent_core_timeout_recovery",
-            implemented = true,
-            available = true,
-            deviceConfirmed = false,
-            note = "Agent Core transport uses bounded timeout recovery with one controlled retry and fail-closed terminal handling; device-confirmed evidence remains separate from source presence"
-        )
-
-        capability(
-            capabilities,
-            "extended_accessibility_semantics",
-            implemented = true,
-            available = accessibilityConnected,
-            deviceConfirmed = false,
-            note = "extended Accessibility semantics expose richer node/window identity and interaction evidence while preserving owner-fusion and strict verification; requires device-specific confirmation for unsupported surfaces"
         )
 
         capability(
@@ -1901,7 +1791,7 @@ class AyanaCapabilityRegistry(
             )
 
             append(
-                "image_upload=true; video_upload=true; image_vision=true; video_analysis=visual_sampled_frames; video_audio_analysis=false; "
+                "image_upload=true; video_upload=true; image_vision=true; video_analysis=visual_sampled_frames_plus_optional_audio_transcript; video_audio_analysis=implemented_pending_device_confirmation; "
             )
 
             append(
@@ -1913,7 +1803,7 @@ class AyanaCapabilityRegistry(
             )
 
             append(
-                "Multimodal intake is device-confirmed on the target tablet for image, PDF/DOCX and sampled-frame visual video analysis; video audio remains unavailable. Never inherit other generic ChatGPT abilities. "
+                "Multimodal intake is device-confirmed for image, PDF/DOCX and sampled-frame visual video analysis. R10.27.4 video-audio transcription is implemented but remains pending device acceptance; do not advertise it as device-confirmed before real proof. Never inherit other generic ChatGPT abilities. "
             )
 
             append(
@@ -2239,191 +2129,6 @@ class AyanaCapabilityRegistry(
         }
     }
 
-    private fun recoverVerifiedCapabilityEvidenceFromHistory(
-        records: List<JSONObject>
-    ) {
-        if (
-            persistedCapabilityConfirmed(
-                "clipboard_write"
-            )
-        ) {
-            return
-        }
-
-        val verifiedClipboardRecord =
-            records.firstOrNull { record ->
-                val status =
-                    record
-                        .optString("status")
-                        .lowercase()
-
-                if (status != "success") {
-                    return@firstOrNull false
-                }
-
-                val events =
-                    record.optJSONArray("events")
-                        ?: return@firstOrNull false
-
-                var executorObserved =
-                    false
-
-                var committedTerminalObserved =
-                    false
-
-                for (index in 0 until events.length()) {
-                    val event =
-                        events.optJSONObject(index)
-                            ?: continue
-
-                    val state =
-                        event.optString("state")
-                            .lowercase()
-
-                    val details =
-                        event.optString("details")
-                            .lowercase()
-
-                    if (
-                        state == "execution_phase" &&
-                        (
-                            "clipboard_executor" in details ||
-                                "local_clipboard_write" in details
-                            )
-                    ) {
-                        executorObserved =
-                            true
-                    }
-
-                    if (
-                        state == "execution_terminal" &&
-                        "side_effect_state=verified_committed" in details &&
-                        "side_effect_kind=clipboard_write" in details
-                    ) {
-                        committedTerminalObserved =
-                            true
-                    }
-                }
-
-                executorObserved &&
-                    committedTerminalObserved
-            }
-
-        if (verifiedClipboardRecord != null) {
-            recordCapabilityEvidence(
-                capabilityId = "clipboard_write",
-                detail =
-                    "Recovered from raw Command History: clipboard_executor + " +
-                        "side_effect_state=VERIFIED_COMMITTED + side_effect_kind=clipboard_write",
-                verified = true
-            )
-        }
-    }
-
-    private fun isIntentionalDiagnosticProbe(
-        record: JSONObject
-    ): Boolean {
-        val command =
-            record
-                .optString("command")
-                .lowercase()
-                .replace('ё', 'е')
-                .replace(Regex("\\s+"), " ")
-                .trim()
-
-        val result =
-            record
-                .optString("result")
-                .lowercase()
-                .replace('ё', 'е')
-
-        val explicitTestToken =
-            Regex("(?:^|[^a-z0-9])test[-_a-z0-9]*", RegexOption.IGNORE_CASE)
-                .containsMatchIn(command)
-
-        val negativeIntentMarker =
-            listOf(
-                "недоступное действие",
-                "несуществующую функцию",
-                "несуществующая функция",
-                "unavailable",
-                "unsupported",
-                "invalid action"
-            ).any { marker ->
-                marker in command
-            }
-
-        val negativeResultConfirmed =
-            listOf(
-                "недоступ",
-                "не найден",
-                "не выполн",
-                "не поддерж",
-                "unavailable",
-                "unsupported"
-            ).any { marker ->
-                marker in result
-            }
-
-        val explicitNegativeProbe =
-            negativeIntentMarker &&
-                negativeResultConfirmed
-
-        // A TEST-* label alone is not enough: a positive test that genuinely
-        // regresses must remain an operational ERROR. Suppress only explicit
-        // negative-capability probes whose expected negative result is visible.
-        return explicitNegativeProbe &&
-            (explicitTestToken || negativeIntentMarker)
-    }
-
-    private fun persistedCapabilityEvidenceIds(): JSONArray {
-        val result =
-            JSONArray()
-
-        prefs.all
-            .keys
-            .asSequence()
-            .filter { key ->
-                key.startsWith(
-                    KEY_CAPABILITY_CONFIRMED_PREFIX
-                ) &&
-                    prefs.getBoolean(
-                        key,
-                        false
-                    )
-            }
-            .map { key ->
-                key.removePrefix(
-                    KEY_CAPABILITY_CONFIRMED_PREFIX
-                )
-            }
-            .filter { id ->
-                id.isNotBlank()
-            }
-            .sorted()
-            .forEach { id ->
-                result.put(id)
-            }
-
-        return result
-    }
-
-    private fun persistedCapabilityConfirmed(
-        id: String
-    ): Boolean =
-        prefs.getBoolean(
-            KEY_CAPABILITY_CONFIRMED_PREFIX + id,
-            false
-        )
-
-    private fun persistedCapabilityEvidenceDetail(
-        id: String
-    ): String =
-        prefs.getString(
-            KEY_CAPABILITY_CONFIRMED_DETAIL_PREFIX + id,
-            ""
-        ).orEmpty()
-
     private fun capability(
         array: JSONArray,
         id: String,
@@ -2432,28 +2137,19 @@ class AyanaCapabilityRegistry(
         deviceConfirmed: Boolean,
         note: String
     ) {
-        val persistedConfirmed =
-            persistedCapabilityConfirmed(
-                id
-            )
-
-        val effectiveDeviceConfirmed =
-            deviceConfirmed ||
-                persistedConfirmed
-
         val truthState =
             when {
                 !implemented ->
                     "UNIMPLEMENTED"
 
                 !available &&
-                    effectiveDeviceConfirmed ->
+                    deviceConfirmed ->
                     "DEVICE_CONFIRMED_UNAVAILABLE_NOW"
 
                 !available ->
                     "IMPLEMENTED_UNAVAILABLE_NOW"
 
-                effectiveDeviceConfirmed ->
+                deviceConfirmed ->
                     "DEVICE_CONFIRMED_AVAILABLE"
 
                 else ->
@@ -2474,25 +2170,9 @@ class AyanaCapabilityRegistry(
                     "available_now",
                     available
                 )
-                                .put(
+                .put(
                     "device_confirmed",
-                    effectiveDeviceConfirmed
-                )
-                .put(
-                    "static_device_confirmed",
                     deviceConfirmed
-                )
-                .put(
-                    "runtime_evidence_persisted",
-                    persistedConfirmed
-                )
-                .put(
-                    "runtime_evidence_detail",
-                    if (persistedConfirmed) {
-                        persistedCapabilityEvidenceDetail(id)
-                    } else {
-                        ""
-                    }
                 )
                 .put(
                     "truth_state",
@@ -2508,23 +2188,10 @@ class AyanaCapabilityRegistry(
     companion object {
 
         const val BUILD_LABEL =
-            "v12.21.0_r7_9_1_schema_restore_candidate"
+            "v12.62.0_r10_27_4_video_audio_analysis_candidate"
 
         private const val PREFS_NAME =
             "ayana_capability_runtime_v11"
-
-
-        private const val KEY_CAPABILITY_CONFIRMED_PREFIX =
-            "capability_confirmed_flag_"
-
-        private const val KEY_CAPABILITY_CONFIRMED_AT_PREFIX =
-            "capability_confirmed_at_"
-
-        private const val KEY_CAPABILITY_CONFIRMED_DETAIL_PREFIX =
-            "capability_confirmed_detail_"
-
-        private val CAPABILITY_ID_REGEX =
-            Regex("[a-z0-9_\\-]{2,96}")
 
         private const val KEY_AGENT_CORE_OK =
             "agent_core_ok"
