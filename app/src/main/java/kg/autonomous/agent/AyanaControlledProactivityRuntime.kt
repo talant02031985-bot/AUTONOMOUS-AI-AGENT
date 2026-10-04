@@ -163,64 +163,115 @@ class AyanaControlledProactivityRuntime(
             explicitUserOptIn = true
         )
 
-    override fun configureChargingStarted(): AyanaControlledProactivityEngine.Rule? =
-        engine.createRule(
+    override fun configureChargingStarted(): AyanaControlledProactivityEngine.Rule? {
+        val rule = engine.createRule(
             ruleId = "charging_started",
             triggerType = AyanaControlledProactivityEngine.TriggerType.CHARGING_STARTED,
             title = "AYANA • Зарядка",
             message = "Зарядное устройство подключено.",
             explicitUserOptIn = true
-        )
+        ) ?: return null
+        return primeTransitionRule(rule)
+    }
 
-    override fun configureChargingStopped(): AyanaControlledProactivityEngine.Rule? =
-        engine.createRule(
+    override fun configureChargingStopped(): AyanaControlledProactivityEngine.Rule? {
+        val rule = engine.createRule(
             ruleId = "charging_stopped",
             triggerType = AyanaControlledProactivityEngine.TriggerType.CHARGING_STOPPED,
             title = "AYANA • Зарядка",
             message = "Зарядное устройство отключено.",
             explicitUserOptIn = true
-        )
+        ) ?: return null
+        return primeTransitionRule(rule)
+    }
 
-    override fun configureNetworkLost(): AyanaControlledProactivityEngine.Rule? =
-        engine.createRule(
+    override fun configureNetworkLost(): AyanaControlledProactivityEngine.Rule? {
+        val rule = engine.createRule(
             ruleId = "network_lost",
             triggerType = AyanaControlledProactivityEngine.TriggerType.NETWORK_LOST,
             title = "AYANA • Интернет",
             message = "Интернет-соединение потеряно.",
             explicitUserOptIn = true
-        )
+        ) ?: return null
+        return primeTransitionRule(rule)
+    }
 
-    override fun configureNetworkRestored(): AyanaControlledProactivityEngine.Rule? =
-        engine.createRule(
+    override fun configureNetworkRestored(): AyanaControlledProactivityEngine.Rule? {
+        val rule = engine.createRule(
             ruleId = "network_restored",
             triggerType = AyanaControlledProactivityEngine.TriggerType.NETWORK_RESTORED,
             title = "AYANA • Интернет",
             message = "Интернет-соединение восстановлено.",
             explicitUserOptIn = true
-        )
+        ) ?: return null
+        return primeTransitionRule(rule)
+    }
 
-    override fun configureWifiConnected(): AyanaControlledProactivityEngine.Rule? =
-        engine.createRule(
+    override fun configureWifiConnected(): AyanaControlledProactivityEngine.Rule? {
+        val rule = engine.createRule(
             ruleId = "wifi_connected",
             triggerType = AyanaControlledProactivityEngine.TriggerType.WIFI_CONNECTED,
             title = "AYANA • Wi-Fi",
             message = "Подтверждено подключение к Wi-Fi с доступом в интернет.",
             explicitUserOptIn = true
-        )
+        ) ?: return null
+        return primeTransitionRule(rule)
+    }
 
-    override fun configureCellularActive(): AyanaControlledProactivityEngine.Rule? =
-        engine.createRule(
+    override fun configureCellularActive(): AyanaControlledProactivityEngine.Rule? {
+        val rule = engine.createRule(
             ruleId = "cellular_active",
             triggerType = AyanaControlledProactivityEngine.TriggerType.CELLULAR_ACTIVE,
             title = "AYANA • Мобильная сеть",
             message = "Активна мобильная сеть с подтверждённым доступом в интернет.",
             explicitUserOptIn = true
-        )
+        ) ?: return null
+        return primeTransitionRule(rule)
+    }
 
-    fun setRuleEnabled(ruleId: String, enabled: Boolean): Boolean =
-        engine.setRuleEnabled(ruleId, enabled)?.enabled == enabled
+    fun setRuleEnabled(ruleId: String, enabled: Boolean): Boolean {
+        val rule = engine.setRuleEnabled(ruleId, enabled) ?: return false
+        val finalRule = if (enabled) primeTransitionRule(rule) else rule
+        return finalRule.enabled == enabled
+    }
 
     fun deleteRule(ruleId: String): Boolean = store.delete(ruleId)
+
+    private fun primeTransitionRule(
+        rule: AyanaControlledProactivityEngine.Rule
+    ): AyanaControlledProactivityEngine.Rule {
+        val event: AyanaControlledProactivityEngine.Event? =
+            when (rule.triggerType) {
+                AyanaControlledProactivityEngine.TriggerType.CHARGING_STARTED,
+                AyanaControlledProactivityEngine.TriggerType.CHARGING_STOPPED ->
+                    currentBatteryIntent()?.let { batteryEvent(it) }
+
+                AyanaControlledProactivityEngine.TriggerType.NETWORK_LOST,
+                AyanaControlledProactivityEngine.TriggerType.NETWORK_RESTORED,
+                AyanaControlledProactivityEngine.TriggerType.WIFI_CONNECTED,
+                AyanaControlledProactivityEngine.TriggerType.CELLULAR_ACTIVE ->
+                    currentNetworkEvent()
+
+                else -> null
+            }
+
+        val primed =
+            event?.let { engine.primeRule(rule.ruleId, it) }
+                ?: rule
+
+        eventSink(
+            RuntimeEvent(
+                state = "proactivity_rule_baseline_primed",
+                ruleId = rule.ruleId,
+                details =
+                    "trigger=${rule.triggerType}; baseline_available=${event != null}; " +
+                        "last_condition_matched=${primed.lastConditionMatched}; " +
+                        "fire_count=${primed.fireCount}; mutation_authority=false"
+            )
+        )
+
+        return primed
+    }
 
     fun simulateRule(ruleId: String): AyanaControlledProactivityEngine.Decision? {
         val rule = store.get(ruleId) ?: return null
@@ -607,7 +658,7 @@ class AyanaControlledProactivityRuntime(
             "cooldown_remaining_ms=${decision.cooldownRemainingMs}; mutation_authority=false"
 
     companion object {
-        const val VERSION = "1.1"
+        const val VERSION = "1.1.1"
         const val CHANNEL_ID = "ayana_controlled_proactivity_v2"
         private const val NOTIFICATION_ID_BASE = 19000
     }

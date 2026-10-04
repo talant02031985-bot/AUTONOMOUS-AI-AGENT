@@ -1,7 +1,7 @@
 package kg.autonomous.agent
 
 /**
- * AYANA Controlled Proactivity Engine v2.0 — R10.27.6.
+ * AYANA Controlled Proactivity Engine v2.0.1 — R10.27.6.
  *
  * Pure decision/state machine. It does not register Android receivers, post
  * notifications, speak, launch apps, mutate device settings or call Agent Core.
@@ -190,6 +190,33 @@ class AyanaControlledProactivityEngine(
         )
     }
 
+    /**
+     * Records the current physical state for one already-created rule without
+     * firing it. Transition rules must be primed immediately after explicit
+     * opt-in so the first future transition is not consumed as a baseline.
+     */
+    fun primeRule(
+        ruleId: String,
+        event: Event
+    ): Rule? {
+        val id = normalizeRuleId(ruleId) ?: return null
+        val rule = repository.get(id) ?: return null
+        if (!rule.enabled || !rule.explicitUserOptIn) return null
+        if (!ruleAppliesToEvent(rule, event)) return null
+
+        val match = match(rule, event)
+        val now = eventObservedAt(event).coerceAtLeast(0L)
+
+        return repository.upsert(
+            rule.copy(
+                lastConditionMatched = match.condition,
+                lastObservationFingerprint = match.fingerprint,
+                lastState = RuleState.ARMED,
+                updatedAtMs = now
+            )
+        )
+    }
+
     fun evaluate(event: Event): List<Decision> {
         if (!repository.isGloballyEnabled()) return emptyList()
 
@@ -327,6 +354,30 @@ class AyanaControlledProactivityEngine(
         if (networkFire.none { it.ruleId == "network_restored" && it.shouldExecute }) return false
 
         if (networkFire.any { it.deviceMutationAuthority }) return false
+
+        val networkLost = engine.createRule(
+            ruleId = "network_lost_prime_regression",
+            triggerType = TriggerType.NETWORK_LOST,
+            title = "Интернет потерян",
+            message = "Сеть недоступна.",
+            explicitUserOptIn = true
+        ) ?: return false
+
+        val primed = engine.primeRule(
+            networkLost.ruleId,
+            Event.Network(true, true, "wifi", clock + 55L)
+        ) ?: return false
+        if (primed.lastConditionMatched != false || primed.fireCount != 0L) return false
+
+        val firstRealLoss = engine.evaluate(
+            Event.Network(false, false, "none", clock + 60L)
+        )
+        if (firstRealLoss.none {
+                it.ruleId == networkLost.ruleId &&
+                    it.shouldExecute &&
+                    it.reason == "verified_edge_condition_met"
+            }
+        ) return false
 
         repo.setGloballyEnabled(false)
         val disabled = engine.evaluate(Event.Battery(10, false, clock + 70_000L))
@@ -658,7 +709,7 @@ class AyanaControlledProactivityEngine(
     }
 
     companion object {
-        const val VERSION = "2.0"
+        const val VERSION = "2.0.1"
         const val DEFAULT_COOLDOWN_MS = 30L * 60L * 1000L
         const val MIN_COOLDOWN_MS = 60_000L
         const val MAX_COOLDOWN_MS = 24L * 60L * 60L * 1000L
