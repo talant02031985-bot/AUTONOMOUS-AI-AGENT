@@ -45,6 +45,7 @@ class AyanaProactivityCommandRouter(
         if (n.isBlank()) return false
         if (n.contains("проактив")) return true
         if (isSpecificRuleManagementRequest(n)) return true
+        if (isUnauthorizedMutationRuleRequest(n)) return true
         if (
             hasNotifyIntent(n) &&
             hasConditionConnector(n)
@@ -118,6 +119,19 @@ class AyanaProactivityCommandRouter(
                     "Не удалось включить проактивность."
                 },
                 technical = "controlled_proactivity_global_enabled=true; explicit_user_opt_in=true; mutation_authority=false"
+            )
+        }
+
+        if (isUnauthorizedMutationRuleRequest(n)) {
+            return Result(
+                handled = true,
+                success = false,
+                terminalStatus = "BLOCKED",
+                message =
+                    "Такое проактивное действие заблокировано: R10.27.6 может уведомлять, но не получает автоматические полномочия изменять устройство или приложения.",
+                technical =
+                    "controlled_proactivity_mutation_blocked; authority_level=DENIED; " +
+                        "explicit_user_opt_in_required=true; mutation_authority=false"
             )
         }
 
@@ -295,6 +309,67 @@ class AyanaProactivityCommandRouter(
             "выключи контролируемую проактивность"
         )
 
+    private fun hasRuleManagementNoun(n: String): Boolean =
+        n.contains("правил") ||
+            n.contains("network_lost") ||
+            n.contains("network_restored") ||
+            n.contains("charging_started") ||
+            n.contains("charging_stopped") ||
+            n.contains("wifi_connected") ||
+            n.contains("cellular_active") ||
+            n.contains("battery_below_") ||
+            n.contains("battery_above_")
+
+    private fun isExplicitExistingRuleManagement(n: String): Boolean =
+        n.startsWith("выключи правило") ||
+            n.startsWith("выключить правило") ||
+            n.startsWith("отключи правило") ||
+            n.startsWith("отключить правило") ||
+            n.startsWith("включи правило") ||
+            n.startsWith("включить правило") ||
+            n.startsWith("активируй правило") ||
+            n.startsWith("деактивируй правило") ||
+            n.startsWith("удали правило") ||
+            n.startsWith("удалить правило") ||
+            n.startsWith("убери правило")
+
+    private fun isUnauthorizedMutationRuleRequest(n: String): Boolean {
+        if (isExplicitExistingRuleManagement(n)) return false
+        if (!hasConditionConnector(n) && !n.contains("проактив")) return false
+
+        val mutationVerb =
+            n.contains("выключ") ||
+                n.contains("отключ") ||
+                n.contains("включ") ||
+                n.contains("переключ") ||
+                n.contains("измени") ||
+                n.contains("изменить") ||
+                n.contains("установи") ||
+                n.contains("запусти") ||
+                n.contains("закрой") ||
+                n.contains("открой") ||
+                n.contains("отправ") ||
+                n.contains("удали") ||
+                n.contains("очист")
+
+        val mutationTarget =
+            n.contains("wi-fi") ||
+                n.contains("wifi") ||
+                n.contains("вайф") ||
+                n.contains("мобильн") ||
+                n.contains("авиареж") ||
+                n.contains("bluetooth") ||
+                n.contains("блютуз") ||
+                n.contains("яркост") ||
+                n.contains("громкост") ||
+                n.contains("прилож") ||
+                n.contains("настрой") ||
+                n.contains("режим энерг") ||
+                n.contains("энергосбереж")
+
+        return mutationVerb && mutationTarget
+    }
+
     private fun isSpecificRuleManagementRequest(n: String): Boolean =
         (isRuleDisableRequest(n) || isRuleEnableRequest(n) || isRuleDeleteRequest(n)) &&
             resolveManagedRuleId(n) != null
@@ -313,6 +388,8 @@ class AyanaProactivityCommandRouter(
             n.contains("убери правило")
 
     private fun resolveManagedRuleId(n: String): String? {
+        if (!isExplicitExistingRuleManagement(n)) return null
+
         val rules = runtime.listRules()
 
         fun existing(id: String): String? =
@@ -461,7 +538,7 @@ class AyanaProactivityCommandRouter(
         )
 
     companion object {
-        const val VERSION = "1.0.3"
+        const val VERSION = "1.0.4"
         private const val DEFAULT_LOW_BATTERY_PERCENT = 20
         private const val DEFAULT_HIGH_BATTERY_PERCENT = 80
     }
