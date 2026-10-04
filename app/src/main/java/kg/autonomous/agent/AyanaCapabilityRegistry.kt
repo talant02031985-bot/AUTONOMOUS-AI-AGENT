@@ -10,7 +10,7 @@ import org.json.JSONArray
 import org.json.JSONObject
 
 /**
- * AYANA Device Capability Registry v3.4 — R10.27.5 VERIFIED INTERNET SPEED TRUTH.
+ * AYANA Device Capability Registry v3.5 — R10.27.6 CONTROLLED PROACTIVITY 2.0 TRUTH.
  *
  * Single machine-readable source of truth for:
  * 1) what this build implements;
@@ -694,6 +694,33 @@ class AyanaCapabilityRegistry(
                 true
             }
 
+        val controlledProactivityStore =
+            try {
+                AyanaProactivityRuleStore(
+                    appContext
+                )
+            } catch (_: Exception) {
+                null
+            }
+
+        val controlledProactivityRules =
+            try {
+                controlledProactivityStore
+                    ?.list()
+                    .orEmpty()
+            } catch (_: Exception) {
+                emptyList()
+            }
+
+        val controlledProactivityGlobalEnabled =
+            try {
+                controlledProactivityStore
+                    ?.isGloballyEnabled() ==
+                    true
+            } catch (_: Exception) {
+                false
+            }
+
         val microphonePermission =
             appContext
                 .checkSelfPermission(
@@ -854,6 +881,22 @@ class AyanaCapabilityRegistry(
                     notificationPermission
                 )
                 .put(
+                    "controlled_proactivity_v2_global_enabled",
+                    controlledProactivityGlobalEnabled
+                )
+                .put(
+                    "controlled_proactivity_v2_rule_count",
+                    controlledProactivityRules.size
+                )
+                .put(
+                    "controlled_proactivity_v2_enabled_rule_count",
+                    controlledProactivityRules.count { it.enabled }
+                )
+                .put(
+                    "controlled_proactivity_v2_runtime_available",
+                    notificationPermission
+                )
+                .put(
                     "notification_listener_access",
                     notificationListenerAccess
                 )
@@ -898,7 +941,7 @@ class AyanaCapabilityRegistry(
                     )
                 )
                 .put(
-                    "agent_core_last_latency_ms",
+"agent_core_last_latency_ms",
                     prefs.getLong(
                         KEY_AGENT_CORE_LATENCY,
                         -1L
@@ -1476,6 +1519,19 @@ class AyanaCapabilityRegistry(
 
         capability(
             capabilities,
+            "controlled_proactivity_v2",
+            implemented = true,
+            available = notificationPermission,
+            deviceConfirmed = prefs.getBoolean(
+                "capability_confirmed_controlled_proactivity_v2",
+                false
+            ),
+            note =
+                "R10.27.6 durable explicit-opt-in battery/power/network proactivity with edge-trigger, cooldown/no-replay and verified local notification delivery; no device-mutation authority; device confirmation persists only after a real verified proactive notification"
+        )
+
+        capability(
+            capabilities,
             "image_upload_to_ayana",
             implemented = true,
             available = true,
@@ -1798,7 +1854,7 @@ class AyanaCapabilityRegistry(
                 )
             )
             append(
-                "; Samsung App Info->Permissions has a known terminal-verifier window-list edge, so describe it as implemented/limited rather than universally confirmed. "
+"; Samsung App Info->Permissions has a known terminal-verifier window-list edge, so describe it as implemented/limited rather than universally confirmed. "
             )
 
             append(
@@ -1819,7 +1875,7 @@ class AyanaCapabilityRegistry(
             )
 
             append(
-                "document_understanding=true; artifact_generation=true; artifact_formats=txt,docx,pdf,xlsx,jpeg,graph_jpeg; docx_style_preserving_transform=true; docx_translation=true; docx_translation_targets=ru,en,ky,de,fr,es,tr; external_mail_calendar_files=false; offline_llm=false; broad_proactivity=false; "
+                "document_understanding=true; artifact_generation=true; artifact_formats=txt,docx,pdf,xlsx,jpeg,graph_jpeg; docx_style_preserving_transform=true; docx_translation=true; docx_translation_targets=ru,en,ky,de,fr,es,tr; external_mail_calendar_files=false; offline_llm=false; controlled_proactivity_v2=true; unrestricted_broad_proactivity=false; "
             )
 
             append(
@@ -1832,11 +1888,38 @@ class AyanaCapabilityRegistry(
                 )
             )
             append(
+                "; controlled_proactivity_v2_device_confirmed="
+            )
+            append(
+                prefs.getBoolean(
+                    "capability_confirmed_controlled_proactivity_v2",
+                    false
+                )
+            )
+            append(
+                "; controlled_proactivity_v2_global_enabled="
+            )
+            append(
+                runtime.optBoolean(
+                    "controlled_proactivity_v2_global_enabled",
+                    false
+                )
+            )
+            append(
+                "; controlled_proactivity_v2_rules="
+            )
+            append(
+                runtime.optInt(
+                    "controlled_proactivity_v2_rule_count",
+                    0
+                )
+            )
+            append(
                 "; speed_test_launcher=true; google_image_search=true. "
             )
 
             append(
-                "Multimodal intake including R10.27.4 video-audio transcription is device-confirmed. R10.27.5 native internet speed measurement is implemented; advertise it as device-confirmed only after persisted verified runtime evidence. Never inherit other generic ChatGPT abilities. "
+                "Multimodal intake including R10.27.4 video-audio transcription is device-confirmed. R10.27.5 native internet speed measurement is implemented. R10.27.6 Controlled Proactivity 2.0 is implemented as explicit opt-in notification/confirmation-only rules with no device-mutation authority; advertise it as device-confirmed only after persisted verified notification evidence. Never inherit other generic ChatGPT abilities. "
             )
 
             append(
@@ -2221,7 +2304,7 @@ class AyanaCapabilityRegistry(
     companion object {
 
         const val BUILD_LABEL =
-            "v12.63.0_r10_27_5_verified_internet_speed"
+            "v12.64.0_r10_27_6_controlled_proactivity_2_0"
 
         private const val PREFS_NAME =
             "ayana_capability_runtime_v11"

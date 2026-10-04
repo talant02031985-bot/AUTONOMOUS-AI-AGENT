@@ -63,6 +63,12 @@ import kotlin.math.abs
 
 class AyanaVoiceService : Service() {
 
+// AYANA v12.64.0 / R10.27.6 CONTROLLED PROACTIVITY 2.0.
+// Adds one bounded durable opt-in proactivity runtime for battery/power/network events,
+// edge-trigger + cooldown/no-replay truth, verified notification delivery and deterministic
+// rule commands. R9.9.2 low-battery state is migrated into the v2 store; legacy acceptance
+// remains available. No ORB/UI changes and no device-mutation authority is granted.
+//
 // AYANA v12.63.0 / R10.27.5 VERIFIED INTERNET SPEED.
 // Adds active-network-bound latency/download/upload measurement with exact byte/time evidence,
 // transport validation, unchanged-network proof and fail-closed terminal truth. No browser/UI/ORB changes.
@@ -998,7 +1004,7 @@ class AyanaVoiceService : Service() {
 
     // R9.7 / R9.6 read-only visual evidence bridge. Android Accessibility owns capture
     // provenance; the verifier below owns exact-marker + structured semantic truth. Neither can dispatch actions.
-    private val visualScreenEvidence by lazy {
+private val visualScreenEvidence by lazy {
         AyanaVisualScreenEvidence(applicationContext)
     }
 
@@ -1442,6 +1448,29 @@ private val miniOrbController by lazy {
         )
     }
 
+    // R10.27.6 CONTROLLED PROACTIVITY 2.0.
+    // Single production facade for durable opt-in battery/power/network rules.
+    // The legacy R9.9.2 controller is retained only for backward-compatible
+    // acceptance/state migration and carries no additional authority.
+    private val controlledProactivityFacade by lazy {
+        AyanaControlledProactivityFacade(
+            applicationContext
+        ) { state, details ->
+            recordControlledProactivityRuntimeEvent(
+                state = state,
+                details = details
+            )
+        }
+    }
+
+    @Volatile
+    private var backgroundProactivityHistoryId: String? =
+        null
+
+    @Volatile
+    private var backgroundProactivityRuleId =
+        ""
+
     @Volatile
     private var batteryProactivityReceiverRegistered =
         false
@@ -1696,6 +1725,17 @@ private val miniOrbController by lazy {
 
         createNotificationChannel()
         createBatteryProactivityNotificationChannel()
+
+        // R10.27.6 starts before the legacy compatibility receiver. This prevents
+        // an old enabled low-battery rule from firing twice during migration.
+        try {
+            controlledProactivityFacade.start()
+            migrateLegacyBatteryProactivityToV2()
+        } catch (_: Exception) {
+        }
+
+        // Retained for R9.9.2 acceptance/live battery sampling only. Production
+        // generalized rules are owned by controlledProactivityFacade.
         registerBatteryProactivityReceiver()
 
         promoteToForeground(
@@ -1997,8 +2037,7 @@ mainHandler.post {
                 ) {
                     startWakeListening()
                 }
-
-                maybeAutoResumeDurableGoal()
+maybeAutoResumeDurableGoal()
             }
         }
 
@@ -2998,7 +3037,7 @@ if (
                                             earlyCommand,
                                             silent = false
                                         )
-                                    }
+}
 
                                 break
                             }
@@ -3997,8 +4036,7 @@ message = text.take(
 
             } catch (_: Exception) {
             }
-
-            mainHandler.postDelayed(
+mainHandler.postDelayed(
                 {
                     startFollowUpListening()
                 },
@@ -4378,8 +4416,7 @@ if (
             return
         }
 
-        // These local commands only manage an explicit notification-only battery
-        // rule or run its bounded acceptance. They do not grant mutation authority.
+        // Keep the accepted R9.9.2 battery-only acceptance command intact.
         if (
             isBatteryProactivityAcceptanceCommand(
                 originalCommand
@@ -4391,9 +4428,25 @@ if (
             return
         }
 
+        // R10.27.6 generalized opt-in proactivity owns broad rule/status commands.
+        // It is deterministic and notification/confirmation-only.
+        if (
+            controlledProactivityFacade.isCandidate(
+                originalCommand
+            )
+        ) {
+            runControlledProactivityV2Command(
+                command = originalCommand,
+                silent = silent
+            )
+            return
+        }
+
+        // Legacy low-battery wording remains supported but is translated into
+        // the R10.27.6 durable store instead of creating a second production watcher.
         if (
             isBatteryProactivityEnableCommand(
-originalCommand
+                originalCommand
             )
         ) {
             runBatteryProactivityEnable(
@@ -4998,7 +5051,7 @@ originalCommand
             .parseRequest(
                 originalCommand
             )
-            ?.let { personalSearchRequest ->
+?.let { personalSearchRequest ->
                 runLocalPersonalGlobalSearch(
                     request = personalSearchRequest,
                     silent = silent,
@@ -5998,8 +6051,7 @@ if (localCalculation != null) {
                 val result =
                     screenIntelligence
                         .pressBack()
-
-                result.optJSONObject("screen")?.let { screen ->
+result.optJSONObject("screen")?.let { screen ->
                     capabilityRegistry.recordScreenObservation(screen)
                 }
 
@@ -6998,7 +7050,7 @@ if (localCalculation != null) {
                 )
 
         if (
-            appFromLaunch
+appFromLaunch
                 .isNotBlank()
         ) {
             return appFromLaunch to section
@@ -7998,7 +8050,7 @@ if (
 
             return JSONObject()
                 .put("success", true)
-                .put("verified", true)
+.put("verified", true)
                 .put("surface", expectedSurface)
                 .put("confidence", confidence)
                 .put("evidence_age_ms", evidenceAge)
@@ -8998,8 +9050,7 @@ if (
         }
             .trim()
     }
-
-    private fun extractGitHubClientIdConfiguration(
+private fun extractGitHubClientIdConfiguration(
         command: String
     ): String? {
         val patterns =
@@ -9998,7 +10049,7 @@ if (AggregateMetric.MEDIA_VOLUME in metrics) {
             decision.type == AyanaCompositeIntentGate.DecisionType.CONDITIONAL
         ) {
             return false
-        }
+}
 
         return decision.type == AyanaCompositeIntentGate.DecisionType.PASS_THROUGH ||
             decision.type == AyanaCompositeIntentGate.DecisionType.COMPOSITE ||
@@ -10998,7 +11049,7 @@ try {
             .put("screen_status", lastScreenStatus)
             .put("attempts", attempts)
             .put("waited_ms", SystemClock.elapsedRealtime() - startedAt)
-            .put("reason", "post_process_runtime_not_ready")
+.put("reason", "post_process_runtime_not_ready")
     }
 
     private fun reconcileR10_13DispatchedNavigation(
@@ -11913,6 +11964,234 @@ timeoutMs
             )
     }
 
+    private fun recordControlledProactivityRuntimeEvent(
+        state: String,
+        details: String
+    ) {
+        val activeId =
+            activeCommandHistoryId
+
+        if (!activeId.isNullOrBlank()) {
+            commandHistoryStore.addEvent(
+                activeId,
+                state = state,
+                message = "R10.27.6 Controlled Proactivity 2.0",
+                details = details.take(1800)
+            )
+            return
+        }
+
+        val ruleId =
+            Regex("""(?:^|;\s*)rule_id=([^;\s]+)""")
+                .find(details)
+                ?.groupValues
+                ?.getOrNull(1)
+                .orEmpty()
+                .take(80)
+
+        fun ensureBackgroundRecord(): String {
+            val existing =
+                backgroundProactivityHistoryId
+            if (!existing.isNullOrBlank()) {
+                return existing
+            }
+
+            val id =
+                commandHistoryStore.begin(
+                    command =
+                        if (ruleId.isBlank()) {
+                            "Проактивное событие AYANA"
+                        } else {
+                            "Проактивность: $ruleId"
+                        },
+                    source = "proactivity"
+                )
+
+            backgroundProactivityHistoryId =
+                id
+            backgroundProactivityRuleId =
+                ruleId
+
+            commandHistoryStore.addEvent(
+                id,
+                state = "proactive_rule_evaluated",
+                message = "Проактивное правило проверено",
+                details = details.take(1800)
+            )
+            return id
+        }
+
+        when (state) {
+            "proactive_condition_verified" -> {
+                val id = ensureBackgroundRecord()
+                commandHistoryStore.addEvent(
+                    id,
+                    state = state,
+                    message = "Проактивное условие подтверждено",
+                    details = details.take(1800)
+                )
+            }
+
+            "proactive_action_requested" -> {
+                val id = ensureBackgroundRecord()
+                commandHistoryStore.addEvent(
+                    id,
+                    state = state,
+                    message = "Проактивное действие запрошено",
+                    details = details.take(1800)
+                )
+            }
+
+            "proactive_action_verified" -> {
+                val id = ensureBackgroundRecord()
+                commandHistoryStore.addEvent(
+                    id,
+                    state = state,
+                    message = "Проактивное уведомление подтверждено",
+                    details = details.take(1800)
+                )
+                capabilityRegistry.recordCapabilityEvidence(
+                    capabilityId = "controlled_proactivity_v2",
+                    detail = details.take(500),
+                    verified = true
+                )
+                commandHistoryStore.finish(
+                    id = id,
+                    success = true,
+                    result =
+                        if (ruleId.isBlank()) {
+                            "Проактивное уведомление AYANA подтверждено."
+                        } else {
+                            "Проактивное правило $ruleId сработало и уведомление подтверждено."
+                        },
+                    technical =
+                        "r10_27_6=true; verified_notification=true; ${details.take(1500)}"
+                )
+                backgroundProactivityHistoryId = null
+                backgroundProactivityRuleId = ""
+            }
+
+            "proactive_action_error",
+            "proactivity_rule_evaluation_error" -> {
+                val id = ensureBackgroundRecord()
+                commandHistoryStore.addEvent(
+                    id,
+                    state = state,
+                    message = "Ошибка Controlled Proactivity 2.0",
+                    details = details.take(1800)
+                )
+                commandHistoryStore.finish(
+                    id = id,
+                    success = false,
+                    result = "Проактивное действие не удалось подтвердить.",
+                    technical =
+                        "r10_27_6=true; verified_notification=false; ${details.take(1500)}"
+                )
+                backgroundProactivityHistoryId = null
+                backgroundProactivityRuleId = ""
+            }
+        }
+    }
+
+    private fun migrateLegacyBatteryProactivityToV2() {
+        val legacy =
+            try {
+                batteryProactivityController.currentRule()
+            } catch (_: Exception) {
+                null
+            } ?: return
+
+        if (!legacy.enabled) {
+            return
+        }
+
+        val migrated =
+            controlledProactivityFacade.tryHandle(
+                "предупреди когда заряд станет ниже ${legacy.thresholdPercent} процентов"
+            )
+
+        if (
+            migrated.handled &&
+            migrated.success
+        ) {
+            try {
+                batteryProactivityController.disable()
+            } catch (_: Exception) {
+            }
+        }
+    }
+
+    private fun runControlledProactivityV2Command(
+        command: String,
+        silent: Boolean
+    ) {
+        executionPhase(
+            phase = "controlled_proactivity_v2",
+            executor = "controlled_proactivity_v2"
+        )
+
+        val result =
+            try {
+                controlledProactivityFacade.tryHandle(command)
+            } catch (error: Exception) {
+                respondAndResume(
+                    text = "Не удалось обработать проактивное правило.",
+                    silent = silent,
+                    success = false,
+                    technical =
+                        "r10_27_6=true; error=${error.message.orEmpty().take(300)}"
+                )
+                return
+            }
+
+        if (!result.handled) {
+            return
+        }
+
+        commandHistoryStore.addEvent(
+            activeCommandHistoryId,
+            state =
+                if (result.success) {
+                    "controlled_proactivity_v2_command_verified"
+                } else {
+                    "controlled_proactivity_v2_command_failed"
+                },
+            message = result.message.take(500),
+            details = result.technical.take(1800)
+        )
+
+        if (result.success) {
+            finishLocalCommand(
+                text = result.message,
+                silent = silent,
+                technical = result.technical
+            )
+            return
+        }
+
+        val terminal =
+            when (
+                result.terminalStatus
+                    .trim()
+                    .uppercase(Locale.ROOT)
+            ) {
+                "BLOCKED" ->
+                    AyanaCommandHistoryStore.STATUS_BLOCKED
+                "UNSUPPORTED" ->
+                    AyanaCommandHistoryStore.STATUS_UNSUPPORTED
+                else ->
+                    AyanaCommandHistoryStore.STATUS_ERROR
+            }
+
+        respondAndResume(
+            text = result.message,
+            silent = silent,
+            success = false,
+            terminalStatus = terminal,
+            technical = result.technical
+        )
+    }
+
     private fun normalizeBatteryProactivityCommand(
         value: String
     ): String =
@@ -11998,7 +12277,7 @@ timeoutMs
                 "покажи проактивные правила",
                 "какие проактивные правила включены",
                 "покажи активные проактивные правила"
-            )
+)
     }
 
     private fun extractBatteryProactivityThreshold(
@@ -12418,28 +12697,19 @@ BatteryManager.EXTRA_SCALE,
         silent: Boolean
     ) {
         executionPhase(
-            phase = "controlled_battery_proactivity_configure",
-            executor = "battery_proactivity_controller"
+            phase = "controlled_proactivity_v2_legacy_configure",
+            executor = "controlled_proactivity_v2"
         )
 
         val requestedThreshold =
-            extractBatteryProactivityThreshold(
-                command
-            ) ?:
-                AyanaBatteryProactivityController
-                    .DEFAULT_THRESHOLD_PERCENT
+            extractBatteryProactivityThreshold(command)
+                ?: AyanaBatteryProactivityController.DEFAULT_THRESHOLD_PERCENT
 
-        val rule =
-            try {
-                batteryProactivityController
-                    .enable(
-                        requestedThreshold
-                    )
-            } catch (_: Exception) {
-                null
-            }
-
-        if (rule == null) {
+        if (
+            requestedThreshold !in
+            AyanaBatteryProactivityController.MIN_THRESHOLD_PERCENT..
+                AyanaBatteryProactivityController.MAX_THRESHOLD_PERCENT
+        ) {
             respondAndResume(
                 "Порог низкого заряда должен быть от ${AyanaBatteryProactivityController.MIN_THRESHOLD_PERCENT}% до ${AyanaBatteryProactivityController.MAX_THRESHOLD_PERCENT}%.",
                 silent,
@@ -12448,27 +12718,48 @@ BatteryManager.EXTRA_SCALE,
             return
         }
 
-        // Evaluate the current sticky battery state immediately after explicit
-        // opt-in. The rule may only post a notification; no device mutation.
-        currentBatteryIntent()
-            ?.let { intent ->
-                handleBatteryProactivitySample(
-                    intent = intent,
-                    source = "user_enable_immediate_sample"
-                )
-            }
+        val result =
+            controlledProactivityFacade.tryHandle(
+                "предупреди когда заряд станет ниже $requestedThreshold процентов"
+            )
+
+        if (!result.success) {
+            respondAndResume(
+                result.message,
+                silent,
+                success = false,
+                terminalStatus =
+                    if (result.terminalStatus == "UNSUPPORTED") {
+                        AyanaCommandHistoryStore.STATUS_UNSUPPORTED
+                    } else {
+                        AyanaCommandHistoryStore.STATUS_ERROR
+                    },
+                technical = result.technical
+            )
+            return
+        }
+
+        // Prevent duplicate notifications from an old persisted R9.9.2 rule.
+        try {
+            batteryProactivityController.disable()
+        } catch (_: Exception) {
+        }
+        cancelProactivityNotification(
+            BATTERY_PROACTIVITY_NOTIFICATION_ID
+        )
 
         commandHistoryStore.addEvent(
             activeCommandHistoryId,
             state = "controlled_proactivity_rule_enabled",
-            message = "R9.9.2 low-battery rule enabled",
+            message = "R10.27.6 low-battery rule enabled",
             details =
-                "threshold=${rule.thresholdPercent}; cooldown_ms=${rule.cooldownMs}; max_notifications_per_hour=${rule.maxNotificationsPerHour}; mutation_authority=false"
+                "threshold=$requestedThreshold; explicit_user_opt_in=true; engine=v2; mutation_authority=false"
         )
 
         finishLocalCommand(
-            "Контроль низкого заряда включён: AYANA предупредит уведомлением при ${rule.thresholdPercent}% или ниже. Изменять настройки или запускать действия самостоятельно этот контроль не может.",
-            silent
+            "Контроль низкого заряда включён: AYANA предупредит при $requestedThreshold% или ниже.",
+            silent,
+            technical = result.technical
         )
     }
 
@@ -12476,25 +12767,36 @@ BatteryManager.EXTRA_SCALE,
         silent: Boolean
     ) {
         executionPhase(
-            phase = "controlled_battery_proactivity_configure",
-            executor = "battery_proactivity_controller"
+            phase = "controlled_proactivity_v2_legacy_configure",
+            executor = "controlled_proactivity_v2"
         )
 
-        val rule =
+        val store =
+            AyanaProactivityRuleStore(
+                applicationContext
+            )
+
+        val lowBatteryRules =
             try {
-                batteryProactivityController
-                    .disable()
+                store.list()
+                    .filter {
+                        it.triggerType ==
+                            AyanaControlledProactivityEngine.TriggerType.BATTERY_BELOW_PERCENT
+                    }
             } catch (_: Exception) {
-                null
+                emptyList()
             }
 
-        if (rule == null) {
-            respondAndResume(
-                "Не удалось сохранить состояние контроля низкого заряда.",
-                silent,
-                success = false
-            )
-            return
+        var deleted = 0
+        lowBatteryRules.forEach { rule ->
+            if (store.delete(rule.ruleId)) {
+                deleted++
+            }
+        }
+
+        try {
+            batteryProactivityController.disable()
+        } catch (_: Exception) {
         }
 
         cancelProactivityNotification(
@@ -12504,13 +12806,16 @@ BatteryManager.EXTRA_SCALE,
         commandHistoryStore.addEvent(
             activeCommandHistoryId,
             state = "controlled_proactivity_rule_disabled",
-            message = "R9.9.2 low-battery rule disabled",
-            details = "mutation_authority=false"
+            message = "R10.27.6 low-battery rules disabled",
+            details =
+                "deleted_rules=$deleted; other_proactivity_rules_preserved=true; mutation_authority=false"
         )
 
         finishLocalCommand(
             "Контроль низкого заряда выключен.",
-            silent
+            silent,
+            technical =
+                "r10_27_6=true; deleted_low_battery_rules=$deleted; other_rules_preserved=true"
         )
     }
 
@@ -12518,26 +12823,26 @@ BatteryManager.EXTRA_SCALE,
         silent: Boolean
     ) {
         executionPhase(
-            phase = "controlled_battery_proactivity_status",
-            executor = "battery_proactivity_controller"
+            phase = "controlled_proactivity_v2_legacy_status",
+            executor = "controlled_proactivity_v2"
         )
 
-        val rule =
-            try {
-                batteryProactivityController
-                    .currentRule()
-            } catch (_: Exception) {
-                null
-            }
-
-        if (rule == null) {
-            respondAndResume(
-                "Не удалось прочитать правило контроля низкого заряда.",
-                silent,
-                success = false
+        val store =
+            AyanaProactivityRuleStore(
+                applicationContext
             )
-            return
-        }
+
+        val rules =
+            try {
+                store.list()
+                    .filter {
+                        it.triggerType ==
+                            AyanaControlledProactivityEngine.TriggerType.BATTERY_BELOW_PERCENT &&
+                            it.enabled
+                    }
+            } catch (_: Exception) {
+                emptyList()
+            }
 
         val sampleText =
             if (
@@ -12549,13 +12854,24 @@ BatteryManager.EXTRA_SCALE,
                 ""
             }
 
-        finishLocalCommand(
-            if (rule.enabled) {
-                "Контроль низкого заряда включён: порог ${rule.thresholdPercent}%, cooldown ${rule.cooldownMs / 60_000L} мин, максимум ${rule.maxNotificationsPerHour} уведомление в час.$sampleText"
-            } else {
+        val message =
+            if (rules.isEmpty()) {
                 "Контроль низкого заряда выключен.$sampleText"
-            },
-            silent
+            } else {
+                val thresholds =
+                    rules
+                        .mapNotNull { it.threshold }
+                        .distinct()
+                        .sorted()
+                        .joinToString(", ")
+                "Контроль низкого заряда включён. Порог(и): $thresholds%.$sampleText"
+            }
+
+        finishLocalCommand(
+            message,
+            silent,
+            technical =
+                "r10_27_6=true; global_enabled=${store.isGloballyEnabled()}; active_low_battery_rules=${rules.size}"
         )
     }
 
@@ -12998,7 +13314,7 @@ false
             activeCommandHistoryId,
             state =
                 if (result.optBoolean("success", false)) {
-                    "reversible_undo_verified"
+"reversible_undo_verified"
                 } else {
                     "reversible_undo_rejected"
                 },
@@ -13998,7 +14314,7 @@ contentResolver,
         val settingsIntent =
             c.contains("настрой") ||
                 c.contains("разреш") ||
-                c.contains("доступ к уведом") ||
+c.contains("доступ к уведом") ||
                 c.contains("категор") ||
                 c.contains("выключ") ||
                 c.contains("включ")
@@ -14998,8 +15314,7 @@ AyanaNotificationListenerService.PROJECTION_TITLES -> {
             isAppLaunchCommand(
                 wholeCommand
             )
-
-        val candidates =
+val candidates =
             localAppPhoneticRouter
                 .rank(
                     query = target,
@@ -15998,7 +16313,7 @@ respondAndResume(
                                                     "FAIL"
                                                 }
                                             }",
-                                        details =
+details =
                                             stepResult
                                                 .toString()
                                                 .take(2200)
@@ -16998,7 +17313,7 @@ var attempts = 0
                     "r10_5_live_adaptive_autonomy_acceptance"
                 } else {
                     "multi_app_task_orchestration"
-                },
+},
             executor =
                 if (r10_5Acceptance) {
                     "adaptive_execution_loop_v1_1+multi_app_task_orchestrator"
@@ -17998,7 +18313,7 @@ var attempts = 0
                                 adaptiveVerifiedPrefixPreserved
                             )
                             .put(
-                                "same_failed_transition_replay_blocked",
+"same_failed_transition_replay_blocked",
                                 adaptiveSameFailedReplayBlocked
                             )
                             .put(
@@ -18998,7 +19313,7 @@ var attempts = 0
         val result =
             executeAppIntegrationAction(
                 appKey = AyanaAppIntegrationRegistry.APP_YOUTUBE,
-                actionKey = AyanaAppIntegrationRegistry.ACTION_SEARCH,
+actionKey = AyanaAppIntegrationRegistry.ACTION_SEARCH,
                 payload = query
             )
 
@@ -19998,7 +20313,7 @@ else ->
                     mainHandler.post {
                         if (
                             isCommandCancelled(commandToken) ||
-                            commandToken != activeCommandToken
+commandToken != activeCommandToken
                         ) {
                             return@post
                         }
@@ -20997,8 +21312,7 @@ executeCommand(
                     )
                     return true
                 }
-
-                val preflight =
+val preflight =
                     preparePreExecutionGoal(
                         command = executable,
                         inheritedConstraints = decision.constraints
@@ -21998,8 +22312,7 @@ executionKernel.markSideEffectReconciliationStarted(
                 message = "Яркость уже установлена на ${step.percent}%."
             )
         }
-
-        if (
+if (
             !beginDispatch(
                 "brightness=${step.percent}%"
             )
@@ -22998,7 +23311,7 @@ finishLocalCommand(
         val volume =
             state.optInt(
                 "media_volume",
-                -1
+-1
             )
 
         val volumeMax =
@@ -23998,7 +24311,7 @@ append(index + 1)
      * copy semantics continue to the existing routers. The captured payload keeps
      * the user's original case and punctuation; only surrounding whitespace is trimmed.
      */
-    private fun extractLocalClipboardCopyRequest(
+private fun extractLocalClipboardCopyRequest(
         command: String
     ): String? {
 
@@ -24998,7 +25311,7 @@ val verified =
             )
 
         val result =
-            setExactMediaVolume(
+setExactMediaVolume(
                 request
             )
 
@@ -25997,8 +26310,7 @@ val item = values.optJSONObject(index) ?: continue
                         .replace(Regex("\\s+"), " ")
                         .trim()
                         .take(180)
-
-                if (value.isNotBlank() && value !in texts) {
+if (value.isNotBlank() && value !in texts) {
                     texts.add(value)
                 }
             }
@@ -26998,7 +27310,7 @@ val ok =
                 filteredNotification.appFilter
                     .orEmpty()
                     .contains(
-                        "google",
+"google",
                         ignoreCase = true
                     )
 
@@ -27998,7 +28310,7 @@ val ok =
                         "result_transfer_version",
                         report.optString(
                             "result_transfer_version"
-                        )
+)
                     )
                     .put(
                         "plan_key",
@@ -28998,7 +29310,7 @@ val ok =
                     tryBeginPublish = { detail ->
                         executionKernel
                             .tryBeginIrreversibleDispatch(
-                                kind =
+kind =
                                     "master_acceptance_report_publish",
                                 detail = detail
                             )
@@ -29998,7 +30310,7 @@ val ok =
                 .put(
                     "elapsed_ms",
                     (
-                        SystemClock.elapsedRealtime() -
+SystemClock.elapsedRealtime() -
                             startedAt
                         )
                         .coerceAtLeast(0L)
@@ -30998,7 +31310,7 @@ AyanaAcceptanceTestEngine.PROBE_NOTIFICATION_ROUTING ->
                 acceptanceAgentCoreDeepProbe()
 
             AyanaAcceptanceTestEngine.PROBE_AGENT_CORE_CONTEXT ->
-                acceptanceAgentCoreContextProbe()
+acceptanceAgentCoreContextProbe()
 
             AyanaAcceptanceTestEngine.PROBE_KNOWN_LIMITS ->
                 acceptanceKnownLimitsProbe()
@@ -31998,7 +32310,7 @@ AyanaAcceptanceTestEngine.PROBE_NOTIFICATION_ROUTING ->
                         "adaptive_loop_version",
                         AyanaAdaptiveExecutionLoop.VERSION
                     )
-                    .put(
+.put(
                         "long_task_recovery_version",
                         AyanaLongTaskRecoveryCoordinator.VERSION
                     )
@@ -32998,7 +33310,7 @@ AyanaAcceptanceTestEngine.PROBE_NOTIFICATION_ROUTING ->
                 plan.optInt(
                     "max_actions",
                     -1
-                ) in 1..2
+) in 1..2
 
             val terminalStepOk =
                 steps.length() == 1 &&
@@ -33998,7 +34310,7 @@ if (sessionOk) {
             } ?: apps.first()
 
         val resolved =
-            appResolver.resolve(
+appResolver.resolve(
                 candidate.label,
                 forceRefresh = false
             )
@@ -34998,7 +35310,7 @@ val ok = targetVerified && restoreVerified
         val artifactMetricsSuppressed =
             extractRequestedAggregateMetrics(
                 artifactCommand
-            ).isEmpty()
+).isEmpty()
 
         val mixedSideEffectMetricsSuppressed =
             extractRequestedAggregateMetrics(
@@ -35998,7 +36310,7 @@ val code =
             return acceptanceProbeResult(
                 status = AyanaAcceptanceTestEngine.STATUS_NO_DATA,
                 message =
-                    "Required-fact gate не проверен: первый Agent Core turn недоступен, HTTP=$firstCode.",
+"Required-fact gate не проверен: первый Agent Core turn недоступен, HTTP=$firstCode.",
                 evidenceScope = "bounded_online_agent_core",
                 verified = false,
                 evidence = first
@@ -36998,7 +37310,7 @@ commandHistoryStore::fullResult
             "AYANA_SELFTEST_APP_" +
                 UUID.randomUUID()
                     .toString()
-                    .replace(
+.replace(
                         "-",
                         ""
                     )
@@ -37998,7 +38310,7 @@ routed.forEach {
                         "что такое фотосинтез"
                     ),
                 readTimeoutMs = 26000
-            )
+)
 
         val firstData =
             first.optJSONObject(
@@ -38998,7 +39310,7 @@ routed.forEach {
                             // R10.13.2 correction: full process-death recovery must be proved
                             // independently from Samsung AccessibilityService rebinding latency.
                             // The acceptance DAG deliberately leaves only a local Agent Core
-                            // device-state suffix after the disk-only restore. UI-control after
+// device-state suffix after the disk-only restore. UI-control after
                             // total process death is a separate perception-process milestone.
                             runtimeContext
                                 .put("r10_13_post_process_readiness_required", false)
@@ -39998,7 +40310,7 @@ failedSubgoalId = subgoal.id,
                     executorResult.optString(
                         "reason",
                         executorResult.optString(
-                            "message",
+"message",
                             "subgoal_not_verified"
                         )
                     )
@@ -40998,7 +41310,7 @@ failedSubgoalId = subgoal.id,
                 runtimeContext.optBoolean("r10_14_bridge_reconnected_after_process_death", false)
             )
             .put(
-                "accessibility_continuity_verified",
+"accessibility_continuity_verified",
                 runtimeContext.optBoolean("r10_14_accessibility_continuity_verified", false)
             )
             .put(
@@ -41998,7 +42310,7 @@ failedSubgoalId = subgoal.id,
                             partial.optString("value")
                         } else {
                             plannerArguments.optString("title")
-                        }
+}
                     )
                     .put("commit_semantics", "DRAFT_ONLY")
             }
@@ -42998,7 +43310,7 @@ failedSubgoalId = subgoal.id,
             communicationAssistantEngine.actionPolicy(
                 action = "send_message",
                 explicitUserAction = true
-            )
+)
 
         respondUnsupportedAndResume(
             text =
@@ -43998,8 +44310,7 @@ failedSubgoalId = subgoal.id,
 
         currentAgentThread =
             worker
-
-        executionKernel
+executionKernel
             .bindThread(worker)
 
         worker.start()
@@ -44998,7 +45309,7 @@ failedSubgoalId = subgoal.id,
                         activeCommandHistoryId,
                         state = "r10_16_perception_recovery_preflight",
                         message =
-                            if (preflightOk && policyOk) {
+if (preflightOk && policyOk) {
                                 "R10.16 preflight подтверждён; :perception готов к controlled kill/rebind"
                             } else {
                                 "R10.16 preflight не подтверждён"
@@ -45998,8 +46309,7 @@ silent = silent,
                         } catch (_: Exception) {
                             false
                         }
-
-                    val continuitySelfTest =
+val continuitySelfTest =
                         try {
                             AyanaCrossLaneAdaptiveContinuity.selfTest()
                         } catch (_: Exception) {
@@ -46998,7 +47308,7 @@ silent = silent,
                                 mayMutate = false,
                                 authoritySource =
                                     AyanaCrossLaneAdaptiveContinuity.AUTH_AGENT_CORE
-                            )
+)
                         } else {
                             JSONObject().put("allowed", false)
                         }
@@ -47998,7 +48308,7 @@ silent = silent,
 
                     if (!durableStartPersisted) {
                         throw IllegalStateException(
-                            "R10.8 initial durable long-objective checkpoint was not persisted"
+"R10.8 initial durable long-objective checkpoint was not persisted"
                         )
                     }
 
@@ -48998,7 +49308,7 @@ AyanaCrossLaneAdaptiveContinuity.AUTH_AGENT_CORE
                             acceptanceGoalId,
                             "R10.8 general-purpose long autonomous objective verified"
                         )
-                    } else {
+} else {
                         restartedStore.markFailed(
                             acceptanceGoalId,
                             "R10.8 long-objective acceptance failed verification"
@@ -49998,7 +50308,7 @@ AyanaCrossLaneAdaptiveContinuity.AUTH_AGENT_CORE
                             restartStatePreserved &&
                             recoveryIncremented &&
                             backToMulti.optBoolean("allowed", false) &&
-                            expectedBrowserPackage.isNotBlank()
+expectedBrowserPackage.isNotBlank()
                         ) {
                             attemptVerifiedStructuredSemanticScreenRead(
                                 expectedPackage = expectedBrowserPackage,
@@ -50998,8 +51308,7 @@ AyanaCrossLaneAdaptiveContinuity.AUTH_AGENT_CORE
                         multiGate.optBoolean("allowed", false) &&
                             adaptiveLoop.currentRevision() == revisionBeforeMultiSwitch &&
                             adaptiveLoop.verifiedStepCount() == prefixBeforeMultiSwitch
-
-                    val browserArgs =
+val browserArgs =
                         JSONObject()
                             .put("app_key", AyanaAppIntegrationRegistry.APP_BROWSER)
                             .put("action_key", AyanaAppIntegrationRegistry.ACTION_OPEN_URL)
@@ -51998,7 +52307,7 @@ val primaryMarkerObserved =
                     val visualArgs =
                         JSONObject()
                             .put("expected_package", browserPackage)
-                            .put("expected_title", R9_7_STRUCTURED_ACCEPTANCE_TITLE)
+.put("expected_title", R9_7_STRUCTURED_ACCEPTANCE_TITLE)
                             .put("mode", "package_bound_structured_visual")
 
                     val visualProposal =
@@ -52998,7 +53307,7 @@ val networkPaused =
                             .put(
                                 "service_restart_hook_present",
                                 true
-                            )
+)
                             .put(
                                 "automatic_resume_guard_present",
                                 true
@@ -53998,7 +54307,7 @@ val networkPaused =
             }
 
         val screenTruth =
-            try {
+try {
                 screenIntelligence.getScreenState()
             } catch (_: Exception) {
                 JSONObject()
@@ -54998,7 +55307,7 @@ mutableListOf<String>()
 
             hasDocument &&
                 asksUpload ->
-                "Да. В текстовом режиме AYANA можно прикрепить PDF, текстовые и кодовые файлы, Word/ODT/RTF, PowerPoint и таблицы Excel/CSV. Файл проходит проверку типа и размера перед отправкой на анализ."
+"Да. В текстовом режиме AYANA можно прикрепить PDF, текстовые и кодовые файлы, Word/ODT/RTF, PowerPoint и таблицы Excel/CSV. Файл проходит проверку типа и размера перед отправкой на анализ."
 
             hasDocument &&
                 asksAnalysis ->
@@ -55998,8 +56307,7 @@ val activeNetwork =
             450L
         )
     }
-
-    // =========================================================
+// =========================================================
     // AI TEXT
     // =========================================================
 
@@ -56998,7 +57306,7 @@ state = "agent_response",
                                         (
                                             "tool=$lastSemanticActionTool; " +
                                                 "local_success=${semanticFailure.optBoolean("success", false)}; " +
-                                                "local_verified=${semanticFailure.optBoolean("verified", false)}; " +
+"local_verified=${semanticFailure.optBoolean("verified", false)}; " +
                                                 "local_status=${semanticFailure.optString("status")}; " +
                                                 "local_terminal=${semanticFailure.optString("terminal_status")}; " +
                                                 "effective_terminal=${finalTerminalStatus ?: "ERROR"}"
@@ -57998,7 +58306,7 @@ false
                                         .name -> {
                                         taskGraph.pause(
                                             recoveryDecision.optString(
-                                                "reason",
+"reason",
                                                 "r9_2_recovery_pause"
                                             )
                                         )
@@ -58998,7 +59306,7 @@ adaptiveExecutionLoop
 
                                     if (replanCheckpoint == null) {
                                         finalAnswer =
-                                            "Я остановила перепланирование: состояние цели перед новым маршрутом не удалось надёжно сохранить."
+"Я остановила перепланирование: состояние цели перед новым маршрутом не удалось надёжно сохранить."
                                         finalSuccess =
                                             false
                                         break
@@ -59998,7 +60306,7 @@ STATE_SUCCESS
                                 "agent_core_error:${technicalMessage.ifBlank { "unknown" }}"
                             )
                     } catch (storeError: Exception) {
-                        commandHistoryStore.addEvent(
+commandHistoryStore.addEvent(
                             activeCommandHistoryId,
                             state = "goal_store_error",
                             message = "Не удалось сохранить recovery checkpoint после ошибки",
@@ -60998,7 +61306,7 @@ STATE_SUCCESS
                         result.optBoolean("action_dispatched", false) &&
                         result.optBoolean("action_committed", false) &&
                         result.optBoolean("reconciliation_complete", false) &&
-                        result.optString("side_effect_state") == "VERIFIED_COMMITTED" &&
+result.optString("side_effect_state") == "VERIFIED_COMMITTED" &&
                         result.optString("side_effect_kind") == "github_development_transaction" &&
                         transactionId.isNotBlank() &&
                         resultTransactionId == transactionId &&
@@ -61998,7 +62306,7 @@ details = error.message.orEmpty().take(220)
                                     )
                                 )
                                 .put(
-                                    "last_result",
+"last_result",
                                     reconciliation
                                         .toString()
                                         .take(
@@ -62997,8 +63305,7 @@ return ""
         silent: Boolean,
         toolName: String
     ): String? {
-
-        return try {
+return try {
             val item =
                 durableGoalStore
                     .startGoal(
@@ -63998,7 +64305,7 @@ return ""
             manifest.optJSONArray("items")?.length() ?: 0
         } else {
             1
-        }
+}
     }
 
     private fun multimodalAttachmentCountLabel(
@@ -64997,8 +65304,7 @@ technical = technical
                     invalid = true
                 }
             }
-
-            if (
+if (
                 invalid ||
                 returnedIds != expectedIds ||
                 translations.length() != segments.size
@@ -65998,7 +66304,7 @@ return callAgentCore(
                         )
             } catch (error: IllegalStateException) {
                 val decision =
-                    agentCoreRecoveryPolicy.decide(
+agentCoreRecoveryPolicy.decide(
                         error = error,
                         originalMessage = originalMessage,
                         source = source,
@@ -66998,7 +67304,7 @@ private fun isSemanticActionResultVerified(
                                 "section"
                             )
                     )
-                }
+}
 "open_app_info" -> {
 
                     agentOpenAppInfo(
@@ -67998,7 +68304,7 @@ private fun isSemanticActionResultVerified(
                                 )
 
                         override fun openApp(
-                            name: String
+name: String
                         ): JSONObject =
                             this@AyanaVoiceService
                                 .agentOpenApp(
@@ -68998,7 +69304,7 @@ result = result
 
         return JSONObject()
             .put(
-                "success",
+"success",
                 true
             )
             .put(
@@ -69998,7 +70304,7 @@ recurrence = old.recurrence,
                 ) {
 
                     if (intentAttestation.optBoolean("success", false)) {
-                        commandHistoryStore.addEvent(
+commandHistoryStore.addEvent(
                             activeCommandHistoryId,
                             state = "settings_intent_attested",
                             message = "Раздел Settings подтверждён exact-intent attestation",
@@ -70998,7 +71304,7 @@ firstString(
                                             "artifact_type",
                                             "file_type",
                                             "declared_kind",
-                                            "kind",
+"kind",
                                             "type"
                                         )
                                     )
@@ -71998,7 +72304,7 @@ firstString(
                     "X-Ayana-Voice"
                 )
                 ?.trim()
-                ?.lowercase(
+?.lowercase(
                     Locale.ROOT
                 )
                 .orEmpty()
@@ -72998,7 +73304,7 @@ terminalStatus: String? = null
 
         updateNotification(
             "Команда остановлена • AYANA остаётся активной"
-        )
+)
 
         resumeAfterCancellation(
             attempt = 0
@@ -73308,6 +73614,10 @@ state
         listenMode =
             ListenMode.BUSY
 
+        try {
+            controlledProactivityFacade.stop()
+        } catch (_: Exception) {
+        }
         unregisterBatteryProactivityReceiver()
         stopCancelListenerWatchdog()
         backgroundImageIndexer.stop()
@@ -73386,25 +73696,25 @@ state
 
         // R10.27.4 VIDEO AUDIO ANALYSIS.
         private const val AYANA_VOICE_SERVICE_RELEASE =
-            "v12.63.0 / R10.27.5 VERIFIED INTERNET SPEED"
+            "v12.64.0 / R10.27.6 CONTROLLED PROACTIVITY 2.0"
 
         private const val AYANA_PERSONAL_SEARCH_ENGINE_RELEASE =
             "v2.0 / R10.20 PERSONAL SEARCH 2.0 + VERIFIED RESULT CONTRACT v2"
 
         private const val AYANA_CAPABILITY_REGISTRY_RELEASE =
-            "v3.4 / R10.27.5 VERIFIED INTERNET SPEED TRUTH"
+            "v3.5 / R10.27.6 CONTROLLED PROACTIVITY 2.0 TRUTH"
 
         private const val AYANA_WORKER_RELEASE =
             "v11.7.0 / R10.27.4 VIDEO AUDIO ANALYSIS"
 
         private const val AYANA_ACCEPTED_FEATURE_CHECKPOINT =
-            "R10.27.4 VIDEO AUDIO ANALYSIS — DEVICE-CONFIRMED; R10.27.3.1 + R10.27.2.1 + R10.27.1.2 preserved"
+            "R10.27.5 VERIFIED INTERNET SPEED — FUNCTIONALLY DEVICE-CONFIRMED; minor CANCELLED-history issue deferred; R10.27.4 + R10.27.3.1 + R10.27.2.1 + R10.27.1.2 preserved"
 
         private const val AYANA_CURRENT_FEATURE_RELEASE =
-            "R10.27.5 VERIFIED INTERNET SPEED — PENDING DEVICE CONFIRMATION"
+            "R10.27.6 CONTROLLED PROACTIVITY 2.0 — BUILD / DEVICE CONFIRMATION PENDING"
 
         private const val AYANA_RELEASE_LINEAGE =
-            "Android v12.21.0 / R7.9 truth-hardening + R8.0 multi-attachment + R8.1–R8.4 accepted Personal Global Search stack + R8.5–R8.5.4 capability/evidence truth + R9.0 autonomous agent foundation + R9.0.1 history live-refresh proof fix + R9.0.2 diagnostic reconciliation/history refresh fix + R9.0.3 TTS health reconciliation + R9.1 IME perception/active telemetry truth + R9.2 autonomous recovery/long-task reconciliation + R9.2.1 adaptive hypothesis reconciliation + R9.3 app integration framework + R9.3.1 screen health reconciliation + R9.3.2 history latency recovery reconciliation + R9.3.3 informational terminal reconciliation + R9.3.4 app integration device acceptance + R9.4 multi-app task orchestration + R9.4.1 screen ownership union reconciliation + R9.5 verified result transfer between app steps + R9.5.1 partial marker provenance reconciliation + R9.5.2 bounded marker observation + R9.5.3 verified action result transfer + R9.6 verified semantic observation fallback + R9.6.1 visual fallback acceptance truth + R9.7 structured screen reading + R9.7.1 conversation routing/terminal truth + R9.7.2 structured router conversation precedence + R9.7.3 action morphology/terminal truth + R9.8 generic verified result transfer + R9.8.1 master full acceptance/diagnostic engine + R9.9 reversible action journal/verified undo + R9.9.1 brightness verified undo device acceptance + R9.9.2 opt-in low-battery controlled proactivity + R10.0 unified screen intelligence + R10.1 local self-diagnostics/self-audit + R10.2 personal search expansion + R10.3 long autonomous tasks/recovery + R10.4 adaptive verified execution loop + R10.5 generalized live adaptive autonomy + R10.6 cross-lane adaptive continuity + R10.6.1 durable goal binding fix + R10.7 cross-lane durable recovery continuity + R10.7.1 isolated acceptance cleanup hardening + R10.8 general-purpose long autonomous objectives + R10.9 dynamic goal decomposition/planner contract + R10.10 adaptive planner production path + R10.11 production replan/durable recovery + R10.12 natural lifecycle recovery/background continuation + R10.13 full process-death recovery + R10.13.1 post-process readiness/reconciliation + R10.13.2 process-death core recovery proof correction + R10.14 perception process isolation/cross-process accessibility bridge + R10.14.1 cross-process visual evidence fix + R10.14.2 lifecycle profile/self-diagnostic truth + R10.14.3 history recovery reconciliation + R10.15 generalized cross-process autonomy hardening + R10.15.1 self-diagnostics routing reconciliation + R10.16 perception process recovery/safe bridge rebind + R10.16.1 restart telemetry reconciliation + R10.17 screen intelligence 2.0 + R10.17.1 acceptance routing reconciliation + R10.18 universal UI action engine + R10.18.1 acceptance target reconciliation + R10.18.2 live target authority reconciliation + R10.18.3 app info target reconciliation + R10.19 autonomous multi-app tasks 2.0 + R10.20 personal search 2.0 + R10.21 document & office engine 2.0 + R10.22 notifications & communication assistant + R10.22.1 notification acceptance visibility reconciliation + R10.21.1 pptx completion evidence reconciliation + R10.23 voice & background 2.0 + R10.24 field hardening + R10.24.1 field hardening reconciliation/device acceptance + R10.24.2 acceptance truth reconciliation + R10.25 cross-process accessibility truth reconciliation + R10.26 capability evidence metadata reconciliation + R10.26.1 capability evidence metadata detector reconciliation + R10.27.1 github repository write/commit-push + R10.27.1.1 github confirmation terminal truth + R10.27.1.2 github verified-commit completion truth + R10.27.2 apk build pipeline + R10.27.2.1 apk build prepare read-only truth + R10.27.3 verified development transaction/project workspace + R10.27.3.1 waiting-acceptance terminal truth + R10.27.4 video audio analysis + R10.27.5 verified internet speed"
+            "Android v12.21.0 / R7.9 truth-hardening + R8.0 multi-attachment + R8.1–R8.4 accepted Personal Global Search stack + R8.5–R8.5.4 capability/evidence truth + R9.0 autonomous agent foundation + R9.0.1 history live-refresh proof fix + R9.0.2 diagnostic reconciliation/history refresh fix + R9.0.3 TTS health reconciliation + R9.1 IME perception/active telemetry truth + R9.2 autonomous recovery/long-task reconciliation + R9.2.1 adaptive hypothesis reconciliation + R9.3 app integration framework + R9.3.1 screen health reconciliation + R9.3.2 history latency recovery reconciliation + R9.3.3 informational terminal reconciliation + R9.3.4 app integration device acceptance + R9.4 multi-app task orchestration + R9.4.1 screen ownership union reconciliation + R9.5 verified result transfer between app steps + R9.5.1 partial marker provenance reconciliation + R9.5.2 bounded marker observation + R9.5.3 verified action result transfer + R9.6 verified semantic observation fallback + R9.6.1 visual fallback acceptance truth + R9.7 structured screen reading + R9.7.1 conversation routing/terminal truth + R9.7.2 structured router conversation precedence + R9.7.3 action morphology/terminal truth + R9.8 generic verified result transfer + R9.8.1 master full acceptance/diagnostic engine + R9.9 reversible action journal/verified undo + R9.9.1 brightness verified undo device acceptance + R9.9.2 opt-in low-battery controlled proactivity + R10.0 unified screen intelligence + R10.1 local self-diagnostics/self-audit + R10.2 personal search expansion + R10.3 long autonomous tasks/recovery + R10.4 adaptive verified execution loop + R10.5 generalized live adaptive autonomy + R10.6 cross-lane adaptive continuity + R10.6.1 durable goal binding fix + R10.7 cross-lane durable recovery continuity + R10.7.1 isolated acceptance cleanup hardening + R10.8 general-purpose long autonomous objectives + R10.9 dynamic goal decomposition/planner contract + R10.10 adaptive planner production path + R10.11 production replan/durable recovery + R10.12 natural lifecycle recovery/background continuation + R10.13 full process-death recovery + R10.13.1 post-process readiness/reconciliation + R10.13.2 process-death core recovery proof correction + R10.14 perception process isolation/cross-process accessibility bridge + R10.14.1 cross-process visual evidence fix + R10.14.2 lifecycle profile/self-diagnostic truth + R10.14.3 history recovery reconciliation + R10.15 generalized cross-process autonomy hardening + R10.15.1 self-diagnostics routing reconciliation + R10.16 perception process recovery/safe bridge rebind + R10.16.1 restart telemetry reconciliation + R10.17 screen intelligence 2.0 + R10.17.1 acceptance routing reconciliation + R10.18 universal UI action engine + R10.18.1 acceptance target reconciliation + R10.18.2 live target authority reconciliation + R10.18.3 app info target reconciliation + R10.19 autonomous multi-app tasks 2.0 + R10.20 personal search 2.0 + R10.21 document & office engine 2.0 + R10.22 notifications & communication assistant + R10.22.1 notification acceptance visibility reconciliation + R10.21.1 pptx completion evidence reconciliation + R10.23 voice & background 2.0 + R10.24 field hardening + R10.24.1 field hardening reconciliation/device acceptance + R10.24.2 acceptance truth reconciliation + R10.25 cross-process accessibility truth reconciliation + R10.26 capability evidence metadata reconciliation + R10.26.1 capability evidence metadata detector reconciliation + R10.27.1 github repository write/commit-push + R10.27.1.1 github confirmation terminal truth + R10.27.1.2 github verified-commit completion truth + R10.27.2 apk build pipeline + R10.27.2.1 apk build prepare read-only truth + R10.27.3 verified development transaction/project workspace + R10.27.3.1 waiting-acceptance terminal truth + R10.27.4 video audio analysis + R10.27.5 verified internet speed + R10.27.6 controlled proactivity 2.0"
 
         // AyanaCommandHistoryStore v2.8 keeps up to 4k chars inline and stores longer
         // results out-of-line. Self-review intentionally remains inline so copied History
@@ -73998,7 +74308,7 @@ const val ACTION_START =
                 "делай ",
                 "делайте ",
                 "выполни ",
-                "выполните ",
+"выполните ",
                 "выполняй ",
                 "выполняйте ",
                 "закоммить ",
