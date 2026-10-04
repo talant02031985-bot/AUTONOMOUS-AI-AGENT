@@ -63,6 +63,15 @@ import kotlin.math.abs
 
 class AyanaVoiceService : Service() {
 
+    // AYANA v12.61.1 / R10.27.3.1 DEVELOPMENT WAITING-ACCEPTANCE TERMINAL TRUTH.
+    // Device acceptance proved the transaction commit, push-triggered APK build and explicit rollback,
+    // but exposed one telemetry contradiction: a verified committed transaction intentionally paused
+    // for ACCEPT/ROLLBACK was semantically BLOCKED while the generic Execution Kernel coerced
+    // BLOCKED + VERIFIED_COMMITTED to ERROR. R10.27.3.1 keeps the user/Task-Graph terminal BLOCKED,
+    // but closes the execution turn as a successful verified checkpoint only for the exact
+    // development_transaction_waiting_acceptance proof. No mutation/build/rollback authority changes;
+    // ORB/UI, Worker, SafetyPolicy and GitHub executor remain unchanged.
+    //
     // AYANA v12.61.0 / R10.27.3 VERIFIED DEVELOPMENT TRANSACTION / PROJECT WORKSPACE.
     // Builds on DEVICE-CONFIRMED R10.27.2.1 / R10.27.2 APK BUILD PIPELINE. Adds one bounded
     // fixed-repository development transaction: immutable blob snapshot -> exact single replacement ->
@@ -72118,30 +72127,81 @@ terminalStatus: String? = null
             return
         }
 
+        // R10.27.3.1: a verified development transaction may have already committed
+        // an exact repository change and verified its APK build while intentionally
+        // pausing for the user's final ACCEPT/ROLLBACK choice. The generic Execution
+        // Kernel correctly rejects ordinary BLOCKED/ERROR after VERIFIED_COMMITTED,
+        // because that usually means terminal truth is inconsistent. This one state
+        // is different: the current execution turn reached a verified checkpoint
+        // successfully, while the higher-level durable transaction remains BLOCKED.
+        val technicalJson =
+            try {
+                technical
+                    .trim()
+                    .takeIf {
+                        it.startsWith("{") &&
+                            it.endsWith("}")
+                    }
+                    ?.let {
+                        JSONObject(it)
+                    }
+            } catch (_: Exception) {
+                null
+            }
+
+        val verifiedDevelopmentWaitingAcceptance =
+            terminalStatus == AyanaCommandHistoryStore.STATUS_BLOCKED &&
+                current?.sideEffectState ==
+                    AyanaExecutionKernel.SideEffectState.VERIFIED_COMMITTED &&
+                technicalJson?.optBoolean("success", false) == true &&
+                technicalJson.optBoolean("verified", false) &&
+                technicalJson.optString("terminal_status") == "BLOCKED" &&
+                technicalJson.optString("status") ==
+                    "development_transaction_waiting_acceptance" &&
+                technicalJson.optBoolean("requires_acceptance", false) &&
+                technicalJson.optBoolean("action_dispatched", false) &&
+                technicalJson.optBoolean("action_committed", false) &&
+                technicalJson.optBoolean("reconciliation_complete", false) &&
+                technicalJson.optString("side_effect_state") ==
+                    "VERIFIED_COMMITTED" &&
+                technicalJson.optString("side_effect_kind") ==
+                    "github_development_transaction"
+
         val kernelStatus =
-            kernelStatusFor(
-                success = success,
-                terminalStatus = terminalStatus
-            )
+            if (verifiedDevelopmentWaitingAcceptance) {
+                // The execution turn itself completed its verified commit+build
+                // checkpoint. The durable transaction/user-facing terminal remains
+                // BLOCKED below until explicit accept or rollback.
+                AyanaExecutionKernel.TerminalStatus.SUCCESS
+            } else {
+                kernelStatusFor(
+                    success = success,
+                    terminalStatus = terminalStatus
+                )
+            }
 
         val kernelReason =
-            technical
-                .trim()
-                .ifBlank {
-                    when {
-                        terminalStatus == AyanaCommandHistoryStore.STATUS_BLOCKED ->
-                            "command_blocked"
+            if (verifiedDevelopmentWaitingAcceptance) {
+                "development_transaction_waiting_acceptance_checkpoint"
+            } else {
+                technical
+                    .trim()
+                    .ifBlank {
+                        when {
+                            terminalStatus == AyanaCommandHistoryStore.STATUS_BLOCKED ->
+                                "command_blocked"
 
-                        terminalStatus == AyanaCommandHistoryStore.STATUS_UNSUPPORTED ->
-                            "command_unsupported"
+                            terminalStatus == AyanaCommandHistoryStore.STATUS_UNSUPPORTED ->
+                                "command_unsupported"
 
-                        !success ->
-                            "command_failed"
+                            !success ->
+                                "command_failed"
 
-                        else ->
-                            "command_completed"
+                            else ->
+                                "command_completed"
+                        }
                     }
-                }
+            }
 
         val completedSnapshot =
             executionKernel.complete(
@@ -72158,6 +72218,17 @@ terminalStatus: String? = null
             message = effectiveKernelStatus.name,
             details = executionKernel.diagnosticSummary().take(1000)
         )
+
+        if (verifiedDevelopmentWaitingAcceptance) {
+            commandHistoryStore.addEvent(
+                id,
+                state = "development_transaction_semantic_pause",
+                message = "Execution checkpoint завершён; development transaction остаётся BLOCKED до accept/rollback",
+                details =
+                    "kernel_terminal=${effectiveKernelStatus.name}; semantic_terminal=BLOCKED; " +
+                        "side_effect_state=VERIFIED_COMMITTED; reconciliation_required=false"
+            )
+        }
     }
 
     private fun finishActiveCommandHistory(
@@ -73045,7 +73116,7 @@ state
 
         // R10.27.3 VERIFIED DEVELOPMENT TRANSACTION / PROJECT WORKSPACE.
         private const val AYANA_VOICE_SERVICE_RELEASE =
-            "v12.61.0 / R10.27.3 VERIFIED DEVELOPMENT TRANSACTION"
+            "v12.61.1 / R10.27.3.1 DEVELOPMENT WAITING-ACCEPTANCE TERMINAL TRUTH"
 
         private const val AYANA_PERSONAL_SEARCH_ENGINE_RELEASE =
             "v2.0 / R10.20 PERSONAL SEARCH 2.0 + VERIFIED RESULT CONTRACT v2"
@@ -73060,10 +73131,10 @@ state
             "R10.27.2.1 / R10.27.2 APK BUILD PIPELINE — DEVICE-CONFIRMED; R10.27.1.2 and R10.26.1 preserved"
 
         private const val AYANA_CURRENT_FEATURE_RELEASE =
-            "R10.27.3 VERIFIED DEVELOPMENT TRANSACTION — PENDING DEVICE CONFIRMATION"
+            "R10.27.3.1 DEVELOPMENT WAITING-ACCEPTANCE TERMINAL TRUTH — PENDING DEVICE CONFIRMATION"
 
         private const val AYANA_RELEASE_LINEAGE =
-            "Android v12.21.0 / R7.9 truth-hardening + R8.0 multi-attachment + R8.1–R8.4 accepted Personal Global Search stack + R8.5–R8.5.4 capability/evidence truth + R9.0 autonomous agent foundation + R9.0.1 history live-refresh proof fix + R9.0.2 diagnostic reconciliation/history refresh fix + R9.0.3 TTS health reconciliation + R9.1 IME perception/active telemetry truth + R9.2 autonomous recovery/long-task reconciliation + R9.2.1 adaptive hypothesis reconciliation + R9.3 app integration framework + R9.3.1 screen health reconciliation + R9.3.2 history latency recovery reconciliation + R9.3.3 informational terminal reconciliation + R9.3.4 app integration device acceptance + R9.4 multi-app task orchestration + R9.4.1 screen ownership union reconciliation + R9.5 verified result transfer between app steps + R9.5.1 partial marker provenance reconciliation + R9.5.2 bounded marker observation + R9.5.3 verified action result transfer + R9.6 verified semantic observation fallback + R9.6.1 visual fallback acceptance truth + R9.7 structured screen reading + R9.7.1 conversation routing/terminal truth + R9.7.2 structured router conversation precedence + R9.7.3 action morphology/terminal truth + R9.8 generic verified result transfer + R9.8.1 master full acceptance/diagnostic engine + R9.9 reversible action journal/verified undo + R9.9.1 brightness verified undo device acceptance + R9.9.2 opt-in low-battery controlled proactivity + R10.0 unified screen intelligence + R10.1 local self-diagnostics/self-audit + R10.2 personal search expansion + R10.3 long autonomous tasks/recovery + R10.4 adaptive verified execution loop + R10.5 generalized live adaptive autonomy + R10.6 cross-lane adaptive continuity + R10.6.1 durable goal binding fix + R10.7 cross-lane durable recovery continuity + R10.7.1 isolated acceptance cleanup hardening + R10.8 general-purpose long autonomous objectives + R10.9 dynamic goal decomposition/planner contract + R10.10 adaptive planner production path + R10.11 production replan/durable recovery + R10.12 natural lifecycle recovery/background continuation + R10.13 full process-death recovery + R10.13.1 post-process readiness/reconciliation + R10.13.2 process-death core recovery proof correction + R10.14 perception process isolation/cross-process accessibility bridge + R10.14.1 cross-process visual evidence fix + R10.14.2 lifecycle profile/self-diagnostic truth + R10.14.3 history recovery reconciliation + R10.15 generalized cross-process autonomy hardening + R10.15.1 self-diagnostics routing reconciliation + R10.16 perception process recovery/safe bridge rebind + R10.16.1 restart telemetry reconciliation + R10.17 screen intelligence 2.0 + R10.17.1 acceptance routing reconciliation + R10.18 universal UI action engine + R10.18.1 acceptance target reconciliation + R10.18.2 live target authority reconciliation + R10.18.3 app info target reconciliation + R10.19 autonomous multi-app tasks 2.0 + R10.20 personal search 2.0 + R10.21 document & office engine 2.0 + R10.22 notifications & communication assistant + R10.22.1 notification acceptance visibility reconciliation + R10.21.1 pptx completion evidence reconciliation + R10.23 voice & background 2.0 + R10.24 field hardening + R10.24.1 field hardening reconciliation/device acceptance + R10.24.2 acceptance truth reconciliation + R10.25 cross-process accessibility truth reconciliation + R10.26 capability evidence metadata reconciliation + R10.26.1 capability evidence metadata detector reconciliation + R10.27.1 github repository write/commit-push + R10.27.1.1 github confirmation terminal truth + R10.27.1.2 github verified-commit completion truth + R10.27.2 apk build pipeline + R10.27.2.1 apk build prepare read-only truth + R10.27.3 verified development transaction/project workspace"
+            "Android v12.21.0 / R7.9 truth-hardening + R8.0 multi-attachment + R8.1–R8.4 accepted Personal Global Search stack + R8.5–R8.5.4 capability/evidence truth + R9.0 autonomous agent foundation + R9.0.1 history live-refresh proof fix + R9.0.2 diagnostic reconciliation/history refresh fix + R9.0.3 TTS health reconciliation + R9.1 IME perception/active telemetry truth + R9.2 autonomous recovery/long-task reconciliation + R9.2.1 adaptive hypothesis reconciliation + R9.3 app integration framework + R9.3.1 screen health reconciliation + R9.3.2 history latency recovery reconciliation + R9.3.3 informational terminal reconciliation + R9.3.4 app integration device acceptance + R9.4 multi-app task orchestration + R9.4.1 screen ownership union reconciliation + R9.5 verified result transfer between app steps + R9.5.1 partial marker provenance reconciliation + R9.5.2 bounded marker observation + R9.5.3 verified action result transfer + R9.6 verified semantic observation fallback + R9.6.1 visual fallback acceptance truth + R9.7 structured screen reading + R9.7.1 conversation routing/terminal truth + R9.7.2 structured router conversation precedence + R9.7.3 action morphology/terminal truth + R9.8 generic verified result transfer + R9.8.1 master full acceptance/diagnostic engine + R9.9 reversible action journal/verified undo + R9.9.1 brightness verified undo device acceptance + R9.9.2 opt-in low-battery controlled proactivity + R10.0 unified screen intelligence + R10.1 local self-diagnostics/self-audit + R10.2 personal search expansion + R10.3 long autonomous tasks/recovery + R10.4 adaptive verified execution loop + R10.5 generalized live adaptive autonomy + R10.6 cross-lane adaptive continuity + R10.6.1 durable goal binding fix + R10.7 cross-lane durable recovery continuity + R10.7.1 isolated acceptance cleanup hardening + R10.8 general-purpose long autonomous objectives + R10.9 dynamic goal decomposition/planner contract + R10.10 adaptive planner production path + R10.11 production replan/durable recovery + R10.12 natural lifecycle recovery/background continuation + R10.13 full process-death recovery + R10.13.1 post-process readiness/reconciliation + R10.13.2 process-death core recovery proof correction + R10.14 perception process isolation/cross-process accessibility bridge + R10.14.1 cross-process visual evidence fix + R10.14.2 lifecycle profile/self-diagnostic truth + R10.14.3 history recovery reconciliation + R10.15 generalized cross-process autonomy hardening + R10.15.1 self-diagnostics routing reconciliation + R10.16 perception process recovery/safe bridge rebind + R10.16.1 restart telemetry reconciliation + R10.17 screen intelligence 2.0 + R10.17.1 acceptance routing reconciliation + R10.18 universal UI action engine + R10.18.1 acceptance target reconciliation + R10.18.2 live target authority reconciliation + R10.18.3 app info target reconciliation + R10.19 autonomous multi-app tasks 2.0 + R10.20 personal search 2.0 + R10.21 document & office engine 2.0 + R10.22 notifications & communication assistant + R10.22.1 notification acceptance visibility reconciliation + R10.21.1 pptx completion evidence reconciliation + R10.23 voice & background 2.0 + R10.24 field hardening + R10.24.1 field hardening reconciliation/device acceptance + R10.24.2 acceptance truth reconciliation + R10.25 cross-process accessibility truth reconciliation + R10.26 capability evidence metadata reconciliation + R10.26.1 capability evidence metadata detector reconciliation + R10.27.1 github repository write/commit-push + R10.27.1.1 github confirmation terminal truth + R10.27.1.2 github verified-commit completion truth + R10.27.2 apk build pipeline + R10.27.2.1 apk build prepare read-only truth + R10.27.3 verified development transaction/project workspace + R10.27.3.1 waiting-acceptance terminal truth"
 
         // AyanaCommandHistoryStore v2.8 keeps up to 4k chars inline and stores longer
         // results out-of-line. Self-review intentionally remains inline so copied History
