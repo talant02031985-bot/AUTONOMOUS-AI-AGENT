@@ -25,12 +25,7 @@ import android.os.SystemClock
 import android.os.Looper
 import android.net.Uri
 import android.provider.Settings
-import android.text.SpannableString
-import android.text.Spanned
-import android.text.TextPaint
-import android.text.method.LinkMovementMethod
 import android.text.method.PasswordTransformationMethod
-import android.text.style.ClickableSpan
 import android.view.Gravity
 import android.view.View
 import android.view.ViewGroup
@@ -61,7 +56,7 @@ import kotlin.concurrent.thread
 
 class MainActivity : AppCompatActivity() {
 
-    // UI generation: v7.10.3 SEARCH RESULT LINKS + v7.10.2 MEDIA SEARCH PERMISSION TRUTH + v7.10.1 COMPACT TEXT RESPONSE + v7.10 MULTI-ATTACHMENT INTAKE + v7.8 UI SCROLL PERFORMANCE + v7.5 NOTIFICATION ACCESS TRUTH
+    // UI generation: v8.0 R10.28.3 PROJECTS UI + v7.8 UI SCROLL PERFORMANCE + v7.5 NOTIFICATION ACCESS TRUTH
     // + OWN-APP SEMANTIC ACTION TRUTH.
     // v7.4 keeps v7.2 foreground ownership truth and hardens the in-process
     // semantic bridge so the same factual View tree used for perception also
@@ -75,6 +70,7 @@ class MainActivity : AppCompatActivity() {
 
     private enum class Page {
         HOME,
+        PROJECTS,
         TASKS,
         MEMORY,
         HISTORY,
@@ -104,9 +100,6 @@ class MainActivity : AppCompatActivity() {
 
     @Volatile
     private var attachmentPreparationGeneration = 0L
-
-    @Volatile
-    private var attachmentPreparationInProgress = false
 
     private val navButtons =
         mutableMapOf<Page, TextView>()
@@ -174,11 +167,33 @@ class MainActivity : AppCompatActivity() {
         org.json.JSONObject? =
         null
 
-    private val memoryStore by lazy {
-        AyanaMemoryStore(
+    // R10.28 PROJECTS UI. MainActivity reads the same durable active_project_id
+    // as VoiceService, so Tasks/Memory/History/Durable Goals shown on screen
+    // always follow the selected project. No active project preserves legacy
+    // global storage exactly.
+    private val projectStore by lazy {
+        AyanaProjectStore(
             applicationContext
         )
     }
+
+    private val projectDataScope by lazy {
+        AyanaProjectDataScope(
+            applicationContext,
+            projectStore
+        )
+    }
+
+    private val memoryStore: AyanaMemoryStore
+        get() =
+            projectStore.activeProjectId()
+                ?.let {
+                    projectDataScope
+                        .forProject(it)
+                        ?.memory
+                }
+                ?: projectDataScope
+                    .globalMemory()
 
     private val multimodalAttachmentManager by lazy {
         AyanaMultimodalAttachmentManager(
@@ -186,11 +201,16 @@ class MainActivity : AppCompatActivity() {
         )
     }
 
-    private val taskStore by lazy {
-        AyanaTaskStore(
-            applicationContext
-        )
-    }
+    private val taskStore: AyanaTaskStore
+        get() =
+            projectStore.activeProjectId()
+                ?.let {
+                    projectDataScope
+                        .forProject(it)
+                        ?.tasks
+                }
+                ?: projectDataScope
+                    .globalTasks()
 
     private val taskScheduler by lazy {
         AyanaTaskScheduler(
@@ -198,11 +218,16 @@ class MainActivity : AppCompatActivity() {
         )
     }
 
-    private val durableGoalStore by lazy {
-        AyanaDurableGoalStore(
-            applicationContext
-        )
-    }
+    private val durableGoalStore: AyanaDurableGoalStore
+        get() =
+            projectStore.activeProjectId()
+                ?.let {
+                    projectDataScope
+                        .forProject(it)
+                        ?.durableGoals
+                }
+                ?: projectDataScope
+                    .globalDurableGoals()
 
     private val ayanaPreferences by lazy {
         AyanaPreferences(
@@ -210,11 +235,16 @@ class MainActivity : AppCompatActivity() {
         )
     }
 
-    private val commandHistoryStore by lazy {
-        AyanaCommandHistoryStore(
-            applicationContext
-        )
-    }
+    private val commandHistoryStore: AyanaCommandHistoryStore
+        get() =
+            projectStore.activeProjectId()
+                ?.let {
+                    projectDataScope
+                        .forProject(it)
+                        ?.history
+                }
+                ?: projectDataScope
+                    .globalHistory()
 
     private val appResolver by lazy {
         AyanaAppResolver(
@@ -264,10 +294,10 @@ class MainActivity : AppCompatActivity() {
 
     private val attachmentLauncher =
         registerForActivityResult(
-            ActivityResultContracts.OpenMultipleDocuments()
-        ) { uris ->
-            if (uris.isNotEmpty()) {
-                prepareSelectedAttachments(uris)
+            ActivityResultContracts.OpenDocument()
+        ) { uri ->
+            if (uri != null) {
+                prepareSelectedAttachment(uri)
             }
         }
 
@@ -778,7 +808,7 @@ class MainActivity : AppCompatActivity() {
                     }
                 layoutParams =
                     LinearLayout.LayoutParams(
-                        dp(158),
+                        dp(172),
                         ViewGroup.LayoutParams.MATCH_PARENT
                     )
             }
@@ -805,6 +835,7 @@ class MainActivity : AppCompatActivity() {
         )
 
         side.addView(navButton(Page.HOME, "⌂  Главная"))
+        side.addView(navButton(Page.PROJECTS, "▣  Проекты"))
         side.addView(navButton(Page.TASKS, "◷  Задачи"))
         side.addView(navButton(Page.MEMORY, "◇  Память"))
         side.addView(navButton(Page.HISTORY, "≡  История"))
@@ -1026,6 +1057,7 @@ class MainActivity : AppCompatActivity() {
 
         return when (page) {
             Page.HOME -> "Главная"
+            Page.PROJECTS -> "Проекты"
             Page.TASKS -> "Задачи"
             Page.MEMORY -> "Память"
             Page.HISTORY -> "История"
@@ -1070,6 +1102,7 @@ class MainActivity : AppCompatActivity() {
         val target =
             when (raw) {
                 "HOME" -> Page.HOME
+                "PROJECTS" -> Page.PROJECTS
                 "TASKS" -> Page.TASKS
                 "MEMORY" -> Page.MEMORY
                 "HISTORY" -> Page.HISTORY
@@ -1115,6 +1148,7 @@ class MainActivity : AppCompatActivity() {
 
         when (currentPage) {
             Page.HOME -> renderHome()
+            Page.PROJECTS -> renderProjects()
             Page.TASKS -> renderTasks()
             Page.MEMORY -> renderMemory()
             Page.HISTORY -> renderHistory()
@@ -3364,6 +3398,726 @@ class MainActivity : AppCompatActivity() {
 
         return box
     }
+
+    private fun renderProjects() {
+
+        contentContainer
+            .removeAllViews()
+
+        val active =
+            projectStore
+                .activeProject()
+
+        contentContainer.addView(
+            pageTitle(
+                "Проекты",
+                if (active == null) {
+                    "Отдельные рабочие пространства без смешивания памяти, истории и задач"
+                } else {
+                    "Активный проект: ${active.name}"
+                }
+            )
+        )
+
+        val createButton =
+            TextView(this).apply {
+                text = "＋  Новый проект"
+                contentDescription = "Создать новый проект"
+                importantForAccessibility =
+                    View.IMPORTANT_FOR_ACCESSIBILITY_YES
+                textSize = 16f
+                gravity = Gravity.CENTER
+                setTypeface(
+                    Typeface.DEFAULT,
+                    Typeface.BOLD
+                )
+                setTextColor(
+                    Color.WHITE
+                )
+                background =
+                    softDrawable(
+                        "#321B6C",
+                        "#6847C7",
+                        15
+                    )
+                setOnClickListener {
+                    showCreateProjectDialog()
+                }
+            }
+
+        contentContainer.addView(
+            createButton,
+            LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                dp(48)
+            ).apply {
+                topMargin = dp(4)
+                bottomMargin = dp(14)
+            }
+        )
+
+        if (active != null) {
+            val activeCard =
+                panel(
+                    18
+                )
+
+            activeCard.addView(
+                TextView(this).apply {
+                    text = "ТЕКУЩИЙ ПРОЕКТ"
+                    textSize = 13.5f
+                    setTypeface(
+                        Typeface.DEFAULT,
+                        Typeface.BOLD
+                    )
+                    letterSpacing = 0.05f
+                    setTextColor(
+                        Color.parseColor("#A78BFA")
+                    )
+                }
+            )
+
+            activeCard.addView(
+                TextView(this).apply {
+                    text = active.name
+                    contentDescription =
+                        "Текущий проект ${active.name}"
+                    textSize = 21f
+                    setTypeface(
+                        Typeface.DEFAULT,
+                        Typeface.BOLD
+                    )
+                    setTextColor(
+                        Color.WHITE
+                    )
+                    setPadding(
+                        0,
+                        dp(7),
+                        0,
+                        0
+                    )
+                }
+            )
+
+            activeCard.addView(
+                TextView(this).apply {
+                    text = "Память, история, задачи и цели сейчас привязаны только к этому проекту."
+                    textSize = 14.5f
+                    setTextColor(
+                        Color.parseColor("#8190A5")
+                    )
+                    setPadding(
+                        0,
+                        dp(6),
+                        0,
+                        0
+                    )
+                }
+            )
+
+            activeCard.addView(
+                smallAction(
+                    "Выйти в глобальный контекст"
+                ) {
+                    val result =
+                        projectStore
+                            .clearActive()
+
+                    Toast.makeText(
+                        this@MainActivity,
+                        if (result.success) {
+                            "Глобальный контекст активен"
+                        } else {
+                            "Не удалось выйти из проекта"
+                        },
+                        Toast.LENGTH_SHORT
+                    ).show()
+
+                    renderCurrentPage()
+                },
+                LinearLayout.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT,
+                    dp(42)
+                ).apply {
+                    topMargin = dp(12)
+                }
+            )
+
+            contentContainer.addView(
+                activeCard,
+                sectionParams(
+                    top = 4
+                )
+            )
+        }
+
+        val projects =
+            projectStore
+                .list(
+                    includeArchived = false
+                )
+
+        contentContainer.addView(
+            smallSectionTitle(
+                if (projects.isEmpty()) {
+                    "ВАШИ ПРОЕКТЫ"
+                } else {
+                    "ВАШИ ПРОЕКТЫ  •  ${projects.size}"
+                }
+            ),
+            LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT
+            ).apply {
+                topMargin = dp(18)
+                bottomMargin = dp(6)
+            }
+        )
+
+        if (projects.isEmpty()) {
+            contentContainer.addView(
+                emptyCard(
+                    "Проектов пока нет",
+                    "Нажмите «Новый проект». Каждый проект будет иметь свой контекст и данные."
+                ),
+                sectionParams(
+                    top = 4
+                )
+            )
+            return
+        }
+
+        projects.forEach { project ->
+            val isActive =
+                project.projectId ==
+                    projectStore.activeProjectId()
+
+            val card =
+                panel(
+                    18
+                )
+
+            val titleRow =
+                LinearLayout(this).apply {
+                    orientation = LinearLayout.HORIZONTAL
+                    gravity = Gravity.CENTER_VERTICAL
+                }
+
+            titleRow.addView(
+                LinearLayout(this).apply {
+                    orientation = LinearLayout.VERTICAL
+
+                    addView(
+                        TextView(this@MainActivity).apply {
+                            text = project.name
+                            contentDescription =
+                                "Проект ${project.name}" +
+                                    if (isActive) {
+                                        ", активный"
+                                    } else {
+                                        ""
+                                    }
+                            textSize = 18f
+                            setTypeface(
+                                Typeface.DEFAULT,
+                                Typeface.BOLD
+                            )
+                            setTextColor(
+                                Color.WHITE
+                            )
+                        }
+                    )
+
+                    addView(
+                        TextView(this@MainActivity).apply {
+                            text =
+                                if (isActive) {
+                                    "АКТИВЕН"
+                                } else {
+                                    "Изолированное рабочее пространство"
+                                }
+                            textSize = 13f
+                            setTextColor(
+                                if (isActive) {
+                                    Color.parseColor("#A78BFA")
+                                } else {
+                                    Color.parseColor("#75859D")
+                                }
+                            )
+                            setPadding(
+                                0,
+                                dp(4),
+                                0,
+                                0
+                            )
+                        }
+                    )
+                },
+                LinearLayout.LayoutParams(
+                    0,
+                    ViewGroup.LayoutParams.WRAP_CONTENT,
+                    1f
+                )
+            )
+
+            if (project.pinned) {
+                titleRow.addView(
+                    TextView(this).apply {
+                        text = "★"
+                        textSize = 18f
+                        setTextColor(
+                            Color.parseColor("#D8B4FE")
+                        )
+                        contentDescription = "Закреплён"
+                    }
+                )
+            }
+
+            card.addView(
+                titleRow
+            )
+
+            val actionRow =
+                LinearLayout(this).apply {
+                    orientation = LinearLayout.HORIZONTAL
+                    gravity = Gravity.CENTER_VERTICAL
+                    setPadding(
+                        0,
+                        dp(12),
+                        0,
+                        0
+                    )
+                }
+
+            actionRow.addView(
+                smallAction(
+                    if (isActive) {
+                        "Открыт"
+                    } else {
+                        "Открыть"
+                    }
+                ) {
+                    if (!isActive) {
+                        val result =
+                            projectStore
+                                .switchActive(
+                                    project.projectId
+                                )
+
+                        Toast.makeText(
+                            this@MainActivity,
+                            if (result.success) {
+                                "Открыт проект «${project.name}»"
+                            } else {
+                                "Не удалось открыть проект"
+                            },
+                            Toast.LENGTH_SHORT
+                        ).show()
+
+                        renderCurrentPage()
+                    }
+                },
+                LinearLayout.LayoutParams(
+                    0,
+                    dp(40),
+                    1f
+                )
+            )
+
+            actionRow.addView(
+                Space(this),
+                LinearLayout.LayoutParams(
+                    dp(8),
+                    1
+                )
+            )
+
+            actionRow.addView(
+                smallAction(
+                    "Переименовать"
+                ) {
+                    showRenameProjectDialog(
+                        project
+                    )
+                },
+                LinearLayout.LayoutParams(
+                    0,
+                    dp(40),
+                    1f
+                )
+            )
+
+            card.addView(
+                actionRow
+            )
+
+            val secondaryRow =
+                LinearLayout(this).apply {
+                    orientation = LinearLayout.HORIZONTAL
+                    gravity = Gravity.CENTER_VERTICAL
+                    setPadding(
+                        0,
+                        dp(8),
+                        0,
+                        0
+                    )
+                }
+
+            secondaryRow.addView(
+                smallAction(
+                    if (project.pinned) {
+                        "Открепить"
+                    } else {
+                        "Закрепить"
+                    }
+                ) {
+                    val result =
+                        projectStore
+                            .setPinned(
+                                project.projectId,
+                                !project.pinned
+                            )
+
+                    Toast.makeText(
+                        this@MainActivity,
+                        if (result.success) {
+                            if (project.pinned) {
+                                "Проект откреплён"
+                            } else {
+                                "Проект закреплён"
+                            }
+                        } else {
+                            "Не удалось изменить проект"
+                        },
+                        Toast.LENGTH_SHORT
+                    ).show()
+
+                    renderProjects()
+                },
+                LinearLayout.LayoutParams(
+                    0,
+                    dp(40),
+                    1f
+                )
+            )
+
+            secondaryRow.addView(
+                Space(this),
+                LinearLayout.LayoutParams(
+                    dp(8),
+                    1
+                )
+            )
+
+            secondaryRow.addView(
+                TextView(this).apply {
+                    text = "Архивировать"
+                    textSize = 14.5f
+                    gravity = Gravity.CENTER
+                    setTextColor(
+                        Color.parseColor("#FCA5A5")
+                    )
+                    background =
+                        softDrawable(
+                            "#1B1017",
+                            "#5B2838",
+                            14
+                        )
+                    contentDescription =
+                        "Архивировать проект ${project.name}"
+                    importantForAccessibility =
+                        View.IMPORTANT_FOR_ACCESSIBILITY_YES
+                    setOnClickListener {
+                        showArchiveProjectDialog(
+                            project
+                        )
+                    }
+                },
+                LinearLayout.LayoutParams(
+                    0,
+                    dp(40),
+                    1f
+                )
+            )
+
+            card.addView(
+                secondaryRow
+            )
+
+            contentContainer.addView(
+                card,
+                sectionParams(
+                    top = 8
+                )
+            )
+        }
+    }
+
+
+    private fun showCreateProjectDialog() {
+
+        val input =
+            EditText(this).apply {
+                hint = "Название проекта"
+                contentDescription = "Название нового проекта"
+                importantForAccessibility =
+                    View.IMPORTANT_FOR_ACCESSIBILITY_YES
+                isSingleLine = true
+                textSize = 16f
+                setTextColor(
+                    Color.WHITE
+                )
+                setHintTextColor(
+                    Color.parseColor("#64748B")
+                )
+                background =
+                    softDrawable(
+                        "#070C16",
+                        "#293754",
+                        14
+                    )
+                setPadding(
+                    dp(14),
+                    0,
+                    dp(14),
+                    0
+                )
+            }
+
+        val box =
+            LinearLayout(this).apply {
+                orientation = LinearLayout.VERTICAL
+                setPadding(
+                    dp(22),
+                    dp(8),
+                    dp(22),
+                    0
+                )
+                addView(
+                    input,
+                    LinearLayout.LayoutParams(
+                        ViewGroup.LayoutParams.MATCH_PARENT,
+                        dp(48)
+                    )
+                )
+            }
+
+        val dialog =
+            AlertDialog
+                .Builder(this)
+                .setTitle("Новый проект")
+                .setMessage(
+                    "Память, история, задачи и цели проекта будут храниться отдельно."
+                )
+                .setView(
+                    box
+                )
+                .setNegativeButton(
+                    "Отмена",
+                    null
+                )
+                .setPositiveButton(
+                    "Создать",
+                    null
+                )
+                .create()
+
+        dialog.setOnShowListener {
+            dialog
+                .getButton(
+                    AlertDialog.BUTTON_POSITIVE
+                )
+                .setOnClickListener {
+                    val name =
+                        input
+                            .text
+                            ?.toString()
+                            .orEmpty()
+                            .trim()
+
+                    val result =
+                        projectStore
+                            .create(
+                                name = name,
+                                makeActive = true
+                            )
+
+                    if (result.success) {
+                        dialog.dismiss()
+                        Toast.makeText(
+                            this,
+                            "Проект «${result.project?.name.orEmpty()}» создан",
+                            Toast.LENGTH_SHORT
+                        ).show()
+                        renderProjects()
+                    } else {
+                        input.error =
+                            when (result.reason) {
+                                "project_name_already_exists" ->
+                                    "Проект с таким названием уже есть"
+                                else ->
+                                    "Введите название проекта"
+                            }
+                    }
+                }
+        }
+
+        dialog.show()
+    }
+
+
+    private fun showRenameProjectDialog(
+        project: AyanaProjectStore.Project
+    ) {
+
+        val input =
+            EditText(this).apply {
+                setText(
+                    project.name
+                )
+                setSelection(
+                    text?.length ?: 0
+                )
+                contentDescription =
+                    "Новое название проекта ${project.name}"
+                importantForAccessibility =
+                    View.IMPORTANT_FOR_ACCESSIBILITY_YES
+                isSingleLine = true
+                textSize = 16f
+                setTextColor(
+                    Color.WHITE
+                )
+                background =
+                    softDrawable(
+                        "#070C16",
+                        "#293754",
+                        14
+                    )
+                setPadding(
+                    dp(14),
+                    0,
+                    dp(14),
+                    0
+                )
+            }
+
+        val box =
+            LinearLayout(this).apply {
+                orientation = LinearLayout.VERTICAL
+                setPadding(
+                    dp(22),
+                    dp(8),
+                    dp(22),
+                    0
+                )
+                addView(
+                    input,
+                    LinearLayout.LayoutParams(
+                        ViewGroup.LayoutParams.MATCH_PARENT,
+                        dp(48)
+                    )
+                )
+            }
+
+        val dialog =
+            AlertDialog
+                .Builder(this)
+                .setTitle("Переименовать проект")
+                .setView(
+                    box
+                )
+                .setNegativeButton(
+                    "Отмена",
+                    null
+                )
+                .setPositiveButton(
+                    "Сохранить",
+                    null
+                )
+                .create()
+
+        dialog.setOnShowListener {
+            dialog
+                .getButton(
+                    AlertDialog.BUTTON_POSITIVE
+                )
+                .setOnClickListener {
+                    val name =
+                        input
+                            .text
+                            ?.toString()
+                            .orEmpty()
+                            .trim()
+
+                    val result =
+                        projectStore
+                            .rename(
+                                project.projectId,
+                                name
+                            )
+
+                    if (result.success) {
+                        dialog.dismiss()
+                        Toast.makeText(
+                            this,
+                            "Проект переименован",
+                            Toast.LENGTH_SHORT
+                        ).show()
+                        renderProjects()
+                    } else {
+                        input.error =
+                            when (result.reason) {
+                                "project_name_already_exists" ->
+                                    "Проект с таким названием уже есть"
+                                else ->
+                                    "Введите другое название"
+                            }
+                    }
+                }
+        }
+
+        dialog.show()
+    }
+
+
+    private fun showArchiveProjectDialog(
+        project: AyanaProjectStore.Project
+    ) {
+
+        AlertDialog
+            .Builder(this)
+            .setTitle("Архивировать проект?")
+            .setMessage(
+                "«${project.name}» останется сохранён, но исчезнет из активного списка. Данные не смешиваются и не удаляются."
+            )
+            .setNegativeButton(
+                "Отмена",
+                null
+            )
+            .setPositiveButton(
+                "Архивировать"
+            ) { _, _ ->
+                val result =
+                    projectStore
+                        .archive(
+                            project.projectId
+                        )
+
+                Toast.makeText(
+                    this,
+                    if (result.success) {
+                        "Проект архивирован"
+                    } else {
+                        "Не удалось архивировать проект"
+                    },
+                    Toast.LENGTH_SHORT
+                ).show()
+
+                renderProjects()
+            }
+            .show()
+    }
+
 
     private fun renderTasks() {
 
@@ -6172,7 +6926,6 @@ class MainActivity : AppCompatActivity() {
                 setTextColor(
                     Color.parseColor("#DCE6F5")
                 )
-                highlightColor = Color.TRANSPARENT
             }
 
         answerCard.addView(
@@ -6202,7 +6955,7 @@ class MainActivity : AppCompatActivity() {
             answerScroll,
             LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT,
-                dp(44)
+                dp(190)
             ).apply {
                 topMargin =
                     dp(8)
@@ -6263,13 +7016,6 @@ class MainActivity : AppCompatActivity() {
 
     private fun sendTextCommand() {
 
-        if (attachmentPreparationInProgress) {
-            showTextAnswer(
-                "Вложения ещё подготавливаются. Дождитесь завершения подготовки и отправьте команду ещё раз."
-            )
-            return
-        }
-
         val attachment =
             pendingAttachment
 
@@ -6284,14 +7030,7 @@ class MainActivity : AppCompatActivity() {
                 typedCommand.isBlank() &&
                 attachment != null
             ) {
-                if (
-                    attachment.kind ==
-                    AyanaMultimodalAttachmentManager.KIND_BATCH
-                ) {
-                    "Проанализируй эти вложения вместе и выдели главное."
-                } else {
-                    "Проанализируй это вложение и выдели главное."
-                }
+                "Проанализируй это вложение и выдели главное."
             } else {
                 typedCommand
             }
@@ -6371,22 +7110,14 @@ class MainActivity : AppCompatActivity() {
 
             textAnswer.text =
                 if (useAttachment) {
-                    if (
-                        attachment?.kind ==
-                        AyanaMultimodalAttachmentManager.KIND_BATCH
-                    ) {
-                        "AYANA анализирует вложения…"
-                    } else {
-                        "AYANA анализирует вложение…"
-                    }
+                    "AYANA анализирует вложение…"
                 } else {
                     "AYANA думает…"
                 }
 
-            updateTextAnswerViewport(
-                text = textAnswer.text?.toString().orEmpty(),
-                forceCompact = true
-            )
+            answerScroll.post {
+                answerScroll.scrollTo(0, 0)
+            }
 
             hideKeyboard()
 
@@ -6428,21 +7159,15 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    private fun prepareSelectedAttachments(
-        uris: List<Uri>
+    private fun prepareSelectedAttachment(
+        uri: Uri
     ) {
         val generation =
             ++attachmentPreparationGeneration
-        attachmentPreparationInProgress = true
 
         if (::attachmentInfo.isInitialized) {
             attachmentInfo.visibility = View.VISIBLE
-            attachmentInfo.text =
-                if (uris.size > 1) {
-                    "Подготавливаю вложения: ${uris.size}…"
-                } else {
-                    "Подготавливаю вложение…"
-                }
+            attachmentInfo.text = "Подготавливаю вложение…"
         }
 
         thread(
@@ -6452,7 +7177,7 @@ class MainActivity : AppCompatActivity() {
             val result =
                 try {
                     Result.success(
-                        multimodalAttachmentManager.prepareBatch(uris)
+                        multimodalAttachmentManager.prepare(uri)
                     )
                 } catch (error: Exception) {
                     Result.failure(error)
@@ -6466,8 +7191,6 @@ class MainActivity : AppCompatActivity() {
                     return@runOnUiThread
                 }
 
-                attachmentPreparationInProgress = false
-
                 result
                     .onSuccess { prepared ->
                         pendingAttachment?.let {
@@ -6477,10 +7200,11 @@ class MainActivity : AppCompatActivity() {
                         updateAttachmentInfo()
                     }
                     .onFailure { error ->
+                        pendingAttachment = null
                         updateAttachmentInfo()
                         showTextAnswer(
                             error.message
-                                ?: "Не удалось подготовить вложения."
+                                ?: "Не удалось подготовить вложение."
                         )
                     }
             }
@@ -6491,7 +7215,6 @@ class MainActivity : AppCompatActivity() {
         deleteFiles: Boolean
     ) {
         attachmentPreparationGeneration++
-        attachmentPreparationInProgress = false
         val old = pendingAttachment
         pendingAttachment = null
         if (deleteFiles && old != null) {
@@ -6514,43 +7237,8 @@ class MainActivity : AppCompatActivity() {
             when (attachment.kind) {
                 AyanaMultimodalAttachmentManager.KIND_IMAGE ->
                     "Фото: ${attachment.displayName}   ×"
-
                 AyanaMultimodalAttachmentManager.KIND_VIDEO_VISUAL ->
                     "Видео: ${attachment.displayName} · визуальный анализ кадров   ×"
-
-                AyanaMultimodalAttachmentManager.KIND_BATCH -> {
-                    val items =
-                        attachment.manifest
-                            .optJSONArray("items")
-                    val names =
-                        if (items == null) {
-                            emptyList()
-                        } else {
-                            (0 until items.length())
-                                .mapNotNull { index ->
-                                    items
-                                        .optJSONObject(index)
-                                        ?.optString("display_name")
-                                        ?.trim()
-                                        ?.takeIf { it.isNotBlank() }
-                                }
-                        }
-                    val preview =
-                        names
-                            .take(4)
-                            .joinToString(", ")
-                    val extra =
-                        (names.size - 4)
-                            .coerceAtLeast(0)
-                    val suffix =
-                        if (extra > 0) {
-                            ", ещё $extra"
-                        } else {
-                            ""
-                        }
-                    "Вложения (${names.size}): $preview$suffix   ×"
-                }
-
                 else ->
                     "Файл: ${attachment.displayName}   ×"
             }
@@ -6576,208 +7264,10 @@ class MainActivity : AppCompatActivity() {
         answerScroll.visibility =
             View.VISIBLE
 
-        setTextAnswerContent(
+        textAnswer.text =
             text
-        )
-
-        updateTextAnswerViewport(
-            text = text,
-            forceCompact = false
-        )
-    }
-
-    /**
-     * v7.10.3 — user-facing local links for Personal Search results.
-     * Raw content:// values remain private in AyanaSearchResultStore; the visible
-     * answer contains only «Открыть результат N». Tapping it sends the same factual
-     * command through VoiceService, where URI access and foreground handoff are verified.
-     */
-    private fun setTextAnswerContent(
-        text: String
-    ) {
-        if (!::textAnswer.isInitialized) {
-            return
-        }
-
-        val pattern =
-            Regex("Открыть результат (\\d{1,2})")
-
-        val matches =
-            pattern.findAll(text)
-                .toList()
-
-        if (matches.isEmpty()) {
-            textAnswer.movementMethod = null
-            textAnswer.text = text
-            return
-        }
-
-        val spannable =
-            SpannableString(text)
-
-        matches.forEach { match ->
-            val resultNumber =
-                match.groupValues
-                    .getOrNull(1)
-                    ?.toIntOrNull()
-                    ?: return@forEach
-
-            if (resultNumber !in 1..20) {
-                return@forEach
-            }
-
-            spannable.setSpan(
-                object : ClickableSpan() {
-                    override fun onClick(
-                        widget: View
-                    ) {
-                        openSearchResultFromAnswer(
-                            resultNumber
-                        )
-                    }
-
-                    override fun updateDrawState(
-                        ds: TextPaint
-                    ) {
-                        ds.color =
-                            Color.parseColor(
-                                "#67E8F9"
-                            )
-                        ds.isUnderlineText = true
-                        ds.isFakeBoldText = true
-                    }
-                },
-                match.range.first,
-                match.range.last + 1,
-                Spanned.SPAN_EXCLUSIVE_EXCLUSIVE
-            )
-        }
-
-        textAnswer.text = spannable
-        textAnswer.movementMethod =
-            LinkMovementMethod.getInstance()
-    }
-
-    private fun openSearchResultFromAnswer(
-        resultNumber: Int
-    ) {
-        if (resultNumber !in 1..20) {
-            return
-        }
-
-        val command =
-            "открой результат $resultNumber"
-
-        val intent =
-            Intent(
-                this,
-                AyanaVoiceService::class.java
-            ).apply {
-                action =
-                    AyanaVoiceService.ACTION_TEXT_COMMAND
-                putExtra(
-                    AyanaVoiceService.EXTRA_TEXT_COMMAND,
-                    command
-                )
-            }
-
-        try {
-            if (Build.VERSION.SDK_INT >= 26) {
-                startForegroundService(intent)
-            } else {
-                startService(intent)
-            }
-
-            answerCard.visibility = View.VISIBLE
-            answerScroll.visibility = View.VISIBLE
-            textAnswer.movementMethod = null
-            textAnswer.text =
-                "AYANA открывает результат $resultNumber…"
-
-            updateTextAnswerViewport(
-                text = textAnswer.text?.toString().orEmpty(),
-                forceCompact = true
-            )
-        } catch (_: Exception) {
-            showTextAnswer(
-                "Не удалось отправить команду открытия результата $resultNumber."
-            )
-        }
-    }
-
-    /**
-     * v7.10.1 — compact response viewport.
-     * Short states/results stay compact; long answers remain fully available inside
-     * the existing internal ScrollView and are capped at 190dp. This restores the
-     * pre-v7.9 compact behavior without losing long-response scrolling.
-     */
-    private fun updateTextAnswerViewport(
-        text: String,
-        forceCompact: Boolean
-    ) {
-        if (
-            !::answerScroll.isInitialized ||
-            !::textAnswer.isInitialized
-        ) {
-            return
-        }
-
-        val compactHeight =
-            dp(44)
-        val maxHeight =
-            dp(190)
-
-        val normalized =
-            text.trim()
-
-        val provisionalHeight =
-            when {
-                forceCompact -> compactHeight
-
-                normalized.length <= 120 &&
-                    normalized.count { it == '\n' } <= 1 ->
-                    dp(52)
-
-                normalized.length <= 320 &&
-                    normalized.count { it == '\n' } <= 4 ->
-                    dp(92)
-
-                else -> dp(132)
-            }.coerceAtMost(maxHeight)
-
-        val params =
-            answerScroll.layoutParams as? LinearLayout.LayoutParams
-                ?: return
-
-        if (params.height != provisionalHeight) {
-            params.height = provisionalHeight
-            answerScroll.layoutParams = params
-        }
 
         answerScroll.post {
-            val lines =
-                textAnswer.lineCount.coerceAtLeast(1)
-
-            val contentHeight =
-                (lines * textAnswer.lineHeight + dp(20))
-                    .coerceAtLeast(compactHeight)
-
-            val targetHeight =
-                if (forceCompact) {
-                    compactHeight
-                } else {
-                    contentHeight.coerceAtMost(maxHeight)
-                }
-
-            val current =
-                answerScroll.layoutParams as? LinearLayout.LayoutParams
-                    ?: return@post
-
-            if (current.height != targetHeight) {
-                current.height = targetHeight
-                answerScroll.layoutParams = current
-            }
-
             answerScroll.scrollTo(0, 0)
         }
     }
@@ -6829,51 +7319,6 @@ class MainActivity : AppCompatActivity() {
             permissions.add(
                 Manifest.permission.POST_NOTIFICATIONS
             )
-        }
-
-        // R8.2 Personal Global Search: request photo-library visibility once as part
-        // of AYANA's existing permission bootstrap. Denial never blocks voice startup.
-        // On Android 14+ a user may grant only selected photos; the search engine checks
-        // the live permission state and reports PARTIAL coverage instead of claiming the
-        // whole gallery. File metadata search does not request broad all-files access.
-        if (Build.VERSION.SDK_INT >= 34) {
-            val fullPhotoAccess =
-                checkSelfPermissionCompat(
-                    Manifest.permission.READ_MEDIA_IMAGES
-                )
-            val partialPhotoAccess =
-                checkSelfPermissionCompat(
-                    Manifest.permission.READ_MEDIA_VISUAL_USER_SELECTED
-                )
-
-            if (!fullPhotoAccess && !partialPhotoAccess) {
-                permissions.add(
-                    Manifest.permission.READ_MEDIA_IMAGES
-                )
-                permissions.add(
-                    Manifest.permission.READ_MEDIA_VISUAL_USER_SELECTED
-                )
-            }
-        } else if (Build.VERSION.SDK_INT >= 33) {
-            if (
-                !checkSelfPermissionCompat(
-                    Manifest.permission.READ_MEDIA_IMAGES
-                )
-            ) {
-                permissions.add(
-                    Manifest.permission.READ_MEDIA_IMAGES
-                )
-            }
-        } else if (Build.VERSION.SDK_INT >= 23) {
-            if (
-                !checkSelfPermissionCompat(
-                    Manifest.permission.READ_EXTERNAL_STORAGE
-                )
-            ) {
-                permissions.add(
-                    Manifest.permission.READ_EXTERNAL_STORAGE
-                )
-            }
         }
 
         if (
@@ -7471,6 +7916,7 @@ class MainActivity : AppCompatActivity() {
             }
 
         listOf(
+            "Проекты" to Page.PROJECTS,
             "Задачи" to Page.TASKS,
             "Память" to Page.MEMORY,
             "Проверка" to Page.DIAGNOSTICS
