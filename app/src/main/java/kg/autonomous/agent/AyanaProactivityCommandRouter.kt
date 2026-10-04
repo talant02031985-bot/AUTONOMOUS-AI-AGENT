@@ -43,8 +43,8 @@ class AyanaProactivityCommandRouter(
         if (n.isBlank()) return false
         if (n.contains("проактив")) return true
         if (
-            (n.contains("предупреди") || n.contains("сообщи") || n.contains("скажи")) &&
-            n.contains("когда")
+            hasNotifyIntent(n) &&
+            hasConditionConnector(n)
         ) {
             return n.contains("заряд") ||
                 n.contains("батар") ||
@@ -285,6 +285,13 @@ class AyanaProactivityCommandRouter(
             n.contains("следи") ||
             n.contains("отслеживай")
 
+    private fun hasConditionConnector(n: String): Boolean =
+        n.contains("когда") ||
+            n.contains("если") ||
+            n.contains("как только") ||
+            n.contains("при ") ||
+            n.startsWith("при ")
+
     private fun extractPercent(n: String): Int? {
         val percent = Regex("(\\d{1,3})\\s*(?:%|процент(?:а|ов|ы)?)")
             .find(n)
@@ -317,7 +324,7 @@ class AyanaProactivityCommandRouter(
         )
 
     companion object {
-        const val VERSION = "1.0"
+        const val VERSION = "1.0.1"
         private const val DEFAULT_LOW_BATTERY_PERCENT = 20
         private const val DEFAULT_HIGH_BATTERY_PERCENT = 80
     }
