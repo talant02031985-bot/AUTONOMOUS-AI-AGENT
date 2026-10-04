@@ -10,7 +10,7 @@ import org.json.JSONArray
 import org.json.JSONObject
 
 /**
- * AYANA Device Capability Registry v3.3 — R10.27.4 VIDEO AUDIO ANALYSIS TRUTH.
+ * AYANA Device Capability Registry v3.3.1 — R10.27.4.2 COMPILE CONTRACT RESTORE.
  *
  * Single machine-readable source of truth for:
  * 1) what this build implements;
@@ -34,6 +34,27 @@ class AyanaCapabilityRegistry(
             PREFS_NAME,
             Context.MODE_PRIVATE
         )
+
+    /**
+     * R10.27.4.2 compatibility restore: preserve the accepted v3.2 runtime
+     * evidence API used by VoiceService. This method only persists a positive
+     * proof after the caller has already verified the concrete device result.
+     */
+    fun recordCapabilityEvidence(
+        capabilityId: String,
+        detail: String,
+        verified: Boolean
+    ) {
+        val id = capabilityId.trim().lowercase()
+        if (!verified || id.isBlank() || !Regex("^[a-z0-9_]{1,80}$").matches(id)) {
+            return
+        }
+        prefs.edit()
+            .putBoolean("capability_confirmed_" + id, true)
+            .putLong("capability_confirmed_at_" + id, System.currentTimeMillis())
+            .putString("capability_confirmed_detail_" + id, detail.take(500))
+            .apply()
+    }
 
     fun recordAgentCoreResult(
         success: Boolean,
@@ -2188,7 +2209,7 @@ class AyanaCapabilityRegistry(
     companion object {
 
         const val BUILD_LABEL =
-            "v12.62.0_r10_27_4_video_audio_analysis_candidate"
+            "v12.62.0_r10_27_4_2_video_audio_compile_contract_restore"
 
         private const val PREFS_NAME =
             "ayana_capability_runtime_v11"
