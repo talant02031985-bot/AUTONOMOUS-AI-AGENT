@@ -1,1 +1,1 @@
-R10.27.3 transaction rollback acceptance
+R10.27.1.2 verified terminal acceptance
