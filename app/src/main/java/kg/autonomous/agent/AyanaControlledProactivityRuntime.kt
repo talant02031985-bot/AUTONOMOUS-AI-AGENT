@@ -229,13 +229,13 @@ class AyanaControlledProactivityRuntime(
         return primeTransitionRule(rule)
     }
 
-    fun setRuleEnabled(ruleId: String, enabled: Boolean): Boolean {
+    override fun setRuleEnabled(ruleId: String, enabled: Boolean): Boolean {
         val rule = engine.setRuleEnabled(ruleId, enabled) ?: return false
         val finalRule = if (enabled) primeTransitionRule(rule) else rule
         return finalRule.enabled == enabled
     }
 
-    fun deleteRule(ruleId: String): Boolean = store.delete(ruleId)
+    override fun deleteRule(ruleId: String): Boolean = store.delete(ruleId)
 
     private fun primeTransitionRule(
         rule: AyanaControlledProactivityEngine.Rule
@@ -658,7 +658,7 @@ class AyanaControlledProactivityRuntime(
             "cooldown_remaining_ms=${decision.cooldownRemainingMs}; mutation_authority=false"
 
     companion object {
-        const val VERSION = "1.1.1"
+        const val VERSION = "1.1.2"
         const val CHANNEL_ID = "ayana_controlled_proactivity_v2"
         private const val NOTIFICATION_ID_BASE = 19000
     }

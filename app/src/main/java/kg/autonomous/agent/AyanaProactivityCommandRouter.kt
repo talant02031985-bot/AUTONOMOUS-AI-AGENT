@@ -29,6 +29,8 @@ class AyanaProactivityCommandRouter(
         fun configureNetworkRestored(): AyanaControlledProactivityEngine.Rule?
         fun configureWifiConnected(): AyanaControlledProactivityEngine.Rule?
         fun configureCellularActive(): AyanaControlledProactivityEngine.Rule?
+        fun setRuleEnabled(ruleId: String, enabled: Boolean): Boolean
+        fun deleteRule(ruleId: String): Boolean
     }
     data class Result(
         val handled: Boolean,
@@ -42,6 +44,7 @@ class AyanaProactivityCommandRouter(
         val n = normalize(command)
         if (n.isBlank()) return false
         if (n.contains("проактив")) return true
+        if (isSpecificRuleManagementRequest(n)) return true
         if (
             hasNotifyIntent(n) &&
             hasConditionConnector(n)
@@ -116,6 +119,62 @@ class AyanaProactivityCommandRouter(
                 },
                 technical = "controlled_proactivity_global_enabled=true; explicit_user_opt_in=true; mutation_authority=false"
             )
+        }
+
+        resolveManagedRuleId(n)?.let { ruleId ->
+            if (isRuleDeleteRequest(n)) {
+                val ok = runtime.deleteRule(ruleId)
+                return Result(
+                    handled = true,
+                    success = ok,
+                    terminalStatus = if (ok) "SUCCESS" else "ERROR",
+                    message = if (ok) {
+                        "Проактивное правило $ruleId удалено."
+                    } else {
+                        "Не удалось удалить правило $ruleId: правило не найдено."
+                    },
+                    technical =
+                        "controlled_proactivity_rule_deleted=$ok; rule_id=$ruleId; " +
+                            "mutation_authority=false"
+                )
+            }
+
+            if (isRuleDisableRequest(n)) {
+                val ok = runtime.setRuleEnabled(ruleId, false)
+                return Result(
+                    handled = true,
+                    success = ok,
+                    terminalStatus = if (ok) "SUCCESS" else "ERROR",
+                    message = if (ok) {
+                        "Проактивное правило $ruleId выключено."
+                    } else {
+                        "Не удалось выключить правило $ruleId: правило не найдено."
+                    },
+                    technical =
+                        "controlled_proactivity_rule_enabled=false; rule_id=$ruleId; " +
+                            "mutation_authority=false"
+                )
+            }
+
+            if (isRuleEnableRequest(n)) {
+                val ok = runtime.setRuleEnabled(ruleId, true)
+                if (ok) {
+                    runtime.setGlobalEnabled(true)
+                }
+                return Result(
+                    handled = true,
+                    success = ok,
+                    terminalStatus = if (ok) "SUCCESS" else "ERROR",
+                    message = if (ok) {
+                        "Проактивное правило $ruleId включено."
+                    } else {
+                        "Не удалось включить правило $ruleId: правило не найдено."
+                    },
+                    technical =
+                        "controlled_proactivity_rule_enabled=true; rule_id=$ruleId; " +
+                            "global_enabled=${runtime.isGlobalEnabled()}; mutation_authority=false"
+                )
+            }
         }
 
         val configured = when {
@@ -236,6 +295,80 @@ class AyanaProactivityCommandRouter(
             "выключи контролируемую проактивность"
         )
 
+    private fun isSpecificRuleManagementRequest(n: String): Boolean =
+        (isRuleDisableRequest(n) || isRuleEnableRequest(n) || isRuleDeleteRequest(n)) &&
+            resolveManagedRuleId(n) != null
+
+    private fun isRuleDisableRequest(n: String): Boolean =
+        n.contains("выключ") ||
+            n.contains("отключ") ||
+            n.contains("деактив")
+
+    private fun isRuleEnableRequest(n: String): Boolean =
+        n.contains("включ") ||
+            n.contains("активиру")
+
+    private fun isRuleDeleteRequest(n: String): Boolean =
+        n.contains("удал") ||
+            n.contains("убери правило")
+
+    private fun resolveManagedRuleId(n: String): String? {
+        val rules = runtime.listRules()
+
+        fun existing(id: String): String? =
+            rules.firstOrNull { it.ruleId == id }?.ruleId
+
+        if (n.contains("network_lost") ||
+            ((n.contains("интернет") || n.contains("сеть")) &&
+                (n.contains("потер") || n.contains("пропад") || n.contains("отключ")))
+        ) {
+            return existing("network_lost")
+        }
+
+        if (n.contains("network_restored") ||
+            ((n.contains("интернет") || n.contains("сеть")) &&
+                (n.contains("восстанов") || n.contains("появ") || n.contains("вернет")))
+        ) {
+            return existing("network_restored")
+        }
+
+        if (n.contains("charging_started") ||
+            (n.contains("заряд") && n.contains("подключ"))
+        ) {
+            return existing("charging_started")
+        }
+
+        if (n.contains("charging_stopped") ||
+            (n.contains("заряд") &&
+                (n.contains("отключ") || n.contains("перестан") || n.contains("прекрат")))
+        ) {
+            return existing("charging_stopped")
+        }
+
+        if (n.contains("wifi_connected") ||
+            ((n.contains("wi-fi") || n.contains("wifi") || n.contains("вайф")) &&
+                n.contains("подключ"))
+        ) {
+            return existing("wifi_connected")
+        }
+
+        if (n.contains("cellular_active") ||
+            (n.contains("мобиль") && (n.contains("сеть") || n.contains("интернет")))
+        ) {
+            return existing("cellular_active")
+        }
+
+        val percent = extractPercent(n)
+        if (percent != null && (n.contains("заряд") || n.contains("батар"))) {
+            val belowId = "battery_below_$percent"
+            val aboveId = "battery_above_$percent"
+            if (rules.any { it.ruleId == belowId }) return belowId
+            if (rules.any { it.ruleId == aboveId }) return aboveId
+        }
+
+        return null
+    }
+
     private fun wantsBatteryBelow(n: String): Boolean =
         hasNotifyIntent(n) &&
             (n.contains("заряд") || n.contains("батар")) &&
@@ -328,7 +461,7 @@ class AyanaProactivityCommandRouter(
         )
 
     companion object {
-        const val VERSION = "1.0.1"
+        const val VERSION = "1.0.3"
         private const val DEFAULT_LOW_BATTERY_PERCENT = 20
         private const val DEFAULT_HIGH_BATTERY_PERCENT = 80
     }
