@@ -20,16 +20,17 @@ import java.util.UUID
 import kotlin.math.roundToInt
 
 /**
- * AYANA Multimodal Attachment Manager v1.2 — VIDEO AUDIO EXTRACTION.
+ * AYANA Multimodal Attachment Manager v1.3 — VIDEO AUDIO + MULTI-ATTACHMENT COMPATIBILITY.
  *
  * Security / reliability contract:
  * - never exposes arbitrary user filesystem paths to the service/Worker;
  * - immediately stages content into AYANA's private cache;
  * - normalizes images/video frames to bounded JPEGs;
  * - allow-lists document extensions and enforces byte limits;
- * - video v1.2 keeps bounded sampled frames and also stages a bounded lossless audio-track remux when available;
+ * - video v1.3 keeps bounded sampled frames and also stages a bounded lossless audio-track remux when available;
  * - audio extraction never records from the microphone and never exposes an arbitrary filesystem path;
  * - manifests contain only cache paths owned by AYANA and are revalidated by VoiceService.
+ * - one picker action may stage a bounded batch of attachments without weakening per-item limits.
  */
 class AyanaMultimodalAttachmentManager(
     context: Context
@@ -63,6 +64,80 @@ class AyanaMultimodalAttachmentManager(
             else -> throw IllegalArgumentException(
                 "Этот тип файла пока не поддерживается AYANA: ${metadata.displayName}"
             )
+        }
+    }
+
+    /**
+     * R10.27.4.1 compatibility contract inherited from R8.0 multi-attachment:
+     * one bounded picker selection is staged either as the original single
+     * attachment or as one batch manifest. The batch is all-or-nothing.
+     */
+    fun prepareBatch(uris: List<Uri>): PreparedAttachment {
+        val uniqueUris =
+            uris
+                .distinctBy { it.toString() }
+                .take(MAX_BATCH_ITEMS + 1)
+
+        if (uniqueUris.isEmpty()) {
+            throw IllegalArgumentException("Файлы не выбраны.")
+        }
+        if (uniqueUris.size > MAX_BATCH_ITEMS) {
+            throw IllegalArgumentException(
+                "За один раз можно выбрать не более $MAX_BATCH_ITEMS файлов."
+            )
+        }
+        if (uniqueUris.size == 1) {
+            return prepare(uniqueUris.first())
+        }
+
+        val prepared = mutableListOf<PreparedAttachment>()
+        try {
+            var totalStagedBytes = 0L
+            var totalVideoFrames = 0
+
+            uniqueUris.forEach { uri ->
+                val item = prepare(uri)
+                prepared += item
+                totalStagedBytes += stagedBytes(item.manifest)
+                totalVideoFrames += stagedFrameCount(item.manifest)
+
+                if (totalStagedBytes > MAX_BATCH_STAGED_BYTES) {
+                    throw IllegalArgumentException(
+                        "Общий объём подготовленных вложений слишком большой. Максимум 8 МБ за одну отправку."
+                    )
+                }
+                if (totalVideoFrames > MAX_BATCH_VIDEO_FRAMES) {
+                    throw IllegalArgumentException(
+                        "В одном пакете слишком много видеокадров. Уменьшите количество выбранных видео."
+                    )
+                }
+            }
+
+            val items = JSONArray()
+            prepared.forEach { item ->
+                items.put(JSONObject(item.manifest.toString()))
+            }
+
+            val manifest =
+                JSONObject()
+                    .put("version", MANIFEST_VERSION)
+                    .put("kind", KIND_BATCH)
+                    .put("display_name", "Вложения: ${prepared.size}")
+                    .put("mime_type", BATCH_MIME_TYPE)
+                    .put("item_count", prepared.size)
+                    .put("total_staged_bytes", totalStagedBytes)
+                    .put("total_video_frames", totalVideoFrames)
+                    .put("items", items)
+
+            return PreparedAttachment(
+                kind = KIND_BATCH,
+                displayName = "Вложения: ${prepared.size}",
+                mimeType = BATCH_MIME_TYPE,
+                manifest = manifest
+            )
+        } catch (error: Exception) {
+            prepared.forEach { cleanupPrepared(it.manifest) }
+            throw error
         }
     }
 
@@ -497,6 +572,63 @@ class AyanaMultimodalAttachmentManager(
         }
     }
 
+    private fun stagedFrameCount(manifest: JSONObject): Int {
+        return when (manifest.optString("kind")) {
+            KIND_VIDEO_VISUAL ->
+                manifest.optJSONArray("frames")?.length() ?: 0
+
+            KIND_BATCH -> {
+                val items = manifest.optJSONArray("items") ?: JSONArray()
+                var total = 0
+                for (i in 0 until items.length()) {
+                    items.optJSONObject(i)?.let { total += stagedFrameCount(it) }
+                }
+                total
+            }
+
+            else -> 0
+        }
+    }
+
+    private fun stagedBytes(manifest: JSONObject): Long {
+        return when (manifest.optString("kind")) {
+            KIND_IMAGE, KIND_DOCUMENT ->
+                manifest.optLong("size_bytes", 0L).coerceAtLeast(0L)
+
+            KIND_VIDEO_VISUAL -> {
+                val frames = manifest.optJSONArray("frames") ?: JSONArray()
+                var total = 0L
+                for (i in 0 until frames.length()) {
+                    total += frames
+                        .optJSONObject(i)
+                        ?.optLong("size_bytes", 0L)
+                        ?.coerceAtLeast(0L)
+                        ?: 0L
+                }
+
+                // R10.27.4.1: batch accounting includes a staged audio track too.
+                total += manifest
+                    .optJSONObject("audio")
+                    ?.optLong("size_bytes", 0L)
+                    ?.coerceAtLeast(0L)
+                    ?: 0L
+
+                total
+            }
+
+            KIND_BATCH -> {
+                val items = manifest.optJSONArray("items") ?: JSONArray()
+                var total = 0L
+                for (i in 0 until items.length()) {
+                    items.optJSONObject(i)?.let { total += stagedBytes(it) }
+                }
+                total
+            }
+
+            else -> 0L
+        }
+    }
+
     private fun copyUriWithLimit(uri: Uri, target: File, maxBytes: Long): Long {
         var total = 0L
         resolver.openInputStream(uri)?.use { input ->
@@ -588,6 +720,7 @@ class AyanaMultimodalAttachmentManager(
         const val KIND_DOCUMENT = "document"
         const val KIND_VIDEO_VISUAL = "video_visual"
         const val KIND_BATCH = "batch"
+        const val BATCH_MIME_TYPE = "application/x-ayana-attachment-batch"
 
         /**
          * Decide whether a currently selected attachment belongs to this text command.
@@ -686,6 +819,9 @@ class AyanaMultimodalAttachmentManager(
 
         private const val MANIFEST_VERSION = 2
         private const val CACHE_DIR_NAME = "ayana_multimodal"
+        const val MAX_BATCH_ITEMS = 8
+        private const val MAX_BATCH_STAGED_BYTES = 8L * 1024L * 1024L
+        private const val MAX_BATCH_VIDEO_FRAMES = 24
         private const val CACHE_TTL_MS = 24L * 60L * 60L * 1000L
         private const val MAX_DISPLAY_NAME_CHARS = 160
         private const val MAX_SOURCE_IMAGE_BYTES = 30L * 1024L * 1024L
