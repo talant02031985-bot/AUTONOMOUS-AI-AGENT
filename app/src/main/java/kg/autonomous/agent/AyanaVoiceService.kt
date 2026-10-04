@@ -63,6 +63,11 @@ import kotlin.math.abs
 
 class AyanaVoiceService : Service() {
 
+// AYANA v12.63.0 / R10.27.5 VERIFIED INTERNET SPEED.
+// Adds active-network-bound latency/download/upload measurement with exact byte/time evidence,
+// transport validation, unchanged-network proof and fail-closed terminal truth. No browser/UI/ORB changes.
+// R10.27.4 video-audio analysis remains DEVICE-CONFIRMED and preserved.
+//
 // AYANA v12.62.0 / R10.27.4 VIDEO AUDIO ANALYSIS.
 // Adds bounded video audio-track transcription and visual+audio fusion while preserving
 // sampled-frame truth, private-cache path validation and fail-closed terminal semantics.
@@ -5474,9 +5479,9 @@ localCapabilityTruthReply(
                 return
             }
 
-        // NETWORK TEST FAST-PATH v11.3
-        // FAST.com starts measurement automatically. AYANA still does not claim
-        // an Mbps result because current screen content is not reliably readable.
+        // R10.27.5 VERIFIED INTERNET SPEED FAST-PATH.
+        // Native active-network-bound measurement returns verified latency/download/upload
+        // without opening a browser or scraping external UI.
         if (
             isInternetSpeedTestRequest(
                 routingNormalized
@@ -55345,96 +55350,166 @@ val activeNetwork =
         silent: Boolean
     ) {
 
-        val transport =
-            activeNetworkTransport()
+        executionPhase(
+            phase = "internet_speed_measurement",
+            executor = "internet_speed_probe"
+        )
 
-        if (specificallyMobile) {
-            when (transport) {
-                "cellular" -> Unit
+        broadcastStatus(
+            "Измеряю скорость интернета…",
+            STATE_EXECUTING
+        )
 
-                "wifi" -> {
-                    respondBlockedAndResume(
-                        text =
-                            "Сейчас активен Wi‑Fi, поэтому скорость именно мобильного интернета подтвердить нельзя. Отключите Wi‑Fi и повторите проверку.",
-                        silent = silent,
-                        technical =
-                            "mobile_speed_test_blocked_by_active_wifi"
-                    )
-                    return
+        val result =
+            AyanaInternetSpeedProbe(
+                applicationContext
+            ).run(
+                specificallyMobile = specificallyMobile,
+                shouldCancel = {
+                    cancelRequested ||
+                        executionKernel.isCancelled() ||
+                        shuttingDown ||
+                        Thread.currentThread().isInterrupted
                 }
+            )
 
-                "none" -> {
-                    respondBlockedAndResume(
-                        text =
-                            "Активного мобильного интернет-подключения сейчас не обнаружено, поэтому измерить его скорость невозможно.",
-                        silent = silent,
-                        technical =
-                            "mobile_speed_test_blocked_no_active_network"
-                    )
-                    return
-                }
-
-                else -> {
-                    respondBlockedAndResume(
-                        text =
-                            "Не удалось надёжно подтвердить, что активный транспорт — мобильная сеть. Тест именно мобильного интернета не запускаю без этого доказательства.",
-                        silent = silent,
-                        technical =
-                            "mobile_speed_test_blocked_unverified_cellular_transport:$transport"
-                    )
-                    return
-                }
-            }
-        }
+        val terminal =
+            result.optString(
+                "terminal_status",
+                if (result.optBoolean("success", false)) "SUCCESS" else "ERROR"
+            )
 
         if (
-            transport ==
-            "none"
+            result.optBoolean("success", false) &&
+            result.optBoolean("verified", false)
         ) {
-            respondBlockedAndResume(
+            val download = result.optDouble("download_mbps", -1.0)
+            val upload = result.optDouble("upload_mbps", -1.0)
+            val latency = result.optDouble("latency_ms", -1.0)
+            val jitter = result.optDouble("jitter_ms", -1.0)
+            val transport = result.optString("transport", "unknown")
+
+            if (download <= 0.0 || upload <= 0.0 || latency < 0.0) {
+                respondAndResume(
+                    text = "Измерение завершилось без полного подтверждённого набора метрик.",
+                    silent = silent,
+                    success = false,
+                    technical = "internet_speed_invalid_verified_result; raw=${result.toString().take(2200)}"
+                )
+                return
+            }
+
+            val technical =
+                (
+                    "verified_internet_speed; " +
+                        "transport=$transport; " +
+                        "network_validated=${result.optBoolean("network_validated", false)}; " +
+                        "network_unchanged=${result.optBoolean("network_unchanged", false)}; " +
+                        "download_mbps=$download; " +
+                        "upload_mbps=$upload; " +
+                        "latency_ms=$latency; " +
+                        "jitter_ms=$jitter; " +
+                        "download_bytes=${result.optLong("download_bytes", 0L)}; " +
+                        "upload_bytes=${result.optLong("upload_bytes", 0L)}; " +
+                        "duration_ms=${result.optLong("duration_ms", 0L)}; " +
+                        "provider=${result.optString("provider", "")}; " +
+                        "measurement_method=${result.optString("measurement_method", "")}; " +
+                        "approximate_point_in_time=${result.optBoolean("approximate_point_in_time", true)}"
+                    ).take(3000)
+
+            commandHistoryStore.addEvent(
+                activeCommandHistoryId,
+                state = "internet_speed_verified",
+                message = "Скорость интернета измерена и подтверждена локальным сетевым пробником",
+                details = technical
+            )
+
+            capabilityRegistry.recordCapabilityEvidence(
+                capabilityId = "internet_speed_measurement",
+                detail =
+                    "R10.27.5 active-network-bound HTTPS byte transfer verified: " +
+                        "download=$download Mbps; upload=$upload Mbps; latency=$latency ms; transport=$transport",
+                verified = true
+            )
+
+            val transportText =
+                when (transport) {
+                    "wifi" -> "Wi-Fi"
+                    "cellular" -> "мобильная сеть"
+                    "ethernet" -> "Ethernet"
+                    "vpn" -> "VPN"
+                    else -> transport
+                }
+
+            respondAndResume(
                 text =
-                    "Активного интернет-подключения сейчас не обнаружено, поэтому измерить скорость невозможно.",
-                silent =
-                    silent,
-                technical =
-                    "internet_speed_test_blocked_no_active_network"
+                    String.format(
+                        Locale.US,
+                        "Скорость интернета сейчас: загрузка %.2f Мбит/с, отдача %.2f Мбит/с, задержка %.2f мс, джиттер %.2f мс. Активный транспорт: %s. Это измерение на текущий момент.",
+                        download,
+                        upload,
+                        latency,
+                        jitter,
+                        transportText
+                    ),
+                silent = silent,
+                success = true,
+                technical = technical
             )
             return
         }
 
-        val uri =
-            Uri.parse(
-                "https://fast.com/"
-            )
+        val reason = result.optString("reason", "internet_speed_probe_failed")
+        val transport = result.optString("transport", "unknown")
+        val technical =
+            (
+                "internet_speed_not_verified; terminal=$terminal; reason=$reason; " +
+                    "transport=$transport; duration_ms=${result.optLong("duration_ms", 0L)}; " +
+                    "raw=${result.toString().take(1800)}"
+                ).take(2600)
 
-        try {
-            startActivity(
-                Intent(
-                    Intent.ACTION_VIEW,
-                    uri
-                ).apply {
-                    addFlags(
-                        Intent.FLAG_ACTIVITY_NEW_TASK
-                    )
-                }
-            )
-respondUnsupportedAndResume(
-                text =
-                    "FAST.com открыт и начнёт измерение автоматически, но текущая AYANA пока не умеет надёжно прочитать и подтвердить итоговую скорость в Mbps.",
-                silent =
-                    silent,
-                technical =
-                    "speed_test_opened_but_mbps_verification_unavailable"
-            )
+        commandHistoryStore.addEvent(
+            activeCommandHistoryId,
+            state = "internet_speed_not_verified",
+            message = "Скорость интернета не подтверждена",
+            details = technical
+        )
 
-        } catch (
-            _: ActivityNotFoundException
-        ) {
-            respondAndResume(
-                "Не удалось открыть тест скорости.",
-                silent,
-                success = false
-            )
+        when (terminal) {
+            "BLOCKED" ->
+                respondBlockedAndResume(
+                    text = when (reason) {
+                        "mobile_speed_test_blocked_by_active_wifi" ->
+                            "Сейчас активен Wi-Fi, поэтому скорость именно мобильного интернета не измеряю. Отключите Wi-Fi и повторите команду."
+                        "mobile_speed_test_blocked_by_active_vpn" ->
+                            "Активен VPN, поэтому транспорт именно мобильной сети нельзя доказательно подтвердить. Отключите VPN и повторите тест мобильной сети."
+                        "no_active_network" ->
+                            "Активного интернет-подключения сейчас нет, поэтому измерить скорость невозможно."
+                        "active_network_not_validated" ->
+                            "Android не подтверждает активную сеть как имеющую рабочий доступ в интернет, поэтому скорость не измеряю."
+                        else ->
+                            "Не удалось доказательно подтвердить подходящий активный интернет-транспорт для измерения скорости."
+                    },
+                    silent = silent,
+                    technical = technical
+                )
+
+            "CANCELLED" ->
+                respondAndResume(
+                    text = "Измерение скорости отменено.",
+                    silent = silent,
+                    success = false,
+                    terminalStatus = "CANCELLED",
+                    technical = technical
+                )
+
+            else ->
+                respondAndResume(
+                    text = "Не удалось надёжно измерить скорость интернета. Результат в Мбит/с не выдаю без полного подтверждения.",
+                    silent = silent,
+                    success = false,
+                    technical = technical
+                )
         }
     }
 
@@ -73311,25 +73386,25 @@ state
 
         // R10.27.4 VIDEO AUDIO ANALYSIS.
         private const val AYANA_VOICE_SERVICE_RELEASE =
-            "v12.62.0 / R10.27.4 VIDEO AUDIO ANALYSIS"
+            "v12.63.0 / R10.27.5 VERIFIED INTERNET SPEED"
 
         private const val AYANA_PERSONAL_SEARCH_ENGINE_RELEASE =
             "v2.0 / R10.20 PERSONAL SEARCH 2.0 + VERIFIED RESULT CONTRACT v2"
 
         private const val AYANA_CAPABILITY_REGISTRY_RELEASE =
-            "v3.3 / R10.27.4 VIDEO AUDIO ANALYSIS TRUTH"
+            "v3.4 / R10.27.5 VERIFIED INTERNET SPEED TRUTH"
 
         private const val AYANA_WORKER_RELEASE =
             "v11.7.0 / R10.27.4 VIDEO AUDIO ANALYSIS"
 
         private const val AYANA_ACCEPTED_FEATURE_CHECKPOINT =
-            "R10.27.3.1 / R10.27.3 VERIFIED DEVELOPMENT TRANSACTION — DEVICE-CONFIRMED; R10.27.2.1 + R10.27.1.2 preserved"
+            "R10.27.4 VIDEO AUDIO ANALYSIS — DEVICE-CONFIRMED; R10.27.3.1 + R10.27.2.1 + R10.27.1.2 preserved"
 
         private const val AYANA_CURRENT_FEATURE_RELEASE =
-            "R10.27.4 VIDEO AUDIO ANALYSIS — PENDING DEVICE CONFIRMATION"
+            "R10.27.5 VERIFIED INTERNET SPEED — PENDING DEVICE CONFIRMATION"
 
         private const val AYANA_RELEASE_LINEAGE =
-            "Android v12.21.0 / R7.9 truth-hardening + R8.0 multi-attachment + R8.1–R8.4 accepted Personal Global Search stack + R8.5–R8.5.4 capability/evidence truth + R9.0 autonomous agent foundation + R9.0.1 history live-refresh proof fix + R9.0.2 diagnostic reconciliation/history refresh fix + R9.0.3 TTS health reconciliation + R9.1 IME perception/active telemetry truth + R9.2 autonomous recovery/long-task reconciliation + R9.2.1 adaptive hypothesis reconciliation + R9.3 app integration framework + R9.3.1 screen health reconciliation + R9.3.2 history latency recovery reconciliation + R9.3.3 informational terminal reconciliation + R9.3.4 app integration device acceptance + R9.4 multi-app task orchestration + R9.4.1 screen ownership union reconciliation + R9.5 verified result transfer between app steps + R9.5.1 partial marker provenance reconciliation + R9.5.2 bounded marker observation + R9.5.3 verified action result transfer + R9.6 verified semantic observation fallback + R9.6.1 visual fallback acceptance truth + R9.7 structured screen reading + R9.7.1 conversation routing/terminal truth + R9.7.2 structured router conversation precedence + R9.7.3 action morphology/terminal truth + R9.8 generic verified result transfer + R9.8.1 master full acceptance/diagnostic engine + R9.9 reversible action journal/verified undo + R9.9.1 brightness verified undo device acceptance + R9.9.2 opt-in low-battery controlled proactivity + R10.0 unified screen intelligence + R10.1 local self-diagnostics/self-audit + R10.2 personal search expansion + R10.3 long autonomous tasks/recovery + R10.4 adaptive verified execution loop + R10.5 generalized live adaptive autonomy + R10.6 cross-lane adaptive continuity + R10.6.1 durable goal binding fix + R10.7 cross-lane durable recovery continuity + R10.7.1 isolated acceptance cleanup hardening + R10.8 general-purpose long autonomous objectives + R10.9 dynamic goal decomposition/planner contract + R10.10 adaptive planner production path + R10.11 production replan/durable recovery + R10.12 natural lifecycle recovery/background continuation + R10.13 full process-death recovery + R10.13.1 post-process readiness/reconciliation + R10.13.2 process-death core recovery proof correction + R10.14 perception process isolation/cross-process accessibility bridge + R10.14.1 cross-process visual evidence fix + R10.14.2 lifecycle profile/self-diagnostic truth + R10.14.3 history recovery reconciliation + R10.15 generalized cross-process autonomy hardening + R10.15.1 self-diagnostics routing reconciliation + R10.16 perception process recovery/safe bridge rebind + R10.16.1 restart telemetry reconciliation + R10.17 screen intelligence 2.0 + R10.17.1 acceptance routing reconciliation + R10.18 universal UI action engine + R10.18.1 acceptance target reconciliation + R10.18.2 live target authority reconciliation + R10.18.3 app info target reconciliation + R10.19 autonomous multi-app tasks 2.0 + R10.20 personal search 2.0 + R10.21 document & office engine 2.0 + R10.22 notifications & communication assistant + R10.22.1 notification acceptance visibility reconciliation + R10.21.1 pptx completion evidence reconciliation + R10.23 voice & background 2.0 + R10.24 field hardening + R10.24.1 field hardening reconciliation/device acceptance + R10.24.2 acceptance truth reconciliation + R10.25 cross-process accessibility truth reconciliation + R10.26 capability evidence metadata reconciliation + R10.26.1 capability evidence metadata detector reconciliation + R10.27.1 github repository write/commit-push + R10.27.1.1 github confirmation terminal truth + R10.27.1.2 github verified-commit completion truth + R10.27.2 apk build pipeline + R10.27.2.1 apk build prepare read-only truth + R10.27.3 verified development transaction/project workspace + R10.27.3.1 waiting-acceptance terminal truth + R10.27.4 video audio analysis"
+            "Android v12.21.0 / R7.9 truth-hardening + R8.0 multi-attachment + R8.1–R8.4 accepted Personal Global Search stack + R8.5–R8.5.4 capability/evidence truth + R9.0 autonomous agent foundation + R9.0.1 history live-refresh proof fix + R9.0.2 diagnostic reconciliation/history refresh fix + R9.0.3 TTS health reconciliation + R9.1 IME perception/active telemetry truth + R9.2 autonomous recovery/long-task reconciliation + R9.2.1 adaptive hypothesis reconciliation + R9.3 app integration framework + R9.3.1 screen health reconciliation + R9.3.2 history latency recovery reconciliation + R9.3.3 informational terminal reconciliation + R9.3.4 app integration device acceptance + R9.4 multi-app task orchestration + R9.4.1 screen ownership union reconciliation + R9.5 verified result transfer between app steps + R9.5.1 partial marker provenance reconciliation + R9.5.2 bounded marker observation + R9.5.3 verified action result transfer + R9.6 verified semantic observation fallback + R9.6.1 visual fallback acceptance truth + R9.7 structured screen reading + R9.7.1 conversation routing/terminal truth + R9.7.2 structured router conversation precedence + R9.7.3 action morphology/terminal truth + R9.8 generic verified result transfer + R9.8.1 master full acceptance/diagnostic engine + R9.9 reversible action journal/verified undo + R9.9.1 brightness verified undo device acceptance + R9.9.2 opt-in low-battery controlled proactivity + R10.0 unified screen intelligence + R10.1 local self-diagnostics/self-audit + R10.2 personal search expansion + R10.3 long autonomous tasks/recovery + R10.4 adaptive verified execution loop + R10.5 generalized live adaptive autonomy + R10.6 cross-lane adaptive continuity + R10.6.1 durable goal binding fix + R10.7 cross-lane durable recovery continuity + R10.7.1 isolated acceptance cleanup hardening + R10.8 general-purpose long autonomous objectives + R10.9 dynamic goal decomposition/planner contract + R10.10 adaptive planner production path + R10.11 production replan/durable recovery + R10.12 natural lifecycle recovery/background continuation + R10.13 full process-death recovery + R10.13.1 post-process readiness/reconciliation + R10.13.2 process-death core recovery proof correction + R10.14 perception process isolation/cross-process accessibility bridge + R10.14.1 cross-process visual evidence fix + R10.14.2 lifecycle profile/self-diagnostic truth + R10.14.3 history recovery reconciliation + R10.15 generalized cross-process autonomy hardening + R10.15.1 self-diagnostics routing reconciliation + R10.16 perception process recovery/safe bridge rebind + R10.16.1 restart telemetry reconciliation + R10.17 screen intelligence 2.0 + R10.17.1 acceptance routing reconciliation + R10.18 universal UI action engine + R10.18.1 acceptance target reconciliation + R10.18.2 live target authority reconciliation + R10.18.3 app info target reconciliation + R10.19 autonomous multi-app tasks 2.0 + R10.20 personal search 2.0 + R10.21 document & office engine 2.0 + R10.22 notifications & communication assistant + R10.22.1 notification acceptance visibility reconciliation + R10.21.1 pptx completion evidence reconciliation + R10.23 voice & background 2.0 + R10.24 field hardening + R10.24.1 field hardening reconciliation/device acceptance + R10.24.2 acceptance truth reconciliation + R10.25 cross-process accessibility truth reconciliation + R10.26 capability evidence metadata reconciliation + R10.26.1 capability evidence metadata detector reconciliation + R10.27.1 github repository write/commit-push + R10.27.1.1 github confirmation terminal truth + R10.27.1.2 github verified-commit completion truth + R10.27.2 apk build pipeline + R10.27.2.1 apk build prepare read-only truth + R10.27.3 verified development transaction/project workspace + R10.27.3.1 waiting-acceptance terminal truth + R10.27.4 video audio analysis + R10.27.5 verified internet speed"
 
         // AyanaCommandHistoryStore v2.8 keeps up to 4k chars inline and stores longer
         // results out-of-line. Self-review intentionally remains inline so copied History

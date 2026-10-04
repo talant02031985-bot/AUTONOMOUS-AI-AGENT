@@ -10,7 +10,7 @@ import org.json.JSONArray
 import org.json.JSONObject
 
 /**
- * AYANA Device Capability Registry v3.3.1 — R10.27.4.2 COMPILE CONTRACT RESTORE.
+ * AYANA Device Capability Registry v3.4 — R10.27.5 VERIFIED INTERNET SPEED TRUTH.
  *
  * Single machine-readable source of truth for:
  * 1) what this build implements;
@@ -1459,16 +1459,19 @@ class AyanaCapabilityRegistry(
             implemented = true,
             available = true,
             deviceConfirmed = false,
-            note = "v11.3 can open FAST.com; AYANA does not yet independently read/verify Mbps result"
+            note = "legacy FAST.com launcher capability retained for compatibility; R10.27.5 production speed commands use native verified measurement instead of browser UI"
         )
 
         capability(
             capabilities,
             "internet_speed_measurement",
-            implemented = false,
-            available = false,
-            deviceConfirmed = false,
-            note = "AYANA cannot yet independently measure and return verified Mbps"
+            implemented = true,
+            available = true,
+            deviceConfirmed = prefs.getBoolean(
+                "capability_confirmed_internet_speed_measurement",
+                false
+            ),
+            note = "R10.27.5 native bounded active-network HTTPS measurement returns latency/download/upload from actual transferred bytes + monotonic time; device confirmation is persisted only after a verified runtime result"
         )
 
         capability(
@@ -1512,8 +1515,8 @@ class AyanaCapabilityRegistry(
             "video_audio_analysis",
             implemented = true,
             available = true,
-            deviceConfirmed = false,
-            note = "R10.27.4 candidate stages a bounded private-cache audio track, transcribes it through the dedicated Worker transcription path, and fuses transcript + sampled frames; pending device acceptance"
+            deviceConfirmed = true,
+            note = "R10.27.4 DEVICE-CONFIRMED: bounded private-cache audio staging + gpt-4o-mini-transcribe + sampled-frame fusion; true no-audio-track requests fail closed with audio_status=no_audio_track"
         )
 
         capability(
@@ -1812,7 +1815,7 @@ class AyanaCapabilityRegistry(
             )
 
             append(
-                "image_upload=true; video_upload=true; image_vision=true; video_analysis=visual_sampled_frames_plus_optional_audio_transcript; video_audio_analysis=implemented_pending_device_confirmation; "
+                "image_upload=true; video_upload=true; image_vision=true; video_analysis=visual_sampled_frames_plus_optional_audio_transcript; video_audio_analysis=device_confirmed; "
             )
 
             append(
@@ -1820,11 +1823,20 @@ class AyanaCapabilityRegistry(
             )
 
             append(
-                "internet_speed_measurement=false; speed_test_launcher=true; google_image_search=true. "
+                "internet_speed_measurement=implemented; internet_speed_device_confirmed="
+            )
+            append(
+                prefs.getBoolean(
+                    "capability_confirmed_internet_speed_measurement",
+                    false
+                )
+            )
+            append(
+                "; speed_test_launcher=true; google_image_search=true. "
             )
 
             append(
-                "Multimodal intake is device-confirmed for image, PDF/DOCX and sampled-frame visual video analysis. R10.27.4 video-audio transcription is implemented but remains pending device acceptance; do not advertise it as device-confirmed before real proof. Never inherit other generic ChatGPT abilities. "
+                "Multimodal intake including R10.27.4 video-audio transcription is device-confirmed. R10.27.5 native internet speed measurement is implemented; advertise it as device-confirmed only after persisted verified runtime evidence. Never inherit other generic ChatGPT abilities. "
             )
 
             append(
@@ -2209,7 +2221,7 @@ class AyanaCapabilityRegistry(
     companion object {
 
         const val BUILD_LABEL =
-            "v12.62.0_r10_27_4_2_video_audio_compile_contract_restore"
+            "v12.63.0_r10_27_5_verified_internet_speed"
 
         private const val PREFS_NAME =
             "ayana_capability_runtime_v11"
