@@ -56,7 +56,7 @@ import kotlin.concurrent.thread
 
 class MainActivity : AppCompatActivity() {
 
-    // UI generation: v8.0 R10.28.3 PROJECTS UI + v7.8 UI SCROLL PERFORMANCE + v7.5 NOTIFICATION ACCESS TRUTH
+    // UI generation: v8.0.1 R10.28.3.1 PROJECTS UI GEOMETRY FIX + v7.8 UI SCROLL PERFORMANCE + v7.5 NOTIFICATION ACCESS TRUTH
     // + OWN-APP SEMANTIC ACTION TRUTH.
     // v7.4 keeps v7.2 foreground ownership truth and hardens the in-process
     // semantic bridge so the same factual View tree used for perception also
@@ -787,9 +787,9 @@ class MainActivity : AppCompatActivity() {
                 orientation = LinearLayout.VERTICAL
                 setPadding(
                     dp(8),
-                    dp(12),
+                    dp(9),
                     dp(8),
-                    dp(10)
+                    dp(8)
                 )
                 background =
                     GradientDrawable(
@@ -808,7 +808,7 @@ class MainActivity : AppCompatActivity() {
                     }
                 layoutParams =
                     LinearLayout.LayoutParams(
-                        dp(172),
+                        dp(158),
                         ViewGroup.LayoutParams.MATCH_PARENT
                     )
             }
@@ -827,9 +827,9 @@ class MainActivity : AppCompatActivity() {
                 letterSpacing = 0.09f
                 setPadding(
                     dp(10),
-                    dp(2),
+                    dp(1),
                     0,
-                    dp(10)
+                    dp(6)
                 )
             }
         )
@@ -857,9 +857,9 @@ class MainActivity : AppCompatActivity() {
                 gravity = Gravity.CENTER_VERTICAL
                 setPadding(
                     dp(10),
-                    dp(9),
+                    dp(7),
                     dp(10),
-                    dp(9)
+                    dp(7)
                 )
                 background =
                     softDrawable(
@@ -904,7 +904,7 @@ class MainActivity : AppCompatActivity() {
                 ViewGroup.LayoutParams.MATCH_PARENT,
                 ViewGroup.LayoutParams.WRAP_CONTENT
             ).apply {
-                bottomMargin = dp(9)
+                bottomMargin = dp(6)
             }
         )
 
@@ -943,10 +943,10 @@ class MainActivity : AppCompatActivity() {
             cancelCommandButton,
             LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT,
-                dp(44)
+                dp(42)
             ).apply {
                 bottomMargin =
-                    dp(7)
+                    dp(5)
             }
         )
 
@@ -983,7 +983,7 @@ class MainActivity : AppCompatActivity() {
             stopButton,
             LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT,
-                dp(48)
+                dp(44)
             )
         )
 
@@ -1010,7 +1010,7 @@ class MainActivity : AppCompatActivity() {
                 View.IMPORTANT_FOR_ACCESSIBILITY_YES
 
             textSize =
-                    16.5f
+                    16.0f
 
             gravity =
                 Gravity.CENTER_VERTICAL
@@ -1022,20 +1022,20 @@ class MainActivity : AppCompatActivity() {
             )
 
             setPadding(
-                dp(12),
-                0,
                 dp(10),
+                0,
+                dp(8),
                 0
             )
 
             layoutParams =
                 LinearLayout.LayoutParams(
                     ViewGroup.LayoutParams.MATCH_PARENT,
-                    dp(54)
+                    dp(48)
                 ).apply {
 
                     bottomMargin =
-                        dp(6)
+                        dp(4)
                 }
 
             setOnClickListener {
