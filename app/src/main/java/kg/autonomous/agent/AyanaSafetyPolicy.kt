@@ -4,7 +4,7 @@ import org.json.JSONObject
 import java.util.Locale
 
 /**
- * AYANA Safety Policy v1.5.1 — R10.28 Project Artifact Policy Reconciliation.
+ * AYANA Safety Policy v1.6 — Development Workspace 2.0 Candidate.
  *
  * Local fail-closed guard executed immediately before Agent Core device tools.
  * It is intentionally independent from model instructions: a model mistake must
@@ -105,7 +105,11 @@ class AyanaSafetyPolicy {
             "list_reminders",
             "github_repository_status",
             "github_build_status",
-            "github_development_transaction_status" ->
+            "github_development_transaction_status",
+            "project_workspace_status",
+            "project_workspace_list",
+            "project_workspace_read",
+            "project_workspace_transaction_status" ->
                 allow(
                     RISK_READ_ONLY,
                     "read_only"
@@ -129,6 +133,67 @@ class AyanaSafetyPolicy {
                     RISK_SAFE_ACTION,
                     "safe_action"
                 )
+
+            "project_workspace_write_transaction" ->
+                if (
+                    arguments.optBoolean(
+                        "confirmed",
+                        false
+                    )
+                ) {
+                    // confirmed=true is injected only by VoiceService after a fresh
+                    // local user confirmation of the exact prepared transaction id.
+                    allow(
+                        RISK_CONFIRMATION_REQUIRED,
+                        "project_workspace_write_confirmed"
+                    )
+                } else {
+                    // PREPARE persists only private transaction metadata/baselines;
+                    // project source files are not changed before confirmation.
+                    allow(
+                        RISK_READ_ONLY,
+                        "project_workspace_prepare_only"
+                    )
+                }
+
+            "project_workspace_transaction_control" -> {
+                val action =
+                    arguments.optString("action")
+                        .trim()
+                        .lowercase(Locale.ROOT)
+
+                when (action) {
+                    "status" ->
+                        allow(
+                            RISK_READ_ONLY,
+                            "project_workspace_transaction_status"
+                        )
+
+                    "accept",
+                    "cancel" ->
+                        allow(
+                            RISK_SAFE_ACTION,
+                            "project_workspace_local_finalize"
+                        )
+
+                    "rollback" ->
+                        if (arguments.optBoolean("confirmed", false)) {
+                            allow(
+                                RISK_CONFIRMATION_REQUIRED,
+                                "project_workspace_rollback_confirmed"
+                            )
+                        } else {
+                            confirmation(
+                                "Rollback project workspace transaction требует явного локального подтверждения пользователя."
+                            )
+                        }
+
+                    else ->
+                        prohibit(
+                            "Неизвестное действие управления project workspace transaction."
+                        )
+                }
+            }
 
             "github_write_commit" ->
                 if (
