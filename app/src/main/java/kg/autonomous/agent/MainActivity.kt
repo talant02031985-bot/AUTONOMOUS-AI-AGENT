@@ -74,6 +74,7 @@ class MainActivity : AppCompatActivity() {
         TASKS,
         MEMORY,
         HISTORY,
+        TESTS,
         DIAGNOSTICS,
         SETTINGS
     }
@@ -166,6 +167,27 @@ class MainActivity : AppCompatActivity() {
     private var diagnosticsCachedReport:
         org.json.JSONObject? =
         null
+
+    // R10.28.4 TEST RUNNER. Read-only stage/quick checks stay local;
+    // MASTER TEST dispatches the canonical acceptance command only after
+    // explicit user confirmation. No hard-coded master test count is used.
+    @Volatile
+    private var testRunnerInFlight =
+        false
+
+    @Volatile
+    private var masterTestAwaitingTerminal =
+        false
+
+    private var testRunnerLastSuccess:
+        Boolean? =
+        null
+
+    private var testRunnerLastTitle =
+        "Готов к проверке"
+
+    private var testRunnerLastDetails =
+        "Выберите тест. Локальные проверки не изменяют данные проекта."
 
     // R10.28 PROJECTS UI. MainActivity reads the same durable active_project_id
     // as VoiceService, so Tasks/Memory/History/Durable Goals shown on screen
@@ -336,15 +358,50 @@ class MainActivity : AppCompatActivity() {
                     state
                 )
 
-                if (
-                    currentPage ==
-                    Page.HISTORY &&
+                val terminalState =
                     state in setOf(
                         AyanaVoiceService.STATE_SUCCESS,
                         AyanaVoiceService.STATE_ERROR,
                         AyanaVoiceService.STATE_CANCELLED,
                         AyanaVoiceService.STATE_STOPPED
                     )
+
+                if (
+                    masterTestAwaitingTerminal &&
+                    terminalState
+                ) {
+                    masterTestAwaitingTerminal = false
+                    testRunnerInFlight = false
+                    testRunnerLastSuccess =
+                        state ==
+                            AyanaVoiceService.STATE_SUCCESS
+                    testRunnerLastTitle =
+                        when (state) {
+                            AyanaVoiceService.STATE_SUCCESS ->
+                                "MASTER TEST — SUCCESS"
+                            AyanaVoiceService.STATE_CANCELLED ->
+                                "MASTER TEST — CANCELLED"
+                            AyanaVoiceService.STATE_STOPPED ->
+                                "MASTER TEST — STOPPED"
+                            else ->
+                                "MASTER TEST — ERROR"
+                        }
+                    testRunnerLastDetails =
+                        text.take(1200) +
+                            "\nПолный результат сохранён в Истории."
+
+                    if (
+                        currentPage ==
+                        Page.TESTS
+                    ) {
+                        renderTests()
+                    }
+                }
+
+                if (
+                    currentPage ==
+                    Page.HISTORY &&
+                    terminalState
                 ) {
                     scheduleHistoryRefresh()
                 }
@@ -839,6 +896,7 @@ class MainActivity : AppCompatActivity() {
         side.addView(navButton(Page.TASKS, "◷  Задачи"))
         side.addView(navButton(Page.MEMORY, "◇  Память"))
         side.addView(navButton(Page.HISTORY, "≡  История"))
+        side.addView(navButton(Page.TESTS, "✓  Тесты"))
         side.addView(navButton(Page.DIAGNOSTICS, "⌁  Система"))
         side.addView(navButton(Page.SETTINGS, "⚙  Настройки"))
 
@@ -1060,6 +1118,7 @@ text =
             Page.TASKS -> "Задачи"
             Page.MEMORY -> "Память"
             Page.HISTORY -> "История"
+            Page.TESTS -> "Тесты"
             Page.DIAGNOSTICS -> "Система"
             Page.SETTINGS -> "Настройки"
         }
@@ -1105,6 +1164,7 @@ text =
                 "TASKS" -> Page.TASKS
                 "MEMORY" -> Page.MEMORY
                 "HISTORY" -> Page.HISTORY
+                "TESTS" -> Page.TESTS
                 "SYSTEM", "DIAGNOSTICS" -> Page.DIAGNOSTICS
                 "SETTINGS" -> Page.SETTINGS
                 else -> null
@@ -1151,6 +1211,7 @@ text =
             Page.TASKS -> renderTasks()
             Page.MEMORY -> renderMemory()
             Page.HISTORY -> renderHistory()
+            Page.TESTS -> renderTests()
             Page.DIAGNOSTICS -> renderDiagnostics()
             Page.SETTINGS -> renderSettings()
         }
@@ -5773,6 +5834,478 @@ records.forEach { record ->
             }
         }.trimEnd()
     }
+
+    private fun renderTests() {
+
+        contentContainer
+            .removeAllViews()
+
+        contentContainer.addView(
+            pageTitle(
+                "Тесты",
+                "R10.28.4 Test Runner — локальные проверки и canonical MASTER"
+            )
+        )
+
+        val statusCard =
+            panel(
+                20
+            )
+
+        statusCard.addView(
+            TextView(this).apply {
+                text =
+                    if (testRunnerInFlight) {
+                        "Выполняется…"
+                    } else {
+                        testRunnerLastTitle
+                    }
+                textSize = 18f
+                setTypeface(
+                    Typeface.DEFAULT,
+                    Typeface.BOLD
+                )
+                setTextColor(
+                    Color.parseColor(
+                        when {
+                            testRunnerInFlight -> "#67E8F9"
+                            testRunnerLastSuccess == true -> "#86EFAC"
+                            testRunnerLastSuccess == false -> "#FCA5A5"
+                            else -> "#E2E8F0"
+                        }
+                    )
+                )
+            }
+        )
+
+        statusCard.addView(
+            TextView(this).apply {
+                text = testRunnerLastDetails
+                textSize = 14f
+                setTextColor(
+                    Color.parseColor("#9FB0C5")
+                )
+                setPadding(
+                    0,
+                    dp(7),
+                    0,
+                    0
+                )
+            }
+        )
+
+        contentContainer.addView(
+            statusCard,
+            sectionParams(
+                top = 8
+            )
+        )
+
+        contentContainer.addView(
+            settingsAction(
+                "Тест текущего этапа",
+                "Projects/Data Scope + active-project routing + current durable-goal UI. Без изменения данных."
+            ) {
+                runCurrentStageTest()
+            },
+            sectionParams(
+                top = 10
+            )
+        )
+
+        contentContainer.addView(
+            settingsAction(
+                "Быстрая регрессия",
+                "Короткая локальная проверка Projects, durable-goal UI и Self-Diagnostics."
+            ) {
+                runQuickRegressionTest()
+            },
+            sectionParams(
+                top = 8
+            )
+        )
+
+        contentContainer.addView(
+            settingsAction(
+                "MASTER TEST",
+                "Запускает canonical MASTER acceptance. Может открывать приложения; перед запуском требуется подтверждение."
+            ) {
+                confirmAndRunMasterTest()
+            },
+            sectionParams(
+                top = 8
+            )
+        )
+    }
+
+    private fun runCurrentStageTest() {
+
+        if (testRunnerInFlight) {
+            Toast.makeText(
+                this,
+                "Тест уже выполняется",
+                Toast.LENGTH_SHORT
+            ).show()
+            return
+        }
+
+        testRunnerInFlight = true
+        testRunnerLastSuccess = null
+        testRunnerLastTitle = "R10.28.4 — тест текущего этапа"
+        testRunnerLastDetails = "Проверяю project scope и UI-инварианты…"
+        renderTests()
+
+        thread(
+            start = true,
+            name = "AyanaR10_28_4StageTest"
+        ) {
+            val checks =
+                mutableListOf<Pair<String, Boolean>>()
+
+            try {
+                val projects =
+                    projectStore
+                        .list(
+                            includeArchived = false
+                        )
+
+                checks +=
+                    "ProjectStore читается" to true
+
+                checks +=
+                    "Project Data Scope self-test" to
+                        projectDataScope.selfTest()
+
+                val activeId =
+                    projectStore.activeProjectId()
+
+                if (activeId.isNullOrBlank()) {
+                    checks +=
+                        "Глобальный контекст разрешён" to true
+                } else {
+                    val active =
+                        projectStore.getById(
+                            activeId
+                        )
+
+                    checks +=
+                        "active_project_id разрешается" to
+                            (
+                                active != null &&
+                                    !active.archived
+                                )
+
+                    val stores =
+                        projectDataScope.forProject(
+                            activeId
+                        )
+
+                    checks +=
+                        "Project stores доступны" to
+                            (stores != null)
+
+                    val isolatedPath =
+                        try {
+                            stores != null &&
+                                stores.context.filesDir.canonicalPath !=
+                                    applicationContext.filesDir.canonicalPath
+                        } catch (_: Exception) {
+                            false
+                        }
+
+                    checks +=
+                        "Project filesDir отделён от global" to
+                            isolatedPath
+                }
+
+                val currentGoal =
+                    durableGoalStore
+                        .getCurrentForUi()
+
+                checks +=
+                    "Durable-goal UI только current" to
+                        (
+                            currentGoal == null ||
+                                currentGoal.isCurrent
+                            )
+
+                checks +=
+                    "Список проектов доступен" to
+                        (projects.size >= 0)
+            } catch (_: Exception) {
+                checks +=
+                    "R10.28.4 stage test exception" to false
+            }
+
+            val passed =
+                checks.count {
+                    it.second
+                }
+
+            val success =
+                passed == checks.size &&
+                    checks.isNotEmpty()
+
+            val details =
+                buildString {
+                    append(
+                        "${passed}/${checks.size} PASS"
+                    )
+                    checks.forEach {
+                        (name, ok) ->
+                        append("\n")
+                        append(
+                            if (ok) "✓ " else "✕ "
+                        )
+                        append(name)
+                    }
+                }
+
+            runOnUiThread {
+                testRunnerInFlight = false
+                testRunnerLastSuccess = success
+                testRunnerLastTitle =
+                    if (success) {
+                        "Тест текущего этапа — PASS"
+                    } else {
+                        "Тест текущего этапа — FAIL"
+                    }
+                testRunnerLastDetails = details
+
+                if (
+                    currentPage ==
+                    Page.TESTS
+                ) {
+                    renderTests()
+                }
+            }
+        }
+    }
+
+    private fun runQuickRegressionTest() {
+
+        if (testRunnerInFlight) {
+            Toast.makeText(
+                this,
+                "Тест уже выполняется",
+                Toast.LENGTH_SHORT
+            ).show()
+            return
+        }
+
+        testRunnerInFlight = true
+        testRunnerLastSuccess = null
+        testRunnerLastTitle = "Быстрая регрессия"
+        testRunnerLastDetails = "Проверяю локальные инварианты без внешних действий…"
+        renderTests()
+
+        thread(
+            start = true,
+            name = "AyanaQuickRegression"
+        ) {
+            val checks =
+                mutableListOf<Pair<String, Boolean>>()
+
+            var diagnosticsLine =
+                "Self-Diagnostics: нет данных"
+
+            try {
+                checks +=
+                    "Project Data Scope" to
+                        projectDataScope.selfTest()
+
+                val activeId =
+                    projectStore.activeProjectId()
+
+                checks +=
+                    "Active project scope" to
+                        (
+                            activeId.isNullOrBlank() ||
+                                projectDataScope.forProject(activeId) != null
+                            )
+
+                val currentGoal =
+                    durableGoalStore
+                        .getCurrentForUi()
+
+                checks +=
+                    "Durable-goal current-only" to
+                        (
+                            currentGoal == null ||
+                                currentGoal.isCurrent
+                            )
+
+                val report =
+                    selfDiagnostics
+                        .run(
+                            focus = "all",
+                            appName = ""
+                        )
+
+                val failed =
+                    report.optInt(
+                        "failed",
+                        0
+                    )
+
+                val warnings =
+                    report.optInt(
+                        "warnings",
+                        0
+                    )
+
+                val unknown =
+                    report.optInt(
+                        "unknown",
+                        0
+                    )
+
+                checks +=
+                    "Self-Diagnostics без ERROR" to
+                        (failed == 0)
+
+                diagnosticsLine =
+                    "Self-Diagnostics: failed=$failed, warnings=$warnings, unknown=$unknown"
+            } catch (_: Exception) {
+                checks +=
+                    "Quick regression exception" to false
+            }
+
+            val passed =
+                checks.count {
+                    it.second
+                }
+
+            val success =
+                passed == checks.size &&
+                    checks.isNotEmpty()
+
+            val details =
+                buildString {
+                    append(
+                        "${passed}/${checks.size} PASS"
+                    )
+                    append("\n")
+                    append(diagnosticsLine)
+                    checks.forEach {
+                        (name, ok) ->
+                        append("\n")
+                        append(
+                            if (ok) "✓ " else "✕ "
+                        )
+                        append(name)
+                    }
+                }
+
+            runOnUiThread {
+                testRunnerInFlight = false
+                testRunnerLastSuccess = success
+                testRunnerLastTitle =
+                    if (success) {
+                        "Быстрая регрессия — PASS"
+                    } else {
+                        "Быстрая регрессия — FAIL"
+                    }
+                testRunnerLastDetails = details
+
+                if (
+                    currentPage ==
+                    Page.TESTS
+                ) {
+                    renderTests()
+                }
+            }
+        }
+    }
+
+    private fun confirmAndRunMasterTest() {
+
+        if (testRunnerInFlight) {
+            Toast.makeText(
+                this,
+                "Тест уже выполняется",
+                Toast.LENGTH_SHORT
+            ).show()
+            return
+        }
+
+        AlertDialog
+            .Builder(this)
+            .setTitle(
+                "Запустить MASTER TEST?"
+            )
+            .setMessage(
+                "Canonical MASTER acceptance может открывать внешние приложения и выполнять проверочные действия. Чувствительные шаги сохраняют свои штатные подтверждения."
+            )
+            .setNegativeButton(
+                "Отмена",
+                null
+            )
+            .setPositiveButton(
+                "Запустить"
+            ) {
+                _, _ ->
+                dispatchTestRunnerCommand(
+                    "проведи полный приемочный тест ayana"
+                )
+            }
+            .show()
+    }
+
+    private fun dispatchTestRunnerCommand(
+        command: String
+    ) {
+
+        if (
+            !AyanaVoiceService.isRunning
+        ) {
+            startAyanaService()
+        }
+
+        val intent =
+            Intent(
+                this,
+                AyanaVoiceService::class.java
+            ).apply {
+                action =
+                    AyanaVoiceService.ACTION_TEXT_COMMAND
+                putExtra(
+                    AyanaVoiceService.EXTRA_TEXT_COMMAND,
+                    command
+                )
+            }
+
+        try {
+            if (
+                Build.VERSION.SDK_INT >= 26
+            ) {
+                startForegroundService(
+                    intent
+                )
+            } else {
+                startService(
+                    intent
+                )
+            }
+
+            masterTestAwaitingTerminal = true
+            testRunnerInFlight = true
+            testRunnerLastSuccess = null
+            testRunnerLastTitle = "MASTER TEST запущен"
+            testRunnerLastDetails =
+                "Запущен canonical MASTER acceptance без hard-coded количества тестов. Итоговый terminal result будет записан в Историю."
+            renderTests()
+        } catch (_: Exception) {
+            masterTestAwaitingTerminal = false
+            testRunnerInFlight = false
+            testRunnerLastSuccess = false
+            testRunnerLastTitle = "MASTER TEST — не запущен"
+            testRunnerLastDetails =
+                "Не удалось передать canonical MASTER command в AyanaVoiceService."
+            renderTests()
+        }
+    }
+
 
     private fun renderDiagnostics(
         forceRefresh: Boolean = false,
