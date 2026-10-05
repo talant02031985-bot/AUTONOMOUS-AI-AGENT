@@ -1,9 +1,10 @@
-// AYANA Worker v11.8.5 — R10.28.6.4 GITHUB DEVELOPMENT CONTROL ROUTING CANDIDATE
-// Preserves v11.8.4 global GitHub PREPARE routing and adds a dedicated read-only
-// github_development_transaction_control status surface. Control/status requests can no longer be
-// misclassified as github_development_transaction merely because the control tool name contains that substring.
-// A development_transaction_already_active tool result now continues through GitHub status inspection,
-// never through Project Workspace transaction control. No GitHub mutation/confirmation authority is expanded.
+// AYANA Worker v11.8.6 — R10.28.6.5 GITHUB DEVELOPMENT STATUS TERMINALITY CANDIDATE
+// Preserves v11.8.5 dedicated read-only github_development_transaction_control routing and closes
+// the post-status continuation leak: once the GitHub development status tool returns a terminal observation,
+// the continuation becomes reasoning-only and exposes no device/workspace tools. This prevents a verified
+// GitHub status result from being followed by an unrelated project_workspace_transaction_control call.
+// development_transaction_already_active still routes once through GitHub status inspection.
+// No GitHub mutation/confirmation authority is expanded.
 // Also preserves machine terminal truth when an execution request cannot run because an executor/tool is absent.
 // Adds project-scoped local source workspace tools; GitHub/APK authority remains unchanged.
 // Preserves verified GitHub write/build and adds one bounded two-phase development transaction tool with explicit accept/rollback.
@@ -1916,6 +1917,30 @@ function hasGitHubDevelopmentTransactionAlreadyActiveEvidence(toolResults) {
   });
 }
 
+function hasGitHubDevelopmentStatusTerminalObservation(toolResults) {
+  return (Array.isArray(toolResults) ? toolResults : []).some(result => {
+    const parsed = parseToolResultObject(result);
+    if (!parsed) return false;
+
+    const status = String(parsed.status || "").trim();
+    const message = String(parsed.message || "").trim().toLowerCase();
+    const explicitToolName = String(
+      result?.name || result?.tool_name || result?.tool || ""
+    ).trim();
+
+    const fromControlTool = explicitToolName === "github_development_transaction_control";
+    const githubDevelopmentMessage = message.includes("development transaction");
+    const alreadyActive = status === "development_transaction_already_active";
+
+    // already_active is not terminal for the user's status request: it must trigger
+    // exactly one read-only github_development_transaction_control status call first.
+    if (alreadyActive) return false;
+
+    return (fromControlTool || githubDevelopmentMessage)
+      && status.length > 0;
+  });
+}
+
 function extractVerifiedWorkspaceReadBaselines(toolResults) {
   const baselines = new Map();
 
@@ -2624,16 +2649,21 @@ ${verifiedLocalEvidence}
 
   const durableRecoveryMode = isDurableRecoveryRequest(message || "");
   const automaticDurableRecoveryMode = isAutomaticDurableRecoveryRequest(message || "");
+  const githubDevelopmentStatusCompletionMode = !durableRecoveryMode
+    && hasGitHubDevelopmentStatusTerminalObservation(toolResults);
   const githubDevelopmentStatusMode = !durableRecoveryMode
+    && !githubDevelopmentStatusCompletionMode
     && (
       isGitHubDevelopmentTransactionStatusRequest(message || "")
       || hasGitHubDevelopmentTransactionAlreadyActiveEvidence(toolResults)
     );
   const githubDevelopmentMode = !durableRecoveryMode
+    && !githubDevelopmentStatusCompletionMode
     && !githubDevelopmentStatusMode
     && isExplicitGitHubDevelopmentTransactionRequest(message || "");
   const projectWorkspaceContinuationMode = hasProjectWorkspaceContinuationEvidence(toolResults);
   const projectWorkspaceDevelopmentMode = !durableRecoveryMode
+    && !githubDevelopmentStatusCompletionMode
     && !githubDevelopmentStatusMode
     && !githubDevelopmentMode
     && (
@@ -2641,6 +2671,7 @@ ${verifiedLocalEvidence}
       || projectWorkspaceContinuationMode
     );
   const androidNavigationMode = !durableRecoveryMode
+    && !githubDevelopmentStatusCompletionMode
     && !githubDevelopmentStatusMode
     && !githubDevelopmentMode
     && !projectWorkspaceDevelopmentMode
@@ -2651,6 +2682,7 @@ ${verifiedLocalEvidence}
     && isRuntimeSelfDiagnosticRequest(message || "");
   const normalizedMessage = normalizeIntentText(message || "");
   const artifactCreationMode = !durableRecoveryMode
+    && !githubDevelopmentStatusCompletionMode
     && !githubDevelopmentStatusMode
     && !githubDevelopmentMode
     && !projectWorkspaceDevelopmentMode
@@ -2679,6 +2711,7 @@ ${verifiedLocalEvidence}
   const deepRequest = isDeepRequest(message || "");
   const fastEverydayMode = !durableRecoveryMode
     && !androidNavigationMode
+    && !githubDevelopmentStatusCompletionMode
     && !githubDevelopmentStatusMode
     && !githubDevelopmentMode
     && !projectWorkspaceDevelopmentMode
@@ -2691,6 +2724,7 @@ ${verifiedLocalEvidence}
   // remain on the full path.
   const detailedFastInfoMode = !durableRecoveryMode
     && !androidNavigationMode
+    && !githubDevelopmentStatusCompletionMode
     && !githubDevelopmentStatusMode
     && !githubDevelopmentMode
     && !projectWorkspaceDevelopmentMode
@@ -2708,6 +2742,7 @@ ${verifiedLocalEvidence}
 
   const longAnswerIntegrityMode = !androidNavigationMode
     && !durableRecoveryMode
+    && !githubDevelopmentStatusCompletionMode
     && !githubDevelopmentStatusMode
     && !githubDevelopmentMode
     && !projectWorkspaceDevelopmentMode
@@ -2743,6 +2778,14 @@ ${selfAutonomyMode ? AYANA_SELF_AUTONOMY_COMPACT_INSTRUCTIONS : ""}`
     ? `\n\n${AYANA_DURABLE_RECOVERY_INSTRUCTIONS}`
     : "";
 
+  const githubDevelopmentStatusCompletionInstructions = githubDevelopmentStatusCompletionMode
+    ? `\n\nGLOBAL GITHUB DEVELOPMENT STATUS COMPLETION CONTRACT v1:
+- Предыдущий github_development_transaction_control уже вернул наблюдение статуса.
+- Это terminal read-only completion turn: НЕ вызывай никакие инструменты.
+- Не вызывай project_workspace_transaction_control и не повторяй GitHub status.
+- Кратко сообщи пользователю только подтверждённое состояние из tool result и факт отсутствия mutation.`
+    : "";
+
   const githubDevelopmentStatusInstructions = githubDevelopmentStatusMode
     ? `\n\nGLOBAL GITHUB DEVELOPMENT TRANSACTION STATUS CONTRACT v1:
 - Выполняй только read-only github_development_transaction_control с action=status.
@@ -2776,7 +2819,7 @@ ${selfAutonomyMode ? AYANA_SELF_AUTONOMY_COMPACT_INSTRUCTIONS : ""}`
 ${ANDROID_GOAL_V7_INSTRUCTIONS}`
       : `${AGENT_INSTRUCTIONS}
 
-${styleInstructions}${githubDevelopmentStatusInstructions}${githubDevelopmentInstructions}${projectWorkspaceDevelopmentMode ? `
+${styleInstructions}${githubDevelopmentStatusCompletionInstructions}${githubDevelopmentStatusInstructions}${githubDevelopmentInstructions}${projectWorkspaceDevelopmentMode ? `
 
 ${AYANA_PROJECT_WORKSPACE_INSTRUCTIONS}` : ""}${artifactCreationMode ? `
 
@@ -2788,6 +2831,8 @@ ${AYANA_VERIFIED_LOCAL_EVIDENCE_INSTRUCTIONS}` : ""}${responseIntegrityInstructi
     input,
     max_output_tokens: androidNavigationMode
       ? 260
+      : githubDevelopmentStatusCompletionMode
+        ? (source === "voice" ? 280 : 700)
       : githubDevelopmentStatusMode
         ? (source === "voice" ? 420 : 1200)
       : githubDevelopmentMode
@@ -2819,6 +2864,9 @@ ${AYANA_VERIFIED_LOCAL_EVIDENCE_INSTRUCTIONS}` : ""}${responseIntegrityInstructi
   if (androidNavigationMode) {
     payload.tools = [ANDROID_GOAL_TOOL];
     payload.tool_choice = { type: "function", name: "execute_android_goal" };
+  } else if (githubDevelopmentStatusCompletionMode) {
+    // Verified status observation already exists in toolResults. Do not expose any
+    // device/workspace tools on the completion turn; the model must only summarize it.
   } else if (githubDevelopmentStatusMode) {
     const githubDevelopmentStatusTool = githubDevelopmentTransactionStatusTool();
     if (!githubDevelopmentStatusTool) {
