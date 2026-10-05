@@ -56,7 +56,7 @@ import kotlin.concurrent.thread
 
 class MainActivity : AppCompatActivity() {
 
-    // UI generation: v8.0.1 R10.28.3.1 PROJECTS UI GEOMETRY FIX + v7.8 UI SCROLL PERFORMANCE + v7.5 NOTIFICATION ACCESS TRUTH
+    // UI generation: v8.0.2 TEXT PANEL COMPACT ANSWER HEIGHT FIX + v8.0.1 R10.28.3.1 PROJECTS UI GEOMETRY FIX + v7.8 UI SCROLL PERFORMANCE + v7.5 NOTIFICATION ACCESS TRUTH
     // + OWN-APP SEMANTIC ACTION TRUTH.
     // v7.4 keeps v7.2 foreground ownership truth and hardens the in-process
     // semantic bridge so the same factual View tree used for perception also
@@ -7469,7 +7469,24 @@ records.forEach { record ->
         )
 
         answerScroll =
-            ScrollView(this).apply {
+            object : ScrollView(this) {
+                override fun onMeasure(
+                    widthMeasureSpec: Int,
+                    heightMeasureSpec: Int
+                ) {
+                    // Keep short replies compact. Long replies grow only up to
+                    // 190 dp and then scroll inside the answer area.
+                    val cappedHeightSpec =
+                        View.MeasureSpec.makeMeasureSpec(
+                            dp(190),
+                            View.MeasureSpec.AT_MOST
+                        )
+                    super.onMeasure(
+                        widthMeasureSpec,
+                        cappedHeightSpec
+                    )
+                }
+            }.apply {
                 visibility = View.GONE
                 isFillViewport = false
                 isVerticalScrollBarEnabled = true
@@ -7491,7 +7508,7 @@ records.forEach { record ->
             answerScroll,
             LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT,
-                dp(190)
+                ViewGroup.LayoutParams.WRAP_CONTENT
             ).apply {
                 topMargin =
                     dp(8)
