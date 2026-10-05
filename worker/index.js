@@ -1,4 +1,5 @@
-// AYANA Worker v11.7.0 — R10.27.4 VIDEO AUDIO ANALYSIS
+// AYANA Worker v11.8.0 — DEVELOPMENT WORKSPACE 2.0 CANDIDATE
+// Adds project-scoped local source workspace tools; GitHub/APK authority remains unchanged.
 // Preserves verified GitHub write/build and adds one bounded two-phase development transaction tool with explicit accept/rollback.
 // Android owns GitHub App Device Flow, encrypted token storage, fixed-repository authority,
 // explicit user confirmation, workflow dispatch/run correlation and artifact verification.
@@ -708,6 +709,94 @@ const DEVICE_TOOLS = [
   ,
   {
     type: "function",
+    name: "project_workspace_status",
+    description: "Read-only status of the currently active AYANA Project local source workspace. Returns the active project identity, isolated workspace path, bounded file limits and supported operations. It MUST fail closed when no project is active. Never use this as proof that an APK build or GitHub repository exists.",
+    strict: true,
+    parameters: {
+      type: "object",
+      properties: {},
+      required: [],
+      additionalProperties: false
+    }
+  },
+  {
+    type: "function",
+    name: "project_workspace_list",
+    description: "List files/directories only inside the currently active project's isolated local workspace. Read-only. Use before editing when the existing source-tree location is uncertain. Never infer access outside the active project from this result.",
+    strict: true,
+    parameters: {
+      type: "object",
+      properties: {
+        path: { type: "string", maxLength: 320, description: "Project-workspace-relative directory path. Use empty string for the workspace root." },
+        recursive: { type: "boolean", description: "Whether to descend recursively. Prefer false unless the user needs a tree." },
+        limit: { type: "integer", minimum: 1, maximum: 500, description: "Maximum returned entries." }
+      },
+      required: ["path", "recursive", "limit"],
+      additionalProperties: false
+    }
+  },
+  {
+    type: "function",
+    name: "project_workspace_read",
+    description: "Read one UTF-8 text/source file from the currently active project's isolated local workspace. Read-only. Use this before updating an existing file so expected_sha256 can be bound to the exact observed baseline.",
+    strict: true,
+    parameters: {
+      type: "object",
+      properties: {
+        path: { type: "string", maxLength: 320, description: "Project-workspace-relative path to one UTF-8 text/source file." },
+        max_bytes: { type: "integer", minimum: 1, maximum: 131072, description: "Maximum UTF-8 bytes to return. Prefer 65536 unless more is necessary." }
+      },
+      required: ["path", "max_bytes"],
+      additionalProperties: false
+    }
+  },
+  {
+    type: "function",
+    name: "project_workspace_write_transaction",
+    description: "Prepare a bounded atomic multi-file CREATE/UPDATE transaction inside the currently active project's isolated local source workspace. First call is PREPARE-ONLY and MUST NOT modify project source files; Android stores exact baselines and returns requires_confirmation=true plus transaction_id. Never invent confirmed=true. Only a fresh local user confirmation may let Android replay that exact prepared transaction. New files require expected_sha256=''; updates require the exact SHA-256 returned by project_workspace_read/list. No deletions, binaries, secrets, .git/.github, APK/AAB/keystores, arbitrary filesystem paths, GitHub mutation or APK build.",
+    strict: true,
+    parameters: {
+      type: "object",
+      properties: {
+        files: {
+          type: "array",
+          minItems: 1,
+          maxItems: 32,
+          items: {
+            type: "object",
+            properties: {
+              path: { type: "string", maxLength: 320, description: "Project-workspace-relative UTF-8 source/text file path." },
+              content: { type: "string", description: "Complete proposed UTF-8 content for this file." },
+              expected_sha256: { type: "string", maxLength: 64, description: "Exact current SHA-256 for an existing file; empty string only when creating a file that does not exist." }
+            },
+            required: ["path", "content", "expected_sha256"],
+            additionalProperties: false
+          }
+        },
+        note: { type: "string", maxLength: 240, description: "Short human-readable purpose of this exact transaction." }
+      },
+      required: ["files", "note"],
+      additionalProperties: false
+    }
+  },
+  {
+    type: "function",
+    name: "project_workspace_transaction_control",
+    description: "Inspect or finalize one local project-workspace transaction created by project_workspace_write_transaction. status is read-only. cancel is allowed only before commit. accept discards rollback payload after a verified commit. rollback restores only files touched by that exact committed transaction and requires fresh explicit local confirmation; never invent confirmation authority.",
+    strict: true,
+    parameters: {
+      type: "object",
+      properties: {
+        action: { type: "string", enum: ["status", "cancel", "accept", "rollback"] },
+        transaction_id: { type: "string", maxLength: 96, description: "Exact transaction_id returned by the workspace executor." }
+      },
+      required: ["action", "transaction_id"],
+      additionalProperties: false
+    }
+  }
+  ,
+  {
+    type: "function",
     name: "github_repository_status",
     description: "Read the current authenticated GitHub repository connection/write readiness for AYANA's fixed repository. This is read-only. Use before a GitHub write when connection state is uncertain.",
     strict: true,
@@ -908,6 +997,15 @@ Screen Intelligence / Perception Contract v2:
 - Низкорисковые действия (открыть приложение, навигация, громкость, поиск, переход в настройки) можно выполнять без дополнительного подтверждения.
 - Не выполняй финансовые операции, ввод паролей, подтверждение платежей, удаление данных, отправку сообщений/писем или изменение критичных настроек без отдельного явного разрешения пользователя. Generic Android-инструменты дополнительно проходят локальный Safety Engine на устройстве.
 - Не пытайся обходить ограничения Android или разрешения.
+
+Project Workspace / Development Workspace 2.0:
+- Если активный AYANA Project используется для разработки отдельного приложения/кода, исходники должны создаваться и изменяться через project_workspace_* инструменты в изолированном local workspace текущего проекта. create_artifact сохраняет пользовательские документы в Downloads/AYANA и НЕ является source-workspace writer.
+- project_workspace_status/list/read — read-only. Не утверждай, что файл существует, пока это не подтверждено workspace result.
+- Для СОЗДАНИЯ нового исходного файла передай expected_sha256="". Для ИЗМЕНЕНИЯ существующего файла сначала прочитай/получи его exact sha256 и передай его как expected_sha256. Не угадывай SHA.
+- project_workspace_write_transaction — строго двухфазная операция: PREPARE не меняет исходники; если result требует confirmation, остановись. confirmed=true может добавить только Android после отдельного свежего подтверждения пользователя.
+- Одна transaction может содержать до 32 UTF-8 файлов, но должна быть логически связной и bounded. Не используй её для секретов, ключей, бинарных файлов, .git/.github, APK/AAB, arbitrary filesystem или файлов другого проекта.
+- Workspace 2.0 local foundation сам по себе НЕ создаёт GitHub repository и НЕ собирает APK. Не обещай build/repository до отдельного подтверждённого executor.
+- Если активного проекта нет, workspace mutation должна завершиться fail-closed; не перенаправляй её в глобальные файлы AYANA.
 
 GitHub / Development R10.27.3:
 - Свежий Android AGENT INTELLIGENCE CONTEXT является единственным источником истины о connected/write_available/actions_permission/device_confirmed_write/device_confirmed_build. Статическая карта ниже не может расширить эту authority.
@@ -1299,6 +1397,39 @@ function isFastInformationalRequest(message = "") {
     && words.length <= 7
     && /(?:подробно|детально|развернуто|подробнее)$/.test(n);
 }
+
+function isProjectWorkspaceDevelopmentRequest(message = "") {
+  const n = normalizeIntentText(message)
+    .replace(/^(?:аяна|ayana)[\s,.:;!?—-]+/u, "");
+  if (!n) return false;
+
+  const developmentVerb = /(?:^|\s)(?:разработай|разработать|создай|создать|сделай|сделать|реализуй|реализовать|добавь|добавить|измени|изменить|исправь|исправить|напиши|написать|сгенерируй|сгенерировать|подготовь|подготовить)(?=\s|$|[?.!,;:—-])/.test(n);
+  const sourceSignal = /(android[ -]?проект|android project|приложени|исходник|source code|код(?:\s+проекта)?|kotlin|compose|room|sqlite|gradle|manifest|build\.gradle|settings\.gradle|\.kt\b|\.kts\b|project workspace|workspace проекта)/.test(n);
+  const projectSignal = /(проект|project|workspace|приложени|исходник|репозитор|repository|gradle|manifest)/.test(n);
+
+  return developmentVerb && sourceSignal && projectSignal;
+}
+
+function projectWorkspaceTools() {
+  const names = new Set([
+    "project_workspace_status",
+    "project_workspace_list",
+    "project_workspace_read",
+    "project_workspace_write_transaction",
+    "project_workspace_transaction_control"
+  ]);
+  return DEVICE_TOOLS.filter(tool => names.has(tool.name));
+}
+
+const AYANA_PROJECT_WORKSPACE_INSTRUCTIONS = `
+PROJECT WORKSPACE WHOLE-GOAL CONTRACT v1:
+- Цель — работать только с исходниками активного AYANA Project в его изолированном workspace.
+- Для нового проекта сначала проверь project_workspace_status; при необходимости list. Затем создай минимально достаточный связный набор текстовых source/config файлов одной bounded transaction.
+- Не создавай отдельные source-файлы через create_artifact: он публикует в Downloads/AYANA и не является workspace.
+- Для существующего файла сначала project_workspace_read и используй точный sha256 как expected_sha256. Для нового файла expected_sha256 должен быть пустым.
+- После PREPARE с requires_confirmation=true остановись и кратко перечисли, что подготовлено. Не утверждай, что файлы уже изменены.
+- Не переходи к GitHub/APK build: текущий local workspace executor их не выполняет.
+`.trim();
 
 function isArtifactCreationRequest(message = "") {
   const n = normalizeIntentText(message)
@@ -2182,7 +2313,10 @@ ${verifiedLocalEvidence}
 
   const durableRecoveryMode = isDurableRecoveryRequest(message || "");
   const automaticDurableRecoveryMode = isAutomaticDurableRecoveryRequest(message || "");
+  const projectWorkspaceDevelopmentMode = !durableRecoveryMode
+    && isProjectWorkspaceDevelopmentRequest(message || "");
   const androidNavigationMode = !durableRecoveryMode
+    && !projectWorkspaceDevelopmentMode
     && !isArtifactCreationRequest(message || "")
     && isLikelyAndroidNavigation(message || "");
   const diagnosticMode = !durableRecoveryMode
@@ -2190,6 +2324,7 @@ ${verifiedLocalEvidence}
     && isRuntimeSelfDiagnosticRequest(message || "");
   const normalizedMessage = normalizeIntentText(message || "");
   const artifactCreationMode = !durableRecoveryMode
+    && !projectWorkspaceDevelopmentMode
     && isArtifactCreationRequest(message || "");
   const genericAgentDefinitionMode = isGenericAgentDefinitionRequest(message || "");
   const explicitExternalImprovementMode = isExplicitExternalImprovementRequest(message || "");
@@ -2215,6 +2350,7 @@ ${verifiedLocalEvidence}
   const deepRequest = isDeepRequest(message || "");
   const fastEverydayMode = !durableRecoveryMode
     && !androidNavigationMode
+    && !projectWorkspaceDevelopmentMode
     && !artifactCreationMode
     && !deepRequest
     && (capabilityMode || isFastEverydayRequest(message || "", source));
@@ -2224,6 +2360,7 @@ ${verifiedLocalEvidence}
   // remain on the full path.
   const detailedFastInfoMode = !durableRecoveryMode
     && !androidNavigationMode
+    && !projectWorkspaceDevelopmentMode
     && !artifactCreationMode
     && !capabilityMode
     && deepRequest
@@ -2238,6 +2375,7 @@ ${verifiedLocalEvidence}
 
   const longAnswerIntegrityMode = !androidNavigationMode
     && !durableRecoveryMode
+    && !projectWorkspaceDevelopmentMode
     && !artifactCreationMode
     && source !== "voice"
     && (deepRequest || capabilityMode || genericAgentDefinitionMode || detailedFastInfoMode);
@@ -2285,7 +2423,9 @@ ${selfAutonomyMode ? AYANA_SELF_AUTONOMY_COMPACT_INSTRUCTIONS : ""}`
 ${ANDROID_GOAL_V7_INSTRUCTIONS}`
       : `${AGENT_INSTRUCTIONS}
 
-${styleInstructions}${artifactCreationMode ? `
+${styleInstructions}${projectWorkspaceDevelopmentMode ? `
+
+${AYANA_PROJECT_WORKSPACE_INSTRUCTIONS}` : ""}${artifactCreationMode ? `
 
 ${AYANA_ARTIFACT_WHOLE_GOAL_INSTRUCTIONS}` : ""}${productInstructions}${scopeInstructions}${recoveryInstructions}${verifiedDeviceFactsCompletionMode ? `
 
@@ -2295,6 +2435,8 @@ ${AYANA_VERIFIED_LOCAL_EVIDENCE_INSTRUCTIONS}` : ""}${responseIntegrityInstructi
     input,
     max_output_tokens: androidNavigationMode
       ? 260
+      : projectWorkspaceDevelopmentMode
+        ? (source === "voice" ? 2400 : 7200)
       : artifactCreationMode
         ? (source === "voice" ? 2600 : 5200)
       : durableRecoveryMode
@@ -2320,6 +2462,9 @@ ${AYANA_VERIFIED_LOCAL_EVIDENCE_INSTRUCTIONS}` : ""}${responseIntegrityInstructi
   if (androidNavigationMode) {
     payload.tools = [ANDROID_GOAL_TOOL];
     payload.tool_choice = { type: "function", name: "execute_android_goal" };
+  } else if (projectWorkspaceDevelopmentMode) {
+    payload.tools = projectWorkspaceTools();
+    payload.tool_choice = "auto";
   } else if (durableRecoveryMode) {
     payload.tools = automaticDurableRecoveryMode
       ? durableAutoSafeTools()
