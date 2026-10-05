@@ -1,4 +1,4 @@
-// AYANA Worker v11.8.0 — DEVELOPMENT WORKSPACE 2.0 CANDIDATE
+// AYANA Worker v11.8.1 — DEVELOPMENT WORKSPACE 2.0 BOUND-SCOPE CANDIDATE
 // Adds project-scoped local source workspace tools; GitHub/APK authority remains unchanged.
 // Preserves verified GitHub write/build and adds one bounded two-phase development transaction tool with explicit accept/rollback.
 // Android owns GitHub App Device Flow, encrypted token storage, fixed-repository authority,
@@ -782,7 +782,7 @@ const DEVICE_TOOLS = [
   {
     type: "function",
     name: "project_workspace_transaction_control",
-    description: "Inspect or finalize one local project-workspace transaction created by project_workspace_write_transaction. status is read-only. cancel is allowed only before commit. accept discards rollback payload after a verified commit. rollback restores only files touched by that exact committed transaction and requires fresh explicit local confirmation; never invent confirmation authority.",
+    description: "Inspect or finalize one local project-workspace transaction created by project_workspace_write_transaction. status is read-only. cancel is allowed only before commit. accept discards rollback payload after a verified commit and requires fresh explicit local user confirmation. rollback restores only files touched by that exact committed transaction and also requires fresh explicit local confirmation; never invent confirmation authority.",
     strict: true,
     parameters: {
       type: "object",
@@ -1087,7 +1087,10 @@ DEVICE-CONFIRMED R10.24.1 TRUTH:
 - существующие Planner + Durable Goals + checkpoints + bounded replan + terminal verification считаются foundation автономного execution loop; v12.13 добавляет единый локальный acceptance runner, но его device-результат должен оцениваться по last_acceptance_grade, а не по факту запуска теста;
 - Development Agent transaction R10.27.3 РЕАЛИЗОВАНА в bounded fixed-repository режиме: immutable blob snapshot + exact replacement + verified commit + fixed APK build + explicit accept/verified rollback.
 
-КРИТИЧЕСКАЯ DEVELOPMENT / DELIVERY TRUTH R10.27.3:
+КРИТИЧЕСКАЯ DEVELOPMENT / DELIVERY TRUTH R10.28.5:
+- R10.28.5 Development Workspace 2.0 CANDIDATE добавляет локальный source workspace только активного AYANA Project: status/list/read + bounded multi-file CREATE/UPDATE PREPARE -> fresh confirmation -> SHA-verified commit; global/cross-project access fail-closed.
+- Workspace transaction не даёт authority на произвольную файловую систему, deletion, binaries, secrets, .git/.github, GitHub mutation или APK build. Новый отдельный GitHub repository этим этапом ещё НЕ создаётся и отдельный APK STORE ACCOUNTING ещё НЕ собирается.
+- create_artifact остаётся отдельным Downloads/AYANA output engine и НЕ является source workspace.
 - R10.27.1 GitHub repository write/commit executor device-confirmed для фиксированного talant02031985-bot/AUTONOMOUS-AI-AGENT/main через GitHub App Device Flow;
 - R10.27.2 android_apk_build РЕАЛИЗОВАН как отдельный fixed-scope GitHub Actions executor: Actions:write authority -> точный active workflow «Build Android APK» -> exact main head SHA -> explicit confirmation -> workflow_dispatch -> exact run correlation -> conclusion=success -> artifact «AYANA-AI-signed-debug» с non-zero size и SHA-256 digest;
 - GitHub mutation и build dispatch остаются отдельными двухфазными authority boundaries; модель никогда не создаёт confirmed=true;
@@ -1404,7 +1407,11 @@ function isProjectWorkspaceDevelopmentRequest(message = "") {
   if (!n) return false;
 
   const developmentVerb = /(?:^|\s)(?:разработай|разработать|создай|создать|сделай|сделать|реализуй|реализовать|добавь|добавить|измени|изменить|исправь|исправить|напиши|написать|сгенерируй|сгенерировать|подготовь|подготовить)(?=\s|$|[?.!,;:—-])/.test(n);
-  const sourceSignal = /(android[ -]?проект|android project|приложени|исходник|source code|код(?:\s+проекта)?|kotlin|compose|room|sqlite|gradle|manifest|build\.gradle|settings\.gradle|\.kt\b|\.kts\b|project workspace|workspace проекта)/.test(n);
+  const explicitProjectFileTarget =
+    /(?:в|для)\s+(?:текущ(?:ем|его)|активн(?:ом|ого)|этом)\s+проект(?:е|а)?/.test(n)
+    && /(файл|каталог|папк|структур|исходник|код|spec|тз|\.txt\b|\.md\b|\.kt\b|\.kts\b|\.xml\b|\.json\b|\.toml\b|\.properties\b)/.test(n);
+  const sourceSignal = /(android[ -]?проект|android project|приложени|исходник|source code|код(?:\s+проекта)?|kotlin|compose|room|sqlite|gradle|manifest|build\.gradle|settings\.gradle|\.kt\b|\.kts\b|project workspace|workspace проекта)/.test(n)
+    || explicitProjectFileTarget;
   const projectSignal = /(проект|project|workspace|приложени|исходник|репозитор|repository|gradle|manifest)/.test(n);
 
   return developmentVerb && sourceSignal && projectSignal;
@@ -1428,6 +1435,7 @@ PROJECT WORKSPACE WHOLE-GOAL CONTRACT v1:
 - Не создавай отдельные source-файлы через create_artifact: он публикует в Downloads/AYANA и не является workspace.
 - Для существующего файла сначала project_workspace_read и используй точный sha256 как expected_sha256. Для нового файла expected_sha256 должен быть пустым.
 - После PREPARE с requires_confirmation=true остановись и кратко перечисли, что подготовлено. Не утверждай, что файлы уже изменены.
+- После VERIFIED commit не вызывай accept автоматически: accept удаляет rollback payload и требует отдельного явного подтверждения пользователя. Rollback также требует отдельного явного подтверждения.
 - Не переходи к GitHub/APK build: текущий local workspace executor их не выполняет.
 `.trim();
 
@@ -2436,7 +2444,7 @@ ${AYANA_VERIFIED_LOCAL_EVIDENCE_INSTRUCTIONS}` : ""}${responseIntegrityInstructi
     max_output_tokens: androidNavigationMode
       ? 260
       : projectWorkspaceDevelopmentMode
-        ? (source === "voice" ? 2400 : 7200)
+        ? (source === "voice" ? 3200 : 12000)
       : artifactCreationMode
         ? (source === "voice" ? 2600 : 5200)
       : durableRecoveryMode
