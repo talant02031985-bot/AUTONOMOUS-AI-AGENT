@@ -997,8 +997,7 @@ class MainActivity : AppCompatActivity() {
     ): TextView {
 
         return TextView(this).apply {
-
-            text =
+text =
                 label
 
             contentDescription =
@@ -1998,7 +1997,7 @@ class MainActivity : AppCompatActivity() {
                 0,
                 ViewGroup.LayoutParams.WRAP_CONTENT,
                 1f
-            )
+)
         )
 
         stateColumn.addView(statusRow)
@@ -2998,7 +2997,7 @@ class MainActivity : AppCompatActivity() {
         )
 
         item.addView(
-            TextView(this).apply {
+TextView(this).apply {
                 text =
                     label
                 textSize =
@@ -3691,30 +3690,35 @@ class MainActivity : AppCompatActivity() {
 
             actionRow.addView(
                 smallAction(
-                    if (isActive) {
-                        "Открыт"
-                    } else {
-                        "Открыть"
-                    }
+                    "Открыть"
                 ) {
-                    if (!isActive) {
-                        val result =
+                    val opened =
+                        if (isActive) {
+                            true
+                        } else {
                             projectStore
                                 .switchActive(
                                     project.projectId
                                 )
+                                .success
+                        }
 
+                    if (opened) {
                         Toast.makeText(
                             this@MainActivity,
-                            if (result.success) {
-                                "Открыт проект «${project.name}»"
-                            } else {
-                                "Не удалось открыть проект"
-                            },
+                            "Открыт проект «${project.name}»",
                             Toast.LENGTH_SHORT
                         ).show()
 
-                        renderCurrentPage()
+                        switchPage(
+                            Page.HOME
+                        )
+                    } else {
+                        Toast.makeText(
+                            this@MainActivity,
+                            "Не удалось открыть проект",
+                            Toast.LENGTH_SHORT
+                        ).show()
                     }
                 },
                 LinearLayout.LayoutParams(
@@ -3998,7 +4002,7 @@ class MainActivity : AppCompatActivity() {
                     0,
                     dp(14),
                     0
-                )
+)
             }
 
         val box =
@@ -4997,8 +5001,7 @@ class MainActivity : AppCompatActivity() {
             filteredRecords.take(
                 historyVisibleLimit
             )
-
-        records.forEach { record ->
+records.forEach { record ->
             val success =
                 record.optBoolean(
                     "success",
@@ -5998,7 +6001,7 @@ class MainActivity : AppCompatActivity() {
                 0
             )
             .put(
-                "failed",
+"failed",
                 1
             )
             .put(
@@ -6998,8 +7001,7 @@ class MainActivity : AppCompatActivity() {
                             getSystemService(
                                 Context.INPUT_METHOD_SERVICE
                             ) as InputMethodManager
-
-                        keyboard.showSoftInput(
+keyboard.showSoftInput(
                             textInput,
                             InputMethodManager.SHOW_IMPLICIT
                         )
@@ -7998,7 +8000,7 @@ class MainActivity : AppCompatActivity() {
                 LinearLayout(this).apply {
 
                     orientation =
-                        LinearLayout.VERTICAL
+LinearLayout.VERTICAL
 
                     gravity =
                         Gravity.CENTER
@@ -8997,8 +8999,7 @@ class MainActivity : AppCompatActivity() {
             ) {
                 return
             }
-
-            val bounds =
+val bounds =
                 Rect()
 
             val globallyVisible =
@@ -9998,7 +9999,7 @@ class MainActivity : AppCompatActivity() {
             t: Int,
             oldl: Int,
             oldt: Int
-        ) {
+) {
             if (
                 t != oldt ||
                 l != oldl
