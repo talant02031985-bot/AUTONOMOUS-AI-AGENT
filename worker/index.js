@@ -1,8 +1,8 @@
-// AYANA Worker v11.8.3 — R10.28.6.1 WORKSPACE CONTINUATION TOOL INTEGRITY CANDIDATE
-// Preserves R10.28.6 app-creation integrity and extends it across read -> write continuation turns.
-// Workspace continuation is detected from verified project_workspace_* tool outputs even when Android
-// correctly omits the original message on follow-up function_call_output requests. Mixed UPDATE+CREATE
-// repair is allowed only when exact non-truncated project_workspace_read baselines bind update SHA values.
+// AYANA Worker v11.8.4 — R10.28.6.2 GLOBAL GITHUB DEVELOPMENT ROUTING CANDIDATE
+// Preserves R10.28.6.1 Workspace continuation integrity and prevents explicit AYANA GitHub development
+// transactions from being hijacked by Project Workspace routing. Explicit fixed-repository find_text /
+// replace_text PREPARE requests receive only github_development_transaction and are tool-forced.
+// Also hardens machine terminal truth when an execution request cannot run because an executor/tool is absent.
 // Adds project-scoped local source workspace tools; GitHub/APK authority remains unchanged.
 // Preserves verified GitHub write/build and adds one bounded two-phase development transaction tool with explicit accept/rollback.
 // Android owns GitHub App Device Flow, encrypted token storage, fixed-repository authority,
@@ -1432,6 +1432,24 @@ function projectWorkspaceTools() {
   return DEVICE_TOOLS.filter(tool => names.has(tool.name));
 }
 
+function isExplicitGitHubDevelopmentTransactionRequest(message = "") {
+  const n = normalizeIntentText(message)
+    .replace(/^(?:аяна|ayana)[\s,.:;!?—-]+/u, "");
+  if (!n) return false;
+
+  const githubSignal = /(?:github|гитхаб)/.test(n);
+  const explicitDevelopmentTransactionSignal =
+    /(?:github[_ -]?development[_ -]?transaction|verified\s+github\s+development\s+transaction|development\s+transaction)/.test(n)
+    || (/(?:find_text|replace_text)/.test(n) && /(?:commit\s+message|коммит|commit|main|исходник|source)/.test(n));
+
+  return githubSignal && explicitDevelopmentTransactionSignal;
+}
+
+function githubDevelopmentTransactionTool() {
+  return DEVICE_TOOLS.find(tool => tool.name === "github_development_transaction");
+}
+
+
 const AYANA_PROJECT_WORKSPACE_INSTRUCTIONS = `
 PROJECT WORKSPACE WHOLE-GOAL CONTRACT v3 — APP CREATION + CONTINUATION TOOL INTEGRITY:
 - Цель — работать только с исходниками активного AYANA Project в его изолированном workspace.
@@ -1477,7 +1495,7 @@ function isActionExecutionRequest(message = "") {
     return false;
   }
 
-  return /(?:^|\s)(?:открой|открыть|запусти|запустить|закрой|закрыть|сверни|свернуть|установи|установить|измени|изменить|создай|создать|сделай|сделать|сохрани|сохранить|экспортируй|экспортировать|удали|удалить|отправь|отправить|введи|ввести|нажми|нажать|найди|найти|проверь|проверить|собери|собрать|подпиши|подписать|загрузи|загрузить|дай\s+(?:мне\s+)?готов)(?=\s|$|[?.!,;:—-])/.test(n)
+  return /(?:^|\s)(?:открой|открыть|запусти|запустить|закрой|закрыть|сверни|свернуть|установи|установить|измени|изменить|создай|создать|сделай|сделать|подготовь|подготовить|выполни|выполнить|сохрани|сохранить|экспортируй|экспортировать|удали|удалить|отправь|отправить|введи|ввести|нажми|нажать|найди|найти|проверь|проверить|собери|собрать|подпиши|подписать|загрузи|загрузить|дай\s+(?:мне\s+)?готов)(?=\s|$|[?.!,;:—-])/.test(n)
     || /(?:commit|push|коммит|пуш|apk|сборк)/.test(n) && /(?:сделай|запусти|собери|дай|измени|выполни)/.test(n);
 }
 
@@ -1494,8 +1512,9 @@ function inferFinalTerminalStatus(message = "", reply = "", options = {}) {
   if (!isActionExecutionRequest(message)) return "SUCCESS";
 
   const unsupported = [
-    /(?:^|\s)я\s+не\s+могу\s+(?:выполнить|сделать|изменить|создать|запустить|отправить|записать|собрать|подписать|передать)/,
+    /(?:^|\s)я\s+не\s+могу(?:\s+[а-яa-z0-9_-]+){0,2}\s+(?:выполнить|сделать|изменить|создать|запустить|отправить|записать|собрать|подписать|передать|подготовить)/,
     /(?:^|\s)у\s+меня\s+нет\s+(?:доступа|возможности|исполнителя|инструмента|разрешения)/,
+    /(?:исполнитель|инструмент)(?:\s+[а-яa-z0-9_.-]+){0,8}\s+не\s+(?:предоставлен|доступен|подключен|подключён)/,
     /(?:^|\s)в\s+текущ(?:ей|ем)\s+(?:версии|сборке).*?(?:нет|не\s+реализован|не\s+доступ)/,
     /(?:^|\s)(?:эта|данная)\s+возможност.*?(?:не\s+реализован|не\s+доступ)/,
     /(?:^|\s)не\s+поддерживается\s+(?:текущ|данн)/
@@ -1503,7 +1522,7 @@ function inferFinalTerminalStatus(message = "", reply = "", options = {}) {
 
   if (unsupported) return "UNSUPPORTED";
 
-  const blocked = /(?:требует|нужно|необходимо)\s+(?:ваше|явное|отдельное)\s+подтверждени/.test(r)
+  const blocked = /(?:требует|требуется|нужно|необходимо)\s+(?:ваше|явное|отдельное)\s+подтверждени/.test(r)
     || /(?:попрошу|потребуется|запрошу).*?(?:отдельн|явн).*?подтверждени/.test(r)
     || /действие\s+заблокирован/.test(r)
     || /^(?:какой|какая|какое|какие|что именно|куда именно|кому именно|уточни|уточните|напиши|напишите|назови|назовите)(?:\s|$).*?[?？]?$/.test(r)
@@ -2546,13 +2565,17 @@ ${verifiedLocalEvidence}
 
   const durableRecoveryMode = isDurableRecoveryRequest(message || "");
   const automaticDurableRecoveryMode = isAutomaticDurableRecoveryRequest(message || "");
+  const githubDevelopmentMode = !durableRecoveryMode
+    && isExplicitGitHubDevelopmentTransactionRequest(message || "");
   const projectWorkspaceContinuationMode = hasProjectWorkspaceContinuationEvidence(toolResults);
   const projectWorkspaceDevelopmentMode = !durableRecoveryMode
+    && !githubDevelopmentMode
     && (
       isProjectWorkspaceDevelopmentRequest(message || "")
       || projectWorkspaceContinuationMode
     );
   const androidNavigationMode = !durableRecoveryMode
+    && !githubDevelopmentMode
     && !projectWorkspaceDevelopmentMode
     && !isArtifactCreationRequest(message || "")
     && isLikelyAndroidNavigation(message || "");
@@ -2561,6 +2584,7 @@ ${verifiedLocalEvidence}
     && isRuntimeSelfDiagnosticRequest(message || "");
   const normalizedMessage = normalizeIntentText(message || "");
   const artifactCreationMode = !durableRecoveryMode
+    && !githubDevelopmentMode
     && !projectWorkspaceDevelopmentMode
     && isArtifactCreationRequest(message || "");
   const genericAgentDefinitionMode = isGenericAgentDefinitionRequest(message || "");
@@ -2587,6 +2611,7 @@ ${verifiedLocalEvidence}
   const deepRequest = isDeepRequest(message || "");
   const fastEverydayMode = !durableRecoveryMode
     && !androidNavigationMode
+    && !githubDevelopmentMode
     && !projectWorkspaceDevelopmentMode
     && !artifactCreationMode
     && !deepRequest
@@ -2597,6 +2622,7 @@ ${verifiedLocalEvidence}
   // remain on the full path.
   const detailedFastInfoMode = !durableRecoveryMode
     && !androidNavigationMode
+    && !githubDevelopmentMode
     && !projectWorkspaceDevelopmentMode
     && !artifactCreationMode
     && !capabilityMode
@@ -2612,6 +2638,7 @@ ${verifiedLocalEvidence}
 
   const longAnswerIntegrityMode = !androidNavigationMode
     && !durableRecoveryMode
+    && !githubDevelopmentMode
     && !projectWorkspaceDevelopmentMode
     && !artifactCreationMode
     && source !== "voice"
@@ -2645,6 +2672,15 @@ ${selfAutonomyMode ? AYANA_SELF_AUTONOMY_COMPACT_INSTRUCTIONS : ""}`
     ? `\n\n${AYANA_DURABLE_RECOVERY_INSTRUCTIONS}`
     : "";
 
+  const githubDevelopmentInstructions = githubDevelopmentMode
+    ? `\n\nGLOBAL GITHUB DEVELOPMENT TRANSACTION CONTRACT v1:
+- Это НЕ Project Workspace. Выполняй bounded github_development_transaction только для фиксированного репозитория AYANA.
+- Пользователь уже задал exact path/find_text/replace_text/commit_message: передай их без смыслового переписывания и без сокращения.
+- Первый вызов только PREPARE. Никогда не создавай confirmed=true.
+- Не подменяй github_development_transaction локальным project_workspace_* или github_write_commit.
+- После requires_confirmation=true остановись и дождись отдельного свежего подтверждения пользователя.`
+    : "";
+
   const payload = {
     model: fastModelMode
       ? "gpt-5.6-luna"
@@ -2660,7 +2696,7 @@ ${selfAutonomyMode ? AYANA_SELF_AUTONOMY_COMPACT_INSTRUCTIONS : ""}`
 ${ANDROID_GOAL_V7_INSTRUCTIONS}`
       : `${AGENT_INSTRUCTIONS}
 
-${styleInstructions}${projectWorkspaceDevelopmentMode ? `
+${styleInstructions}${githubDevelopmentInstructions}${projectWorkspaceDevelopmentMode ? `
 
 ${AYANA_PROJECT_WORKSPACE_INSTRUCTIONS}` : ""}${artifactCreationMode ? `
 
@@ -2672,6 +2708,8 @@ ${AYANA_VERIFIED_LOCAL_EVIDENCE_INSTRUCTIONS}` : ""}${responseIntegrityInstructi
     input,
     max_output_tokens: androidNavigationMode
       ? 260
+      : githubDevelopmentMode
+        ? (source === "voice" ? 4200 : 12000)
       : projectWorkspaceDevelopmentMode
         ? (source === "voice" ? 3200 : 12000)
       : artifactCreationMode
@@ -2699,6 +2737,16 @@ ${AYANA_VERIFIED_LOCAL_EVIDENCE_INSTRUCTIONS}` : ""}${responseIntegrityInstructi
   if (androidNavigationMode) {
     payload.tools = [ANDROID_GOAL_TOOL];
     payload.tool_choice = { type: "function", name: "execute_android_goal" };
+  } else if (githubDevelopmentMode) {
+    const githubDevelopmentTool = githubDevelopmentTransactionTool();
+    if (!githubDevelopmentTool) {
+      return Response.json(
+        { error: "AYANA github_development_transaction tool missing", details: { android_dispatch: false } },
+        { status: 500 }
+      );
+    }
+    payload.tools = [githubDevelopmentTool];
+    payload.tool_choice = { type: "function", name: "github_development_transaction" };
   } else if (projectWorkspaceDevelopmentMode) {
     payload.tools = projectWorkspaceTools();
     payload.tool_choice = "auto";
@@ -3087,7 +3135,7 @@ export default {
         service: "AYANA AI",
         ai: "ready",
         agent_core: "v11.1-v12.15-completion-integrity",
-        worker: "v11.8.3-r10.28.6.1-workspace-continuation-integrity",
+        worker: "v11.8.4-r10.28.6.2-global-github-development-routing",
         voice: "marin"
       });
     }
