@@ -63,6 +63,12 @@ import kotlin.math.abs
 
 class AyanaVoiceService : Service() {
 
+// AYANA v12.66.0 / R10.28.5 DEVELOPMENT WORKSPACE 2.0 CANDIDATE.
+// Adds a command-bound project-local source workspace executor with read/list,
+// bounded multi-file PREPARE -> explicit confirmation -> verified commit,
+// explicit accept/rollback controls and fail-closed global/cross-project isolation.
+// Existing fixed-repository GitHub/APK authority is unchanged. ORB/visualizer unchanged.
+//
 // AYANA v12.65.0 / R10.28.2 PROJECT COMMANDS + PROJECT-AWARE DATA SCOPE.
 // Adds durable active_project_id, deterministic create/list/current/switch/leave commands,
 // command-lifetime project binding and physically isolated Memory/History/Tasks/Durable Goals.
@@ -916,6 +922,18 @@ class AyanaVoiceService : Service() {
             applicationContext,
             projectStore
         )
+    }
+
+    // R10.28.5 DEVELOPMENT WORKSPACE 2.0. VoiceService freezes project scope at
+    // command start; the executor receives that frozen id instead of trusting a
+    // later UI active-project change. A command that started globally remains
+    // globally scoped and cannot acquire workspace authority mid-turn.
+    private val projectWorkspaceExecutor by lazy {
+        AyanaProjectWorkspaceExecutor(
+            applicationContext
+        ) {
+            activeCommandProjectId
+        }
     }
 
     private val projectCommandRouter by lazy {
@@ -9224,6 +9242,27 @@ private fun extractGitHubClientIdConfiguration(
         normalized: String
     ): Boolean {
         val c = normalized.trim()
+
+        // R10.28.5 routing hardening: this fast path owns only a narrow request
+        // for the already-recorded AYANA GitHub build status. A compound
+        // development/capability audit may mention GitHub + APK + "проверь" but
+        // must reach Agent Core instead of being swallowed by the last build run.
+        if (
+            c.length > 220 ||
+            c.contains("\n") ||
+            c.contains("возможност") ||
+            c.contains("можно ли") ||
+            c.contains("репозитор") ||
+            c.contains("repository") ||
+            c.contains("отдельн") ||
+            c.contains("новый проект") ||
+            c.contains("создавать новые") ||
+            c.contains("каталог") ||
+            c.contains("workspace")
+        ) {
+            return false
+        }
+
         val buildMention =
             c.contains("сборк") ||
                 c.contains("build")
@@ -57682,7 +57721,9 @@ state = "agent_response",
                                     "execute_android_plan",
                                     "github_write_commit",
                                     "github_apk_build",
-                                    "github_development_transaction"
+                                    "github_development_transaction",
+                                    "project_workspace_write_transaction",
+                                    "project_workspace_transaction_control"
                                 )
                             ) {
                                 arguments.put(
@@ -57853,17 +57894,33 @@ state = "agent_response",
                                     .isReadOnlyTool(
                                         toolName
                                     ) ||
+                                    toolName in
+                                        setOf(
+                                            "project_workspace_status",
+                                            "project_workspace_list",
+                                            "project_workspace_read"
+                                        ) ||
                                     (
                                         toolName in
                                             setOf(
                                                 "github_write_commit",
                                                 "github_apk_build",
-                                                "github_development_transaction"
+                                                "github_development_transaction",
+                                                "project_workspace_write_transaction"
                                             ) &&
                                             !arguments.optBoolean(
                                                 "confirmed",
                                                 false
                                             )
+                                    ) ||
+                                    (
+                                        toolName ==
+                                            "project_workspace_transaction_control" &&
+                                            arguments
+                                                .optString("action")
+                                                .trim()
+                                                .lowercase(Locale.ROOT) ==
+                                            "status"
                                     )
 
                             val reconciliationPendingBeforeTool =
@@ -58804,6 +58861,7 @@ false
                                                     ),
                                                     checkpoint = "tool_result",
                                                     lastResult = durableToolResultForPersistence(
+                                                        toolName,
                                                         result
                                                     )
                                                 )
@@ -61150,7 +61208,9 @@ commandHistoryStore.addEvent(
                     "tap_screen_coordinates",
                     "github_write_commit",
                     "github_apk_build",
-                    "github_development_transaction"
+                    "github_development_transaction",
+                    "project_workspace_write_transaction",
+                    "project_workspace_transaction_control"
                 )
             ) {
                 durableGoalStore
@@ -61225,6 +61285,9 @@ commandHistoryStore.addEvent(
                 null
 
             var githubDevelopmentPreparedProof: JSONObject? =
+                null
+
+            var projectWorkspacePreparedProof: JSONObject? =
                 null
 
             if (toolName == "github_write_commit") {
@@ -61344,6 +61407,55 @@ commandHistoryStore.addEvent(
                 }
 
                 arguments.put("_github_dev_transaction_id", transactionId)
+            }
+
+            if (toolName == "project_workspace_write_transaction") {
+                val prepared =
+                    try {
+                        JSONObject(goal.optString("last_result"))
+                    } catch (_: Exception) {
+                        JSONObject()
+                    }
+
+                projectWorkspacePreparedProof =
+                    prepared
+
+                val transactionId =
+                    prepared.optString("transaction_id").trim()
+                val preparedProjectId =
+                    prepared.optString("project_id").trim()
+                val manifestSha =
+                    prepared.optString("manifest_sha256").trim()
+                val frozenProjectId =
+                    activeCommandProjectId
+                        .orEmpty()
+                        .trim()
+
+                if (
+                    prepared.optString("status") !=
+                    AyanaProjectWorkspaceExecutor.TX_PREPARED ||
+                    !prepared.optBoolean("requires_confirmation", false) ||
+                    transactionId.isBlank() ||
+                    frozenProjectId.isBlank() ||
+                    preparedProjectId != frozenProjectId ||
+                    !Regex("^[0-9a-fA-F]{64}$").matches(manifestSha)
+                ) {
+                    durableGoalStore.markPaused(
+                        goalId,
+                        "Project workspace confirmation остановлена: PREPARE proof отсутствует, повреждён или относится к другому project scope"
+                    )
+                    respondAndResume(
+                        "Файлы проекта не изменены: точный PREPARE proof workspace transaction не удалось безопасно восстановить. Подготовьте изменение заново.",
+                        silent,
+                        success = false
+                    )
+                    return
+                }
+
+                arguments.put(
+                    "_project_workspace_transaction_id",
+                    transactionId
+                )
             }
 
             arguments.put(
@@ -61527,6 +61639,192 @@ commandHistoryStore.addEvent(
                     success = false
                 )
                 return
+            }
+
+            // R10.28.5 PROJECT WORKSPACE VERIFIED COMMIT TERMINAL TRUTH.
+            // A fresh confirmation authorizes exactly the already prepared private
+            // workspace transaction. Once file SHA verification succeeds, do not
+            // hand the same write back to Agent Core where it could be proposed twice.
+            if (toolName == "project_workspace_write_transaction") {
+                val preparedProof =
+                    projectWorkspacePreparedProof
+                        ?: JSONObject()
+
+                val preparedTransactionId =
+                    preparedProof
+                        .optString("transaction_id")
+                        .trim()
+                val resultTransactionId =
+                    result
+                        .optString("transaction_id")
+                        .trim()
+                val frozenProjectId =
+                    activeCommandProjectId
+                        .orEmpty()
+                        .trim()
+
+                val verifiedWorkspaceCommit =
+                    result.optBoolean("success", false) &&
+                        result.optBoolean("verified", false) &&
+                        result.optString("terminal_status") == "SUCCESS" &&
+                        result.optString("status") ==
+                            AyanaProjectWorkspaceExecutor.TX_COMMITTED &&
+                        preparedTransactionId.isNotBlank() &&
+                        resultTransactionId == preparedTransactionId &&
+                        frozenProjectId.isNotBlank() &&
+                        preparedProof.optString("project_id") == frozenProjectId &&
+                        result.optString("project_id") == frozenProjectId &&
+                        result.optBoolean("action_dispatched", false) &&
+                        result.optBoolean("action_committed", false) &&
+                        result.optBoolean("reconciliation_complete", false) &&
+                        result.optString("side_effect_state") ==
+                            "VERIFIED_COMMITTED" &&
+                        result.optString("side_effect_kind") ==
+                            "project_workspace_write"
+
+                if (!verifiedWorkspaceCommit) {
+                    durableGoalStore.markPaused(
+                        goalId,
+                        "Project workspace write завершён без полного terminal proof; повторная запись запрещена до reconciliation"
+                    )
+
+                    commandHistoryStore.addEvent(
+                        activeCommandHistoryId,
+                        state = "project_workspace_commit_terminal_unverified",
+                        message = "Workspace confirmation не получила полный verified commit proof",
+                        details = result.toString().take(2200)
+                    )
+
+                    currentDurableGoalId =
+                        null
+
+                    respondAndResume(
+                        result.optString(
+                            "message",
+                            "Workspace transaction требует проверки: полный terminal proof записи не подтверждён."
+                        ),
+                        silent,
+                        success = false,
+                        technical = result.toString()
+                    )
+                    return
+                }
+
+                val terminalMessage =
+                    result.optString(
+                        "message",
+                        "Файлы проекта записаны и SHA-проверены."
+                    )
+
+                commandHistoryStore.addEvent(
+                    activeCommandHistoryId,
+                    state = "project_workspace_commit_verified_terminal",
+                    message = "Project workspace transaction физически подтверждена",
+                    details =
+                        (
+                            "project_id=$frozenProjectId; transaction_id=$resultTransactionId; " +
+                                "file_count=${result.optInt("file_count", 0)}; " +
+                                "rollback_available=${result.optBoolean("requires_acceptance", false)}"
+                            ).take(1200)
+                )
+
+                completeCurrentDurableGoal(
+                    terminalMessage
+                )
+
+                respondAndResume(
+                    terminalMessage,
+                    silent,
+                    success = true,
+                    terminalStatus =
+                        AyanaCommandHistoryStore.STATUS_SUCCESS,
+                    technical = result.toString()
+                )
+                return
+            }
+
+            // R10.28.5 explicit workspace ACCEPT/ROLLBACK terminal truth.
+            if (
+                toolName ==
+                "project_workspace_transaction_control"
+            ) {
+                val action =
+                    arguments
+                        .optString("action")
+                        .trim()
+                        .lowercase(Locale.ROOT)
+
+                if (
+                    action == "accept" ||
+                    action == "rollback"
+                ) {
+                    val expectedStatus =
+                        if (action == "accept") {
+                            AyanaProjectWorkspaceExecutor.TX_ACCEPTED
+                        } else {
+                            AyanaProjectWorkspaceExecutor.TX_ROLLED_BACK
+                        }
+
+                    val verifiedControl =
+                        result.optBoolean("success", false) &&
+                            result.optBoolean("verified", false) &&
+                            result.optString("terminal_status") == "SUCCESS" &&
+                            result.optString("status") == expectedStatus &&
+                            result.optString("transaction_id") ==
+                                arguments.optString("transaction_id") &&
+                            result.optBoolean("reconciliation_complete", false) &&
+                            (
+                                action != "rollback" ||
+                                    (
+                                        result.optBoolean("workspace_restored", false) &&
+                                            result.optBoolean("action_committed", false) &&
+                                            result.optString("side_effect_kind") ==
+                                            "project_workspace_rollback"
+                                        )
+                                )
+
+                    if (!verifiedControl) {
+                        durableGoalStore.markPaused(
+                            goalId,
+                            "Workspace transaction control не получил полный verified terminal proof"
+                        )
+                        currentDurableGoalId = null
+                        respondAndResume(
+                            result.optString(
+                                "message",
+                                "Workspace transaction control требует проверки."
+                            ),
+                            silent,
+                            success = false,
+                            technical = result.toString()
+                        )
+                        return
+                    }
+
+                    val terminalMessage =
+                        result.optString(
+                            "message",
+                            if (action == "rollback") {
+                                "Workspace transaction доказательно откатана."
+                            } else {
+                                "Workspace transaction принята."
+                            }
+                        )
+
+                    completeCurrentDurableGoal(
+                        terminalMessage
+                    )
+
+                    respondAndResume(
+                        terminalMessage,
+                        silent,
+                        success = true,
+                        terminalStatus =
+                            AyanaCommandHistoryStore.STATUS_SUCCESS,
+                        technical = result.toString()
+                    )
+                    return
+                }
             }
 
             // R10.27.3 VERIFIED DEVELOPMENT TRANSACTION INTERMEDIATE TRUTH.
@@ -63418,6 +63716,7 @@ return ""
             .toMutableList()
 
     private fun durableToolResultForPersistence(
+        toolName: String,
         result: JSONObject
     ): String {
 
@@ -63428,10 +63727,22 @@ return ""
                 remove(
                     "screen"
                 )
+
+                // Workspace PREPARE payloads can describe many files. The exact
+                // transaction manifest/baselines are already stored privately by
+                // AyanaProjectWorkspaceExecutor. Durable Goal keeps only the compact
+                // proof needed to resume confirmation, never the full source bundle.
+                if (
+                    toolName ==
+                    "project_workspace_write_transaction"
+                ) {
+                    remove("files")
+                    remove("verification")
+                }
             }
                 .toString()
                 .take(
-                    1800
+                    3000
                 )
         } catch (_: Exception) {
             ""
@@ -64000,6 +64311,51 @@ return try {
             )
         }
 
+        if (
+            toolName ==
+            "project_workspace_write_transaction"
+        ) {
+            val sourceFiles =
+                copy.optJSONArray("files")
+                    ?: JSONArray()
+            val compactFiles =
+                JSONArray()
+
+            for (index in 0 until sourceFiles.length()) {
+                val item =
+                    sourceFiles.optJSONObject(index)
+                        ?: continue
+
+                compactFiles.put(
+                    JSONObject()
+                        .put(
+                            "path",
+                            item.optString("path")
+                        )
+                        .put(
+                            "expected_sha256",
+                            item.optString("expected_sha256")
+                        )
+                        .put(
+                            "content_chars",
+                            item.optString("content").length
+                        )
+                )
+            }
+
+            // Exact proposed contents are persisted only inside the private
+            // workspace transaction plan. Durable Goal keeps paths/baselines
+            // for audit/recovery identity without duplicating source text.
+            copy.put(
+                "files",
+                compactFiles
+            )
+            copy.put(
+                "prepared_file_count",
+                compactFiles.length()
+            )
+        }
+
         return copy
     }
 
@@ -64028,7 +64384,9 @@ return try {
                 "tap_screen_coordinates",
                 "github_write_commit",
                 "github_apk_build",
-                "github_development_transaction"
+                "github_development_transaction",
+                "project_workspace_write_transaction",
+                "project_workspace_transaction_control"
             )
 
     private fun isSafeAutoResumeTool(
@@ -67272,6 +67630,35 @@ agentCoreRecoveryPolicy.decide(
             "set_reminder_enabled" ->
                 "Меняю состояние напоминания…"
 
+            "project_workspace_status" ->
+                "Проверяю workspace активного проекта…"
+
+            "project_workspace_list" ->
+                "Читаю структуру файлов проекта…"
+
+            "project_workspace_read" ->
+                "Читаю исходный файл проекта…"
+
+            "project_workspace_write_transaction" ->
+                if (arguments.optBoolean("confirmed", false)) {
+                    "Записываю подтверждённую workspace transaction…"
+                } else {
+                    "Подготавливаю workspace transaction без изменения исходников…"
+                }
+
+            "project_workspace_transaction_control" ->
+                when (
+                    arguments
+                        .optString("action")
+                        .trim()
+                        .lowercase(Locale.ROOT)
+                ) {
+                    "rollback" -> "Откатываю workspace transaction…"
+                    "accept" -> "Принимаю workspace transaction…"
+                    "cancel" -> "Отменяю подготовленную workspace transaction…"
+                    else -> "Проверяю workspace transaction…"
+                }
+
             "github_repository_status" ->
                 "Проверяю подключение GitHub…"
 
@@ -67410,7 +67797,9 @@ private fun isSemanticActionResultVerified(
                 "github_write_commit",
                 "github_apk_build",
                 "github_development_transaction",
-                "github_development_transaction_control"
+                "github_development_transaction_control",
+                "project_workspace_write_transaction",
+                "project_workspace_transaction_control"
             )
         ) {
             arguments.put(
@@ -68031,6 +68420,249 @@ private fun isSemanticActionResultVerified(
                                     "down"
                                 )
                         )
+                }
+
+                "project_workspace_status" -> {
+                    projectWorkspaceExecutor.status()
+                }
+
+                "project_workspace_list" -> {
+                    projectWorkspaceExecutor.listFiles(
+                        arguments
+                    )
+                }
+
+                "project_workspace_read" -> {
+                    projectWorkspaceExecutor.readTextFile(
+                        arguments
+                    )
+                }
+
+                "project_workspace_write_transaction" -> {
+                    val confirmed =
+                        arguments.optBoolean(
+                            "confirmed",
+                            false
+                        )
+
+                    if (!confirmed) {
+                        projectWorkspaceExecutor.writeTransaction(
+                            arguments = arguments,
+                            confirmed = false
+                        )
+                    } else {
+                        val transactionId =
+                            arguments
+                                .optString(
+                                    "_project_workspace_transaction_id"
+                                )
+                                .trim()
+
+                        val dispatchAllowed =
+                            executionKernel.tryBeginIrreversibleDispatch(
+                                kind = "project_workspace_write",
+                                detail =
+                                    "project_id=${activeCommandProjectId.orEmpty().take(120)}; " +
+                                        "transaction_id=${transactionId.take(120)}"
+                            )
+
+                        if (!dispatchAllowed) {
+                            toolResult(
+                                false,
+                                "Workspace transaction остановлена Execution Kernel до записи исходников."
+                            )
+                                .put(
+                                    "status",
+                                    "dispatch_gate_rejected"
+                                )
+                                .put(
+                                    "action_dispatched",
+                                    false
+                                )
+                                .put(
+                                    "action_committed",
+                                    false
+                                )
+                                .put(
+                                    "reconciliation_complete",
+                                    true
+                                )
+                        } else {
+                            val workspaceResult =
+                                projectWorkspaceExecutor
+                                    .writeTransaction(
+                                        arguments = arguments,
+                                        confirmed = true
+                                    )
+
+                            val dispatched =
+                                workspaceResult.optBoolean(
+                                    "action_dispatched",
+                                    false
+                                )
+                            val committed =
+                                workspaceResult.optBoolean(
+                                    "action_committed",
+                                    false
+                                )
+                            val reconciliationComplete =
+                                workspaceResult.optBoolean(
+                                    "reconciliation_complete",
+                                    false
+                                )
+
+                            if (dispatched) {
+                                executionKernel
+                                    .markIrreversibleDispatchAccepted(
+                                        "Project workspace write accepted: transaction_id=${transactionId.take(120)}"
+                                    )
+                            }
+
+                            executionKernel
+                                .markSideEffectReconciliationStarted(
+                                    "Project workspace write reconciliation: status=${workspaceResult.optString("status")}"
+                                )
+
+                            if (
+                                !dispatched ||
+                                reconciliationComplete
+                            ) {
+                                executionKernel
+                                    .markSideEffectReconciled(
+                                        committed = committed,
+                                        detail =
+                                            "Project workspace write reconciliation complete=$reconciliationComplete; " +
+                                                "committed=$committed; transaction_id=${transactionId.take(120)}"
+                                    )
+                            }
+
+                            workspaceResult
+                        }
+                    }
+                }
+
+                "project_workspace_transaction_control" -> {
+                    val action =
+                        arguments
+                            .optString("action")
+                            .trim()
+                            .lowercase(Locale.ROOT)
+                    val transactionId =
+                        arguments
+                            .optString("transaction_id")
+                            .trim()
+
+                    when (action) {
+                        "status" ->
+                            projectWorkspaceExecutor
+                                .transactionStatus(
+                                    transactionId
+                                )
+
+                        "cancel" ->
+                            projectWorkspaceExecutor
+                                .cancelPreparedTransaction(
+                                    transactionId
+                                )
+
+                        "accept" ->
+                            projectWorkspaceExecutor
+                                .acceptCommittedTransaction(
+                                    transactionId
+                                )
+
+                        "rollback" -> {
+                            val dispatchAllowed =
+                                executionKernel.tryBeginIrreversibleDispatch(
+                                    kind = "project_workspace_rollback",
+                                    detail =
+                                        "project_id=${activeCommandProjectId.orEmpty().take(120)}; " +
+                                            "transaction_id=${transactionId.take(120)}"
+                                )
+
+                            if (!dispatchAllowed) {
+                                toolResult(
+                                    false,
+                                    "Workspace rollback остановлен Execution Kernel до изменения файлов."
+                                )
+                                    .put(
+                                        "status",
+                                        "dispatch_gate_rejected"
+                                    )
+                                    .put(
+                                        "action_dispatched",
+                                        false
+                                    )
+                                    .put(
+                                        "action_committed",
+                                        false
+                                    )
+                                    .put(
+                                        "reconciliation_complete",
+                                        true
+                                    )
+                            } else {
+                                val rollback =
+                                    projectWorkspaceExecutor
+                                        .rollbackCommittedTransaction(
+                                            transactionId
+                                        )
+
+                                val dispatched =
+                                    rollback.optBoolean(
+                                        "action_dispatched",
+                                        false
+                                    )
+                                val committed =
+                                    rollback.optBoolean(
+                                        "action_committed",
+                                        false
+                                    )
+                                val reconciliationComplete =
+                                    rollback.optBoolean(
+                                        "reconciliation_complete",
+                                        false
+                                    )
+
+                                if (dispatched) {
+                                    executionKernel
+                                        .markIrreversibleDispatchAccepted(
+                                            "Project workspace rollback accepted: transaction_id=${transactionId.take(120)}"
+                                        )
+                                }
+
+                                executionKernel
+                                    .markSideEffectReconciliationStarted(
+                                        "Project workspace rollback reconciliation: status=${rollback.optString("status")}"
+                                    )
+
+                                if (
+                                    !dispatched ||
+                                    reconciliationComplete
+                                ) {
+                                    executionKernel
+                                        .markSideEffectReconciled(
+                                            committed = committed,
+                                            detail =
+                                                "Project workspace rollback reconciliation complete=$reconciliationComplete; " +
+                                                    "committed=$committed; transaction_id=${transactionId.take(120)}"
+                                        )
+                                }
+
+                                rollback
+                            }
+                        }
+
+                        else ->
+                            toolResult(
+                                false,
+                                "Неизвестное действие project workspace transaction control."
+                            )
+                                .put(
+                                    "status",
+                                    "project_workspace_transaction_control_unknown"
+                                )
+                    }
                 }
 
                 "github_repository_status" -> {
@@ -73964,7 +74596,7 @@ state
 
         // R10.27.4 VIDEO AUDIO ANALYSIS.
         private const val AYANA_VOICE_SERVICE_RELEASE =
-            "v12.65.0 / R10.28.2 PROJECT COMMANDS + PROJECT-AWARE DATA SCOPE"
+            "v12.66.0 / R10.28.5 DEVELOPMENT WORKSPACE 2.0 CANDIDATE"
 
         private const val AYANA_PERSONAL_SEARCH_ENGINE_RELEASE =
             "v2.0 / R10.20 PERSONAL SEARCH 2.0 + VERIFIED RESULT CONTRACT v2"
@@ -73973,16 +74605,16 @@ state
             "v3.6 / R10.28.2 PROJECTS TRUTH"
 
         private const val AYANA_WORKER_RELEASE =
-            "v11.7.0 / R10.27.4 VIDEO AUDIO ANALYSIS"
+            "v11.8.1 / R10.28.5 DEVELOPMENT WORKSPACE 2.0"
 
         private const val AYANA_ACCEPTED_FEATURE_CHECKPOINT =
             "R10.27.6 CONTROLLED PROACTIVITY 2.0 — DEVICE-CONFIRMED ACCEPTED"
 
         private const val AYANA_CURRENT_FEATURE_RELEASE =
-            "R10.28.2 PROJECT COMMANDS + PROJECT-AWARE DATA SCOPE — BUILD / DEVICE CONFIRMATION PENDING"
+            "R10.28.5 DEVELOPMENT WORKSPACE 2.0 — BUILD / DEVICE CONFIRMATION PENDING"
 
         private const val AYANA_RELEASE_LINEAGE =
-            "Android v12.21.0 / R7.9 truth-hardening + R8.0 multi-attachment + R8.1–R8.4 accepted Personal Global Search stack + R8.5–R8.5.4 capability/evidence truth + R9.0 autonomous agent foundation + R9.0.1 history live-refresh proof fix + R9.0.2 diagnostic reconciliation/history refresh fix + R9.0.3 TTS health reconciliation + R9.1 IME perception/active telemetry truth + R9.2 autonomous recovery/long-task reconciliation + R9.2.1 adaptive hypothesis reconciliation + R9.3 app integration framework + R9.3.1 screen health reconciliation + R9.3.2 history latency recovery reconciliation + R9.3.3 informational terminal reconciliation + R9.3.4 app integration device acceptance + R9.4 multi-app task orchestration + R9.4.1 screen ownership union reconciliation + R9.5 verified result transfer between app steps + R9.5.1 partial marker provenance reconciliation + R9.5.2 bounded marker observation + R9.5.3 verified action result transfer + R9.6 verified semantic observation fallback + R9.6.1 visual fallback acceptance truth + R9.7 structured screen reading + R9.7.1 conversation routing/terminal truth + R9.7.2 structured router conversation precedence + R9.7.3 action morphology/terminal truth + R9.8 generic verified result transfer + R9.8.1 master full acceptance/diagnostic engine + R9.9 reversible action journal/verified undo + R9.9.1 brightness verified undo device acceptance + R9.9.2 opt-in low-battery controlled proactivity + R10.0 unified screen intelligence + R10.1 local self-diagnostics/self-audit + R10.2 personal search expansion + R10.3 long autonomous tasks/recovery + R10.4 adaptive verified execution loop + R10.5 generalized live adaptive autonomy + R10.6 cross-lane adaptive continuity + R10.6.1 durable goal binding fix + R10.7 cross-lane durable recovery continuity + R10.7.1 isolated acceptance cleanup hardening + R10.8 general-purpose long autonomous objectives + R10.9 dynamic goal decomposition/planner contract + R10.10 adaptive planner production path + R10.11 production replan/durable recovery + R10.12 natural lifecycle recovery/background continuation + R10.13 full process-death recovery + R10.13.1 post-process readiness/reconciliation + R10.13.2 process-death core recovery proof correction + R10.14 perception process isolation/cross-process accessibility bridge + R10.14.1 cross-process visual evidence fix + R10.14.2 lifecycle profile/self-diagnostic truth + R10.14.3 history recovery reconciliation + R10.15 generalized cross-process autonomy hardening + R10.15.1 self-diagnostics routing reconciliation + R10.16 perception process recovery/safe bridge rebind + R10.16.1 restart telemetry reconciliation + R10.17 screen intelligence 2.0 + R10.17.1 acceptance routing reconciliation + R10.18 universal UI action engine + R10.18.1 acceptance target reconciliation + R10.18.2 live target authority reconciliation + R10.18.3 app info target reconciliation + R10.19 autonomous multi-app tasks 2.0 + R10.20 personal search 2.0 + R10.21 document & office engine 2.0 + R10.22 notifications & communication assistant + R10.22.1 notification acceptance visibility reconciliation + R10.21.1 pptx completion evidence reconciliation + R10.23 voice & background 2.0 + R10.24 field hardening + R10.24.1 field hardening reconciliation/device acceptance + R10.24.2 acceptance truth reconciliation + R10.25 cross-process accessibility truth reconciliation + R10.26 capability evidence metadata reconciliation + R10.26.1 capability evidence metadata detector reconciliation + R10.27.1 github repository write/commit-push + R10.27.1.1 github confirmation terminal truth + R10.27.1.2 github verified-commit completion truth + R10.27.2 apk build pipeline + R10.27.2.1 apk build prepare read-only truth + R10.27.3 verified development transaction/project workspace + R10.27.3.1 waiting-acceptance terminal truth + R10.27.4 video audio analysis + R10.27.5 verified internet speed + R10.27.6 controlled proactivity 2.0 + R10.28 projects core + R10.28.1 project data scope + R10.28.2 project commands/project-aware data scope"
+            "Android v12.21.0 / R7.9 truth-hardening + R8.0 multi-attachment + R8.1–R8.4 accepted Personal Global Search stack + R8.5–R8.5.4 capability/evidence truth + R9.0 autonomous agent foundation + R9.0.1 history live-refresh proof fix + R9.0.2 diagnostic reconciliation/history refresh fix + R9.0.3 TTS health reconciliation + R9.1 IME perception/active telemetry truth + R9.2 autonomous recovery/long-task reconciliation + R9.2.1 adaptive hypothesis reconciliation + R9.3 app integration framework + R9.3.1 screen health reconciliation + R9.3.2 history latency recovery reconciliation + R9.3.3 informational terminal reconciliation + R9.3.4 app integration device acceptance + R9.4 multi-app task orchestration + R9.4.1 screen ownership union reconciliation + R9.5 verified result transfer between app steps + R9.5.1 partial marker provenance reconciliation + R9.5.2 bounded marker observation + R9.5.3 verified action result transfer + R9.6 verified semantic observation fallback + R9.6.1 visual fallback acceptance truth + R9.7 structured screen reading + R9.7.1 conversation routing/terminal truth + R9.7.2 structured router conversation precedence + R9.7.3 action morphology/terminal truth + R9.8 generic verified result transfer + R9.8.1 master full acceptance/diagnostic engine + R9.9 reversible action journal/verified undo + R9.9.1 brightness verified undo device acceptance + R9.9.2 opt-in low-battery controlled proactivity + R10.0 unified screen intelligence + R10.1 local self-diagnostics/self-audit + R10.2 personal search expansion + R10.3 long autonomous tasks/recovery + R10.4 adaptive verified execution loop + R10.5 generalized live adaptive autonomy + R10.6 cross-lane adaptive continuity + R10.6.1 durable goal binding fix + R10.7 cross-lane durable recovery continuity + R10.7.1 isolated acceptance cleanup hardening + R10.8 general-purpose long autonomous objectives + R10.9 dynamic goal decomposition/planner contract + R10.10 adaptive planner production path + R10.11 production replan/durable recovery + R10.12 natural lifecycle recovery/background continuation + R10.13 full process-death recovery + R10.13.1 post-process readiness/reconciliation + R10.13.2 process-death core recovery proof correction + R10.14 perception process isolation/cross-process accessibility bridge + R10.14.1 cross-process visual evidence fix + R10.14.2 lifecycle profile/self-diagnostic truth + R10.14.3 history recovery reconciliation + R10.15 generalized cross-process autonomy hardening + R10.15.1 self-diagnostics routing reconciliation + R10.16 perception process recovery/safe bridge rebind + R10.16.1 restart telemetry reconciliation + R10.17 screen intelligence 2.0 + R10.17.1 acceptance routing reconciliation + R10.18 universal UI action engine + R10.18.1 acceptance target reconciliation + R10.18.2 live target authority reconciliation + R10.18.3 app info target reconciliation + R10.19 autonomous multi-app tasks 2.0 + R10.20 personal search 2.0 + R10.21 document & office engine 2.0 + R10.22 notifications & communication assistant + R10.22.1 notification acceptance visibility reconciliation + R10.21.1 pptx completion evidence reconciliation + R10.23 voice & background 2.0 + R10.24 field hardening + R10.24.1 field hardening reconciliation/device acceptance + R10.24.2 acceptance truth reconciliation + R10.25 cross-process accessibility truth reconciliation + R10.26 capability evidence metadata reconciliation + R10.26.1 capability evidence metadata detector reconciliation + R10.27.1 github repository write/commit-push + R10.27.1.1 github confirmation terminal truth + R10.27.1.2 github verified-commit completion truth + R10.27.2 apk build pipeline + R10.27.2.1 apk build prepare read-only truth + R10.27.3 verified development transaction/project workspace + R10.27.3.1 waiting-acceptance terminal truth + R10.27.4 video audio analysis + R10.27.5 verified internet speed + R10.27.6 controlled proactivity 2.0 + R10.28 projects core + R10.28.1 project data scope + R10.28.2 project commands/project-aware data scope + R10.28.5 development workspace 2.0"
 
         // AyanaCommandHistoryStore v2.8 keeps up to 4k chars inline and stores longer
         // results out-of-line. Self-review intentionally remains inline so copied History

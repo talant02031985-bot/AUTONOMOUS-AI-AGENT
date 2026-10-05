@@ -11,7 +11,7 @@ import java.util.Locale
 import java.util.UUID
 
 /**
- * AYANA Project Workspace Executor v1.0 — DEVELOPMENT WORKSPACE 2.0 / local foundation.
+ * AYANA Project Workspace Executor v1.0.1 — DEVELOPMENT WORKSPACE 2.0 / local foundation.
  *
  * Purpose:
  * - operate only inside the currently active AYANA Project filesRoot;
@@ -32,7 +32,8 @@ import java.util.UUID
  * _project_workspace_transaction_id from the verified PREPARE result.
  */
 class AyanaProjectWorkspaceExecutor(
-    context: Context
+    context: Context,
+    private val boundProjectIdProvider: (() -> String?)? = null
 ) {
 
     private val appContext =
@@ -1458,14 +1459,36 @@ class AyanaProjectWorkspaceExecutor(
     }
 
     private fun currentScope(): JSONObject {
+        // VoiceService supplies a command-lifetime project-id provider so one
+        // execution turn cannot silently jump to another project if the UI
+        // changes active_project_id while a tool is running. Standalone callers
+        // may omit the provider and use the currently active project.
+        val boundProviderPresent =
+            boundProjectIdProvider != null
+
+        val boundProjectId =
+            try {
+                boundProjectIdProvider
+                    ?.invoke()
+                    ?.trim()
+                    ?.takeIf { it.isNotBlank() }
+            } catch (_: Exception) {
+                null
+            }
+
         val project =
             try {
-                projectStore.activeProject()
+                if (boundProviderPresent) {
+                    boundProjectId
+                        ?.let { projectStore.getById(it) }
+                } else {
+                    projectStore.activeProject()
+                }
             } catch (_: Exception) {
                 null
             }
                 ?: return failure(
-                    "Project workspace требует активный проект AYANA. В глобальном контексте запись проекта запрещена."
+                    "Project workspace требует проект, привязанный к текущей команде AYANA. В глобальном контексте запись проекта запрещена."
                 )
                     .put("status", "project_workspace_no_active_project")
                     .put("scope", "GLOBAL")
@@ -1998,7 +2021,7 @@ class AyanaProjectWorkspaceExecutor(
             .put("message", message)
 
     companion object {
-        const val VERSION = "1.0"
+        const val VERSION = "1.0.1"
         const val PLAN_SCHEMA = "ayana_project_workspace_tx_v1"
 
         const val MAX_FILES_PER_TRANSACTION = 32

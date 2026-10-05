@@ -4,7 +4,7 @@ import org.json.JSONObject
 import java.util.Locale
 
 /**
- * AYANA Safety Policy v1.6 — Development Workspace 2.0 Candidate.
+ * AYANA Safety Policy v1.6.1 — Development Workspace 2.0 Bound-Scope Candidate.
  *
  * Local fail-closed guard executed immediately before Agent Core device tools.
  * It is intentionally independent from model instructions: a model mistake must
@@ -169,22 +169,30 @@ class AyanaSafetyPolicy {
                             "project_workspace_transaction_status"
                         )
 
-                    "accept",
                     "cancel" ->
                         allow(
                             RISK_SAFE_ACTION,
-                            "project_workspace_local_finalize"
+                            "project_workspace_prepare_cancel"
                         )
 
+                    "accept",
                     "rollback" ->
                         if (arguments.optBoolean("confirmed", false)) {
                             allow(
                                 RISK_CONFIRMATION_REQUIRED,
-                                "project_workspace_rollback_confirmed"
+                                if (action == "accept") {
+                                    "project_workspace_accept_confirmed"
+                                } else {
+                                    "project_workspace_rollback_confirmed"
+                                }
                             )
                         } else {
                             confirmation(
-                                "Rollback project workspace transaction требует явного локального подтверждения пользователя."
+                                if (action == "accept") {
+                                    "Принятие project workspace transaction удаляет rollback payload и требует явного локального подтверждения пользователя."
+                                } else {
+                                    "Rollback project workspace transaction требует явного локального подтверждения пользователя."
+                                }
                             )
                         }
 
