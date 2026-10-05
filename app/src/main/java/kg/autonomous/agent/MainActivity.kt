@@ -56,7 +56,7 @@ import kotlin.concurrent.thread
 
 class MainActivity : AppCompatActivity() {
 
-    // UI generation: v8.0.2 TEXT PANEL COMPACT ANSWER HEIGHT FIX + v8.0.1 R10.28.3.1 PROJECTS UI GEOMETRY FIX + v7.8 UI SCROLL PERFORMANCE + v7.5 NOTIFICATION ACCESS TRUTH
+    // UI generation: v8.0.3 R10.28.6.3 SIDEBAR FIT + STOP CONTROL + v8.0.2 TEXT PANEL COMPACT ANSWER HEIGHT FIX + v8.0.1 R10.28.3.1 PROJECTS UI GEOMETRY FIX + v7.8 UI SCROLL PERFORMANCE + v7.5 NOTIFICATION ACCESS TRUTH
     // + OWN-APP SEMANTIC ACTION TRUTH.
     // v7.4 keeps v7.2 foreground ownership truth and hardens the in-process
     // semantic bridge so the same factual View tree used for perception also
@@ -844,9 +844,9 @@ class MainActivity : AppCompatActivity() {
                 orientation = LinearLayout.VERTICAL
                 setPadding(
                     dp(8),
-                    dp(9),
+                    dp(6),
                     dp(8),
-                    dp(8)
+                    dp(6)
                 )
                 background =
                     GradientDrawable(
@@ -873,7 +873,7 @@ class MainActivity : AppCompatActivity() {
         side.addView(
             TextView(this).apply {
                 text = "AYANA"
-                textSize = 14f
+                textSize = 13.5f
                 setTextColor(
                     Color.parseColor("#6F7F95")
                 )
@@ -884,9 +884,9 @@ class MainActivity : AppCompatActivity() {
                 letterSpacing = 0.09f
                 setPadding(
                     dp(10),
-                    dp(1),
                     0,
-                    dp(6)
+                    0,
+                    dp(4)
                 )
             }
         )
@@ -915,9 +915,9 @@ class MainActivity : AppCompatActivity() {
                 gravity = Gravity.CENTER_VERTICAL
                 setPadding(
                     dp(10),
-                    dp(7),
+                    dp(5),
                     dp(10),
-                    dp(7)
+                    dp(5)
                 )
                 background =
                     softDrawable(
@@ -949,7 +949,8 @@ class MainActivity : AppCompatActivity() {
         serviceLine.addView(
             TextView(this).apply {
                 text = "Голосовой сервис"
-                textSize = 14f
+                textSize = 13f
+                isSingleLine = true
                 setTextColor(
                     Color.parseColor("#AAB7C8")
                 )
@@ -962,14 +963,14 @@ class MainActivity : AppCompatActivity() {
                 ViewGroup.LayoutParams.MATCH_PARENT,
                 ViewGroup.LayoutParams.WRAP_CONTENT
             ).apply {
-                bottomMargin = dp(6)
+                bottomMargin = dp(4)
             }
         )
 
         cancelCommandButton =
             Button(this).apply {
                 text = "Стоп команды"
-                textSize = 14f
+                textSize = 13.5f
                 isAllCaps = false
                 setTextColor(
                     Color.parseColor("#FCD34D")
@@ -981,9 +982,7 @@ class MainActivity : AppCompatActivity() {
                         14
                     )
                 isEnabled =
-                    isCommandBusyState(
-                        AyanaVoiceService.currentStatusState
-                    )
+                    AyanaVoiceService.isRunning
                 alpha =
                     if (
                         isEnabled
@@ -1001,17 +1000,17 @@ class MainActivity : AppCompatActivity() {
             cancelCommandButton,
             LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT,
-                dp(42)
+                dp(36)
             ).apply {
                 bottomMargin =
-                    dp(5)
+                    dp(3)
             }
         )
 
         stopButton =
             Button(this).apply {
                 text = "Остановить AYANA"
-                textSize = 14.5f
+                textSize = 13.5f
                 isAllCaps = false
                 setTextColor(
                     Color.parseColor("#F2A7AE")
@@ -1041,7 +1040,7 @@ class MainActivity : AppCompatActivity() {
             stopButton,
             LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT,
-                dp(44)
+                dp(38)
             )
         )
 
@@ -1067,7 +1066,7 @@ text =
                 View.IMPORTANT_FOR_ACCESSIBILITY_YES
 
             textSize =
-                    16.0f
+                    15.5f
 
             gravity =
                 Gravity.CENTER_VERTICAL
@@ -1088,11 +1087,11 @@ text =
             layoutParams =
                 LinearLayout.LayoutParams(
                     ViewGroup.LayoutParams.MATCH_PARENT,
-                    dp(48)
+                    dp(37)
                 ).apply {
 
                     bottomMargin =
-                        dp(4)
+                        dp(2)
                 }
 
             setOnClickListener {
@@ -8068,18 +8067,15 @@ keyboard.showSoftInput(
             ::cancelCommandButton.isInitialized
         ) {
 
-            val busy =
-                isCommandBusyState(
-                    state
-                ) &&
-                    AyanaVoiceService.isRunning
+            val stopAvailable =
+                AyanaVoiceService.isRunning
 
             cancelCommandButton.isEnabled =
-                busy
+                stopAvailable
 
             cancelCommandButton.alpha =
                 if (
-                    busy
+                    stopAvailable
                 ) {
                     1.0f
                 } else {

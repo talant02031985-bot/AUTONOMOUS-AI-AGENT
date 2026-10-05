@@ -9,6 +9,9 @@ import java.util.UUID
 /**
  * Persistent execution state for AYANA long-running goals.
  *
+ * R10.28.6.3 keeps schema v3 and gives last_result its own bounded capacity so
+ * confirmation proof JSON is not truncated by the shorter diagnostic-field limit.
+ *
  * R10.3 / schema v3 adds interruption provenance needed for safe continuation:
  * - the exact pre-interruption checkpoint is retained;
  * - in-flight Android-step state and screen fingerprint are persisted;
@@ -1697,8 +1700,13 @@ class AyanaDurableGoalStore(
                         MAX_COMMAND_CHARS
                     )
 
+            "last_result" ->
+                value.toString()
+                    .take(
+                        MAX_LAST_RESULT_CHARS
+                    )
+
             "last_error",
-            "last_result",
             "last_checkpoint",
             "recovery_reason",
             "latest_screen_package",
@@ -2311,6 +2319,9 @@ class AyanaDurableGoalStore(
 
         private const val MAX_SHORT_CHARS =
             1200
+
+        private const val MAX_LAST_RESULT_CHARS =
+            8_000
 
         private const val MAX_JSON_CHARS =
             16000
