@@ -4,7 +4,7 @@ import org.json.JSONObject
 import java.util.Locale
 
 /**
- * AYANA Safety Policy v1.5 — R10.27.3 Verified Development Transaction.
+ * AYANA Safety Policy v1.5.1 — R10.28 Project Artifact Policy Reconciliation.
  *
  * Local fail-closed guard executed immediately before Agent Core device tools.
  * It is intentionally independent from model instructions: a model mistake must
@@ -123,7 +123,8 @@ class AyanaSafetyPolicy {
             "map_search",
             "scroll_screen",
             "execute_android_goal",
-            "execute_android_plan" ->
+            "execute_android_plan",
+            "create_artifact" ->
                 allow(
                     RISK_SAFE_ACTION,
                     "safe_action"
