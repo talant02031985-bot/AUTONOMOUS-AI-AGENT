@@ -997,7 +997,8 @@ class AyanaDurableGoalStore(
                 .put(
                     "planner_envelope",
                     JSONObject(
-                        envelope.toString())
+                        envelope.toString()
+                    )
                 )
                 .put(
                     "last_checkpoint",
@@ -1436,13 +1437,65 @@ class AyanaDurableGoalStore(
 
     fun getCurrentForUi(): GoalView? {
 
-        val item =
-            getRecoverable()
-                ?: return null
+        synchronized(lock) {
 
-        return goalViewFromJson(
-            item
-        )
+            val goals =
+                loadUnsafe()
+
+            var current:
+                JSONObject? =
+                null
+
+            var currentUpdatedAt =
+                Long.MIN_VALUE
+
+            for (index in 0 until goals.length()) {
+
+                val item =
+                    goals.optJSONObject(index)
+                        ?: continue
+
+                if (
+                    !item.optBoolean(
+                        "is_current",
+                        false
+                    ) ||
+                    !isRecoverableStatus(
+                        item.optString(
+                            "status"
+                        )
+                    )
+                ) {
+                    continue
+                }
+
+                val updatedAt =
+                    item.optLong(
+                        "updated_at",
+                        0L
+                    )
+
+                if (
+                    current == null ||
+                    updatedAt >
+                    currentUpdatedAt
+                ) {
+                    current =
+                        item
+                    currentUpdatedAt =
+                        updatedAt
+                }
+            }
+
+            return current
+                ?.let {
+                    goalViewFromJson(
+                        JSONObject(
+                            it.toString()
+                        )
+                    )
+                }
+        }
     }
 
     fun canAutoResume(
@@ -1519,22 +1572,16 @@ class AyanaDurableGoalStore(
     }
 
     /**
-     * R10 acceptance helper.
+     * R10.3 acceptance helper.
      *
-     * Only a strictly named isolated acceptance store may be deleted through this API.
-     * The production durable-goal file (`ayana_durable_goals.json`) and arbitrary
-     * caller-supplied filenames can never be removed by this method.
-     *
-     * R10.7.1 broadens the old R10.3-only filename guard to future R10 acceptance
-     * stores while keeping the same fail-closed production boundary. Cleanup is
-     * reported successful only when primary/temp/backup/corrupt generations are
-     * factually absent after the delete attempt.
+     * Only a dedicated test store may be deleted through this API. The production
+     * durable-goal file can never be removed by this method.
      */
     fun clearAcceptanceStorage(): Boolean {
 
         if (
-            !ACCEPTANCE_FILE_PATTERN.matches(
-                storageFileName
+            !storageFileName.startsWith(
+                ACCEPTANCE_FILE_PREFIX
             )
         ) {
             return false
@@ -1542,27 +1589,16 @@ class AyanaDurableGoalStore(
 
         synchronized(lock) {
             return try {
-                val corruptFile =
-                    File(
-                        appContext.filesDir,
-                        "$storageFileName.corrupt"
-                    )
+                file.delete()
+                tempFile.delete()
+                backupFile.delete()
 
-                fun deleteIfPresent(target: File) {
-                    if (target.exists()) {
-                        target.delete()
-                    }
-                }
+                File(
+                    appContext.filesDir,
+                    "$storageFileName.corrupt"
+                ).delete()
 
-                deleteIfPresent(file)
-                deleteIfPresent(tempFile)
-                deleteIfPresent(backupFile)
-                deleteIfPresent(corruptFile)
-
-                !file.exists() &&
-                    !tempFile.exists() &&
-                    !backupFile.exists() &&
-                    !corruptFile.exists()
+                true
             } catch (_: Exception) {
                 false
             }
@@ -2013,7 +2049,8 @@ class AyanaDurableGoalStore(
             recoveryReason = item.optString(
                 "recovery_reason"
             ),
-            isCurrent = item.optBoolean("is_current",
+            isCurrent = item.optBoolean(
+                "is_current",
                 false
             ),
             plannerDomain = planner.optString(
@@ -2212,7 +2249,8 @@ class AyanaDurableGoalStore(
             setOf(
                 STATUS_ACTIVE,
                 STATUS_RECOVERY_PENDING,
-                STATUS_PAUSED,STATUS_WAITING_CONFIRMATION
+                STATUS_PAUSED,
+                STATUS_WAITING_CONFIRMATION
             )
 
     companion object {
@@ -2245,7 +2283,7 @@ class AyanaDurableGoalStore(
             "failed"
 
         const val VERSION =
-            "2.1.1"
+            "2.1"
 
         const val MAX_RECOVERIES =
             2
@@ -2256,10 +2294,8 @@ class AyanaDurableGoalStore(
         private const val FILE_NAME =
             "ayana_durable_goals.json"
 
-        private val ACCEPTANCE_FILE_PATTERN =
-            Regex(
-                """^ayana_durable_goals_r10_[A-Za-z0-9._-]+_acceptance\.json$"""
-            )
+        private const val ACCEPTANCE_FILE_PREFIX =
+            "ayana_durable_goals_r10_3_acceptance"
 
         private const val MAX_GOALS =
             20
