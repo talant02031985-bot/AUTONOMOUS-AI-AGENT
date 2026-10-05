@@ -1,8 +1,10 @@
-// AYANA Worker v11.8.4 — R10.28.6.2 GLOBAL GITHUB DEVELOPMENT ROUTING CANDIDATE
-// Preserves R10.28.6.1 Workspace continuation integrity and prevents explicit AYANA GitHub development
-// transactions from being hijacked by Project Workspace routing. Explicit fixed-repository find_text /
-// replace_text PREPARE requests receive only github_development_transaction and are tool-forced.
-// Also hardens machine terminal truth when an execution request cannot run because an executor/tool is absent.
+// AYANA Worker v11.8.5 — R10.28.6.4 GITHUB DEVELOPMENT CONTROL ROUTING CANDIDATE
+// Preserves v11.8.4 global GitHub PREPARE routing and adds a dedicated read-only
+// github_development_transaction_control status surface. Control/status requests can no longer be
+// misclassified as github_development_transaction merely because the control tool name contains that substring.
+// A development_transaction_already_active tool result now continues through GitHub status inspection,
+// never through Project Workspace transaction control. No GitHub mutation/confirmation authority is expanded.
+// Also preserves machine terminal truth when an execution request cannot run because an executor/tool is absent.
 // Adds project-scoped local source workspace tools; GitHub/APK authority remains unchanged.
 // Preserves verified GitHub write/build and adds one bounded two-phase development transaction tool with explicit accept/rollback.
 // Android owns GitHub App Device Flow, encrypted token storage, fixed-repository authority,
@@ -898,6 +900,27 @@ const DEVICE_TOOLS = [
 
 ];
 
+// R10.28.6.4: expose the GitHub development control surface only for read-only status.
+// Mutating controls remain owned by Android's explicit-confirmation paths and are not
+// added to the general Agent Core tool palette.
+const GITHUB_DEVELOPMENT_TRANSACTION_STATUS_TOOL = {
+  type: "function",
+  name: "github_development_transaction_control",
+  description: "Read-only inspection of the current GitHub development transaction for AYANA's fixed repository. Use action=status only. Never prepare a new transaction, never call Project Workspace transaction control, and never accept, cancel, rollback, commit, build, or invent confirmation authority from this surface.",
+  strict: true,
+  parameters: {
+    type: "object",
+    properties: {
+      action: {
+        type: "string",
+        enum: ["status"]
+      }
+    },
+    required: ["action"],
+    additionalProperties: false
+  }
+};
+
 const AGENT_INSTRUCTIONS = `
 Ты AYANA AI — персональный голосовой ИИ-агент пользователя на Android-планшете.
 
@@ -1432,14 +1455,39 @@ function projectWorkspaceTools() {
   return DEVICE_TOOLS.filter(tool => names.has(tool.name));
 }
 
-function isExplicitGitHubDevelopmentTransactionRequest(message = "") {
+function isGitHubDevelopmentTransactionStatusRequest(message = "") {
   const n = normalizeIntentText(message)
     .replace(/^(?:аяна|ayana)[\s,.:;!?—-]+/u, "");
   if (!n) return false;
 
+  const explicitActionStatus =
+    /(?:^|[\s,;])action\s*=\s*status(?:$|[\s,;.!?])/u.test(n);
+  const explicitMutationAction =
+    /(?:^|[\s,;])action\s*=\s*(?:accept|cancel|rollback)(?:$|[\s,;.!?])/u.test(n);
+
+  if (explicitMutationAction) return false;
+
+  const developmentTransactionSignal =
+    /github[_ -]?development[_ -]?transaction[_ -]?control/u.test(n)
+    || /github[_ -]?development[_ -]?transaction(?![_ -]?control)/u.test(n)
+    || /(?:^|\s)development\s+transaction(?:\s|$|[?.!,;:—-])/u.test(n)
+    || /транзакц\p{L}*\s+разработ\p{L}*/u.test(n);
+
+  const statusSignal =
+    explicitActionStatus
+    || /(?:^|\s)(?:status|статус|состояни\p{L}*|проверь|проверить)(?=\s|$|[?.!,;:—-])/u.test(n);
+
+  return developmentTransactionSignal && statusSignal;
+}
+
+function isExplicitGitHubDevelopmentTransactionRequest(message = "") {
+  const n = normalizeIntentText(message)
+    .replace(/^(?:аяна|ayana)[\s,.:;!?—-]+/u, "");
+  if (!n || isGitHubDevelopmentTransactionStatusRequest(message)) return false;
+
   const githubSignal = /(?:github|гитхаб)/.test(n);
   const explicitDevelopmentTransactionSignal =
-    /(?:github[_ -]?development[_ -]?transaction|verified\s+github\s+development\s+transaction|development\s+transaction)/.test(n)
+    /(?:github[_ -]?development[_ -]?transaction(?![_ -]?control)|verified\s+github\s+development\s+transaction|development\s+transaction(?!\s+control))/.test(n)
     || (/(?:find_text|replace_text)/.test(n) && /(?:commit\s+message|коммит|commit|main|исходник|source)/.test(n));
 
   return githubSignal && explicitDevelopmentTransactionSignal;
@@ -1447,6 +1495,10 @@ function isExplicitGitHubDevelopmentTransactionRequest(message = "") {
 
 function githubDevelopmentTransactionTool() {
   return DEVICE_TOOLS.find(tool => tool.name === "github_development_transaction");
+}
+
+function githubDevelopmentTransactionStatusTool() {
+  return GITHUB_DEVELOPMENT_TRANSACTION_STATUS_TOOL;
 }
 
 
@@ -1857,6 +1909,13 @@ function hasProjectWorkspaceContinuationEvidence(toolResults) {
   });
 }
 
+function hasGitHubDevelopmentTransactionAlreadyActiveEvidence(toolResults) {
+  return (Array.isArray(toolResults) ? toolResults : []).some(result => {
+    const parsed = parseToolResultObject(result);
+    return String(parsed?.status || "").trim() === "development_transaction_already_active";
+  });
+}
+
 function extractVerifiedWorkspaceReadBaselines(toolResults) {
   const baselines = new Map();
 
@@ -1998,7 +2057,7 @@ ${observations || "[]"}
   }
 
   return {
-    ok: true,
+ok: true,
     responseId: repaired.data.id || sourceData?.id || "",
     call: {
       call_id: repairedItems[0].call_id,
@@ -2565,16 +2624,24 @@ ${verifiedLocalEvidence}
 
   const durableRecoveryMode = isDurableRecoveryRequest(message || "");
   const automaticDurableRecoveryMode = isAutomaticDurableRecoveryRequest(message || "");
+  const githubDevelopmentStatusMode = !durableRecoveryMode
+    && (
+      isGitHubDevelopmentTransactionStatusRequest(message || "")
+      || hasGitHubDevelopmentTransactionAlreadyActiveEvidence(toolResults)
+    );
   const githubDevelopmentMode = !durableRecoveryMode
+    && !githubDevelopmentStatusMode
     && isExplicitGitHubDevelopmentTransactionRequest(message || "");
   const projectWorkspaceContinuationMode = hasProjectWorkspaceContinuationEvidence(toolResults);
   const projectWorkspaceDevelopmentMode = !durableRecoveryMode
+    && !githubDevelopmentStatusMode
     && !githubDevelopmentMode
     && (
       isProjectWorkspaceDevelopmentRequest(message || "")
       || projectWorkspaceContinuationMode
     );
   const androidNavigationMode = !durableRecoveryMode
+    && !githubDevelopmentStatusMode
     && !githubDevelopmentMode
     && !projectWorkspaceDevelopmentMode
     && !isArtifactCreationRequest(message || "")
@@ -2584,6 +2651,7 @@ ${verifiedLocalEvidence}
     && isRuntimeSelfDiagnosticRequest(message || "");
   const normalizedMessage = normalizeIntentText(message || "");
   const artifactCreationMode = !durableRecoveryMode
+    && !githubDevelopmentStatusMode
     && !githubDevelopmentMode
     && !projectWorkspaceDevelopmentMode
     && isArtifactCreationRequest(message || "");
@@ -2611,6 +2679,7 @@ ${verifiedLocalEvidence}
   const deepRequest = isDeepRequest(message || "");
   const fastEverydayMode = !durableRecoveryMode
     && !androidNavigationMode
+    && !githubDevelopmentStatusMode
     && !githubDevelopmentMode
     && !projectWorkspaceDevelopmentMode
     && !artifactCreationMode
@@ -2622,6 +2691,7 @@ ${verifiedLocalEvidence}
   // remain on the full path.
   const detailedFastInfoMode = !durableRecoveryMode
     && !androidNavigationMode
+    && !githubDevelopmentStatusMode
     && !githubDevelopmentMode
     && !projectWorkspaceDevelopmentMode
     && !artifactCreationMode
@@ -2638,6 +2708,7 @@ ${verifiedLocalEvidence}
 
   const longAnswerIntegrityMode = !androidNavigationMode
     && !durableRecoveryMode
+    && !githubDevelopmentStatusMode
     && !githubDevelopmentMode
     && !projectWorkspaceDevelopmentMode
     && !artifactCreationMode
@@ -2672,6 +2743,15 @@ ${selfAutonomyMode ? AYANA_SELF_AUTONOMY_COMPACT_INSTRUCTIONS : ""}`
     ? `\n\n${AYANA_DURABLE_RECOVERY_INSTRUCTIONS}`
     : "";
 
+  const githubDevelopmentStatusInstructions = githubDevelopmentStatusMode
+    ? `\n\nGLOBAL GITHUB DEVELOPMENT TRANSACTION STATUS CONTRACT v1:
+- Выполняй только read-only github_development_transaction_control с action=status.
+- Не вызывай github_development_transaction и не создавай новую PREPARE-транзакцию.
+- Не используй project_workspace_transaction_control: devtx-* принадлежит GitHub development executor, а не Project Workspace.
+- Не принимай, не отменяй, не откатывай, не делай commit и не запускай build из этого status-маршрута.
+- Если маршрут активирован после development_transaction_already_active, сначала прочитай статус уже существующей GitHub transaction и затем объясни её состояние.`
+    : "";
+
   const githubDevelopmentInstructions = githubDevelopmentMode
     ? `\n\nGLOBAL GITHUB DEVELOPMENT TRANSACTION CONTRACT v1:
 - Это НЕ Project Workspace. Выполняй bounded github_development_transaction только для фиксированного репозитория AYANA.
@@ -2696,7 +2776,7 @@ ${selfAutonomyMode ? AYANA_SELF_AUTONOMY_COMPACT_INSTRUCTIONS : ""}`
 ${ANDROID_GOAL_V7_INSTRUCTIONS}`
       : `${AGENT_INSTRUCTIONS}
 
-${styleInstructions}${githubDevelopmentInstructions}${projectWorkspaceDevelopmentMode ? `
+${styleInstructions}${githubDevelopmentStatusInstructions}${githubDevelopmentInstructions}${projectWorkspaceDevelopmentMode ? `
 
 ${AYANA_PROJECT_WORKSPACE_INSTRUCTIONS}` : ""}${artifactCreationMode ? `
 
@@ -2708,6 +2788,8 @@ ${AYANA_VERIFIED_LOCAL_EVIDENCE_INSTRUCTIONS}` : ""}${responseIntegrityInstructi
     input,
     max_output_tokens: androidNavigationMode
       ? 260
+      : githubDevelopmentStatusMode
+        ? (source === "voice" ? 420 : 1200)
       : githubDevelopmentMode
         ? (source === "voice" ? 4200 : 12000)
       : projectWorkspaceDevelopmentMode
@@ -2737,6 +2819,16 @@ ${AYANA_VERIFIED_LOCAL_EVIDENCE_INSTRUCTIONS}` : ""}${responseIntegrityInstructi
   if (androidNavigationMode) {
     payload.tools = [ANDROID_GOAL_TOOL];
     payload.tool_choice = { type: "function", name: "execute_android_goal" };
+  } else if (githubDevelopmentStatusMode) {
+    const githubDevelopmentStatusTool = githubDevelopmentTransactionStatusTool();
+    if (!githubDevelopmentStatusTool) {
+      return Response.json(
+        { error: "AYANA github_development_transaction_control status tool missing", details: { android_dispatch: false } },
+        { status: 500 }
+      );
+    }
+    payload.tools = [githubDevelopmentStatusTool];
+    payload.tool_choice = { type: "function", name: "github_development_transaction_control" };
   } else if (githubDevelopmentMode) {
     const githubDevelopmentTool = githubDevelopmentTransactionTool();
     if (!githubDevelopmentTool) {
@@ -2998,7 +3090,7 @@ async function handleTts(request, env) {
     : "";
 
   if (requestedProfile && requestedProfile !== AYANA_TTS_PROFILE_ID) {
-    return Response.json(
+return Response.json(
       {
         error: "AYANA TTS voice profile mismatch",
         expected_profile: AYANA_TTS_PROFILE_ID
