@@ -1,4 +1,6 @@
-// AYANA Worker v11.8.19 — R10.28.6.19 WORKSPACE FRESH CONTEXT + READ-ONLY TERMINALITY
+// AYANA Worker v11.8.20 — R10.28.6.20 WORKSPACE CONTROL CONTEXT ISOLATION
+// Fresh Project Workspace transaction-control commands (status/accept/cancel/rollback) are isolated from stale Responses chains and routed only to project_workspace_transaction_control.
+// When the command includes an explicit pws-* transaction id, Worker schema-pins that exact id; no unrelated tool or previous_response_id may be used.
 // Every fresh Project Workspace command starts a new Responses context instead of inheriting an unrelated previous_response_id. Exact function_call_output continuation is preserved only inside the newly-created Workspace chain.
 // After project_workspace_list/status evidence, tool_choice remains auto (except ready→list), so read-only inspection commands may finish normally while development commands continue from the original clean chain.
 // After a verified project_workspace_read, the next model turn is write-PREPARE-only: Worker exposes only project_workspace_write_transaction and fixes tool_choice to that function. This prevents Responses max_messages/tool-loop churn while preserving exact SHA-bound update safety.
@@ -1483,6 +1485,69 @@ function projectWorkspaceTools() {
   return DEVICE_TOOLS.filter(tool => names.has(tool.name));
 }
 
+function getProjectWorkspaceTransactionControlAction(message = "") {
+  const n = normalizeIntentText(message)
+    .replace(/^(?:аяна|ayana)[\s,.:;!?—-]+/u, "");
+  if (!n) return "";
+
+  const workspaceSignal =
+    /project[_ -]?workspace[_ -]?transaction[_ -]?control/u.test(n)
+    || /project[_ -]?workspace[_ -]?transaction/u.test(n)
+    || /workspace\s+transaction/u.test(n)
+    || /workspace[- ]?транзакц\p{L}*/u.test(n)
+    || /транзакц\p{L}*\s+workspace/u.test(n);
+
+  if (!workspaceSignal) return "";
+
+  const explicit = n.match(/(?:^|[\s,;])action\s*=\s*(status|cancel|accept|rollback)(?:$|[\s,;.!?])/u);
+  if (explicit) return explicit[1];
+
+  if (/(?:^|\s)(?:отмен\p{L}*|cancel)(?=\s|$|[?.!,;:—-])/u.test(n)) return "cancel";
+  if (/(?:^|\s)(?:прим\p{L}*|приним\p{L}*|accept)(?=\s|$|[?.!,;:—-])/u.test(n)) return "accept";
+  if (/(?:^|\s)(?:откат\p{L}*|rollback|верни\s+назад)(?=\s|$|[?.!,;:—-])/u.test(n)) return "rollback";
+  if (/(?:^|\s)(?:status|статус|состояни\p{L}*|проверь|проверить)(?=\s|$|[?.!,;:—-])/u.test(n)) return "status";
+
+  return "";
+}
+
+function extractProjectWorkspaceTransactionId(message = "") {
+  const match = String(message || "").match(/\bpws-[a-z0-9-]{8,96}\b/i);
+  return match ? match[0] : "";
+}
+
+function projectWorkspaceTransactionControlTool(action, transactionId = "") {
+  const normalized = String(action || "").trim().toLowerCase();
+  if (!["status", "cancel", "accept", "rollback"].includes(normalized)) return null;
+
+  const properties = {
+    action: { type: "string", enum: [normalized] },
+    transaction_id: {
+      type: "string",
+      maxLength: 96,
+      description: transactionId
+        ? "Use exactly the transaction_id supplied by the user."
+        : "Exact project workspace transaction_id. Never invent it."
+    }
+  };
+
+  if (transactionId) {
+    properties.transaction_id.enum = [transactionId];
+  }
+
+  return {
+    type: "function",
+    name: "project_workspace_transaction_control",
+    description: `Control only the current Project Workspace transaction with action=${normalized}. Never route this request to GitHub or project_workspace_write_transaction.`,
+    strict: true,
+    parameters: {
+      type: "object",
+      properties,
+      required: ["action", "transaction_id"],
+      additionalProperties: false
+    }
+  };
+}
+
 function isGitHubDevelopmentTransactionStatusRequest(message = "") {
   const n = normalizeIntentText(message)
     .replace(/^(?:аяна|ayana)[\s,.:;!?—-]+/u, "");
@@ -2940,10 +3005,16 @@ ${verifiedLocalEvidence}
       githubDevelopmentMatchRecoveryMode
       || isExplicitGitHubDevelopmentTransactionRequest(message || "")
     );
+  const projectWorkspaceControlAction =
+    getProjectWorkspaceTransactionControlAction(message || "");
+  const projectWorkspaceControlTransactionId =
+    extractProjectWorkspaceTransactionId(message || "");
+  const projectWorkspaceControlMode = Boolean(projectWorkspaceControlAction);
   const projectWorkspaceContinuationMode = hasProjectWorkspaceContinuationEvidence(toolResults);
   const projectWorkspaceReadyContinuationMode = hasProjectWorkspaceReadyEvidence(toolResults);
   const projectWorkspaceVerifiedReadContinuationMode = hasProjectWorkspaceVerifiedReadEvidence(toolResults);
   const projectWorkspaceDevelopmentMode = !durableRecoveryMode
+    && !projectWorkspaceControlMode
     && !githubDevelopmentStatusCompletionMode
     && !githubDevelopmentControlMode
     && !githubDevelopmentStatusMode
@@ -2957,6 +3028,7 @@ ${verifiedLocalEvidence}
     && !githubDevelopmentControlMode
     && !githubDevelopmentStatusMode
     && !githubDevelopmentMode
+    && !projectWorkspaceControlMode
     && !projectWorkspaceDevelopmentMode
     && !isArtifactCreationRequest(message || "")
     && isLikelyAndroidNavigation(message || "");
@@ -2969,6 +3041,7 @@ ${verifiedLocalEvidence}
     && !githubDevelopmentControlMode
     && !githubDevelopmentStatusMode
     && !githubDevelopmentMode
+    && !projectWorkspaceControlMode
     && !projectWorkspaceDevelopmentMode
     && isArtifactCreationRequest(message || "");
   const genericAgentDefinitionMode = isGenericAgentDefinitionRequest(message || "");
@@ -2980,7 +3053,8 @@ ${verifiedLocalEvidence}
   const dropPreviousContext = genericAgentDefinitionMode
     || explicitExternalImprovementMode
     || verifiedFactsCompletionMode
-    || freshProjectWorkspaceTurn;
+    || freshProjectWorkspaceTurn
+    || projectWorkspaceControlMode;
   const capabilityFollowUpMode = Boolean(previousResponseId)
     && !genericAgentDefinitionMode
     && String(message || "").length <= 160
@@ -3003,6 +3077,7 @@ ${verifiedLocalEvidence}
     && !githubDevelopmentControlMode
     && !githubDevelopmentStatusMode
     && !githubDevelopmentMode
+    && !projectWorkspaceControlMode
     && !projectWorkspaceDevelopmentMode
     && !artifactCreationMode
     && !deepRequest
@@ -3017,6 +3092,7 @@ ${verifiedLocalEvidence}
     && !githubDevelopmentControlMode
     && !githubDevelopmentStatusMode
     && !githubDevelopmentMode
+    && !projectWorkspaceControlMode
     && !projectWorkspaceDevelopmentMode
     && !artifactCreationMode
     && !capabilityMode
@@ -3036,6 +3112,7 @@ ${verifiedLocalEvidence}
     && !githubDevelopmentControlMode
     && !githubDevelopmentStatusMode
     && !githubDevelopmentMode
+    && !projectWorkspaceControlMode
     && !projectWorkspaceDevelopmentMode
     && !artifactCreationMode
     && source !== "voice"
@@ -3144,6 +3221,8 @@ ${AYANA_VERIFIED_LOCAL_EVIDENCE_INSTRUCTIONS}` : ""}${responseIntegrityInstructi
         ? (source === "voice" ? 420 : 1200)
       : githubDevelopmentMode
         ? (source === "voice" ? 4200 : 12000)
+      : projectWorkspaceControlMode
+        ? (source === "voice" ? 320 : 700)
       : projectWorkspaceDevelopmentMode
         ? (projectWorkspaceVerifiedReadContinuationMode
             ? (source === "voice" ? 3200 : 7600)
@@ -3206,6 +3285,41 @@ ${AYANA_VERIFIED_LOCAL_EVIDENCE_INSTRUCTIONS}` : ""}${responseIntegrityInstructi
     }
     payload.tools = [githubDevelopmentTool];
     payload.tool_choice = { type: "function", name: "github_development_transaction" };
+  } else if (projectWorkspaceControlMode) {
+    const workspaceControlTool = projectWorkspaceTransactionControlTool(
+      projectWorkspaceControlAction,
+      projectWorkspaceControlTransactionId
+    );
+    if (!workspaceControlTool) {
+      return Response.json(
+        { error: "AYANA project_workspace_transaction_control tool missing", details: { android_dispatch: false } },
+        { status: 500 }
+      );
+    }
+    if (!projectWorkspaceControlTransactionId) {
+      return Response.json(
+        {
+          ok: true,
+          type: "final",
+          terminal_status: "BLOCKED",
+          execution_success: false,
+          completion_status: "completed",
+          continuation_count: 0,
+          reply: "Укажите точный transaction_id текущей Workspace transaction (формат pws-...)."
+        },
+        { status: 200 }
+      );
+    }
+    payload.tools = [workspaceControlTool];
+    payload.tool_choice = { type: "function", name: "project_workspace_transaction_control" };
+    payload.instructions += `
+
+PROJECT WORKSPACE TRANSACTION CONTROL v1:
+- Выполни только project_workspace_transaction_control.
+- action должен быть ровно ${projectWorkspaceControlAction}.
+- transaction_id должен быть ровно ${projectWorkspaceControlTransactionId}.
+- Не вызывай project_workspace_write_transaction, GitHub tools или другие действия.
+- Это свежая control-команда: previous_response_id намеренно не используется.`;
   } else if (projectWorkspaceDevelopmentMode) {
     if (projectWorkspaceVerifiedReadContinuationMode) {
       const writeTool = projectWorkspaceWriteTool();
