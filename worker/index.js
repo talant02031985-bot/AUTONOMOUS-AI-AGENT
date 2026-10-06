@@ -1,9 +1,11 @@
-// AYANA Worker v11.8.6 — R10.28.6.5 GITHUB DEVELOPMENT STATUS TERMINALITY CANDIDATE
-// Preserves v11.8.5 dedicated read-only github_development_transaction_control routing and closes
-// the post-status continuation leak: once the GitHub development status tool returns a terminal observation,
-// the continuation becomes reasoning-only and exposes no device/workspace tools. This prevents a verified
-// GitHub status result from being followed by an unrelated project_workspace_transaction_control call.
-// development_transaction_already_active still routes once through GitHub status inspection.
+// AYANA Worker v11.8.7 — R10.28.6.6 GITHUB DEVELOPMENT DURABLE STATUS TERMINALITY CANDIDATE
+// Preserves v11.8.6 dedicated read-only github_development_transaction_control routing and fixes the
+// Android fresh-turn continuation path used after non-Workspace tools. Android intentionally resumes such
+// turns with a ПРОДОЛЖЕНИЕ МНОГОШАГОВОЙ ЗАДАЧИ trace instead of function_call_output, so the Worker now
+// recognizes a completed github_development_transaction_control action=status observation inside that
+// trusted local continuation envelope BEFORE generic durable-recovery routing. The completion turn exposes
+// no tools, preventing any follow-up project_workspace_transaction_control call or repeated GitHub status.
+// development_transaction_already_active still routes exactly once through GitHub status inspection.
 // No GitHub mutation/confirmation authority is expanded.
 // Also preserves machine terminal truth when an execution request cannot run because an executor/tool is absent.
 // Adds project-scoped local source workspace tools; GitHub/APK authority remains unchanged.
@@ -1941,6 +1943,30 @@ function hasGitHubDevelopmentStatusTerminalObservation(toolResults) {
   });
 }
 
+function hasGitHubDevelopmentStatusFreshTurnObservation(message = "") {
+  const raw = String(message || "");
+  const normalized = normalizeIntentText(raw);
+
+  // Android's generic Agent Core orchestrator intentionally resumes non-Workspace
+  // device tools as a fresh durable turn. Only trust this detector inside that exact
+  // local continuation envelope; ordinary user text containing tool names must never
+  // manufacture terminal evidence.
+  if (!normalized.startsWith("продолжение многошаговой задачи ayana")) {
+    return false;
+  }
+
+  const toolName = "github_development_transaction_control";
+  const toolIndex = raw.lastIndexOf(toolName);
+  if (toolIndex < 0) return false;
+
+  // Bound inspection to the trace segment for the most recent status tool step.
+  const trace = raw.slice(toolIndex, toolIndex + 2600);
+  const statusAction = /"action"\s*:\s*"status"/u.test(trace);
+  const structuredResult = /Результат:\s*\{[\s\S]{0,1800}?"status"\s*:\s*"[^"]+"/u.test(trace);
+
+  return statusAction && structuredResult;
+}
+
 function extractVerifiedWorkspaceReadBaselines(toolResults) {
   const baselines = new Map();
 
@@ -2647,10 +2673,13 @@ ${verifiedLocalEvidence}
     input = contextParts.join("\n\n");
   }
 
-  const durableRecoveryMode = isDurableRecoveryRequest(message || "");
-  const automaticDurableRecoveryMode = isAutomaticDurableRecoveryRequest(message || "");
-  const githubDevelopmentStatusCompletionMode = !durableRecoveryMode
-    && hasGitHubDevelopmentStatusTerminalObservation(toolResults);
+  const githubDevelopmentStatusCompletionMode =
+    hasGitHubDevelopmentStatusTerminalObservation(toolResults)
+    || hasGitHubDevelopmentStatusFreshTurnObservation(message || "");
+  const durableRecoveryMode = isDurableRecoveryRequest(message || "")
+    && !githubDevelopmentStatusCompletionMode;
+  const automaticDurableRecoveryMode = durableRecoveryMode
+    && isAutomaticDurableRecoveryRequest(message || "");
   const githubDevelopmentStatusMode = !durableRecoveryMode
     && !githubDevelopmentStatusCompletionMode
     && (
@@ -2779,8 +2808,8 @@ ${selfAutonomyMode ? AYANA_SELF_AUTONOMY_COMPACT_INSTRUCTIONS : ""}`
     : "";
 
   const githubDevelopmentStatusCompletionInstructions = githubDevelopmentStatusCompletionMode
-    ? `\n\nGLOBAL GITHUB DEVELOPMENT STATUS COMPLETION CONTRACT v1:
-- Предыдущий github_development_transaction_control уже вернул наблюдение статуса.
+    ? `\n\nGLOBAL GITHUB DEVELOPMENT STATUS COMPLETION CONTRACT v2:
+- Предыдущий github_development_transaction_control уже вернул наблюдение статуса через function result или локальный durable continuation trace.
 - Это terminal read-only completion turn: НЕ вызывай никакие инструменты.
 - Не вызывай project_workspace_transaction_control и не повторяй GitHub status.
 - Кратко сообщи пользователю только подтверждённое состояние из tool result и факт отсутствия mutation.`
