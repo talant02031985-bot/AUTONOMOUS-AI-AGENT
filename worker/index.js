@@ -1,4 +1,9 @@
-// AYANA Worker v11.8.17 — R10.28.6.17 WORKSPACE WHOLE-GOAL CONTINUATION
+// AYANA Worker v11.8.19 — R10.28.6.19 WORKSPACE FRESH CONTEXT + READ-ONLY TERMINALITY
+// Every fresh Project Workspace command starts a new Responses context instead of inheriting an unrelated previous_response_id. Exact function_call_output continuation is preserved only inside the newly-created Workspace chain.
+// After project_workspace_list/status evidence, tool_choice remains auto (except ready→list), so read-only inspection commands may finish normally while development commands continue from the original clean chain.
+// After a verified project_workspace_read, the next model turn is write-PREPARE-only: Worker exposes only project_workspace_write_transaction and fixes tool_choice to that function. This prevents Responses max_messages/tool-loop churn while preserving exact SHA-bound update safety.
+// Adds bounded max_messages recovery for a verified Workspace read by regenerating one complete PREPARE call only; no Android write is dispatched until the returned tool arguments pass full schema + baseline checks.
+// Large app bootstraps are intentionally split into small PREPARE batches to stay within the Android Agent Core transport budget.
 // Prevents composite Project Workspace development goals from ending after a successful read-only status/list/read observation.
 // A verified project_workspace_ready continuation deterministically advances to project_workspace_list; subsequent Workspace continuation turns require another Workspace tool call until Android reaches PREPARE/confirmation or a deterministic tool failure.
 // Preserves all v11.8.16 GitHub development transaction routing, candidate disambiguation, canonical path pinning and control terminality.
@@ -2108,6 +2113,10 @@ function hasProjectWorkspaceReadyEvidence(toolResults) {
   });
 }
 
+function hasProjectWorkspaceVerifiedReadEvidence(toolResults) {
+  return extractVerifiedWorkspaceReadBaselines(toolResults).size > 0;
+}
+
 function hasGitHubDevelopmentTransactionAlreadyActiveEvidence(toolResults) {
   return (Array.isArray(toolResults) ? toolResults : []).some(result => {
     const parsed = parseToolResultObject(result);
@@ -2276,7 +2285,7 @@ PROJECT WORKSPACE TOOL ARGUMENT REPAIR v2:
 Сейчас верни ровно ОДИН project_workspace_write_transaction с ПОЛНЫМИ аргументами.
 - files: непустой массив полных объектов path/content/expected_sha256.
 - note: непустая краткая строка.
-- Если запрос на создание приложения велик, подготовь первую логически связанную партию максимум из 4 файлов.
+- Если запрос на создание приложения велик, подготовь первую логически связанную партию максимум из 2 файлов. Это снижает latency и исключает transport timeout; следующие файлы пойдут отдельным PREPARE после подтверждения текущей партии.
 - Если пользователь явно перечислил до 4 новых файлов, подготовь именно их все.
 - Для явно новых файлов expected_sha256="". Для любого обновляемого существующего файла используй ТОЛЬКО exact sha256 из проверенного project_workspace_read текущего tool chain.
 - Если это continuation после read, сохрани исходную development-цель из предыдущего response chain и заверши требуемую UPDATE+CREATE transaction.
@@ -2933,6 +2942,7 @@ ${verifiedLocalEvidence}
     );
   const projectWorkspaceContinuationMode = hasProjectWorkspaceContinuationEvidence(toolResults);
   const projectWorkspaceReadyContinuationMode = hasProjectWorkspaceReadyEvidence(toolResults);
+  const projectWorkspaceVerifiedReadContinuationMode = hasProjectWorkspaceVerifiedReadEvidence(toolResults);
   const projectWorkspaceDevelopmentMode = !durableRecoveryMode
     && !githubDevelopmentStatusCompletionMode
     && !githubDevelopmentControlMode
@@ -2966,7 +2976,11 @@ ${verifiedLocalEvidence}
   const verifiedDeviceFactsCompletionMode = Boolean(verifiedDeviceFacts);
   const verifiedLocalEvidenceCompletionMode = Boolean(verifiedLocalEvidence);
   const verifiedFactsCompletionMode = verifiedDeviceFactsCompletionMode || verifiedLocalEvidenceCompletionMode;
-  const dropPreviousContext = genericAgentDefinitionMode || explicitExternalImprovementMode || verifiedFactsCompletionMode;
+  const freshProjectWorkspaceTurn = projectWorkspaceDevelopmentMode && toolResults.length === 0;
+  const dropPreviousContext = genericAgentDefinitionMode
+    || explicitExternalImprovementMode
+    || verifiedFactsCompletionMode
+    || freshProjectWorkspaceTurn;
   const capabilityFollowUpMode = Boolean(previousResponseId)
     && !genericAgentDefinitionMode
     && String(message || "").length <= 160
@@ -3131,7 +3145,9 @@ ${AYANA_VERIFIED_LOCAL_EVIDENCE_INSTRUCTIONS}` : ""}${responseIntegrityInstructi
       : githubDevelopmentMode
         ? (source === "voice" ? 4200 : 12000)
       : projectWorkspaceDevelopmentMode
-        ? (source === "voice" ? 3200 : 12000)
+        ? (projectWorkspaceVerifiedReadContinuationMode
+            ? (source === "voice" ? 3200 : 7600)
+            : (source === "voice" ? 3200 : 12000))
       : artifactCreationMode
         ? (source === "voice" ? 2600 : 5200)
       : durableRecoveryMode
@@ -3191,15 +3207,45 @@ ${AYANA_VERIFIED_LOCAL_EVIDENCE_INSTRUCTIONS}` : ""}${responseIntegrityInstructi
     payload.tools = [githubDevelopmentTool];
     payload.tool_choice = { type: "function", name: "github_development_transaction" };
   } else if (projectWorkspaceDevelopmentMode) {
-    payload.tools = projectWorkspaceTools();
-    // Composite source-development commands must not terminate after a successful
-    // read-only Workspace observation. A ready-status continuation deterministically
-    // advances to listing the active project's tree; all later read-only continuation
-    // turns require another Workspace tool call until Android reaches PREPARE or a
-    // deterministic executor failure. Android still owns PREPARE confirmation/commit.
-    payload.tool_choice = projectWorkspaceReadyContinuationMode
-      ? { type: "function", name: "project_workspace_list" }
-      : (projectWorkspaceContinuationMode ? "required" : "auto");
+    if (projectWorkspaceVerifiedReadContinuationMode) {
+      const writeTool = projectWorkspaceWriteTool();
+      if (!writeTool) {
+        return Response.json(
+          { error: "AYANA project_workspace_write_transaction tool missing", details: { android_dispatch: false } },
+          { status: 500 }
+        );
+      }
+      payload.tools = [writeTool];
+      payload.tool_choice = { type: "function", name: "project_workspace_write_transaction" };
+      payload.instructions += `
+
+WORKSPACE VERIFIED READ → PREPARE BOUNDARY v1:
+- Текущий function_call_output содержит verified project_workspace_read с точным baseline SHA.
+- Следующий шаг — РОВНО ОДИН project_workspace_write_transaction PREPARE; status/list/read сейчас повторять нельзя.
+- Для большого bootstrap подготовь первую логически завершённую партию максимум из 2 файлов с полным content.
+- Обновляемый прочитанный файл обязан использовать exact expected_sha256 из текущего verified read; явно новые файлы используют expected_sha256="".
+- Не сокращай content, не используй TODO/placeholder. Android сам остановится на requires_confirmation=true без записи.`;
+    } else {
+      payload.tools = projectWorkspaceTools();
+      // A verified ready-status deterministically advances to listing the project tree.
+      // After list/status evidence keep tool_choice=auto: a genuinely read-only user request
+      // may now finish, while a create/update request still sees its original goal in the
+      // clean Workspace response chain and is instructed to continue to read→PREPARE.
+      // Forcing another tool after every list was incorrect: it made read-only inspection
+      // impossible to terminate and amplified Responses max_messages failures.
+      payload.tool_choice = projectWorkspaceReadyContinuationMode
+        ? { type: "function", name: "project_workspace_list" }
+        : "auto";
+
+      if (projectWorkspaceContinuationMode) {
+        payload.instructions += `
+
+WORKSPACE READ-ONLY CONTINUATION TERMINALITY v1:
+- Если исходная команда пользователя была ТОЛЬКО read-only проверкой/списком/структурой и последний verified result уже её удовлетворяет, верни final сейчас; не вызывай лишний Workspace tool.
+- Если исходная команда создаёт или изменяет проект, не завершай её после list/status: выбери один реально существующий конфигурационный/исходный файл для project_workspace_read, чтобы получить exact SHA; после verified read Worker переведёт следующий шаг в write-PREPARE-only.
+- Не вызывай write transaction без полного files[] и exact baseline для обновляемых существующих файлов.`;
+      }
+    }
   } else if (durableRecoveryMode) {
     payload.tools = automaticDurableRecoveryMode
       ? durableAutoSafeTools()
@@ -3269,7 +3315,51 @@ payload.tools = [
     );
   }
 
-  const data = result.data;
+  let data = result.data;
+
+  // R10.28.6.18: Responses may stop a long Workspace continuation with
+  // incomplete_details.reason=max_messages. After a verified read we already have
+  // all authority needed for one SHA-bound PREPARE, so recover once by forcing the
+  // single write-PREPARE tool. This remains pre-dispatch and cannot mutate Android.
+  if (
+    projectWorkspaceDevelopmentMode
+    && projectWorkspaceVerifiedReadContinuationMode
+    && isIncompleteResponse(data)
+    && incompleteResponseReason(data) === "max_messages"
+  ) {
+    const repair = await repairProjectWorkspaceWriteCall(
+      env,
+      payload,
+      message || "",
+      toolResults,
+      data,
+      "workspace_max_messages_after_verified_read"
+    );
+
+    if (!repair.ok) {
+      return Response.json(
+        {
+          error: "OpenAI Agent Core workspace max_messages recovery failed",
+          details: {
+            status: String(data?.status || ""),
+            reason: repair.reason || "workspace_max_messages_repair_failed",
+            original_reason: "max_messages",
+            repair_attempted: true,
+            android_dispatch: false
+          }
+        },
+        { status: 502 }
+      );
+    }
+
+    return Response.json({
+      ok: true,
+      type: "tool_calls",
+      response_id: repair.responseId,
+      calls: [repair.call],
+      workspace_max_messages_recovery: true
+    });
+  }
 
   const rawCallItems = (data.output || [])
     .filter(item => item.type === "function_call");
