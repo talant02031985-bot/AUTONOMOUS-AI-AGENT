@@ -75,7 +75,7 @@ class AyanaVoiceService : Service() {
 // deterministic pre-dispatch/read-only terminal handling, confirmation side-effect truth,
 // and BLOCKED history semantics. Executor/Policy/Worker and ORB/visualizer are unchanged.
 //
-// AYANA v12.66.0 / R10.28.5 DEVELOPMENT WORKSPACE 2.0 CANDIDATE.
+// AYANA v12.66.0 / R10.28.6.2 DEVELOPMENT WORKSPACE 2.0 CANDIDATE.
 // Adds a command-bound project-local source workspace executor with read/list,
 // bounded multi-file PREPARE -> explicit confirmation -> verified commit,
 // explicit accept/rollback controls and fail-closed global/cross-project isolation.
