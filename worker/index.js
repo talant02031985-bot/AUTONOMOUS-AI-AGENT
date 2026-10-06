@@ -1,3 +1,5 @@
+// AYANA Worker v11.10.0 — R10.28.8 AUTONOMOUS PROJECT DEVELOPMENT LOOP
+// Adds bounded Project source/build/diagnose/repair/rebuild orchestration with Android-held persistent working set and GREEN-only completion.
 // AYANA Worker v11.9.0 — R10.28.7 PROJECT WORKSPACE BUILD BRIDGE
 // Explicit APK build requests for the current/active Project are pinned to github_apk_build;
 // Android routes that tool to the frozen Project Workspace build bridge and a dedicated
@@ -1469,6 +1471,11 @@ function isProjectWorkspaceBuildRequest(message = "") {
     .replace(/^(?:аяна|ayana)[\s,.:;!?—-]+/u, "");
   if (!n) return false;
 
+  const explicitBuildDenial =
+    /(?:не\s+(?:выполняй|выполнять|запускай|запускать|делай|делать)|без)\s+(?:(?:github|project\s+workspace)\s+)?(?:build|сборк\p{L}*|apk\s+build|build\s+bridge)/u.test(n)
+    || /не\s+запускай\s+project\s+workspace\s+build\s+bridge/u.test(n);
+  if (explicitBuildDenial) return false;
+
   const buildSignal =
     /(?:^|\s)(?:собери|собрать|сборк\p{L}*|build|assemble)(?=\s|$|[?.!,;:—-])/u.test(n)
     || /\bapk\b/u.test(n);
@@ -1486,11 +1493,11 @@ function isProjectWorkspaceDevelopmentRequest(message = "") {
     .replace(/^(?:аяна|ayana)[\s,.:;!?—-]+/u, "");
   if (!n) return false;
 
-  const developmentVerb = /(?:^|\s)(?:разработай|разработать|создай|создать|сделай|сделать|реализуй|реализовать|добавь|добавить|измени|изменить|исправь|исправить|напиши|написать|сгенерируй|сгенерировать|подготовь|подготовить)(?=\s|$|[?.!,;:—-])/.test(n);
+  const developmentVerb = /(?:^|\s)(?:продолжи|продолжить|разработай|разработать|создай|создать|сделай|сделать|реализуй|реализовать|добавь|добавить|измени|изменить|исправь|исправить|напиши|написать|сгенерируй|сгенерировать|подготовь|подготовить)(?=\s|$|[?.!,;:—-])/.test(n);
   const explicitProjectFileTarget =
     /(?:в|для)\s+(?:текущ(?:ем|его)|активн(?:ом|ого)|этом)\s+проект(?:е|а)?/.test(n)
     && /(файл|каталог|папк|структур|исходник|код|spec|тз|\.txt\b|\.md\b|\.kt\b|\.kts\b|\.xml\b|\.json\b|\.toml\b|\.properties\b)/.test(n);
-  const sourceSignal = /(android[ -]?проект|android project|приложени|исходник|source code|код(?:\s+проекта)?|kotlin|compose|room|sqlite|gradle|manifest|build\.gradle|settings\.gradle|\.kt\b|\.kts\b|project workspace|workspace проекта)/.test(n)
+  const sourceSignal = /(android[ -]?проект|android project|приложени|исходник|source code|код(?:\s+проекта)?|kotlin|compose|room|sqlite|gradle|manifest|build\.gradle|settings\.gradle|\.kt\b|\.kts\b|project workspace|workspace проекта|workspace)/.test(n)
     || explicitProjectFileTarget;
   const projectSignal = /(проект|project|workspace|приложени|исходник|репозитор|repository|gradle|manifest)/.test(n);
 
@@ -1543,6 +1550,30 @@ function isExplicitProjectWorkspaceFileReadRequest(message = "") {
   return /project_workspace_read/u.test(n)
     || /(?:^|\s)(?:прочитай|прочесть|читай|покажи)(?=\s|$|[?.!,;:—-])/u.test(n)
       && /(?:\.kt|\.kts|\.xml|\.json|\.toml|\.properties|\.txt|\.md)(?:\s|$|[?.!,;:—-])/u.test(n);
+}
+
+function isAutonomousProjectDevelopmentRequest(message = "") {
+  const n = normalizeIntentText(message)
+    .replace(/^(?:аяна|ayana)[\s,.:;!?—-]+/u, "");
+  if (!n) return false;
+
+  const developmentSignal =
+    /(?:продолжи|продолжить|разработай|разработать|доведи|доделай|реализуй|реализовать|создай|создать|исправь|исправить|собери|собрать).*(?:приложени|проект|android|apk|workspace|store accounting)/u.test(n);
+  const autonomousGoalSignal =
+    /(?:до green|до успешн|до рабоч|до готов|сам[ао]? исправ|автоном|самостоятель|по тз|тех(?:ническ)?[а-я ]*задан|полностью разработ)/u.test(n);
+
+  return developmentSignal && autonomousGoalSignal;
+}
+
+function projectAutonomousDevelopmentTools() {
+  const names = new Set([
+    "project_workspace_status",
+    "project_workspace_list",
+    "project_workspace_read",
+    "project_workspace_write_transaction",
+    "github_apk_build"
+  ]);
+  return DEVICE_TOOLS.filter(tool => names.has(tool.name));
 }
 
 function projectWorkspaceTools() {
@@ -3132,7 +3163,14 @@ ${verifiedLocalEvidence}
       githubDevelopmentMatchRecoveryMode
       || isExplicitGitHubDevelopmentTransactionRequest(message || "")
     );
+  const autonomousProjectDevelopmentMode = !durableRecoveryMode
+    && !githubDevelopmentStatusCompletionMode
+    && !githubDevelopmentControlMode
+    && !githubDevelopmentStatusMode
+    && !githubDevelopmentMode
+    && isAutonomousProjectDevelopmentRequest(message || "");
   const projectWorkspaceBuildMode = !durableRecoveryMode
+    && !autonomousProjectDevelopmentMode
     && !githubDevelopmentStatusCompletionMode
     && !githubDevelopmentControlMode
     && !githubDevelopmentStatusMode
@@ -3144,6 +3182,7 @@ ${verifiedLocalEvidence}
     extractProjectWorkspaceTransactionId(message || "");
   const projectWorkspaceControlMode = Boolean(projectWorkspaceControlAction);
   const projectWorkspaceReadOnlyMode = !durableRecoveryMode
+    && !autonomousProjectDevelopmentMode
     && !projectWorkspaceBuildMode
     && !projectWorkspaceControlMode
     && !githubDevelopmentStatusCompletionMode
@@ -3155,6 +3194,7 @@ ${verifiedLocalEvidence}
   const projectWorkspaceReadyContinuationMode = hasProjectWorkspaceReadyEvidence(toolResults);
   const projectWorkspaceVerifiedReadContinuationMode = hasProjectWorkspaceVerifiedReadEvidence(toolResults);
   const projectWorkspaceDevelopmentMode = !durableRecoveryMode
+    && !autonomousProjectDevelopmentMode
     && !projectWorkspaceBuildMode
     && !projectWorkspaceControlMode
     && !projectWorkspaceReadOnlyMode
@@ -3166,6 +3206,25 @@ ${verifiedLocalEvidence}
       isProjectWorkspaceDevelopmentRequest(message || "")
       || projectWorkspaceContinuationMode
     );
+  const autonomousProjectDevelopmentInstructions = autonomousProjectDevelopmentMode
+    ? `
+
+AUTONOMOUS PROJECT DEVELOPMENT LOOP v1 — R10.28.8:
+- Это одна bounded development-сессия только для frozen active Project. Никогда не переходи в AUTONOMOUS-AI-AGENT и не выбирай другой repository.
+- Цель — довести пользовательское ТЗ до VERIFIED GREEN debug APK, а не просто подготовить исходники.
+- Работай циклом: inspect/read -> minimal coherent write -> Project build -> inspect compile_output on failure -> reread affected source + its real dependencies -> repair -> rebuild.
+- Android удерживает persistent working set между stateless turns. Используй его как фактический контекст, но перед повторным UPDATE уже изменённого файла обязательно перечитай этот файл для свежего exact SHA.
+- В development session project_workspace_write_transaction автоматически проходит локальный PREPARE + exact-id binding + commit под уже данной пользователем development authority. Никогда не добавляй confirmed=true сам.
+- github_apk_build внутри этой сессии автоматически делает локальный PREPARE + exact Project proof binding и запускает только dedicated Project repository. Никогда не добавляй confirmed=true сам.
+- После result status=project_development_repair_required НЕ завершай задачу. compile_output — подтверждённая причина failed build. Исправь только необходимые файлы и повтори build.
+- Не выдумывай DAO/API/symbols. Если compile_output указывает unresolved reference/signature mismatch, сначала project_workspace_read фактического declaration/source dependency и только затем правь caller или declaration.
+- Максимум 5 repair/build циклов. Если Android сообщает REPAIR_LIMIT_REACHED или другой fail-closed terminal, остановись и верни точную оставшуюся ошибку.
+- SUCCESS допустим ТОЛЬКО после github_apk_build result: success=true, verified=true, status=verified_apk_build, build_conclusion=success, artifact_verified=true, artifact_id>0, artifact_size_bytes>0, sha256 digest.
+- После GREEN Android сам принимает Workspace transactions, созданные этой session. Не вызывай transaction_control для cleanup.
+- Не используй TODO, placeholder, mock, отсутствующие зависимости, .git/.github/secrets/keystore.
+- На каждом Agent Core ходе вызывай максимум один tool; после результата продолжай цикл автоматически.`
+    : "";
+
   const projectWorkspaceBuildInstructions = projectWorkspaceBuildMode
     ? `
 
@@ -3179,6 +3238,7 @@ PROJECT WORKSPACE APK BUILD CONTRACT v1 — R10.28.7:
     : "";
 
   const androidNavigationMode = !durableRecoveryMode
+    && !autonomousProjectDevelopmentMode
     && !githubDevelopmentStatusCompletionMode
     && !githubDevelopmentControlMode
     && !githubDevelopmentStatusMode
@@ -3194,6 +3254,7 @@ PROJECT WORKSPACE APK BUILD CONTRACT v1 — R10.28.7:
     && isRuntimeSelfDiagnosticRequest(message || "");
   const normalizedMessage = normalizeIntentText(message || "");
   const artifactCreationMode = !durableRecoveryMode
+    && !autonomousProjectDevelopmentMode
     && !githubDevelopmentStatusCompletionMode
     && !githubDevelopmentControlMode
     && !githubDevelopmentStatusMode
@@ -3209,6 +3270,7 @@ PROJECT WORKSPACE APK BUILD CONTRACT v1 — R10.28.7:
   const verifiedFactsCompletionMode = verifiedDeviceFactsCompletionMode || verifiedLocalEvidenceCompletionMode;
   const freshProjectWorkspaceTurn = projectWorkspaceDevelopmentMode && toolResults.length === 0;
   const dropPreviousContext = genericAgentDefinitionMode
+    || autonomousProjectDevelopmentMode
     || explicitExternalImprovementMode
     || verifiedFactsCompletionMode
     || freshProjectWorkspaceTurn
@@ -3361,7 +3423,7 @@ ${selfAutonomyMode ? AYANA_SELF_AUTONOMY_COMPACT_INSTRUCTIONS : ""}`
 ${ANDROID_GOAL_V7_INSTRUCTIONS}`
       : `${AGENT_INSTRUCTIONS}
 
-${styleInstructions}${githubDevelopmentStatusCompletionInstructions}${githubDevelopmentControlInstructions}${githubDevelopmentStatusInstructions}${githubDevelopmentInstructions}${projectWorkspaceBuildInstructions}${projectWorkspaceDevelopmentMode ? `
+${styleInstructions}${githubDevelopmentStatusCompletionInstructions}${githubDevelopmentControlInstructions}${githubDevelopmentStatusInstructions}${githubDevelopmentInstructions}${autonomousProjectDevelopmentInstructions}${projectWorkspaceBuildInstructions}${projectWorkspaceDevelopmentMode ? `
 
 ${AYANA_PROJECT_WORKSPACE_INSTRUCTIONS}` : ""}${artifactCreationMode ? `
 
@@ -3381,6 +3443,8 @@ ${AYANA_VERIFIED_LOCAL_EVIDENCE_INSTRUCTIONS}` : ""}${responseIntegrityInstructi
         ? (source === "voice" ? 420 : 1200)
       : githubDevelopmentMode
         ? (source === "voice" ? 4200 : 12000)
+      : autonomousProjectDevelopmentMode
+        ? (source === "voice" ? 4200 : 14000)
       : projectWorkspaceBuildMode
         ? (source === "voice" ? 360 : 800)
       : projectWorkspaceControlMode
@@ -3449,6 +3513,18 @@ ${AYANA_VERIFIED_LOCAL_EVIDENCE_INSTRUCTIONS}` : ""}${responseIntegrityInstructi
     }
     payload.tools = [githubDevelopmentTool];
     payload.tool_choice = { type: "function", name: "github_development_transaction" };
+  } else if (autonomousProjectDevelopmentMode) {
+    payload.tools = projectAutonomousDevelopmentTools();
+    payload.tool_choice = toolResults.length === 0
+      ? { type: "function", name: "project_workspace_status" }
+      : "auto";
+    payload.instructions += `
+
+R10.28.8 TERMINAL GATE:
+- Не возвращай final после status/list/read/write или failed build diagnostic.
+- Если ещё нет verified GREEN artifact, следующий шаг должен быть одним из Project Workspace read/write или github_apk_build.
+- Если последний build failed, приоритет — прочитать affected declaration/caller по compile_output, затем minimal repair.
+- Если verified GREEN artifact уже получен, верни короткий финал с run_id, artifact_name, artifact_digest и количеством repair cycles.`;
   } else if (projectWorkspaceBuildMode) {
     const projectBuildTool = DEVICE_TOOLS.find(tool => tool.name === "github_apk_build");
     if (!projectBuildTool) {
