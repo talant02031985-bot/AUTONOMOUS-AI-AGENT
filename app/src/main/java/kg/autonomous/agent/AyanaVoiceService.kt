@@ -63,7 +63,14 @@ import kotlin.math.abs
 
 class AyanaVoiceService : Service() {
 
-// AYANA v12.66.3 / R10.28.6.22 WORKSPACE STATELESS CONTINUATION.
+// AYANA v12.66.4 / R10.28.6.23 WORKSPACE CONFIRMATION REATTESTATION.
+// Preserves stateless Workspace continuation and fixes false expiration of an exact
+// PREPARED project transaction on the generic 2-minute Android-screen confirmation TTL.
+// Workspace confirmation now re-attests transaction_id + project_id + manifest SHA
+// against the local executor before COMMIT, including recovery from the old false PAUSED state.
+// ORB/UI, Worker, STORE ACCOUNTING sources and generic Android confirmation TTL are unchanged.
+//
+// AYANA v12.66.4 / R10.28.6.23 WORKSPACE CONFIRMATION REATTESTATION.
 // Preserves R10.28.5.1 and adds exact Workspace read->write continuation,
 // non-truncated durable confirmation proof, safe cancellation of a PREPARED
 // development transaction from STOP/cancel controls, and resilient transaction
@@ -61322,9 +61329,178 @@ commandHistoryStore.addEvent(
                     )
         )
 
+        // R10.28.6.23: Project Workspace confirmation is not screen-state authority.
+        // A prepared Workspace transaction is already frozen on disk by transaction_id,
+        // project_id and manifest_sha256. Re-attest that exact local PREPARE before
+        // confirmation instead of expiring it on the generic 2-minute Android-screen TTL.
+        // This also recovers a PREPARE that the old TTL incorrectly moved to PAUSED.
+        val pendingConfirmationToolName =
+            goal.optString(
+                "last_tool_name"
+            )
+                .trim()
+
+        val workspaceConfirmationCandidate =
+            explicitConfirmation &&
+                pendingConfirmationToolName ==
+                "project_workspace_write_transaction" &&
+                status in
+                setOf(
+                    AyanaDurableGoalStore.STATUS_WAITING_CONFIRMATION,
+                    AyanaDurableGoalStore.STATUS_PAUSED
+                )
+
+        var workspaceConfirmationReattested =
+            false
+
+        if (workspaceConfirmationCandidate) {
+            val preparedProof =
+                try {
+                    JSONObject(
+                        goal.optString(
+                            "last_result"
+                        )
+                    )
+                } catch (_: Exception) {
+                    JSONObject()
+                }
+
+            val preparedTransactionId =
+                preparedProof
+                    .optString(
+                        "transaction_id"
+                    )
+                    .trim()
+
+            val preparedProjectId =
+                preparedProof
+                    .optString(
+                        "project_id"
+                    )
+                    .trim()
+
+            val preparedManifestSha =
+                preparedProof
+                    .optString(
+                        "manifest_sha256"
+                    )
+                    .trim()
+
+            val frozenProjectId =
+                activeCommandProjectId
+                    .orEmpty()
+                    .trim()
+
+            val durablePreparedProofValid =
+                preparedProof.optString(
+                    "status"
+                ) ==
+                AyanaProjectWorkspaceExecutor.TX_PREPARED &&
+                    preparedProof.optBoolean(
+                        "requires_confirmation",
+                        false
+                    ) &&
+                    preparedTransactionId.isNotBlank() &&
+                    frozenProjectId.isNotBlank() &&
+                    preparedProjectId ==
+                    frozenProjectId &&
+                    Regex(
+                        "^[0-9a-fA-F]{64}$"
+                    )
+                        .matches(
+                            preparedManifestSha
+                        )
+
+            val livePreparedState =
+                if (durablePreparedProofValid) {
+                    try {
+                        projectWorkspaceExecutor
+                            .transactionStatus(
+                                preparedTransactionId
+                            )
+                    } catch (_: Exception) {
+                        JSONObject()
+                    }
+                } else {
+                    JSONObject()
+                }
+
+            workspaceConfirmationReattested =
+                durablePreparedProofValid &&
+                    livePreparedState.optBoolean(
+                        "success",
+                        false
+                    ) &&
+                    livePreparedState.optBoolean(
+                        "verified",
+                        false
+                    ) &&
+                    livePreparedState.optString(
+                        "terminal_status"
+                    ) ==
+                    "SUCCESS" &&
+                    livePreparedState.optString(
+                        "status"
+                    ) ==
+                    AyanaProjectWorkspaceExecutor.TX_PREPARED &&
+                    livePreparedState.optString(
+                        "transaction_id"
+                    )
+                        .trim() ==
+                    preparedTransactionId &&
+                    livePreparedState.optString(
+                        "project_id"
+                    )
+                        .trim() ==
+                    preparedProjectId &&
+                    livePreparedState.optString(
+                        "manifest_sha256"
+                    )
+                        .trim()
+                        .equals(
+                            preparedManifestSha,
+                            ignoreCase = true
+                        )
+
+            if (!workspaceConfirmationReattested) {
+                try {
+                    durableGoalStore
+                        .markPaused(
+                            goalId,
+                            "Project workspace confirmation re-attestation failed"
+                        )
+                } catch (_: Exception) {
+                }
+
+                commandHistoryStore.addEvent(
+                    activeCommandHistoryId,
+                    state = "project_workspace_confirmation_reattest_failed",
+                    message = "Workspace PREPARE больше не совпадает с сохранённым подтверждением",
+                    details =
+                        "transaction_id=${preparedTransactionId.take(80)}; project_match=${preparedProjectId == frozenProjectId}; manifest_bound=${preparedManifestSha.isNotBlank()}; live_status=${livePreparedState.optString("status")}"
+                )
+
+                respondAndResume(
+                    "Файлы проекта не изменены: сохранённую Workspace transaction не удалось заново подтвердить по transaction_id, project_id и manifest SHA. Подготовьте изменение заново.",
+                    silent,
+                    success = false
+                )
+                return
+            }
+
+            commandHistoryStore.addEvent(
+                activeCommandHistoryId,
+                state = "project_workspace_confirmation_reattested",
+                message = "Workspace PREPARE заново подтверждён локально перед COMMIT",
+                details =
+                    "transaction_id=$preparedTransactionId; project_id=$preparedProjectId; manifest_bound=true; recovered_from_paused=${status == AyanaDurableGoalStore.STATUS_PAUSED}"
+            )
+        }
+
         if (
             status ==
-            AyanaDurableGoalStore.STATUS_WAITING_CONFIRMATION
+            AyanaDurableGoalStore.STATUS_WAITING_CONFIRMATION ||
+            workspaceConfirmationReattested
         ) {
 
             if (!explicitConfirmation) {
@@ -61337,6 +61513,7 @@ commandHistoryStore.addEvent(
             }
 
             if (
+                !workspaceConfirmationReattested &&
                 !durableGoalStore
                     .confirmationIsFresh(
                         goal
@@ -61425,9 +61602,7 @@ commandHistoryStore.addEvent(
             }
 
             val toolName =
-                goal.optString(
-                    "last_tool_name"
-                )
+                pendingConfirmationToolName
 
             if (
                 toolName !in
@@ -75027,7 +75202,7 @@ state
 
         // R10.27.4 VIDEO AUDIO ANALYSIS.
         private const val AYANA_VOICE_SERVICE_RELEASE =
-            "v12.66.3 / R10.28.6.22 WORKSPACE STATELESS CONTINUATION"
+            "v12.66.4 / R10.28.6.23 WORKSPACE CONFIRMATION REATTESTATION"
 
         private const val AYANA_PERSONAL_SEARCH_ENGINE_RELEASE =
             "v2.0 / R10.20 PERSONAL SEARCH 2.0 + VERIFIED RESULT CONTRACT v2"
