@@ -1,5 +1,6 @@
-// AYANA Worker v11.8.9 — R10.28.6.9 GITHUB DEVELOPMENT CANDIDATE-INDEX RECOVERY CANDIDATE
-// Preserves v11.8.8 GitHub development isolation and makes ambiguous exact-match recovery deterministic.
+// AYANA Worker v11.8.10 — R10.28.6.10 STRICT TOOL SCHEMA FIX
+// Fixes OpenAI strict-function schema validity for github_development_transaction: match_candidate_index is now always required and uses -1 for the initial/no-candidate PREPARE.
+// Preserves v11.8.9 candidate-index recovery and all prior GitHub development isolation behavior.
 // A trusted Android durable continuation containing development_exact_match_count_invalid is routed back only
 // to github_development_transaction, even if long result serialization hid match_candidates from the bounded trace.
 // Android may expose compact candidate_contexts with stable match_candidate_index values; the model selects one
@@ -903,12 +904,12 @@ const DEVICE_TOOLS = [
         },
         match_candidate_index: {
           type: "integer",
-          minimum: 0,
+          minimum: -1,
           maximum: 5,
-          description: "Optional zero-based candidate index returned by Android after development_exact_match_count_invalid. Use only on the immediate GitHub disambiguation retry; keep the original find_text and replace_text unchanged."
+          description: "Use -1 for the initial PREPARE or whenever no candidate has been selected. After Android returns development_exact_match_count_invalid with candidate_contexts, retry this same tool with the selected zero-based match_candidate_index while keeping the original path/find_text/replace_text/commit_message unchanged."
         }
       },
-      required: ["path", "find_text", "replace_text", "commit_message"],
+      required: ["path", "find_text", "replace_text", "commit_message", "match_candidate_index"],
       additionalProperties: false
     }
   }
