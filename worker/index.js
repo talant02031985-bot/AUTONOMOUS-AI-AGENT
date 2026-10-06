@@ -1,5 +1,6 @@
-// AYANA Worker v11.8.12 — R10.28.6.12 DETERMINISTIC GITHUB DEVELOPMENT CONTROL ROUTING
-// Fixes explicit/natural GitHub development transaction control routing before PREPARE classification. Cancel/accept/status never fall through to github_development_transaction or Project Workspace.
+// AYANA Worker v11.8.13 — R10.28.6.13 GITHUB CONTROL TERMINALITY
+// Fixes successful GitHub development transaction control terminality across Android fresh-turn continuation: cancel/accept/status results are summarized with NO tools exposed, so a verified control action cannot be proposed twice and tripped by adaptive replay protection.
+// Preserves deterministic explicit/natural GitHub development transaction control routing before PREPARE classification. Cancel/accept/status never fall through to github_development_transaction or Project Workspace.
 // Makes GitHub development PREPARE deterministic: fresh requests are schema-constrained to match_candidate_index=-1; only trusted ambiguous-match continuation may select a candidate.
 // Ambiguous-match recovery now has precedence over generic/status keyword routing, and repeated PREPARE against an already-active GitHub transaction routes only to GitHub read-only status, never Project Workspace.
 // Preserves v11.8.9 candidate-index recovery and all prior GitHub development isolation behavior.
@@ -2085,12 +2086,16 @@ function hasGitHubDevelopmentStatusFreshTurnObservation(message = "") {
   const toolIndex = raw.lastIndexOf(toolName);
   if (toolIndex < 0) return false;
 
-  // Bound inspection to the trace segment for the most recent status tool step.
+  // Bound inspection to the trace segment for the most recent GitHub control step.
+  // status/cancel/accept are one-shot control actions. Once Android has returned a
+  // structured result, the next Worker turn is terminal-summary only: exposing the
+  // control tool again would let the model propose the exact verified transition twice
+  // and R10.4 would correctly block it as verified_transition_replay_blocked.
   const trace = raw.slice(toolIndex, toolIndex + 2600);
-  const statusAction = /"action"\s*:\s*"status"/u.test(trace);
+  const controlAction = /"action"\s*:\s*"(?:status|cancel|accept)"/u.test(trace);
   const structuredResult = /Результат:\s*\{[\s\S]{0,1800}?"status"\s*:\s*"[^"]+"/u.test(trace);
 
-  return statusAction && structuredResult;
+  return controlAction && structuredResult;
 }
 
 function hasGitHubDevelopmentMatchDisambiguationFreshTurnObservation(message = "") {
@@ -2981,11 +2986,11 @@ ${selfAutonomyMode ? AYANA_SELF_AUTONOMY_COMPACT_INSTRUCTIONS : ""}`
     : "";
 
   const githubDevelopmentStatusCompletionInstructions = githubDevelopmentStatusCompletionMode
-    ? `\n\nGLOBAL GITHUB DEVELOPMENT STATUS COMPLETION CONTRACT v2:
-- Предыдущий github_development_transaction_control уже вернул наблюдение статуса через function result или локальный durable continuation trace.
-- Это terminal read-only completion turn: НЕ вызывай никакие инструменты.
-- Не вызывай project_workspace_transaction_control и не повторяй GitHub status.
-- Кратко сообщи пользователю только подтверждённое состояние из tool result и факт отсутствия mutation.`
+    ? `\n\nGLOBAL GITHUB DEVELOPMENT CONTROL COMPLETION CONTRACT v3:
+- Предыдущий github_development_transaction_control уже вернул структурированный результат action=status/cancel/accept через function result или доверенный локальный durable continuation trace.
+- Это terminal completion turn: НЕ вызывай никакие инструменты.
+- Не повторяй github_development_transaction_control, не вызывай github_development_transaction и не переходи в project_workspace_*.
+- Кратко сообщи пользователю только подтверждённый результат control action. Не приписывай GitHub mutation, commit или build, если этого нет в tool result.`
     : "";
 
   const githubDevelopmentControlInstructions = githubDevelopmentControlMode
