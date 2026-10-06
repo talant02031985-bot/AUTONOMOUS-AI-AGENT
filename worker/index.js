@@ -1,3 +1,7 @@
+// AYANA Worker v11.9.0 — R10.28.7 PROJECT WORKSPACE BUILD BRIDGE
+// Explicit APK build requests for the current/active Project are pinned to github_apk_build;
+// Android routes that tool to the frozen Project Workspace build bridge and a dedicated
+// project repository. Global/no-project github_apk_build preserves the fixed AYANA lane.
 // AYANA Worker v11.8.22 — R10.28.6.22 WORKSPACE STATELESS CONTINUATION
 // Explicit Project Workspace read-only requests are isolated into a fresh Responses chain and can expose only status/list/read tools; they can never fall through to project_workspace_write_transaction after a verified read.
 // A verified read-only project_workspace_read may complete immediately or continue to another requested read, but mutation/control tools stay unavailable unless the user issued a separate explicit mutation/control command.
@@ -880,7 +884,7 @@ const DEVICE_TOOLS = [
   {
     type: "function",
     name: "github_apk_build",
-    description: "Prepare or, after a fresh local user confirmation, dispatch the fixed GitHub Actions workflow 'Build Android APK' on main and wait for a verified APK artifact. First call is PREPARE-ONLY and must not dispatch workflow_dispatch. Never invent confirmed=true. Android rechecks Actions:write, workflow identity and exact main head SHA before dispatch. Do not use this tool for repository edits, arbitrary workflows/branches, deployment, APK installation, or secrets.",
+    description: "Two-phase APK build authority. In GLOBAL scope Android preserves the fixed AYANA GitHub Actions build. When the command is frozen to an active AYANA Project, Android routes the same tool to R10.28.7 Project Workspace Build Bridge: exact local workspace snapshot -> dedicated project repository (never AUTONOMOUS-AI-AGENT) -> verified debug APK artifact. First call is PREPARE-ONLY; never invent confirmed=true. Do not use for deployment, installation, secrets, or an unrelated repository.",
     strict: true,
     parameters: {
       type: "object",
@@ -1070,9 +1074,9 @@ GitHub / Development R10.27.3:
 - Свежий Android AGENT INTELLIGENCE CONTEXT является единственным источником истины о connected/write_available/actions_permission/device_confirmed_write/device_confirmed_build. Статическая карта ниже не может расширить эту authority.
 - github_repository_status и github_build_status — только чтение.
 - github_write_commit остаётся строго двухфазным: prepare -> отдельное явное подтверждение -> SHA recheck -> PUT -> verified commit SHA.
-- github_apk_build также строго двухфазный. Первый вызов только проверяет GitHub App installation, Actions:write, точный active workflow «Build Android APK» и текущий main head SHA. Если Android возвращает requires_confirmation=true, ОСТАНОВИСЬ: workflow ещё не запущен.
+- github_apk_build строго двухфазный. В GLOBAL scope он сохраняет fixed AYANA build. В frozen Project scope Android R10.28.7 использует exact Project Workspace snapshot и dedicated project repository; репозиторий AYANA для project build запрещён. Первый вызов только PREPARE и не выполняет mutation/build.
 - confirmed не является аргументом модели: его может добавить только Android после отдельного свежего подтверждения пользователя.
-- После подтверждённого github_apk_build считать APK собранным можно ТОЛЬКО если tool result содержит success=true, verified=true, terminal_status=SUCCESS, build_conclusion=success, artifact_verified=true, непустой artifact_digest sha256 и положительный artifact_id/size.
+- После подтверждённого github_apk_build считать APK собранным можно ТОЛЬКО если tool result содержит success=true, verified=true, terminal_status=SUCCESS, build_conclusion=success, artifact_verified=true, непустой artifact_digest sha256 и положительный artifact_id/size. Для Project scope дополнительно требуются project_workspace_build=true, exact project_id/repository/build_id/workspace_manifest_sha256 evidence.
 - Ошибка/STOP/timeout после workflow dispatch не даёт права автоматически повторять dispatch. Используй github_build_status для reconciliation.
 - R10.27.3 не даёт права на произвольные workflows/ветки, merge, secrets, deployment или установку APK. bounded development_agent_transaction реализована только для fixed repository + exact single replacement + verified build + explicit accept/rollback; direct_apk_delivery остаётся не реализован.
 - Если Actions:write отсутствует, попроси изменить GitHub App Repository permission Actions на Read and write и повторно пройти Device Flow. Не проси PAT/token/client secret.
@@ -1460,6 +1464,23 @@ function isFastInformationalRequest(message = "") {
     && /(?:подробно|детально|развернуто|подробнее)$/.test(n);
 }
 
+function isProjectWorkspaceBuildRequest(message = "") {
+  const n = normalizeIntentText(message)
+    .replace(/^(?:аяна|ayana)[\s,.:;!?—-]+/u, "");
+  if (!n) return false;
+
+  const buildSignal =
+    /(?:^|\s)(?:собери|собрать|сборк\p{L}*|build|assemble)(?=\s|$|[?.!,;:—-])/u.test(n)
+    || /\bapk\b/u.test(n);
+
+  const projectSignal =
+    /(?:текущ\p{L}*|активн\p{L}*|эт\p{L}*)\s+(?:project|проект\p{L}*)/u.test(n)
+    || /project\s+workspace/u.test(n)
+    || /workspace\s+(?:текущ\p{L}*|активн\p{L}*)\s+проект/u.test(n);
+
+  return buildSignal && projectSignal;
+}
+
 function isProjectWorkspaceDevelopmentRequest(message = "") {
   const n = normalizeIntentText(message)
     .replace(/^(?:аяна|ayana)[\s,.:;!?—-]+/u, "");
@@ -1824,7 +1845,7 @@ PROJECT WORKSPACE WHOLE-GOAL CONTRACT v3 — APP CREATION + CONTINUATION TOOL IN
 - Для существующего файла сначала project_workspace_read и используй точный sha256 как expected_sha256. Для нового файла expected_sha256 должен быть пустым. После успешного read продолжай исходную development-цель на следующем tool turn; не теряй контекст и не отправляй пустой write placeholder.
 - После PREPARE с requires_confirmation=true остановись и кратко перечисли, что подготовлено. Не утверждай, что файлы уже изменены.
 - После VERIFIED commit не вызывай accept автоматически: accept удаляет rollback payload и требует отдельного явного подтверждения пользователя. Rollback также требует отдельного явного подтверждения.
-- Не переходи к GitHub/APK build: текущий local workspace executor их не выполняет.
+- R10.28.7: отдельный запрос пользователя «собери APK текущего/активного проекта» выполняется через github_apk_build. Android сам определяет frozen Project scope и направляет его в Project Workspace Build Bridge; не подменяй его fixed AYANA repository build и не вызывай project_workspace_write_transaction ради сборки.
 `.trim();
 
 function isArtifactCreationRequest(message = "") {
@@ -2715,6 +2736,18 @@ async function handleDocxTranslationBatch(request, env) {
     segments.push({ id, text });
   }
 
+  const projectWorkspaceBuildInstructions = projectWorkspaceBuildMode
+    ? `
+
+PROJECT WORKSPACE APK BUILD CONTRACT v1 — R10.28.7:
+- Выполни ровно один github_apk_build.
+- Команда относится к текущему/активному AYANA Project. Android обязан использовать frozen project_id и Project Workspace Build Bridge.
+- Не вызывай project_workspace_status/list/read/write_transaction перед build: build bridge сам делает exact local snapshot и fail-closed проверки.
+- Не вызывай github_repository_status/github_build_status для выбора репозитория и не переходи в fixed AYANA repository lane.
+- Первый вызов только PREPARE. Если result requires_confirmation=true, остановись и сообщи, что project build подготовлен и ждёт отдельного подтверждения.
+- Если dedicated repository отсутствует, честно верни setup_required/repository из Android result; не подменяй его AUTONOMOUS-AI-AGENT.`
+    : "";
+
   const payload = {
     model: "gpt-5.6",
     reasoning: { effort: "low" },
@@ -3111,12 +3144,19 @@ ${verifiedLocalEvidence}
       githubDevelopmentMatchRecoveryMode
       || isExplicitGitHubDevelopmentTransactionRequest(message || "")
     );
+  const projectWorkspaceBuildMode = !durableRecoveryMode
+    && !githubDevelopmentStatusCompletionMode
+    && !githubDevelopmentControlMode
+    && !githubDevelopmentStatusMode
+    && !githubDevelopmentMode
+    && isProjectWorkspaceBuildRequest(message || "");
   const projectWorkspaceControlAction =
     getProjectWorkspaceTransactionControlAction(message || "");
   const projectWorkspaceControlTransactionId =
     extractProjectWorkspaceTransactionId(message || "");
   const projectWorkspaceControlMode = Boolean(projectWorkspaceControlAction);
   const projectWorkspaceReadOnlyMode = !durableRecoveryMode
+    && !projectWorkspaceBuildMode
     && !projectWorkspaceControlMode
     && !githubDevelopmentStatusCompletionMode
     && !githubDevelopmentControlMode
@@ -3127,6 +3167,7 @@ ${verifiedLocalEvidence}
   const projectWorkspaceReadyContinuationMode = hasProjectWorkspaceReadyEvidence(toolResults);
   const projectWorkspaceVerifiedReadContinuationMode = hasProjectWorkspaceVerifiedReadEvidence(toolResults);
   const projectWorkspaceDevelopmentMode = !durableRecoveryMode
+    && !projectWorkspaceBuildMode
     && !projectWorkspaceControlMode
     && !projectWorkspaceReadOnlyMode
     && !githubDevelopmentStatusCompletionMode
@@ -3142,6 +3183,7 @@ ${verifiedLocalEvidence}
     && !githubDevelopmentControlMode
     && !githubDevelopmentStatusMode
     && !githubDevelopmentMode
+    && !projectWorkspaceBuildMode
     && !projectWorkspaceControlMode
     && !projectWorkspaceReadOnlyMode
     && !projectWorkspaceDevelopmentMode
@@ -3319,7 +3361,7 @@ ${selfAutonomyMode ? AYANA_SELF_AUTONOMY_COMPACT_INSTRUCTIONS : ""}`
 ${ANDROID_GOAL_V7_INSTRUCTIONS}`
       : `${AGENT_INSTRUCTIONS}
 
-${styleInstructions}${githubDevelopmentStatusCompletionInstructions}${githubDevelopmentControlInstructions}${githubDevelopmentStatusInstructions}${githubDevelopmentInstructions}${projectWorkspaceDevelopmentMode ? `
+${styleInstructions}${githubDevelopmentStatusCompletionInstructions}${githubDevelopmentControlInstructions}${githubDevelopmentStatusInstructions}${githubDevelopmentInstructions}${projectWorkspaceBuildInstructions}${projectWorkspaceDevelopmentMode ? `
 
 ${AYANA_PROJECT_WORKSPACE_INSTRUCTIONS}` : ""}${artifactCreationMode ? `
 
@@ -3339,6 +3381,8 @@ ${AYANA_VERIFIED_LOCAL_EVIDENCE_INSTRUCTIONS}` : ""}${responseIntegrityInstructi
         ? (source === "voice" ? 420 : 1200)
       : githubDevelopmentMode
         ? (source === "voice" ? 4200 : 12000)
+      : projectWorkspaceBuildMode
+        ? (source === "voice" ? 360 : 800)
       : projectWorkspaceControlMode
         ? (source === "voice" ? 320 : 700)
       : projectWorkspaceReadOnlyMode
@@ -3405,6 +3449,16 @@ ${AYANA_VERIFIED_LOCAL_EVIDENCE_INSTRUCTIONS}` : ""}${responseIntegrityInstructi
     }
     payload.tools = [githubDevelopmentTool];
     payload.tool_choice = { type: "function", name: "github_development_transaction" };
+  } else if (projectWorkspaceBuildMode) {
+    const projectBuildTool = DEVICE_TOOLS.find(tool => tool.name === "github_apk_build");
+    if (!projectBuildTool) {
+      return Response.json(
+        { error: "AYANA github_apk_build tool missing for Project Workspace build", details: { android_dispatch: false } },
+        { status: 500 }
+      );
+    }
+    payload.tools = [projectBuildTool];
+    payload.tool_choice = { type: "function", name: "github_apk_build" };
   } else if (projectWorkspaceReadOnlyMode) {
     payload.tools = projectWorkspaceReadOnlyTools();
     payload.tool_choice = toolResults.length === 0 && isExplicitProjectWorkspaceFileReadRequest(message || "")
