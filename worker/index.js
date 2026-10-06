@@ -1,4 +1,5 @@
-// AYANA Worker v11.8.14 — R10.28.6.14 DETERMINISTIC RELEASE-MARKER DISAMBIGUATION
+// AYANA Worker v11.8.15 — R10.28.6.15 CANONICAL GITHUB SOURCE PATH PINNING
+// Pins AyanaVoiceService.kt to its verified repository path app/src/main/java/kg/autonomous/agent/AyanaVoiceService.kt before dispatch, including when the model invents a different full package path. This is deterministic Worker-side normalization and does not expand GitHub authority.
 // Fixes ambiguous GitHub PREPARE release-marker selection: trusted candidate_contexts are resolved deterministically from exact find_text evidence even when the Android continuation no longer repeats the user phrase “release marker”. A high-confidence AYANA release-header fallback is used only for version-marker candidates.
 // Preserves deterministic explicit/natural GitHub development transaction control routing before PREPARE classification. Cancel/accept/status never fall through to github_development_transaction or Project Workspace.
 // Makes GitHub development PREPARE deterministic: fresh requests are schema-constrained to match_candidate_index=-1; only trusted ambiguous-match continuation may select a candidate.
@@ -1593,6 +1594,21 @@ function extractGitHubDevelopmentCandidateContexts(message = "") {
     found.push({ index: Number(match[1]), preview: String(preview || "") });
   }
   return found;
+}
+
+function canonicalizeGitHubDevelopmentSourcePath(proposedPath = "") {
+  const normalized = String(proposedPath || "").trim().replace(/\\/g, "/");
+  const basename = normalized.split("/").pop() || "";
+
+  // R10.28.6.15: AyanaVoiceService.kt has one verified production location in the
+  // fixed AYANA repository. A model may supply only the basename or hallucinate an
+  // Android package path such as app/src/main/java/com/ayana/voice/... . Never let
+  // that change the repository target: pin this source file before Android dispatch.
+  if (basename === "AyanaVoiceService.kt") {
+    return "app/src/main/java/kg/autonomous/agent/AyanaVoiceService.kt";
+  }
+
+  return normalized;
 }
 
 function deterministicGitHubDevelopmentCandidateIndex(message = "", proposedIndex = -1) {
@@ -3231,6 +3247,9 @@ payload.tools = [
     calls = calls.map(call => {
       if (call.name !== "github_development_transaction") return call;
       const args = { ...(call.arguments || {}) };
+
+      // Deterministic repository-path truth must not depend on model package guesses.
+      args.path = canonicalizeGitHubDevelopmentSourcePath(args.path);
 
       if (!githubDevelopmentMatchRecoveryMode) {
         // Defense in depth in addition to the constrained schema above.
