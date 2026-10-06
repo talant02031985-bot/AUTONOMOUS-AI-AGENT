@@ -1,4 +1,5 @@
-// AYANA Worker v11.8.11 — R10.28.6.11 DETERMINISTIC GITHUB MATCH ROUTING
+// AYANA Worker v11.8.12 — R10.28.6.12 DETERMINISTIC GITHUB DEVELOPMENT CONTROL ROUTING
+// Fixes explicit/natural GitHub development transaction control routing before PREPARE classification. Cancel/accept/status never fall through to github_development_transaction or Project Workspace.
 // Makes GitHub development PREPARE deterministic: fresh requests are schema-constrained to match_candidate_index=-1; only trusted ambiguous-match continuation may select a candidate.
 // Ambiguous-match recovery now has precedence over generic/status keyword routing, and repeated PREPARE against an already-active GitHub transaction routes only to GitHub read-only status, never Project Workspace.
 // Preserves v11.8.9 candidate-index recovery and all prior GitHub development isolation behavior.
@@ -1497,6 +1498,50 @@ function isGitHubDevelopmentTransactionStatusRequest(message = "") {
   return developmentTransactionSignal && statusSignal;
 }
 
+function getGitHubDevelopmentTransactionControlAction(message = "") {
+  const n = normalizeIntentText(message)
+    .replace(/^(?:аяна|ayana)[\s,.:;!?—-]+/u, "");
+  if (!n) return "";
+
+  const transactionSignal =
+    /github[_ -]?development[_ -]?transaction[_ -]?control/u.test(n)
+    || /(?:^|\s)development\s+transaction(?:\s|$|[?.!,;:—-])/u.test(n)
+    || /транзакц\p{L}*\s+разработ\p{L}*/u.test(n);
+  if (!transactionSignal) return "";
+
+  const explicit = n.match(/(?:^|[\s,;])action\s*=\s*(status|cancel|accept|rollback)(?:$|[\s,;.!?])/u);
+  if (explicit) return explicit[1];
+
+  if (/(?:^|\s)(?:отмен\p{L}*|cancel)(?=\s|$|[?.!,;:—-])/u.test(n)) return "cancel";
+  if (/(?:^|\s)(?:прим\p{L}*|приним\p{L}*|accept)(?=\s|$|[?.!,;:—-])/u.test(n)) return "accept";
+  if (/(?:^|\s)(?:откат\p{L}*|rollback)(?=\s|$|[?.!,;:—-])/u.test(n)) return "rollback";
+  if (/(?:^|\s)(?:status|статус|состояни\p{L}*|проверь|проверить)(?=\s|$|[?.!,;:—-])/u.test(n)) return "status";
+
+  return "";
+}
+
+function githubDevelopmentTransactionControlTool(action) {
+  const normalized = String(action || "").trim().toLowerCase();
+  if (!["status", "cancel", "accept"].includes(normalized)) return null;
+
+  return {
+    type: "function",
+    name: "github_development_transaction_control",
+    description: normalized === "status"
+      ? "Read-only inspection of the current GitHub development transaction for AYANA's fixed repository."
+      : `Finalize only the current prepared GitHub development transaction with action=${normalized}. This control must never prepare a new transaction, use Project Workspace, commit, build, or rollback.`,
+    strict: true,
+    parameters: {
+      type: "object",
+      properties: {
+        action: { type: "string", enum: [normalized] }
+      },
+      required: ["action"],
+      additionalProperties: false
+    }
+  };
+}
+
 function isExplicitGitHubDevelopmentTransactionRequest(message = "") {
   const n = normalizeIntentText(message)
     .replace(/^(?:аяна|ayana)[\s,.:;!?—-]+/u, "");
@@ -1531,10 +1576,9 @@ function hasGitHubDevelopmentAlreadyActiveFreshTurnObservation(message = "") {
   const normalized = normalizeIntentText(raw);
   if (!normalized.startsWith("продолжение многошаговой задачи ayana")) return false;
 
-  const toolIndex = raw.lastIndexOf("github_development_transaction");
-  if (toolIndex < 0) return false;
-  const trace = raw.slice(toolIndex, toolIndex + 3600);
-  return /"status"\s*:\s*"development_transaction_already_active"/u.test(trace);
+  // This envelope is generated locally by Android. Do not depend on a narrow slice:
+  // bounded executionTrace formatting may move or truncate surrounding tool text.
+  return /development_transaction_already_active/u.test(raw);
 }
 
 function extractGitHubDevelopmentCandidateContexts(message = "") {
@@ -2784,21 +2828,30 @@ ${verifiedLocalEvidence}
     || hasGitHubDevelopmentStatusFreshTurnObservation(message || "");
   const githubDevelopmentMatchRecoveryMode =
     hasGitHubDevelopmentMatchDisambiguationFreshTurnObservation(message || "");
+  const githubDevelopmentControlAction =
+    getGitHubDevelopmentTransactionControlAction(message || "");
+  const githubDevelopmentControlMode =
+    githubDevelopmentControlAction === "cancel"
+    || githubDevelopmentControlAction === "accept";
   const durableRecoveryMode = isDurableRecoveryRequest(message || "")
     && !githubDevelopmentStatusCompletionMode
-    && !githubDevelopmentMatchRecoveryMode;
+    && !githubDevelopmentMatchRecoveryMode
+    && !githubDevelopmentControlMode;
   const automaticDurableRecoveryMode = durableRecoveryMode
     && isAutomaticDurableRecoveryRequest(message || "");
   const githubDevelopmentStatusMode = !durableRecoveryMode
     && !githubDevelopmentStatusCompletionMode
     && !githubDevelopmentMatchRecoveryMode
+    && !githubDevelopmentControlMode
     && (
-      isGitHubDevelopmentTransactionStatusRequest(message || "")
+      githubDevelopmentControlAction === "status"
+      || isGitHubDevelopmentTransactionStatusRequest(message || "")
       || hasGitHubDevelopmentTransactionAlreadyActiveEvidence(toolResults)
       || hasGitHubDevelopmentAlreadyActiveFreshTurnObservation(message || "")
     );
   const githubDevelopmentMode = !durableRecoveryMode
     && !githubDevelopmentStatusCompletionMode
+    && !githubDevelopmentControlMode
     && !githubDevelopmentStatusMode
     && (
       githubDevelopmentMatchRecoveryMode
@@ -2807,6 +2860,7 @@ ${verifiedLocalEvidence}
   const projectWorkspaceContinuationMode = hasProjectWorkspaceContinuationEvidence(toolResults);
   const projectWorkspaceDevelopmentMode = !durableRecoveryMode
     && !githubDevelopmentStatusCompletionMode
+    && !githubDevelopmentControlMode
     && !githubDevelopmentStatusMode
     && !githubDevelopmentMode
     && (
@@ -2815,6 +2869,7 @@ ${verifiedLocalEvidence}
     );
   const androidNavigationMode = !durableRecoveryMode
     && !githubDevelopmentStatusCompletionMode
+    && !githubDevelopmentControlMode
     && !githubDevelopmentStatusMode
     && !githubDevelopmentMode
     && !projectWorkspaceDevelopmentMode
@@ -2826,6 +2881,7 @@ ${verifiedLocalEvidence}
   const normalizedMessage = normalizeIntentText(message || "");
   const artifactCreationMode = !durableRecoveryMode
     && !githubDevelopmentStatusCompletionMode
+    && !githubDevelopmentControlMode
     && !githubDevelopmentStatusMode
     && !githubDevelopmentMode
     && !projectWorkspaceDevelopmentMode
@@ -2855,6 +2911,7 @@ ${verifiedLocalEvidence}
   const fastEverydayMode = !durableRecoveryMode
     && !androidNavigationMode
     && !githubDevelopmentStatusCompletionMode
+    && !githubDevelopmentControlMode
     && !githubDevelopmentStatusMode
     && !githubDevelopmentMode
     && !projectWorkspaceDevelopmentMode
@@ -2868,6 +2925,7 @@ ${verifiedLocalEvidence}
   const detailedFastInfoMode = !durableRecoveryMode
     && !androidNavigationMode
     && !githubDevelopmentStatusCompletionMode
+    && !githubDevelopmentControlMode
     && !githubDevelopmentStatusMode
     && !githubDevelopmentMode
     && !projectWorkspaceDevelopmentMode
@@ -2886,6 +2944,7 @@ ${verifiedLocalEvidence}
   const longAnswerIntegrityMode = !androidNavigationMode
     && !durableRecoveryMode
     && !githubDevelopmentStatusCompletionMode
+    && !githubDevelopmentControlMode
     && !githubDevelopmentStatusMode
     && !githubDevelopmentMode
     && !projectWorkspaceDevelopmentMode
@@ -2929,6 +2988,15 @@ ${selfAutonomyMode ? AYANA_SELF_AUTONOMY_COMPACT_INSTRUCTIONS : ""}`
 - Кратко сообщи пользователю только подтверждённое состояние из tool result и факт отсутствия mutation.`
     : "";
 
+  const githubDevelopmentControlInstructions = githubDevelopmentControlMode
+    ? `\n\nGLOBAL GITHUB DEVELOPMENT TRANSACTION CONTROL CONTRACT v1:
+- Выполни ровно один github_development_transaction_control с action=${githubDevelopmentControlAction}.
+- Это управление уже существующей GitHub development transaction, НЕ новый PREPARE.
+- Не вызывай github_development_transaction и не используй project_workspace_* инструменты.
+- action=cancel/accept меняет только локальное состояние transaction; не делает commit/build/rollback.
+- После tool result остановись и сообщи подтверждённый результат.`
+    : "";
+
   const githubDevelopmentStatusInstructions = githubDevelopmentStatusMode
     ? `\n\nGLOBAL GITHUB DEVELOPMENT TRANSACTION STATUS CONTRACT v1:
 - Выполняй только read-only github_development_transaction_control с action=status.
@@ -2967,7 +3035,7 @@ ${selfAutonomyMode ? AYANA_SELF_AUTONOMY_COMPACT_INSTRUCTIONS : ""}`
 ${ANDROID_GOAL_V7_INSTRUCTIONS}`
       : `${AGENT_INSTRUCTIONS}
 
-${styleInstructions}${githubDevelopmentStatusCompletionInstructions}${githubDevelopmentStatusInstructions}${githubDevelopmentInstructions}${projectWorkspaceDevelopmentMode ? `
+${styleInstructions}${githubDevelopmentStatusCompletionInstructions}${githubDevelopmentControlInstructions}${githubDevelopmentStatusInstructions}${githubDevelopmentInstructions}${projectWorkspaceDevelopmentMode ? `
 
 ${AYANA_PROJECT_WORKSPACE_INSTRUCTIONS}` : ""}${artifactCreationMode ? `
 
@@ -2981,6 +3049,8 @@ ${AYANA_VERIFIED_LOCAL_EVIDENCE_INSTRUCTIONS}` : ""}${responseIntegrityInstructi
       ? 260
       : githubDevelopmentStatusCompletionMode
         ? (source === "voice" ? 280 : 700)
+      : githubDevelopmentControlMode
+        ? (source === "voice" ? 320 : 700)
       : githubDevelopmentStatusMode
         ? (source === "voice" ? 420 : 1200)
       : githubDevelopmentMode
@@ -3015,6 +3085,16 @@ ${AYANA_VERIFIED_LOCAL_EVIDENCE_INSTRUCTIONS}` : ""}${responseIntegrityInstructi
   } else if (githubDevelopmentStatusCompletionMode) {
     // Verified status observation already exists in toolResults. Do not expose any
     // device/workspace tools on the completion turn; the model must only summarize it.
+  } else if (githubDevelopmentControlMode) {
+    const githubDevelopmentControlTool = githubDevelopmentTransactionControlTool(githubDevelopmentControlAction);
+    if (!githubDevelopmentControlTool) {
+      return Response.json(
+        { error: "AYANA github_development_transaction_control tool missing", details: { android_dispatch: false } },
+        { status: 500 }
+      );
+    }
+    payload.tools = [githubDevelopmentControlTool];
+    payload.tool_choice = { type: "function", name: "github_development_transaction_control" };
   } else if (githubDevelopmentStatusMode) {
     const githubDevelopmentStatusTool = githubDevelopmentTransactionStatusTool();
     if (!githubDevelopmentStatusTool) {
