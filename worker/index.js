@@ -2736,18 +2736,6 @@ async function handleDocxTranslationBatch(request, env) {
     segments.push({ id, text });
   }
 
-  const projectWorkspaceBuildInstructions = projectWorkspaceBuildMode
-    ? `
-
-PROJECT WORKSPACE APK BUILD CONTRACT v1 — R10.28.7:
-- Выполни ровно один github_apk_build.
-- Команда относится к текущему/активному AYANA Project. Android обязан использовать frozen project_id и Project Workspace Build Bridge.
-- Не вызывай project_workspace_status/list/read/write_transaction перед build: build bridge сам делает exact local snapshot и fail-closed проверки.
-- Не вызывай github_repository_status/github_build_status для выбора репозитория и не переходи в fixed AYANA repository lane.
-- Первый вызов только PREPARE. Если result requires_confirmation=true, остановись и сообщи, что project build подготовлен и ждёт отдельного подтверждения.
-- Если dedicated repository отсутствует, честно верни setup_required/repository из Android result; не подменяй его AUTONOMOUS-AI-AGENT.`
-    : "";
-
   const payload = {
     model: "gpt-5.6",
     reasoning: { effort: "low" },
@@ -3178,6 +3166,18 @@ ${verifiedLocalEvidence}
       isProjectWorkspaceDevelopmentRequest(message || "")
       || projectWorkspaceContinuationMode
     );
+  const projectWorkspaceBuildInstructions = projectWorkspaceBuildMode
+    ? `
+
+PROJECT WORKSPACE APK BUILD CONTRACT v1 — R10.28.7:
+- Выполни ровно один github_apk_build.
+- Команда относится к текущему/активному AYANA Project. Android обязан использовать frozen project_id и Project Workspace Build Bridge.
+- Не вызывай project_workspace_status/list/read/write_transaction перед build: build bridge сам делает exact local snapshot и fail-closed проверки.
+- Не вызывай github_repository_status/github_build_status для выбора репозитория и не переходи в fixed AYANA repository lane.
+- Первый вызов только PREPARE. Если result requires_confirmation=true, остановись и сообщи, что project build подготовлен и ждёт отдельного подтверждения.
+- Если dedicated repository отсутствует, честно верни setup_required/repository из Android result; не подменяй его AUTONOMOUS-AI-AGENT.`
+    : "";
+
   const androidNavigationMode = !durableRecoveryMode
     && !githubDevelopmentStatusCompletionMode
     && !githubDevelopmentControlMode
