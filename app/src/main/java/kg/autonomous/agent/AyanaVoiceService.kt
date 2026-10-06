@@ -63,14 +63,14 @@ import kotlin.math.abs
 
 class AyanaVoiceService : Service() {
 
-// AYANA v12.66.4 / R10.28.6.23 WORKSPACE CONFIRMATION REATTESTATION.
-// Preserves stateless Workspace continuation and fixes false expiration of an exact
-// PREPARED project transaction on the generic 2-minute Android-screen confirmation TTL.
-// Workspace confirmation now re-attests transaction_id + project_id + manifest SHA
-// against the local executor before COMMIT, including recovery from the old false PAUSED state.
-// ORB/UI, Worker, STORE ACCOUNTING sources and generic Android confirmation TTL are unchanged.
+// AYANA v12.66.5 / R10.28.6.24 WORKSPACE NOOP COMMIT TRUTH.
+// Preserves R10.28.6.23 Workspace confirmation re-attestation and fixes terminal truth
+// for SHA-verified Workspace transactions whose proposed files are already identical
+// to the current workspace (action_dispatched=false, action_committed=true).
+// An already-COMMITTED transaction is also reconciled from disk after the previous
+// false terminal ERROR, preventing duplicate writes. ORB/UI and Worker are unchanged.
 //
-// AYANA v12.66.4 / R10.28.6.23 WORKSPACE CONFIRMATION REATTESTATION.
+// AYANA v12.66.5 / R10.28.6.24 WORKSPACE NOOP COMMIT TRUTH.
 // Preserves R10.28.5.1 and adds exact Workspace read->write continuation,
 // non-truncated durable confirmation proof, safe cancellation of a PREPARED
 // development transaction from STOP/cancel controls, and resilient transaction
@@ -61425,7 +61425,7 @@ commandHistoryStore.addEvent(
                     JSONObject()
                 }
 
-            workspaceConfirmationReattested =
+            val liveIdentityMatches =
                 durablePreparedProofValid &&
                     livePreparedState.optBoolean(
                         "success",
@@ -61439,10 +61439,6 @@ commandHistoryStore.addEvent(
                         "terminal_status"
                     ) ==
                     "SUCCESS" &&
-                    livePreparedState.optString(
-                        "status"
-                    ) ==
-                    AyanaProjectWorkspaceExecutor.TX_PREPARED &&
                     livePreparedState.optString(
                         "transaction_id"
                     )
@@ -61461,6 +61457,55 @@ commandHistoryStore.addEvent(
                             preparedManifestSha,
                             ignoreCase = true
                         )
+
+            val liveWorkspaceStatus =
+                livePreparedState
+                    .optString(
+                        "status"
+                    )
+                    .trim()
+
+            // R10.28.6.24 recovery: the previous VoiceService could classify a fully
+            // verified no-op commit as ERROR solely because mutationStarted=false.
+            // If the exact frozen transaction is already COMMITTED on disk, never
+            // dispatch the write again. Reconcile terminal truth from local state.
+            if (
+                liveIdentityMatches &&
+                liveWorkspaceStatus ==
+                AyanaProjectWorkspaceExecutor.TX_COMMITTED
+            ) {
+                val reconciledMessage =
+                    "Workspace transaction уже подтверждённо COMMITTED и SHA-проверена. Повторная запись не выполнялась; transaction можно принять или доказательно откатить."
+
+                commandHistoryStore.addEvent(
+                    activeCommandHistoryId,
+                    state = "project_workspace_commit_reconciled_from_disk",
+                    message = "Ложный terminal ERROR исправлен по локальному COMMITTED proof без повторной записи",
+                    details =
+                        "transaction_id=$preparedTransactionId; project_id=$preparedProjectId; manifest_bound=true; redispatch=false"
+                )
+
+                completeCurrentDurableGoal(
+                    reconciledMessage
+                )
+
+                respondAndResume(
+                    reconciledMessage,
+                    silent,
+                    success = true,
+                    terminalStatus =
+                        AyanaCommandHistoryStore.STATUS_SUCCESS,
+                    technical =
+                        livePreparedState
+                            .toString()
+                )
+                return
+            }
+
+            workspaceConfirmationReattested =
+                liveIdentityMatches &&
+                    liveWorkspaceStatus ==
+                    AyanaProjectWorkspaceExecutor.TX_PREPARED
 
             if (!workspaceConfirmationReattested) {
                 try {
@@ -62044,10 +62089,11 @@ commandHistoryStore.addEvent(
                 return
             }
 
-            // R10.28.5 PROJECT WORKSPACE VERIFIED COMMIT TERMINAL TRUTH.
+            // R10.28.6.24 PROJECT WORKSPACE VERIFIED/NO-OP COMMIT TERMINAL TRUTH.
             // A fresh confirmation authorizes exactly the already prepared private
-            // workspace transaction. Once file SHA verification succeeds, do not
-            // hand the same write back to Agent Core where it could be proposed twice.
+            // workspace transaction. A fully verified no-op is also a valid commit:
+            // action_dispatched may be false when every proposed file already matches.
+            // Once file SHA verification succeeds, never propose the same write twice.
             if (toolName == "project_workspace_write_transaction") {
                 val preparedProof =
                     projectWorkspacePreparedProof
@@ -62066,6 +62112,70 @@ commandHistoryStore.addEvent(
                         .orEmpty()
                         .trim()
 
+                val workspaceVerification =
+                    result.optJSONArray(
+                        "verification"
+                    )
+                        ?: JSONArray()
+
+                val workspaceFileCount =
+                    result.optInt(
+                        "file_count",
+                        -1
+                    )
+
+                var everyWorkspaceFileVerified =
+                    workspaceFileCount > 0 &&
+                        workspaceVerification.length() ==
+                        workspaceFileCount
+
+                if (everyWorkspaceFileVerified) {
+                    for (index in 0 until workspaceVerification.length()) {
+                        val item =
+                            workspaceVerification.optJSONObject(index)
+                        val expectedSha =
+                            item
+                                ?.optString(
+                                    "expected_sha256"
+                                )
+                                .orEmpty()
+                                .trim()
+                                .lowercase(
+                                    Locale.ROOT
+                                )
+                        val actualSha =
+                            item
+                                ?.optString(
+                                    "actual_sha256"
+                                )
+                                .orEmpty()
+                                .trim()
+                                .lowercase(
+                                    Locale.ROOT
+                                )
+
+                        if (
+                            item == null ||
+                            !item.optBoolean(
+                                "verified",
+                                false
+                            ) ||
+                            !Regex(
+                                "^[0-9a-f]{64}$"
+                            )
+                                .matches(
+                                    expectedSha
+                                ) ||
+                            actualSha !=
+                                expectedSha
+                        ) {
+                            everyWorkspaceFileVerified =
+                                false
+                            break
+                        }
+                    }
+                }
+
                 val verifiedWorkspaceCommit =
                     result.optBoolean("success", false) &&
                         result.optBoolean("verified", false) &&
@@ -62077,13 +62187,13 @@ commandHistoryStore.addEvent(
                         frozenProjectId.isNotBlank() &&
                         preparedProof.optString("project_id") == frozenProjectId &&
                         result.optString("project_id") == frozenProjectId &&
-                        result.optBoolean("action_dispatched", false) &&
                         result.optBoolean("action_committed", false) &&
                         result.optBoolean("reconciliation_complete", false) &&
                         result.optString("side_effect_state") ==
                             "VERIFIED_COMMITTED" &&
                         result.optString("side_effect_kind") ==
-                            "project_workspace_write"
+                            "project_workspace_write" &&
+                        everyWorkspaceFileVerified
 
                 if (!verifiedWorkspaceCommit) {
                     durableGoalStore.markPaused(
@@ -75202,7 +75312,7 @@ state
 
         // R10.27.4 VIDEO AUDIO ANALYSIS.
         private const val AYANA_VOICE_SERVICE_RELEASE =
-            "v12.66.4 / R10.28.6.23 WORKSPACE CONFIRMATION REATTESTATION"
+            "v12.66.5 / R10.28.6.24 WORKSPACE NOOP COMMIT TRUTH"
 
         private const val AYANA_PERSONAL_SEARCH_ENGINE_RELEASE =
             "v2.0 / R10.20 PERSONAL SEARCH 2.0 + VERIFIED RESULT CONTRACT v2"
