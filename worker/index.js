@@ -1,4 +1,7 @@
-// AYANA Worker v11.8.16 — R10.28.6.16 ESCAPED CANDIDATE CONTEXT RECOVERY
+// AYANA Worker v11.8.17 — R10.28.6.17 WORKSPACE WHOLE-GOAL CONTINUATION
+// Prevents composite Project Workspace development goals from ending after a successful read-only status/list/read observation.
+// A verified project_workspace_ready continuation deterministically advances to project_workspace_list; subsequent Workspace continuation turns require another Workspace tool call until Android reaches PREPARE/confirmation or a deterministic tool failure.
+// Preserves all v11.8.16 GitHub development transaction routing, candidate disambiguation, canonical path pinning and control terminality.
 // Fixes Android continuation recovery for GitHub PREPARE when candidate_contexts are nested inside a JSON message string and therefore arrive with escaped quotes (\\"). Candidate extraction now accepts both direct and one-level JSON-escaped evidence before deterministic selection.
 // Preserves canonical AyanaVoiceService.kt path pinning and exact release-marker disambiguation; no GitHub authority is expanded.
 // Preserves deterministic explicit/natural GitHub development transaction control routing before PREPARE classification. Cancel/accept/status never fall through to github_development_transaction or Project Workspace.
@@ -1692,6 +1695,8 @@ const AYANA_PROJECT_WORKSPACE_INSTRUCTIONS = `
 PROJECT WORKSPACE WHOLE-GOAL CONTRACT v3 — APP CREATION + CONTINUATION TOOL INTEGRITY:
 - Цель — работать только с исходниками активного AYANA Project в его изолированном workspace.
 - Для нового проекта сначала проверь project_workspace_status; при необходимости list.
+- WHOLE-GOAL TERMINALITY: успешный project_workspace_status/list/read — это только промежуточное наблюдение, а не завершение action-команды. После read-only результата НЕ возвращай final с формулировкой «на следующем ходе». Продолжай Workspace tool chain в этом же execution turn, пока не будет подготовлен project_workspace_write_transaction (requires_confirmation) либо пока Workspace tool не вернёт детерминированную невозможность продолжения.
+- После verified project_workspace_ready первым следующим шагом прочитай дерево через project_workspace_list(path="", recursive=true, limit=200); не повторяй status.
 - project_workspace_write_transaction НИКОГДА не вызывай как placeholder. До вызова полностью сформируй files[] и note. files[] обязан содержать минимум один объект с полными path, content и expected_sha256.
 - Для создания приложения/многофайлового проекта работай связными bounded batches. Если весь запрос велик для одного надёжного function call, выбери ПЕРВУЮ логически завершённую партию максимум из 4 файлов, подготовь её полностью и остановись после PREPARE. Не отправляй пустой/частичный tool call ради продолжения.
 - Если пользователь явно перечислил до 4 новых файлов, включи именно эти файлы в один PREPARE и сгенерируй полное согласованное содержимое каждого.
@@ -2092,6 +2097,14 @@ function hasProjectWorkspaceContinuationEvidence(toolResults) {
     const parsed = parseToolResultObject(result);
     const status = String(parsed?.status || "").trim();
     return status.startsWith("project_workspace_") || status.startsWith("workspace_");
+  });
+}
+
+function hasProjectWorkspaceReadyEvidence(toolResults) {
+  return (Array.isArray(toolResults) ? toolResults : []).some(result => {
+    const parsed = parseToolResultObject(result);
+    return parsed?.success === true
+      && String(parsed?.status || "").trim() === "project_workspace_ready";
   });
 }
 
@@ -2919,6 +2932,7 @@ ${verifiedLocalEvidence}
       || isExplicitGitHubDevelopmentTransactionRequest(message || "")
     );
   const projectWorkspaceContinuationMode = hasProjectWorkspaceContinuationEvidence(toolResults);
+  const projectWorkspaceReadyContinuationMode = hasProjectWorkspaceReadyEvidence(toolResults);
   const projectWorkspaceDevelopmentMode = !durableRecoveryMode
     && !githubDevelopmentStatusCompletionMode
     && !githubDevelopmentControlMode
@@ -3178,7 +3192,14 @@ ${AYANA_VERIFIED_LOCAL_EVIDENCE_INSTRUCTIONS}` : ""}${responseIntegrityInstructi
     payload.tool_choice = { type: "function", name: "github_development_transaction" };
   } else if (projectWorkspaceDevelopmentMode) {
     payload.tools = projectWorkspaceTools();
-    payload.tool_choice = "auto";
+    // Composite source-development commands must not terminate after a successful
+    // read-only Workspace observation. A ready-status continuation deterministically
+    // advances to listing the active project's tree; all later read-only continuation
+    // turns require another Workspace tool call until Android reaches PREPARE or a
+    // deterministic executor failure. Android still owns PREPARE confirmation/commit.
+    payload.tool_choice = projectWorkspaceReadyContinuationMode
+      ? { type: "function", name: "project_workspace_list" }
+      : (projectWorkspaceContinuationMode ? "required" : "auto");
   } else if (durableRecoveryMode) {
     payload.tools = automaticDurableRecoveryMode
       ? durableAutoSafeTools()
