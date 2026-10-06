@@ -21,7 +21,7 @@ import javax.crypto.SecretKey
 import javax.crypto.spec.GCMParameterSpec
 
 /**
- * AYANA R10.27.3 GitHub Repository + Actions + Development Transaction Executor v1.3.0.
+ * AYANA R10.28.6.7 GitHub Repository + Actions + Development Transaction Executor v1.3.1.
  *
  * Security model:
  * - GitHub App Device Flow only. No PAT/client secret is embedded in the APK.
@@ -54,6 +54,12 @@ import javax.crypto.spec.GCMParameterSpec
  * snapshot -> exact patch -> static integrity checks -> explicit confirmation -> commit
  * -> verified APK build -> explicit accept OR verified rollback. Large repository files
  * are read by immutable Git blob SHA; only a bounded patch is carried in Durable Goal.
+ *
+ * R10.28.6.7 adds read-only exact-match disambiguation evidence. When a PREPARE
+ * find_text is not unique, the executor returns a bounded list of exact unique source
+ * contexts from the same immutable repository snapshot. This does not prepare, commit,
+ * build, or grant confirmation authority; Agent Core may use one context to retry the
+ * same bounded GitHub development transaction without falling into Project Workspace.
  *
  * This executor still does not merge branches, delete files, edit workflows, write
  * secrets, install APKs, or broaden authority beyond the fixed repository.
@@ -1044,12 +1050,24 @@ class AyanaGitHubRepositoryExecutor(
         val matchCount = countOccurrences(originalText, findText)
 
         if (matchCount != 1) {
+            val matchCandidates =
+                developmentMatchCandidates(
+                    text = originalText,
+                    needle = findText
+                )
+
             return developmentPrepareFailure(
                 failure(
                     "Exact replacement остановлен: find_text должен встречаться ровно один раз, найдено $matchCount."
                 )
                     .put("status", "development_exact_match_count_invalid")
                     .put("match_count", matchCount)
+                    .put("match_candidates", matchCandidates)
+                    .put("candidate_count", matchCandidates.length())
+                    .put(
+                        "candidates_truncated",
+                        matchCount > matchCandidates.length()
+                    )
             )
         }
 
@@ -1785,6 +1803,85 @@ class AyanaGitHubRepositoryExecutor(
             from = index + needle.length
         }
         return count
+    }
+
+    /**
+     * Read-only disambiguation evidence for an ambiguous exact replacement.
+     *
+     * Each returned string:
+     * - is copied verbatim from the immutable repository snapshot already read for PREPARE;
+     * - contains the requested needle;
+     * - occurs exactly once in the file, so it can safely become a refined find_text;
+     * - is bounded and skipped if it resembles sensitive material.
+     *
+     * No state is persisted and no GitHub mutation occurs here.
+     */
+    private fun developmentMatchCandidates(
+        text: String,
+        needle: String
+    ): JSONArray {
+        val result = JSONArray()
+        if (needle.isEmpty()) return result
+
+        val positions = ArrayList<Int>()
+        var from = 0
+
+        while (
+            positions.size < MAX_TRANSACTION_MATCH_CANDIDATES &&
+            from <= text.length
+        ) {
+            val index = text.indexOf(needle, from)
+            if (index < 0) break
+
+            positions.add(index)
+            from = index + needle.length
+        }
+
+        for (index in positions) {
+            var radius = MATCH_CONTEXT_INITIAL_RADIUS_CHARS
+            var uniqueCandidate: String? = null
+
+            while (
+                radius <= MATCH_CONTEXT_MAX_RADIUS_CHARS &&
+                uniqueCandidate == null
+            ) {
+                val start =
+                    (index - radius)
+                        .coerceAtLeast(0)
+                val end =
+                    (index + needle.length + radius)
+                        .coerceAtMost(text.length)
+
+                val candidate =
+                    text.substring(
+                        start,
+                        end
+                    )
+
+                val candidateBytes =
+                    candidate.toByteArray(
+                        StandardCharsets.UTF_8
+                    )
+
+                if (
+                    candidateBytes.size <= MAX_TRANSACTION_FIND_BYTES &&
+                    candidate.contains(needle) &&
+                    countOccurrences(text, candidate) == 1 &&
+                    !containsSensitiveMaterial(candidate)
+                ) {
+                    uniqueCandidate = candidate
+                    break
+                }
+
+                radius += MATCH_CONTEXT_RADIUS_STEP_CHARS
+            }
+
+            if (uniqueCandidate != null) {
+                result.put(uniqueCandidate)
+            }
+        }
+
+        return result
     }
 
     private fun containsSensitiveMaterial(
@@ -3304,12 +3401,41 @@ class AyanaGitHubRepositoryExecutor(
         val devWorkflowBlocked = validateDevelopmentTransactionPath(".github/workflows/build-apk.yml")
         val bytes = "hello".toByteArray(StandardCharsets.UTF_8)
         val knownBlob = gitBlobSha(bytes)
+        val disambiguationCandidates =
+            developmentMatchCandidates(
+                text =
+                    "header R10.28.5 release\n" +
+                        "history R10.28.5 old\n" +
+                        "footer",
+                needle = "R10.28.5"
+            )
+        val firstCandidate =
+            disambiguationCandidates.optString(0)
+        val secondCandidate =
+            disambiguationCandidates.optString(1)
+        val disambiguationOk =
+            disambiguationCandidates.length() == 2 &&
+                firstCandidate.contains("R10.28.5") &&
+                secondCandidate.contains("R10.28.5") &&
+                countOccurrences(
+                    "header R10.28.5 release\n" +
+                        "history R10.28.5 old\n" +
+                        "footer",
+                    firstCandidate
+                ) == 1 &&
+                countOccurrences(
+                    "header R10.28.5 release\n" +
+                        "history R10.28.5 old\n" +
+                        "footer",
+                    secondCandidate
+                ) == 1
         return okPath.optBoolean("success", false) &&
             !badTraversal.optBoolean("success", true) &&
             !badSecret.optBoolean("success", true) &&
             devPath.optBoolean("success", false) &&
             !devWorkflowBlocked.optBoolean("success", true) &&
             countOccurrences("abc abc", "abc") == 2 &&
+            disambiguationOk &&
             !containsSensitiveMaterial("ordinary Kotlin text") &&
             containsSensitiveMaterial("-----BEGIN PRIVATE KEY-----") &&
             knownBlob == "b6fc4c620b67d95f953a5c1c1230aaab5db5a1b0" &&
@@ -4351,6 +4477,10 @@ class AyanaGitHubRepositoryExecutor(
         private const val MAX_TRANSACTION_REPLACE_BYTES = 3_500
         private const val MAX_TRANSACTION_PATCH_BYTES = 5_000
         private const val MAX_TRANSACTION_FILE_BYTES = 5_000_000L
+        private const val MAX_TRANSACTION_MATCH_CANDIDATES = 6
+        private const val MATCH_CONTEXT_INITIAL_RADIUS_CHARS = 40
+        private const val MATCH_CONTEXT_RADIUS_STEP_CHARS = 40
+        private const val MATCH_CONTEXT_MAX_RADIUS_CHARS = 240
 
         private const val DEV_TX_STATUS_PREPARED = "prepared"
         private const val DEV_TX_STATUS_BUILDING = "building"
