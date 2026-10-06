@@ -21,7 +21,7 @@ import javax.crypto.SecretKey
 import javax.crypto.spec.GCMParameterSpec
 
 /**
- * AYANA R10.28.6.7 GitHub Repository + Actions + Development Transaction Executor v1.3.1.
+ * AYANA R10.28.6.8 GitHub Repository + Actions + Development Transaction Executor v1.3.2.
  *
  * Security model:
  * - GitHub App Device Flow only. No PAT/client secret is embedded in the APK.
@@ -60,6 +60,11 @@ import javax.crypto.spec.GCMParameterSpec
  * contexts from the same immutable repository snapshot. This does not prepare, commit,
  * build, or grant confirmation authority; Agent Core may use one context to retry the
  * same bounded GitHub development transaction without falling into Project Workspace.
+ *
+ * R10.28.6.8 canonicalizes a bare Android source filename only inside the fixed
+ * kg.autonomous.agent source directory before any GitHub read. This prevents a root-level
+ * same-name/stale file from being mistaken for the production Android source while keeping
+ * explicit repository-relative paths unchanged and preserving all path safety guards.
  *
  * This executor still does not merge branches, delete files, edit workflows, write
  * secrets, install APKs, or broaden authority beyond the fixed repository.
@@ -1626,7 +1631,17 @@ class AyanaGitHubRepositoryExecutor(
     private fun validateDevelopmentTransactionPath(
         rawPath: String
     ): JSONObject {
-        val base = validatePath(rawPath)
+        val requestedPath =
+            rawPath.trim()
+                .replace('\\', '/')
+                .removePrefix("/")
+
+        val resolvedPath =
+            canonicalDevelopmentTransactionPath(
+                requestedPath
+            )
+
+        val base = validatePath(resolvedPath)
         if (!base.optBoolean("success", false)) {
             return base
         }
@@ -1654,6 +1669,44 @@ class AyanaGitHubRepositoryExecutor(
         return JSONObject(base.toString())
             .put("success", true)
             .put("verified", true)
+            .put(
+                "path_alias_resolved",
+                requestedPath != path
+            )
+            .put(
+                "requested_path",
+                requestedPath
+            )
+    }
+
+    private fun canonicalDevelopmentTransactionPath(
+        rawPath: String
+    ): String {
+        val path =
+            rawPath.trim()
+                .replace('\\', '/')
+                .removePrefix("/")
+
+        if (path.contains('/')) {
+            return path
+        }
+
+        val lower =
+            path.lowercase(Locale.ROOT)
+
+        val isAndroidSourceBasename =
+            (lower.endsWith(".kt") || lower.endsWith(".java")) &&
+                (
+                    lower.startsWith("ayana") ||
+                    lower == "mainactivity.kt" ||
+                    lower == "mainactivity.java"
+                )
+
+        return if (isAndroidSourceBasename) {
+            "app/src/main/java/kg/autonomous/agent/$path"
+        } else {
+            path
+        }
     }
 
     private fun readRepositoryFileText(
@@ -3398,6 +3451,28 @@ class AyanaGitHubRepositoryExecutor(
         val badTraversal = validatePath("../secret.txt")
         val badSecret = validatePath("app/ayana-release.jks")
         val devPath = validateDevelopmentTransactionPath("app/src/main/java/kg/autonomous/agent/Test.kt")
+        val canonicalVoicePath =
+            validateDevelopmentTransactionPath("AyanaVoiceService.kt")
+        val canonicalVoicePathOk =
+            canonicalVoicePath.optBoolean("success", false) &&
+                canonicalVoicePath.optBoolean("path_alias_resolved", false) &&
+                canonicalVoicePath.optString("path") ==
+                    "app/src/main/java/kg/autonomous/agent/AyanaVoiceService.kt"
+        val explicitPathUnchanged =
+            validateDevelopmentTransactionPath(
+                "app/src/main/java/kg/autonomous/agent/AyanaVoiceService.kt"
+            )
+        val explicitPathUnchangedOk =
+            explicitPathUnchanged.optBoolean("success", false) &&
+                !explicitPathUnchanged.optBoolean("path_alias_resolved", true) &&
+                explicitPathUnchanged.optString("path") ==
+                    "app/src/main/java/kg/autonomous/agent/AyanaVoiceService.kt"
+        val rootTextPathUnchanged =
+            validateDevelopmentTransactionPath("README.md")
+        val rootTextPathUnchangedOk =
+            rootTextPathUnchanged.optBoolean("success", false) &&
+                !rootTextPathUnchanged.optBoolean("path_alias_resolved", true) &&
+                rootTextPathUnchanged.optString("path") == "README.md"
         val devWorkflowBlocked = validateDevelopmentTransactionPath(".github/workflows/build-apk.yml")
         val bytes = "hello".toByteArray(StandardCharsets.UTF_8)
         val knownBlob = gitBlobSha(bytes)
@@ -3433,6 +3508,9 @@ class AyanaGitHubRepositoryExecutor(
             !badTraversal.optBoolean("success", true) &&
             !badSecret.optBoolean("success", true) &&
             devPath.optBoolean("success", false) &&
+            canonicalVoicePathOk &&
+            explicitPathUnchangedOk &&
+            rootTextPathUnchangedOk &&
             !devWorkflowBlocked.optBoolean("success", true) &&
             countOccurrences("abc abc", "abc") == 2 &&
             disambiguationOk &&
