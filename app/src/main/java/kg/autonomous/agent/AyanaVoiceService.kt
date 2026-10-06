@@ -63,6 +63,10 @@ import kotlin.math.abs
 
 class AyanaVoiceService : Service() {
 
+// AYANA v12.67.0 / R10.28.7 PROJECT WORKSPACE BUILD BRIDGE.
+// Adds frozen-project APK build routing to a dedicated repository while preserving
+// the accepted fixed AYANA GitHub build lane and all R10.28.6.24 Workspace truth.
+//
 // AYANA v12.66.5 / R10.28.6.24 WORKSPACE NOOP COMMIT TRUTH.
 // Preserves R10.28.6.23 Workspace confirmation re-attestation and fixes terminal truth
 // for SHA-verified Workspace transactions whose proposed files are already identical
@@ -950,6 +954,18 @@ class AyanaVoiceService : Service() {
     private val projectWorkspaceExecutor by lazy {
         AyanaProjectWorkspaceExecutor(
             applicationContext
+        ) {
+            activeCommandProjectId
+        }
+    }
+
+    // R10.28.7 PROJECT WORKSPACE BUILD BRIDGE.
+    // A build requested inside a frozen Project scope is routed to that project's
+    // dedicated repository and can never fall back to AYANA's fixed repository.
+    private val projectWorkspaceBuildBridge by lazy {
+        AyanaProjectWorkspaceBuildBridge(
+            context = applicationContext,
+            githubRepositoryExecutor = githubRepositoryExecutor
         ) {
             activeCommandProjectId
         }
@@ -61792,6 +61808,12 @@ commandHistoryStore.addEvent(
                 val preparedHeadSha =
                     prepared.optString("head_sha").trim()
 
+                val projectWorkspaceBuild =
+                    prepared.optBoolean(
+                        "project_workspace_build",
+                        false
+                    )
+
                 if (
                     prepared.optString("status") != "build_prepared_waiting_confirmation" ||
                     !prepared.optBoolean("requires_confirmation", false) ||
@@ -61804,7 +61826,7 @@ commandHistoryStore.addEvent(
                         "GitHub Actions подтверждение остановлено: точный prepared build payload отсутствует или повреждён"
                     )
                     respondAndResume(
-                        "Сборка APK не запущена: подготовленный GitHub Actions payload не удалось восстановить. Запустите сборку заново.",
+                        "Сборка APK не запущена: подготовленный build payload не удалось восстановить. Запустите сборку заново.",
                         silent,
                         success = false
                     )
@@ -61815,6 +61837,30 @@ commandHistoryStore.addEvent(
                     .put("_github_build_workflow_id", preparedWorkflowId)
                     .put("_github_build_workflow_name", preparedWorkflowName)
                     .put("_github_build_head_sha", preparedHeadSha)
+
+                if (projectWorkspaceBuild) {
+                    arguments
+                        .put(
+                            "_project_workspace_build",
+                            true
+                        )
+                        .put(
+                            "_project_workspace_build_id",
+                            prepared.optString("build_id")
+                        )
+                        .put(
+                            "_project_workspace_project_id",
+                            prepared.optString("project_id")
+                        )
+                        .put(
+                            "_project_workspace_repository",
+                            prepared.optString("repository")
+                        )
+                        .put(
+                            "_project_workspace_manifest_sha256",
+                            prepared.optString("workspace_manifest_sha256")
+                        )
+                }
             }
 
             if (toolName == "github_development_transaction") {
@@ -62495,7 +62541,13 @@ result.optString("side_effect_state") == "VERIFIED_COMMITTED" &&
                 val artifactSize =
                     result.optLong("artifact_size_bytes", 0L)
 
-                val verifiedApkBuild =
+                val projectWorkspaceBuild =
+                    preparedProof.optBoolean(
+                        "project_workspace_build",
+                        false
+                    )
+
+                val commonBuildProof =
                     result.optBoolean("success", false) &&
                         result.optBoolean("verified", false) &&
                         result.optString("terminal_status") == "SUCCESS" &&
@@ -62504,8 +62556,6 @@ result.optString("side_effect_state") == "VERIFIED_COMMITTED" &&
                         result.optBoolean("action_committed", false) &&
                         result.optBoolean("reconciliation_complete", false) &&
                         result.optString("side_effect_state") == "VERIFIED_COMMITTED" &&
-                        result.optString("side_effect_kind") == "github_actions_build_dispatch" &&
-                        result.optString("repository") == AyanaGitHubRepositoryExecutor.REPOSITORY_SLUG &&
                         result.optString("branch") == AyanaGitHubRepositoryExecutor.BRANCH &&
                         preparedWorkflowId > 0L &&
                         result.optLong("workflow_id", 0L) == preparedWorkflowId &&
@@ -62516,11 +62566,60 @@ result.optString("side_effect_state") == "VERIFIED_COMMITTED" &&
                         result.optString("build_status") == "completed" &&
                         result.optString("build_conclusion") == "success" &&
                         result.optBoolean("artifact_verified", false) &&
-                        result.optString("artifact_name") == AyanaGitHubRepositoryExecutor.APK_ARTIFACT_NAME &&
                         runId > 0L &&
                         artifactId > 0L &&
                         artifactSize > 0L &&
                         Regex("^sha256:[0-9a-fA-F]{64}$").matches(artifactDigest)
+
+                val verifiedApkBuild =
+                    if (projectWorkspaceBuild) {
+                        val preparedProjectId =
+                            preparedProof.optString("project_id").trim()
+                        val preparedRepository =
+                            preparedProof.optString("repository").trim()
+                        val preparedBuildId =
+                            preparedProof.optString("build_id").trim()
+                        val preparedManifest =
+                            preparedProof
+                                .optString("workspace_manifest_sha256")
+                                .trim()
+                                .lowercase(Locale.ROOT)
+
+                        commonBuildProof &&
+                            result.optString("side_effect_kind") ==
+                            AyanaProjectWorkspaceBuildBridge.SIDE_EFFECT_KIND &&
+                            preparedProjectId.isNotBlank() &&
+                            preparedProjectId ==
+                            activeCommandProjectId.orEmpty().trim() &&
+                            result.optString("project_id").trim() ==
+                            preparedProjectId &&
+                            preparedRepository.isNotBlank() &&
+                            !preparedRepository.equals(
+                                AyanaGitHubRepositoryExecutor.REPOSITORY_SLUG,
+                                ignoreCase = true
+                            ) &&
+                            result.optString("repository").trim() ==
+                            preparedRepository &&
+                            preparedBuildId.isNotBlank() &&
+                            result.optString("build_id").trim() ==
+                            preparedBuildId &&
+                            Regex("^[0-9a-f]{64}$").matches(preparedManifest) &&
+                            result
+                                .optString("workspace_manifest_sha256")
+                                .trim()
+                                .lowercase(Locale.ROOT) ==
+                            preparedManifest &&
+                            result.optString("artifact_name") ==
+                            AyanaProjectWorkspaceBuildBridge.PROJECT_ARTIFACT_NAME
+                    } else {
+                        commonBuildProof &&
+                            result.optString("side_effect_kind") ==
+                            "github_actions_build_dispatch" &&
+                            result.optString("repository") ==
+                            AyanaGitHubRepositoryExecutor.REPOSITORY_SLUG &&
+                            result.optString("artifact_name") ==
+                            AyanaGitHubRepositoryExecutor.APK_ARTIFACT_NAME
+                    }
 
                 if (!verifiedApkBuild) {
                     durableGoalStore
@@ -62554,7 +62653,11 @@ result.optString("side_effect_state") == "VERIFIED_COMMITTED" &&
                 val terminalMessage =
                     result.optString(
                         "message",
-                        "APK build подтверждён: run=$runId; artifact=${AyanaGitHubRepositoryExecutor.APK_ARTIFACT_NAME}."
+                        if (projectWorkspaceBuild) {
+                            "Project APK build подтверждён: run=$runId; artifact=${AyanaProjectWorkspaceBuildBridge.PROJECT_ARTIFACT_NAME}."
+                        } else {
+                            "APK build подтверждён: run=$runId; artifact=${AyanaGitHubRepositoryExecutor.APK_ARTIFACT_NAME}."
+                        }
                     )
 
                 val confirmationTaskGraph =
@@ -69249,27 +69352,55 @@ private fun isSemanticActionResultVerified(
 
                 "github_apk_build" -> {
                     val confirmed = arguments.optBoolean("confirmed", false)
+                    val frozenProjectId =
+                        activeCommandProjectId
+                            .orEmpty()
+                            .trim()
+                    val projectScopedBuild =
+                        frozenProjectId.isNotBlank()
 
                     if (!confirmed) {
-                        githubRepositoryExecutor.buildApk(
-                            arguments = arguments,
-                            confirmed = false
-                        )
+                        if (projectScopedBuild) {
+                            projectWorkspaceBuildBridge.build(
+                                arguments = arguments,
+                                confirmed = false
+                            )
+                        } else {
+                            githubRepositoryExecutor.buildApk(
+                                arguments = arguments,
+                                confirmed = false
+                            )
+                        }
                     } else {
+                        val sideEffectKind =
+                            if (projectScopedBuild) {
+                                AyanaProjectWorkspaceBuildBridge.SIDE_EFFECT_KIND
+                            } else {
+                                "github_actions_build_dispatch"
+                            }
+
+                        val dispatchDetail =
+                            if (projectScopedBuild) {
+                                "project_id=$frozenProjectId; " +
+                                    "repository=${arguments.optString("_project_workspace_repository").take(180)}; " +
+                                    "manifest=${arguments.optString("_project_workspace_manifest_sha256").take(64)}"
+                            } else {
+                                "repository=${AyanaGitHubRepositoryExecutor.REPOSITORY_SLUG}; " +
+                                    "branch=${AyanaGitHubRepositoryExecutor.BRANCH}; " +
+                                    "workflow=${AyanaGitHubRepositoryExecutor.BUILD_WORKFLOW_NAME}; " +
+                                    "head_sha=${arguments.optString("_github_build_head_sha").take(64)}"
+                            }
+
                         val dispatchAllowed =
                             executionKernel.tryBeginIrreversibleDispatch(
-                                kind = "github_actions_build_dispatch",
-                                detail =
-                                    "repository=${AyanaGitHubRepositoryExecutor.REPOSITORY_SLUG}; " +
-                                        "branch=${AyanaGitHubRepositoryExecutor.BRANCH}; " +
-                                        "workflow=${AyanaGitHubRepositoryExecutor.BUILD_WORKFLOW_NAME}; " +
-                                        "head_sha=${arguments.optString("_github_build_head_sha").take(64)}"
+                                kind = sideEffectKind,
+                                detail = dispatchDetail
                             )
 
                         if (!dispatchAllowed) {
                             toolResult(
                                 false,
-                                "GitHub Actions build остановлен Execution Kernel до workflow dispatch."
+                                "APK build остановлен Execution Kernel до внешнего side effect."
                             )
                                 .put("status", "dispatch_gate_rejected")
                                 .put("action_dispatched", false)
@@ -69277,14 +69408,25 @@ private fun isSemanticActionResultVerified(
                                 .put("reconciliation_complete", true)
                         } else {
                             val buildResult =
-                                githubRepositoryExecutor.buildApk(
-                                    arguments = arguments,
-                                    confirmed = true,
-                                    shouldCancel = {
-                                        cancelRequested ||
-                                            Thread.currentThread().isInterrupted
-                                    }
-                                )
+                                if (projectScopedBuild) {
+                                    projectWorkspaceBuildBridge.build(
+                                        arguments = arguments,
+                                        confirmed = true,
+                                        shouldCancel = {
+                                            cancelRequested ||
+                                                Thread.currentThread().isInterrupted
+                                        }
+                                    )
+                                } else {
+                                    githubRepositoryExecutor.buildApk(
+                                        arguments = arguments,
+                                        confirmed = true,
+                                        shouldCancel = {
+                                            cancelRequested ||
+                                                Thread.currentThread().isInterrupted
+                                        }
+                                    )
+                                }
 
                             val dispatched =
                                 buildResult.optBoolean("action_dispatched", false)
@@ -69295,28 +69437,36 @@ private fun isSemanticActionResultVerified(
 
                             if (dispatched) {
                                 executionKernel.markIrreversibleDispatchAccepted(
-                                    "GitHub Actions workflow_dispatch accepted: " +
-                                        "workflow=${AyanaGitHubRepositoryExecutor.BUILD_WORKFLOW_NAME}; " +
-                                        "head=${arguments.optString("_github_build_head_sha").take(64)}"
+                                    if (projectScopedBuild) {
+                                        "Project Workspace build mutation accepted: " +
+                                            "project_id=$frozenProjectId; " +
+                                            "repository=${buildResult.optString("repository").take(180)}; " +
+                                            "commit=${buildResult.optString("source_commit_sha").take(64)}"
+                                    } else {
+                                        "GitHub Actions workflow_dispatch accepted: " +
+                                            "workflow=${AyanaGitHubRepositoryExecutor.BUILD_WORKFLOW_NAME}; " +
+                                            "head=${arguments.optString("_github_build_head_sha").take(64)}"
+                                    }
                                 )
                             }
 
                             executionKernel.markSideEffectReconciliationStarted(
-                                "GitHub Actions build reconciliation: status=${buildResult.optString("status")}"
+                                "APK build reconciliation: status=${buildResult.optString("status")}"
                             )
 
                             when {
                                 !dispatched ->
                                     executionKernel.markSideEffectReconciled(
                                         committed = false,
-                                        detail = "GitHub Actions workflow_dispatch не был отправлен; side effect отсутствует."
+                                        detail = "Build side effect не был отправлен."
                                     )
 
                                 reconciliationComplete ->
                                     executionKernel.markSideEffectReconciled(
                                         committed = committed,
                                         detail =
-                                            "GitHub Actions reconciliation complete; committed=$committed; " +
+                                            "APK build reconciliation complete; committed=$committed; " +
+                                                "project_scope=$projectScopedBuild; " +
                                                 "run_id=${buildResult.optLong("run_id", 0L)}; " +
                                                 "conclusion=${buildResult.optString("build_conclusion")}; " +
                                                 "artifact_id=${buildResult.optLong("artifact_id", 0L)}"
@@ -75312,7 +75462,7 @@ state
 
         // R10.27.4 VIDEO AUDIO ANALYSIS.
         private const val AYANA_VOICE_SERVICE_RELEASE =
-            "v12.66.5 / R10.28.6.24 WORKSPACE NOOP COMMIT TRUTH"
+            "v12.67.0 / R10.28.7 PROJECT WORKSPACE BUILD BRIDGE"
 
         private const val AYANA_PERSONAL_SEARCH_ENGINE_RELEASE =
             "v2.0 / R10.20 PERSONAL SEARCH 2.0 + VERIFIED RESULT CONTRACT v2"
@@ -75321,13 +75471,13 @@ state
             "v3.6 / R10.28.2 PROJECTS TRUTH"
 
         private const val AYANA_WORKER_RELEASE =
-            "v11.8.22 / R10.28.6.22 WORKSPACE STATELESS CONTINUATION"
+            "v11.9.0 / R10.28.7 PROJECT WORKSPACE BUILD BRIDGE"
 
         private const val AYANA_ACCEPTED_FEATURE_CHECKPOINT =
             "R10.27.6 CONTROLLED PROACTIVITY 2.0 — DEVICE-CONFIRMED ACCEPTED"
 
         private const val AYANA_CURRENT_FEATURE_RELEASE =
-            "R10.28.6.22 WORKSPACE STATELESS CONTINUATION — CODE FIX / BUILD PENDING"
+            "R10.28.7 PROJECT WORKSPACE BUILD BRIDGE — CANDIDATE / DEVICE CONFIRMATION PENDING"
 
         private const val AYANA_RELEASE_LINEAGE =
             "Android v12.21.0 / R7.9 truth-hardening + R8.0 multi-attachment + R8.1–R8.4 accepted Personal Global Search stack + R8.5–R8.5.4 capability/evidence truth + R9.0 autonomous agent foundation + R9.0.1 history live-refresh proof fix + R9.0.2 diagnostic reconciliation/history refresh fix + R9.0.3 TTS health reconciliation + R9.1 IME perception/active telemetry truth + R9.2 autonomous recovery/long-task reconciliation + R9.2.1 adaptive hypothesis reconciliation + R9.3 app integration framework + R9.3.1 screen health reconciliation + R9.3.2 history latency recovery reconciliation + R9.3.3 informational terminal reconciliation + R9.3.4 app integration device acceptance + R9.4 multi-app task orchestration + R9.4.1 screen ownership union reconciliation + R9.5 verified result transfer between app steps + R9.5.1 partial marker provenance reconciliation + R9.5.2 bounded marker observation + R9.5.3 verified action result transfer + R9.6 verified semantic observation fallback + R9.6.1 visual fallback acceptance truth + R9.7 structured screen reading + R9.7.1 conversation routing/terminal truth + R9.7.2 structured router conversation precedence + R9.7.3 action morphology/terminal truth + R9.8 generic verified result transfer + R9.8.1 master full acceptance/diagnostic engine + R9.9 reversible action journal/verified undo + R9.9.1 brightness verified undo device acceptance + R9.9.2 opt-in low-battery controlled proactivity + R10.0 unified screen intelligence + R10.1 local self-diagnostics/self-audit + R10.2 personal search expansion + R10.3 long autonomous tasks/recovery + R10.4 adaptive verified execution loop + R10.5 generalized live adaptive autonomy + R10.6 cross-lane adaptive continuity + R10.6.1 durable goal binding fix + R10.7 cross-lane durable recovery continuity + R10.7.1 isolated acceptance cleanup hardening + R10.8 general-purpose long autonomous objectives + R10.9 dynamic goal decomposition/planner contract + R10.10 adaptive planner production path + R10.11 production replan/durable recovery + R10.12 natural lifecycle recovery/background continuation + R10.13 full process-death recovery + R10.13.1 post-process readiness/reconciliation + R10.13.2 process-death core recovery proof correction + R10.14 perception process isolation/cross-process accessibility bridge + R10.14.1 cross-process visual evidence fix + R10.14.2 lifecycle profile/self-diagnostic truth + R10.14.3 history recovery reconciliation + R10.15 generalized cross-process autonomy hardening + R10.15.1 self-diagnostics routing reconciliation + R10.16 perception process recovery/safe bridge rebind + R10.16.1 restart telemetry reconciliation + R10.17 screen intelligence 2.0 + R10.17.1 acceptance routing reconciliation + R10.18 universal UI action engine + R10.18.1 acceptance target reconciliation + R10.18.2 live target authority reconciliation + R10.18.3 app info target reconciliation + R10.19 autonomous multi-app tasks 2.0 + R10.20 personal search 2.0 + R10.21 document & office engine 2.0 + R10.22 notifications & communication assistant + R10.22.1 notification acceptance visibility reconciliation + R10.21.1 pptx completion evidence reconciliation + R10.23 voice & background 2.0 + R10.24 field hardening + R10.24.1 field hardening reconciliation/device acceptance + R10.24.2 acceptance truth reconciliation + R10.25 cross-process accessibility truth reconciliation + R10.26 capability evidence metadata reconciliation + R10.26.1 capability evidence metadata detector reconciliation + R10.27.1 github repository write/commit-push + R10.27.1.1 github confirmation terminal truth + R10.27.1.2 github verified-commit completion truth + R10.27.2 apk build pipeline + R10.27.2.1 apk build prepare read-only truth + R10.27.3 verified development transaction/project workspace + R10.27.3.1 waiting-acceptance terminal truth + R10.27.4 video audio analysis + R10.27.5 verified internet speed + R10.27.6 controlled proactivity 2.0 + R10.28 projects core + R10.28.1 project data scope + R10.28.2 project commands/project-aware data scope + R10.28.5 development workspace 2.0 + R10.28.5.1 workspace reconciliation/confirmation fix"
