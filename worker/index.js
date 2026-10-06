@@ -1,4 +1,8 @@
-// AYANA Worker v11.8.7 — R10.28.6.6 GITHUB DEVELOPMENT DURABLE STATUS TERMINALITY CANDIDATE
+// AYANA Worker v11.8.8 — R10.28.6.7 GITHUB DEVELOPMENT MATCH DISAMBIGUATION CANDIDATE
+// Preserves v11.8.7 status terminality and adds exact-match recovery isolation for GitHub development PREPARE.
+// A trusted Android durable continuation containing development_exact_match_count_invalid + match_candidates
+// is routed back only to github_development_transaction; Project Workspace tools are not exposed on that recovery turn.
+// The model must refine find_text from one exact unique candidate and derive replace_text by changing only the requested marker.
 // Preserves v11.8.6 dedicated read-only github_development_transaction_control routing and fixes the
 // Android fresh-turn continuation path used after non-Workspace tools. Android intentionally resumes such
 // turns with a ПРОДОЛЖЕНИЕ МНОГОШАГОВОЙ ЗАДАЧИ trace instead of function_call_output, so the Worker now
@@ -870,7 +874,7 @@ const DEVICE_TOOLS = [
   {
     type: "function",
     name: "github_development_transaction",
-    description: "Prepare an exact bounded replacement inside ONE existing UTF-8 text/source file in AYANA's fixed GitHub repository. Android snapshots the immutable Git blob and main head, verifies exactly one find_text match, runs static integrity guards, and returns requires_confirmation=true WITHOUT commit/build. Never invent confirmed=true. Only the user's fresh local confirmation may commit the exact proposed blob. The repository's existing push-to-main Build Android APK workflow is then correlated by exact commit SHA; the transaction must not issue a duplicate workflow_dispatch. After a verified build the transaction remains pending until the user explicitly accepts it or explicitly asks AYANA to roll it back. Workflow files, secrets, arbitrary repositories/branches, deletion and binary replacement are forbidden.",
+    description: "Prepare an exact bounded replacement inside ONE existing UTF-8 text/source file in AYANA's fixed GitHub repository. Android snapshots the immutable Git blob and main head, verifies exactly one find_text match, runs static integrity guards, and returns requires_confirmation=true WITHOUT commit/build. If find_text is ambiguous, Android may return bounded read-only match_candidates copied exactly from the same repository snapshot; refine find_text from one candidate and retry the same GitHub tool, never Project Workspace. Never invent confirmed=true. Only the user's fresh local confirmation may commit the exact proposed blob. The repository's existing push-to-main Build Android APK workflow is then correlated by exact commit SHA; the transaction must not issue a duplicate workflow_dispatch. After a verified build the transaction remains pending until the user explicitly accepts it or explicitly asks AYANA to roll it back. Workflow files, secrets, arbitrary repositories/branches, deletion and binary replacement are forbidden.",
     strict: true,
     parameters: {
       type: "object",
@@ -1967,6 +1971,28 @@ function hasGitHubDevelopmentStatusFreshTurnObservation(message = "") {
   return statusAction && structuredResult;
 }
 
+function hasGitHubDevelopmentMatchDisambiguationFreshTurnObservation(message = "") {
+  const raw = String(message || "");
+  const normalized = normalizeIntentText(raw);
+
+  // Trust only Android's exact local durable continuation envelope. Ordinary user
+  // text cannot manufacture GitHub source evidence or force this recovery lane.
+  if (!normalized.startsWith("продолжение многошаговой задачи ayana")) {
+    return false;
+  }
+
+  const toolIndex = raw.lastIndexOf("github_development_transaction");
+  if (toolIndex < 0) return false;
+
+  const trace = raw.slice(toolIndex, toolIndex + 5200);
+  const ambiguousMatch =
+    /"status"\s*:\s*"development_exact_match_count_invalid"/u.test(trace);
+  const candidatesPresent =
+    /"match_candidates"\s*:\s*\[/u.test(trace);
+
+  return ambiguousMatch && candidatesPresent;
+}
+
 function extractVerifiedWorkspaceReadBaselines(toolResults) {
   const baselines = new Map();
 
@@ -2676,8 +2702,11 @@ ${verifiedLocalEvidence}
   const githubDevelopmentStatusCompletionMode =
     hasGitHubDevelopmentStatusTerminalObservation(toolResults)
     || hasGitHubDevelopmentStatusFreshTurnObservation(message || "");
+  const githubDevelopmentMatchRecoveryMode =
+    hasGitHubDevelopmentMatchDisambiguationFreshTurnObservation(message || "");
   const durableRecoveryMode = isDurableRecoveryRequest(message || "")
-    && !githubDevelopmentStatusCompletionMode;
+    && !githubDevelopmentStatusCompletionMode
+    && !githubDevelopmentMatchRecoveryMode;
   const automaticDurableRecoveryMode = durableRecoveryMode
     && isAutomaticDurableRecoveryRequest(message || "");
   const githubDevelopmentStatusMode = !durableRecoveryMode
@@ -2689,7 +2718,10 @@ ${verifiedLocalEvidence}
   const githubDevelopmentMode = !durableRecoveryMode
     && !githubDevelopmentStatusCompletionMode
     && !githubDevelopmentStatusMode
-    && isExplicitGitHubDevelopmentTransactionRequest(message || "");
+    && (
+      githubDevelopmentMatchRecoveryMode
+      || isExplicitGitHubDevelopmentTransactionRequest(message || "")
+    );
   const projectWorkspaceContinuationMode = hasProjectWorkspaceContinuationEvidence(toolResults);
   const projectWorkspaceDevelopmentMode = !durableRecoveryMode
     && !githubDevelopmentStatusCompletionMode
@@ -2825,11 +2857,15 @@ ${selfAutonomyMode ? AYANA_SELF_AUTONOMY_COMPACT_INSTRUCTIONS : ""}`
     : "";
 
   const githubDevelopmentInstructions = githubDevelopmentMode
-    ? `\n\nGLOBAL GITHUB DEVELOPMENT TRANSACTION CONTRACT v1:
+    ? `\n\nGLOBAL GITHUB DEVELOPMENT TRANSACTION CONTRACT v2:
 - Это НЕ Project Workspace. Выполняй bounded github_development_transaction только для фиксированного репозитория AYANA.
-- Пользователь уже задал exact path/find_text/replace_text/commit_message: передай их без смыслового переписывания и без сокращения.
 - Первый вызов только PREPARE. Никогда не создавай confirmed=true.
 - Не подменяй github_development_transaction локальным project_workspace_* или github_write_commit.
+- Если это исходный PREPARE и пользователь уже дал exact path/find_text/replace_text/commit_message, передай их без смыслового переписывания.
+- Если предыдущий GitHub PREPARE вернул status=development_exact_match_count_invalid и match_candidates, это read-only disambiguation evidence из ТОГО ЖЕ GitHub source snapshot. Выбери ОДИН match_candidate, который соответствует исходной цели пользователя.
+- На таком recovery шаге новый find_text должен быть ровно выбранным match_candidate. Новый replace_text должен быть тем же exact text с заменой только исходного неоднозначного маркера на уже запрошенное пользователем новое значение; весь окружающий текст сохрани байт-в-байт по смыслу.
+- Для release/version marker предпочитай строку/контекст, который сам объявляет текущий release/candidate, а не историческое "preserves", комментарий о routing или длинный release lineage.
+- Если match_candidates не позволяют однозначно определить цель, остановись без mutation и объясни, каких данных не хватает; НЕ переходи в Project Workspace.
 - После requires_confirmation=true остановись и дождись отдельного свежего подтверждения пользователя.`
     : "";
 
