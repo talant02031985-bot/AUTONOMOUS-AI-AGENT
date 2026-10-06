@@ -1,6 +1,6 @@
-// AYANA Worker v11.8.15 — R10.28.6.15 CANONICAL GITHUB SOURCE PATH PINNING
-// Pins AyanaVoiceService.kt to its verified repository path app/src/main/java/kg/autonomous/agent/AyanaVoiceService.kt before dispatch, including when the model invents a different full package path. This is deterministic Worker-side normalization and does not expand GitHub authority.
-// Fixes ambiguous GitHub PREPARE release-marker selection: trusted candidate_contexts are resolved deterministically from exact find_text evidence even when the Android continuation no longer repeats the user phrase “release marker”. A high-confidence AYANA release-header fallback is used only for version-marker candidates.
+// AYANA Worker v11.8.16 — R10.28.6.16 ESCAPED CANDIDATE CONTEXT RECOVERY
+// Fixes Android continuation recovery for GitHub PREPARE when candidate_contexts are nested inside a JSON message string and therefore arrive with escaped quotes (\\"). Candidate extraction now accepts both direct and one-level JSON-escaped evidence before deterministic selection.
+// Preserves canonical AyanaVoiceService.kt path pinning and exact release-marker disambiguation; no GitHub authority is expanded.
 // Preserves deterministic explicit/natural GitHub development transaction control routing before PREPARE classification. Cancel/accept/status never fall through to github_development_transaction or Project Workspace.
 // Makes GitHub development PREPARE deterministic: fresh requests are schema-constrained to match_candidate_index=-1; only trusted ambiguous-match continuation may select a candidate.
 // Ambiguous-match recovery now has precedence over generic/status keyword routing, and repeated PREPARE against an already-active GitHub transaction routes only to GitHub read-only status, never Project Workspace.
@@ -1585,15 +1585,32 @@ function hasGitHubDevelopmentAlreadyActiveFreshTurnObservation(message = "") {
 
 function extractGitHubDevelopmentCandidateContexts(message = "") {
   const raw = String(message || "");
-  const found = [];
-  const rx = /"match_candidate_index"\s*:\s*(\d+)\s*,\s*"preview"\s*:\s*"((?:\\.|[^"\\])*)"/gu;
-  let match;
-  while ((match = rx.exec(raw)) !== null) {
-    let preview = match[2];
-    try { preview = JSON.parse(`"${preview}"`); } catch {}
-    found.push({ index: Number(match[1]), preview: String(preview || "") });
+  const foundByIndex = new Map();
+
+  // Android appends resultForTrace.toString() into the continuation. candidate_contexts
+  // live inside the result's message string, so their quotes are escaped one JSON
+  // level (e.g. {\"match_candidate_index\":2,...}). Search both the raw
+  // continuation and a single trusted JSON-string unescape view. This is read-only
+  // parsing of Android-originated evidence; it never grants action authority.
+  const sources = [raw];
+  if (raw.includes('\\"match_candidate_index\\"')) {
+    sources.push(raw.replace(/\\"/g, '"'));
   }
-  return found;
+
+  for (const source of sources) {
+    const rx = /"match_candidate_index"\s*:\s*(\d+)\s*,\s*"preview"\s*:\s*"((?:\\.|[^"\\])*)"/gu;
+    let match;
+    while ((match = rx.exec(source)) !== null) {
+      const index = Number(match[1]);
+      if (!Number.isInteger(index) || index < 0 || foundByIndex.has(index)) continue;
+
+      let preview = match[2];
+      try { preview = JSON.parse(`"${preview}"`); } catch {}
+      foundByIndex.set(index, { index, preview: String(preview || "") });
+    }
+  }
+
+  return [...foundByIndex.values()].sort((a, b) => a.index - b.index);
 }
 
 function canonicalizeGitHubDevelopmentSourcePath(proposedPath = "") {
