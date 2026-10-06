@@ -1,9 +1,11 @@
-// AYANA Worker v11.8.20 — R10.28.6.20 WORKSPACE CONTROL CONTEXT ISOLATION
+// AYANA Worker v11.8.21 — R10.28.6.21 WORKSPACE READ-ONLY TERMINALITY
+// Explicit Project Workspace read-only requests are isolated into a fresh Responses chain and can expose only status/list/read tools; they can never fall through to project_workspace_write_transaction after a verified read.
+// A verified read-only project_workspace_read may complete immediately or continue to another requested read, but mutation/control tools stay unavailable unless the user issued a separate explicit mutation/control command.
 // Fresh Project Workspace transaction-control commands (status/accept/cancel/rollback) are isolated from stale Responses chains and routed only to project_workspace_transaction_control.
 // When the command includes an explicit pws-* transaction id, Worker schema-pins that exact id; no unrelated tool or previous_response_id may be used.
 // Every fresh Project Workspace command starts a new Responses context instead of inheriting an unrelated previous_response_id. Exact function_call_output continuation is preserved only inside the newly-created Workspace chain.
 // After project_workspace_list/status evidence, tool_choice remains auto (except ready→list), so read-only inspection commands may finish normally while development commands continue from the original clean chain.
-// After a verified project_workspace_read, the next model turn is write-PREPARE-only: Worker exposes only project_workspace_write_transaction and fixes tool_choice to that function. This prevents Responses max_messages/tool-loop churn while preserving exact SHA-bound update safety.
+// After a verified project_workspace_read in a MUTATION request, the next model turn is write-PREPARE-only. Explicit read-only requests are excluded and terminate without mutation tools.
 // Adds bounded max_messages recovery for a verified Workspace read by regenerating one complete PREPARE call only; no Android write is dispatched until the returned tool arguments pass full schema + baseline checks.
 // Large app bootstraps are intentionally split into small PREPARE batches to stay within the Android Agent Core transport budget.
 // Prevents composite Project Workspace development goals from ending after a successful read-only status/list/read observation.
@@ -1472,6 +1474,54 @@ function isProjectWorkspaceDevelopmentRequest(message = "") {
   const projectSignal = /(проект|project|workspace|приложени|исходник|репозитор|repository|gradle|manifest)/.test(n);
 
   return developmentVerb && sourceSignal && projectSignal;
+}
+
+function isProjectWorkspaceReadOnlyRequest(message = "") {
+  const n = normalizeIntentText(message)
+    .replace(/^(?:аяна|ayana)[\s,.:;!?—-]+/u, "");
+  if (!n) return false;
+
+  const workspaceSignal =
+    /project[_ -]?workspace/u.test(n)
+    || /workspace/u.test(n)
+    || /(?:^|\s)проект(?:а|е|у|ом)?(?:\s|$|[?.!,;:—-])/u.test(n);
+
+  const readSignal =
+    /(?:^|\s)(?:прочитай|прочесть|читай|покажи|показать|проверь|проверить|посмотри|посмотреть|перечисли|перечислить|список|структур\p{L}*|status|статус|состояни\p{L}*|read|list)(?=\s|$|[?.!,;:—-])/u.test(n)
+    || /project_workspace_(?:status|list|read)/u.test(n);
+
+  const explicitReadOnlySignal =
+    /только\s+чтен/u.test(n)
+    || /только\s+read/u.test(n)
+    || /read[- ]?only/u.test(n)
+    || /без\s+измен/u.test(n)
+    || /ничего\s+не\s+измен/u.test(n)
+    || /ничего\s+не\s+запис/u.test(n)
+    || /не\s+записывай/u.test(n)
+    || /без\s+запис/u.test(n)
+    || /не\s+выполняй\s+другие\s+инструмент/u.test(n);
+
+  const mutationSignal =
+    /(?:^|\s)(?:разработай|разработать|создай|создать|сделай|сделать|реализуй|реализовать|добавь|добавить|измени|изменить|обнови|обновить|исправь|исправить|напиши|написать|сгенерируй|сгенерировать|подготовь|подготовить|запиши|записать|удали|удалить)(?=\s|$|[?.!,;:—-])/u.test(n)
+    || /project_workspace_write_transaction/u.test(n);
+
+  return workspaceSignal && readSignal && (explicitReadOnlySignal || !mutationSignal);
+}
+
+function projectWorkspaceReadOnlyTools() {
+  const names = new Set([
+    "project_workspace_status",
+    "project_workspace_list",
+    "project_workspace_read"
+  ]);
+  return DEVICE_TOOLS.filter(tool => names.has(tool.name));
+}
+
+function isExplicitProjectWorkspaceFileReadRequest(message = "") {
+  const n = normalizeIntentText(message);
+  return /project_workspace_read/u.test(n)
+    || /(?:^|\s)(?:прочитай|прочесть|читай|покажи)(?=\s|$|[?.!,;:—-])/u.test(n)
+      && /(?:\.kt|\.kts|\.xml|\.json|\.toml|\.properties|\.txt|\.md)(?:\s|$|[?.!,;:—-])/u.test(n);
 }
 
 function projectWorkspaceTools() {
@@ -3010,11 +3060,19 @@ ${verifiedLocalEvidence}
   const projectWorkspaceControlTransactionId =
     extractProjectWorkspaceTransactionId(message || "");
   const projectWorkspaceControlMode = Boolean(projectWorkspaceControlAction);
+  const projectWorkspaceReadOnlyMode = !durableRecoveryMode
+    && !projectWorkspaceControlMode
+    && !githubDevelopmentStatusCompletionMode
+    && !githubDevelopmentControlMode
+    && !githubDevelopmentStatusMode
+    && !githubDevelopmentMode
+    && isProjectWorkspaceReadOnlyRequest(message || "");
   const projectWorkspaceContinuationMode = hasProjectWorkspaceContinuationEvidence(toolResults);
   const projectWorkspaceReadyContinuationMode = hasProjectWorkspaceReadyEvidence(toolResults);
   const projectWorkspaceVerifiedReadContinuationMode = hasProjectWorkspaceVerifiedReadEvidence(toolResults);
   const projectWorkspaceDevelopmentMode = !durableRecoveryMode
     && !projectWorkspaceControlMode
+    && !projectWorkspaceReadOnlyMode
     && !githubDevelopmentStatusCompletionMode
     && !githubDevelopmentControlMode
     && !githubDevelopmentStatusMode
@@ -3029,6 +3087,7 @@ ${verifiedLocalEvidence}
     && !githubDevelopmentStatusMode
     && !githubDevelopmentMode
     && !projectWorkspaceControlMode
+    && !projectWorkspaceReadOnlyMode
     && !projectWorkspaceDevelopmentMode
     && !isArtifactCreationRequest(message || "")
     && isLikelyAndroidNavigation(message || "");
@@ -3042,6 +3101,7 @@ ${verifiedLocalEvidence}
     && !githubDevelopmentStatusMode
     && !githubDevelopmentMode
     && !projectWorkspaceControlMode
+    && !projectWorkspaceReadOnlyMode
     && !projectWorkspaceDevelopmentMode
     && isArtifactCreationRequest(message || "");
   const genericAgentDefinitionMode = isGenericAgentDefinitionRequest(message || "");
@@ -3054,7 +3114,8 @@ ${verifiedLocalEvidence}
     || explicitExternalImprovementMode
     || verifiedFactsCompletionMode
     || freshProjectWorkspaceTurn
-    || projectWorkspaceControlMode;
+    || projectWorkspaceControlMode
+    || projectWorkspaceReadOnlyMode;
   const capabilityFollowUpMode = Boolean(previousResponseId)
     && !genericAgentDefinitionMode
     && String(message || "").length <= 160
@@ -3223,6 +3284,8 @@ ${AYANA_VERIFIED_LOCAL_EVIDENCE_INSTRUCTIONS}` : ""}${responseIntegrityInstructi
         ? (source === "voice" ? 4200 : 12000)
       : projectWorkspaceControlMode
         ? (source === "voice" ? 320 : 700)
+      : projectWorkspaceReadOnlyMode
+        ? (source === "voice" ? 420 : 1200)
       : projectWorkspaceDevelopmentMode
         ? (projectWorkspaceVerifiedReadContinuationMode
             ? (source === "voice" ? 3200 : 7600)
@@ -3285,6 +3348,19 @@ ${AYANA_VERIFIED_LOCAL_EVIDENCE_INSTRUCTIONS}` : ""}${responseIntegrityInstructi
     }
     payload.tools = [githubDevelopmentTool];
     payload.tool_choice = { type: "function", name: "github_development_transaction" };
+  } else if (projectWorkspaceReadOnlyMode) {
+    payload.tools = projectWorkspaceReadOnlyTools();
+    payload.tool_choice = toolResults.length === 0 && isExplicitProjectWorkspaceFileReadRequest(message || "")
+      ? { type: "function", name: "project_workspace_read" }
+      : "auto";
+    payload.instructions += `
+
+PROJECT WORKSPACE READ-ONLY TERMINALITY v2:
+- Это строго read-only запрос пользователя. Разрешены только project_workspace_status, project_workspace_list и project_workspace_read.
+- project_workspace_write_transaction и project_workspace_transaction_control недоступны в этом execution turn.
+- После получения запрошенного verified read/list/status верни final; не создавай no-op PREPARE и не пытайся cancel/accept/rollback.
+- Если пользователь запросил несколько файлов, можно последовательно прочитать только эти файлы и затем завершить ответ.
+- previous_response_id для свежего read-only Workspace запроса намеренно не используется.`;
   } else if (projectWorkspaceControlMode) {
     const workspaceControlTool = projectWorkspaceTransactionControlTool(
       projectWorkspaceControlAction,
