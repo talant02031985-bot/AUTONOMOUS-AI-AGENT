@@ -1,13 +1,13 @@
-// AYANA Worker v11.8.13 — R10.28.6.13 GITHUB CONTROL TERMINALITY
-// Fixes successful GitHub development transaction control terminality across Android fresh-turn continuation: cancel/accept/status results are summarized with NO tools exposed, so a verified control action cannot be proposed twice and tripped by adaptive replay protection.
+// AYANA Worker v11.8.14 — R10.28.6.14 DETERMINISTIC RELEASE-MARKER DISAMBIGUATION
+// Fixes ambiguous GitHub PREPARE release-marker selection: trusted candidate_contexts are resolved deterministically from exact find_text evidence even when the Android continuation no longer repeats the user phrase “release marker”. A high-confidence AYANA release-header fallback is used only for version-marker candidates.
 // Preserves deterministic explicit/natural GitHub development transaction control routing before PREPARE classification. Cancel/accept/status never fall through to github_development_transaction or Project Workspace.
 // Makes GitHub development PREPARE deterministic: fresh requests are schema-constrained to match_candidate_index=-1; only trusted ambiguous-match continuation may select a candidate.
 // Ambiguous-match recovery now has precedence over generic/status keyword routing, and repeated PREPARE against an already-active GitHub transaction routes only to GitHub read-only status, never Project Workspace.
 // Preserves v11.8.9 candidate-index recovery and all prior GitHub development isolation behavior.
 // A trusted Android durable continuation containing development_exact_match_count_invalid is routed back only
 // to github_development_transaction, even if long result serialization hid match_candidates from the bounded trace.
-// Android may expose compact candidate_contexts with stable match_candidate_index values; the model selects one
-// candidate index while keeping the original find_text/replace_text. Android expands that index back to an exact
+// Android may expose compact candidate_contexts with stable match_candidate_index values; Worker deterministically
+// selects a high-confidence candidate when exact release-marker evidence is present, otherwise the model choice is preserved. Android expands that index back to an exact
 // unique source context from the same fresh GitHub snapshot. Project Workspace is never exposed on this recovery turn.
 // Preserves v11.8.6 dedicated read-only github_development_transaction_control routing and fixes the
 // Android fresh-turn continuation path used after non-Workspace tools. Android intentionally resumes such
@@ -1599,32 +1599,55 @@ function deterministicGitHubDevelopmentCandidateIndex(message = "", proposedInde
   const candidates = extractGitHubDevelopmentCandidateContexts(message);
   if (!candidates.length) return proposedIndex;
 
-  const normalized = normalizeIntentText(message);
-  const releaseIntent = /(?:release\s+marker|release[- ]?marker|релизн\p{L}*\s+маркер|маркер\s+релиз|release\b)/u.test(normalized);
-  if (!releaseIntent) return proposedIndex;
+  const raw = String(message || "");
+  const findMatch = raw.match(/"find_text"\s*:\s*"([^"\\]{1,120})"/u);
+  const needle = findMatch ? String(findMatch[1] || "").trim() : "";
 
-  const findMatch = String(message || "").match(/"find_text"\s*:\s*"([^"]{1,120})"/u);
-  const needle = findMatch ? findMatch[1] : (String(message || "").match(/R\d+(?:\.\d+){2,}/u)?.[0] || "");
-  const escaped = needle.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-  const exactMarker = escaped ? new RegExp(`${escaped}(?![.\d])`, "i") : null;
+  // Primary path: the trusted Android continuation normally carries the original
+  // tool call, including find_text. For release/version markers we can therefore
+  // distinguish R10.28.5 from R10.28.5.1 without relying on the model or on the
+  // natural-language phrase "release marker" surviving the continuation envelope.
+  const versionNeedle = /^R\d+(?:\.\d+){2,}$/i.test(needle);
+  const escapedNeedle = needle.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const exactNeedle = escapedNeedle
+    ? new RegExp(`${escapedNeedle}(?![.\\d])`, "i")
+    : null;
 
-  let best = null;
-  for (const candidate of candidates) {
-    const preview = candidate.preview;
-    let score = 0;
-    if (/AYANA\s+v\d/i.test(preview)) score += 100;
-    if (/\bCANDIDATE\b/i.test(preview)) score += 40;
-    if (/\bRELEASE\b/i.test(preview)) score += 20;
-    if (exactMarker && exactMarker.test(preview)) score += 70;
-    if (/\bPreserves\b/i.test(preview)) score -= 100;
-    if (/\brouting\b/i.test(preview)) score -= 60;
-    if (/release lineage/i.test(preview)) score -= 100;
-    if (!best || score > best.score || (score === best.score && candidate.index < best.index)) {
-      best = { index: candidate.index, score };
+  if (versionNeedle && exactNeedle) {
+    let best = null;
+    for (const candidate of candidates) {
+      const preview = candidate.preview;
+      let score = 0;
+      if (exactNeedle.test(preview)) score += 200;
+      else if (preview.includes(needle)) score -= 200; // e.g. R10.28.5.1, not R10.28.5
+      if (/AYANA\s+v\d/i.test(preview)) score += 100;
+      if (/\bCANDIDATE\b/i.test(preview)) score += 60;
+      if (/\bRELEASE\b/i.test(preview)) score += 30;
+      if (/\bPreserves\b/i.test(preview)) score -= 120;
+      if (/\brouting\b/i.test(preview)) score -= 80;
+      if (/release lineage/i.test(preview)) score -= 120;
+      if (!best || score > best.score || (score === best.score && candidate.index < best.index)) {
+        best = { index: candidate.index, score };
+      }
     }
+    if (best && best.score >= 200) return best.index;
   }
 
-  return best && best.score >= 100 ? best.index : proposedIndex;
+  // Bounded fallback for trusted release-header candidate sets where the Android
+  // envelope was truncated before find_text. Do not generalize this to arbitrary
+  // source ambiguity: require an AYANA version header + an unsuffixed R-version +
+  // the explicit CANDIDATE marker, and require exactly one such candidate.
+  const releaseHeaderCandidates = candidates.filter(candidate => {
+    const preview = candidate.preview;
+    return /AYANA\s+v\d/i.test(preview)
+      && /\bCANDIDATE\b/i.test(preview)
+      && /\bR\d+(?:\.\d+){2}(?!\.\d)/i.test(preview);
+  });
+  if (releaseHeaderCandidates.length === 1) {
+    return releaseHeaderCandidates[0].index;
+  }
+
+  return proposedIndex;
 }
 
 function githubDevelopmentTransactionStatusTool() {
