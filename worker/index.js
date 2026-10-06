@@ -1,5 +1,6 @@
-// AYANA Worker v11.8.10 — R10.28.6.10 STRICT TOOL SCHEMA FIX
-// Fixes OpenAI strict-function schema validity for github_development_transaction: match_candidate_index is now always required and uses -1 for the initial/no-candidate PREPARE.
+// AYANA Worker v11.8.11 — R10.28.6.11 DETERMINISTIC GITHUB MATCH ROUTING
+// Makes GitHub development PREPARE deterministic: fresh requests are schema-constrained to match_candidate_index=-1; only trusted ambiguous-match continuation may select a candidate.
+// Ambiguous-match recovery now has precedence over generic/status keyword routing, and repeated PREPARE against an already-active GitHub transaction routes only to GitHub read-only status, never Project Workspace.
 // Preserves v11.8.9 candidate-index recovery and all prior GitHub development isolation behavior.
 // A trusted Android durable continuation containing development_exact_match_count_invalid is routed back only
 // to github_development_transaction, even if long result serialization hid match_candidates from the bounded trace.
@@ -1509,8 +1510,76 @@ function isExplicitGitHubDevelopmentTransactionRequest(message = "") {
   return githubSignal && explicitDevelopmentTransactionSignal;
 }
 
-function githubDevelopmentTransactionTool() {
-  return DEVICE_TOOLS.find(tool => tool.name === "github_development_transaction");
+function githubDevelopmentTransactionTool(initialOnly = false) {
+  const base = DEVICE_TOOLS.find(tool => tool.name === "github_development_transaction");
+  if (!base || !initialOnly) return base;
+
+  // Fresh user PREPARE must always perform read-only discovery first. Do not let the
+  // model guess a candidate index before Android has returned candidate_contexts.
+  const constrained = JSON.parse(JSON.stringify(base));
+  const candidate = constrained?.parameters?.properties?.match_candidate_index;
+  if (candidate) {
+    candidate.minimum = -1;
+    candidate.maximum = -1;
+    candidate.description = "Fresh PREPARE discovery sentinel. This value MUST be -1; Android will return candidate_contexts if disambiguation is required.";
+  }
+  return constrained;
+}
+
+function hasGitHubDevelopmentAlreadyActiveFreshTurnObservation(message = "") {
+  const raw = String(message || "");
+  const normalized = normalizeIntentText(raw);
+  if (!normalized.startsWith("продолжение многошаговой задачи ayana")) return false;
+
+  const toolIndex = raw.lastIndexOf("github_development_transaction");
+  if (toolIndex < 0) return false;
+  const trace = raw.slice(toolIndex, toolIndex + 3600);
+  return /"status"\s*:\s*"development_transaction_already_active"/u.test(trace);
+}
+
+function extractGitHubDevelopmentCandidateContexts(message = "") {
+  const raw = String(message || "");
+  const found = [];
+  const rx = /"match_candidate_index"\s*:\s*(\d+)\s*,\s*"preview"\s*:\s*"((?:\\.|[^"\\])*)"/gu;
+  let match;
+  while ((match = rx.exec(raw)) !== null) {
+    let preview = match[2];
+    try { preview = JSON.parse(`"${preview}"`); } catch {}
+    found.push({ index: Number(match[1]), preview: String(preview || "") });
+  }
+  return found;
+}
+
+function deterministicGitHubDevelopmentCandidateIndex(message = "", proposedIndex = -1) {
+  const candidates = extractGitHubDevelopmentCandidateContexts(message);
+  if (!candidates.length) return proposedIndex;
+
+  const normalized = normalizeIntentText(message);
+  const releaseIntent = /(?:release\s+marker|release[- ]?marker|релизн\p{L}*\s+маркер|маркер\s+релиз|release\b)/u.test(normalized);
+  if (!releaseIntent) return proposedIndex;
+
+  const findMatch = String(message || "").match(/"find_text"\s*:\s*"([^"]{1,120})"/u);
+  const needle = findMatch ? findMatch[1] : (String(message || "").match(/R\d+(?:\.\d+){2,}/u)?.[0] || "");
+  const escaped = needle.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const exactMarker = escaped ? new RegExp(`${escaped}(?![.\d])`, "i") : null;
+
+  let best = null;
+  for (const candidate of candidates) {
+    const preview = candidate.preview;
+    let score = 0;
+    if (/AYANA\s+v\d/i.test(preview)) score += 100;
+    if (/\bCANDIDATE\b/i.test(preview)) score += 40;
+    if (/\bRELEASE\b/i.test(preview)) score += 20;
+    if (exactMarker && exactMarker.test(preview)) score += 70;
+    if (/\bPreserves\b/i.test(preview)) score -= 100;
+    if (/\brouting\b/i.test(preview)) score -= 60;
+    if (/release lineage/i.test(preview)) score -= 100;
+    if (!best || score > best.score || (score === best.score && candidate.index < best.index)) {
+      best = { index: candidate.index, score };
+    }
+  }
+
+  return best && best.score >= 100 ? best.index : proposedIndex;
 }
 
 function githubDevelopmentTransactionStatusTool() {
@@ -2722,9 +2791,11 @@ ${verifiedLocalEvidence}
     && isAutomaticDurableRecoveryRequest(message || "");
   const githubDevelopmentStatusMode = !durableRecoveryMode
     && !githubDevelopmentStatusCompletionMode
+    && !githubDevelopmentMatchRecoveryMode
     && (
       isGitHubDevelopmentTransactionStatusRequest(message || "")
       || hasGitHubDevelopmentTransactionAlreadyActiveEvidence(toolResults)
+      || hasGitHubDevelopmentAlreadyActiveFreshTurnObservation(message || "")
     );
   const githubDevelopmentMode = !durableRecoveryMode
     && !githubDevelopmentStatusCompletionMode
@@ -2955,7 +3026,7 @@ ${AYANA_VERIFIED_LOCAL_EVIDENCE_INSTRUCTIONS}` : ""}${responseIntegrityInstructi
     payload.tools = [githubDevelopmentStatusTool];
     payload.tool_choice = { type: "function", name: "github_development_transaction_control" };
   } else if (githubDevelopmentMode) {
-    const githubDevelopmentTool = githubDevelopmentTransactionTool();
+    const githubDevelopmentTool = githubDevelopmentTransactionTool(!githubDevelopmentMatchRecoveryMode);
     if (!githubDevelopmentTool) {
       return Response.json(
         { error: "AYANA github_development_transaction tool missing", details: { android_dispatch: false } },
@@ -3047,6 +3118,25 @@ payload.tools = [
       name: item.name,
       arguments: safeParseArguments(item.arguments)
     }));
+
+  if (githubDevelopmentMode) {
+    calls = calls.map(call => {
+      if (call.name !== "github_development_transaction") return call;
+      const args = { ...(call.arguments || {}) };
+
+      if (!githubDevelopmentMatchRecoveryMode) {
+        // Defense in depth in addition to the constrained schema above.
+        args.match_candidate_index = -1;
+      } else {
+        args.match_candidate_index = deterministicGitHubDevelopmentCandidateIndex(
+          message || "",
+          Number.isInteger(args.match_candidate_index) ? args.match_candidate_index : -1
+        );
+      }
+
+      return { ...call, arguments: args };
+    });
+  }
 
   if (projectWorkspaceDevelopmentMode) {
     const invalidWorkspaceWrite = rawCallItems
