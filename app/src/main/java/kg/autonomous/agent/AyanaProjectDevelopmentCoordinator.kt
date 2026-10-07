@@ -7,7 +7,7 @@ import java.security.MessageDigest
 import java.util.Locale
 
 /**
- * AYANA Project Development Coordinator v1.0 — R10.28.8.
+ * AYANA Project Development Coordinator v1.2 — R10.28.8.4.
  *
  * Bounded authority for one explicitly requested autonomous Project development objective.
  * The user's explicit "develop/build to GREEN" command is the session authority. It never
@@ -250,7 +250,7 @@ class AyanaProjectDevelopmentCoordinator(
         }
 
         return buildString {
-            append("AYANA PROJECT DEVELOPMENT SESSION v1 / R10.28.8\n")
+            append("AYANA PROJECT DEVELOPMENT SESSION v1.2 / R10.28.8.4\n")
             append("session_id=").append(state.optString("session_id")).append('\n')
             append("project_id=").append(state.optString("project_id")).append('\n')
             append("objective=").append(state.optString("objective")).append('\n')
@@ -273,6 +273,51 @@ class AyanaProjectDevelopmentCoordinator(
             append("PERSISTENT WORKING SET:")
             append(files.toString().take(MAX_CONTEXT_CHARS))
         }.take(MAX_CONTEXT_CHARS + MAX_DIAGNOSTIC_CHARS + 4000)
+    }
+
+    /**
+     * Stable development-progress fingerprint used by the outer adaptive loop.
+     * Android screen state is irrelevant for Workspace/GitHub development tools;
+     * progress is defined by the frozen development session, observed source SHAs,
+     * committed source transactions and build/repair counters.
+     */
+    fun progressFingerprint(): String {
+        val state = load()
+        normalizeState(state)
+
+        val working = state.optJSONObject("working_set") ?: JSONObject()
+        val workingKeys = working.keys().asSequence().toList().sorted()
+        val pending = state.optJSONArray("pending_transactions") ?: JSONArray()
+
+        val canonical = buildString {
+            append("session=").append(state.optString("session_id")).append('\n')
+            append("project=").append(state.optString("project_id")).append('\n')
+            append("terminal=").append(state.optString("terminal_state")).append('\n')
+            append("source_commits=").append(state.optInt("source_commit_count", 0)).append('\n')
+            append("build_attempts=").append(state.optInt("build_attempts", 0)).append('\n')
+            append("repair_cycles=").append(state.optInt("repair_cycles", 0)).append('\n')
+            append("green_builds=").append(state.optInt("green_build_count", 0)).append('\n')
+            append("last_run=").append(state.optLong("last_run_id", 0L)).append('\n')
+            append("last_build_status=").append(state.optString("last_build_status")).append('\n')
+            append("last_build_conclusion=").append(state.optString("last_build_conclusion")).append('\n')
+
+            for (path in workingKeys) {
+                val item = working.optJSONObject(path) ?: continue
+                append("file=").append(path).append('|')
+                    .append(item.optString("sha256")).append('\n')
+            }
+
+            for (index in 0 until pending.length()) {
+                append("tx=").append(pending.optString(index)).append('\n')
+            }
+
+            val diagnostic = state.optString("last_compile_output")
+            if (diagnostic.isNotBlank()) {
+                append("diagnostic=").append(sha256(diagnostic)).append('\n')
+            }
+        }
+
+        return "dev:${sha256(canonical).take(32)}"
     }
 
     private fun publicState(state: JSONObject): JSONObject =
@@ -365,7 +410,7 @@ class AyanaProjectDevelopmentCoordinator(
     }
 
     companion object {
-        const val VERSION = "1.1"
+        const val VERSION = "1.2"
         const val MAX_REPAIR_CYCLES = 5
         private const val PREFS_NAME = "ayana_project_development_r10_28_8"
         private const val KEY_STATE = "state"
