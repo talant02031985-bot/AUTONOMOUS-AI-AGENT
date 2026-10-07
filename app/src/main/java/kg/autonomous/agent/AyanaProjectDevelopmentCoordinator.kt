@@ -7,7 +7,7 @@ import java.security.MessageDigest
 import java.util.Locale
 
 /**
- * AYANA Project Development Coordinator v1.2 — R10.28.8.4.
+ * AYANA Project Development Coordinator v1.3 — R10.28.8.5.
  *
  * Bounded authority for one explicitly requested autonomous Project development objective.
  * The user's explicit "develop/build to GREEN" command is the session authority. It never
@@ -68,6 +68,7 @@ class AyanaProjectDevelopmentCoordinator(
                 .put("requires_source_change", requiresSourceChange)
                 .put("source_commit_count", 0)
                 .put("green_build_count", 0)
+                .put("observation_sequence", 0L)
                 .put("working_set", JSONObject())
                 .put("pending_transactions", JSONArray())
                 .put("last_compile_output", "")
@@ -115,6 +116,38 @@ class AyanaProjectDevelopmentCoordinator(
         )
         trimWorkingSet(working)
         state.put("working_set", working)
+        state.put("observation_sequence", state.optLong("observation_sequence", 0L) + 1L)
+        state.put("last_observation_tool", "project_workspace_read")
+        state.put("last_observation_path", path)
+        save(state)
+    }
+
+    /**
+     * Read-only Workspace status/list calls are legitimate repeated observations in a
+     * stateless development turn. Advance a persistent sequence after every verified
+     * observation so R10.4 can distinguish progress from a true replay without
+     * weakening mutation replay protection.
+     */
+    fun observeReadOnlyProgress(toolName: String, result: JSONObject) {
+        val cleanTool = toolName.trim()
+        if (cleanTool !in setOf("project_workspace_status", "project_workspace_list")) return
+        val projectId = result.optString("project_id").trim()
+        if (!isActiveFor(projectId)) return
+        if (!result.optBoolean("success", false) || !result.optBoolean("verified", false)) return
+
+        val expectedStatus =
+            when (cleanTool) {
+                "project_workspace_status" -> "project_workspace_ready"
+                "project_workspace_list" -> "project_workspace_listed"
+                else -> return
+            }
+        if (result.optString("status") != expectedStatus) return
+
+        val state = load()
+        normalizeState(state)
+        state.put("observation_sequence", state.optLong("observation_sequence", 0L) + 1L)
+        state.put("last_observation_tool", cleanTool)
+        state.put("last_observation_path", result.optString("path"))
         save(state)
     }
 
@@ -250,7 +283,7 @@ class AyanaProjectDevelopmentCoordinator(
         }
 
         return buildString {
-            append("AYANA PROJECT DEVELOPMENT SESSION v1.2 / R10.28.8.4\n")
+            append("AYANA PROJECT DEVELOPMENT SESSION v1.3 / R10.28.8.5\n")
             append("session_id=").append(state.optString("session_id")).append('\n')
             append("project_id=").append(state.optString("project_id")).append('\n')
             append("objective=").append(state.optString("objective")).append('\n')
@@ -297,6 +330,9 @@ class AyanaProjectDevelopmentCoordinator(
             append("build_attempts=").append(state.optInt("build_attempts", 0)).append('\n')
             append("repair_cycles=").append(state.optInt("repair_cycles", 0)).append('\n')
             append("green_builds=").append(state.optInt("green_build_count", 0)).append('\n')
+            append("observation_seq=").append(state.optLong("observation_sequence", 0L)).append('\n')
+            append("last_observation_tool=").append(state.optString("last_observation_tool")).append('\n')
+            append("last_observation_path=").append(state.optString("last_observation_path")).append('\n')
             append("last_run=").append(state.optLong("last_run_id", 0L)).append('\n')
             append("last_build_status=").append(state.optString("last_build_status")).append('\n')
             append("last_build_conclusion=").append(state.optString("last_build_conclusion")).append('\n')
@@ -333,6 +369,7 @@ class AyanaProjectDevelopmentCoordinator(
             .put("requires_source_change", state.optBoolean("requires_source_change", false))
             .put("source_commit_count", state.optInt("source_commit_count", 0))
             .put("green_build_count", state.optInt("green_build_count", 0))
+            .put("observation_sequence", state.optLong("observation_sequence", 0L))
             .put("terminal_state", state.optString("terminal_state"))
             .put("pending_transaction_count", (state.optJSONArray("pending_transactions") ?: JSONArray()).length())
 
@@ -386,6 +423,9 @@ class AyanaProjectDevelopmentCoordinator(
         if (!state.has("green_build_count")) {
             state.put("green_build_count", 0)
         }
+        if (!state.has("observation_sequence")) {
+            state.put("observation_sequence", 0L)
+        }
     }
 
     private fun requiresSourceChangeEvidence(command: String): Boolean {
@@ -410,7 +450,7 @@ class AyanaProjectDevelopmentCoordinator(
     }
 
     companion object {
-        const val VERSION = "1.2"
+        const val VERSION = "1.3"
         const val MAX_REPAIR_CYCLES = 5
         private const val PREFS_NAME = "ayana_project_development_r10_28_8"
         private const val KEY_STATE = "state"
