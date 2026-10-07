@@ -63,7 +63,7 @@ import kotlin.math.abs
 
 class AyanaVoiceService : Service() {
 
-// AYANA v12.68.1 / R10.28.8.1 AUTONOMOUS DEVELOPMENT CONTINUATION HARDENING.
+// AYANA v12.68.2 / R10.28.8.2 AUTONOMOUS DEVELOPMENT ROUTING OWNERSHIP.
 // Prevents an already-COMMITTED development-session transaction from being mistaken
 // for a PREPARED transaction that should be cancelled; committed repair writes remain
 // intact and the autonomous loop continues to the next Project build.
@@ -4460,10 +4460,13 @@ mainHandler.postDelayed(
             executor = "deterministic_router"
         )
 
-        projectDevelopmentCoordinator
-            .maybeStartExplicitSession(
-                originalCommand
-            )
+        val projectDevelopmentSession =
+            projectDevelopmentCoordinator
+                .maybeStartExplicitSession(
+                    originalCommand
+                )
+
+        projectDevelopmentSession
             ?.let { session ->
                 commandHistoryStore.addEvent(
                     activeCommandHistoryId,
@@ -4493,6 +4496,30 @@ mainHandler.postDelayed(
             },
             STATE_THINKING
         )
+
+        // R10.28.8.2 AUTONOMOUS DEVELOPMENT ROUTING OWNERSHIP.
+        // maybeStartExplicitSession() is a strict command classifier bound to the
+        // frozen active Project. Once it owns this command, no generic deterministic
+        // local route (self-review, diagnostics, device state, app helpers, etc.) may
+        // reinterpret words inside the development specification. The whole original
+        // objective goes directly to Agent Core, where the bounded development
+        // coordinator/Workspace/Build Bridge contracts remain authoritative.
+        if (projectDevelopmentSession != null) {
+            commandHistoryStore.addEvent(
+                activeCommandHistoryId,
+                state = "project_development_routing_owned",
+                message = "R10.28.8.2 development objective защищена от generic local routing",
+                details =
+                    "session_id=${projectDevelopmentSession.optString("session_id")}; " +
+                        "project_id=${activeCommandProjectId.orEmpty().take(120)}"
+            )
+
+            askAyana(
+                originalCommand,
+                silent
+            )
+            return
+        }
 
         // R10.28 PROJECTS deterministic control owns project-management commands
         // before durable-goal/app/Agent Core routing. The command History remains
@@ -75652,7 +75679,7 @@ state
 
         // R10.27.4 VIDEO AUDIO ANALYSIS.
         private const val AYANA_VOICE_SERVICE_RELEASE =
-            "v12.68.1 / R10.28.8.1 AUTONOMOUS DEVELOPMENT CONTINUATION HARDENING"
+            "v12.68.2 / R10.28.8.2 AUTONOMOUS DEVELOPMENT ROUTING OWNERSHIP"
 
         private const val AYANA_PERSONAL_SEARCH_ENGINE_RELEASE =
             "v2.0 / R10.20 PERSONAL SEARCH 2.0 + VERIFIED RESULT CONTRACT v2"
@@ -75667,7 +75694,7 @@ state
             "R10.27.6 CONTROLLED PROACTIVITY 2.0 — DEVICE-CONFIRMED ACCEPTED"
 
         private const val AYANA_CURRENT_FEATURE_RELEASE =
-            "R10.28.8.1 AUTONOMOUS DEVELOPMENT CONTINUATION HARDENING — CANDIDATE / DEVICE CONFIRMATION PENDING"
+            "R10.28.8.2 AUTONOMOUS DEVELOPMENT ROUTING OWNERSHIP — CANDIDATE / DEVICE CONFIRMATION PENDING"
 
         private const val AYANA_RELEASE_LINEAGE =
             "Android v12.21.0 / R7.9 truth-hardening + R8.0 multi-attachment + R8.1–R8.4 accepted Personal Global Search stack + R8.5–R8.5.4 capability/evidence truth + R9.0 autonomous agent foundation + R9.0.1 history live-refresh proof fix + R9.0.2 diagnostic reconciliation/history refresh fix + R9.0.3 TTS health reconciliation + R9.1 IME perception/active telemetry truth + R9.2 autonomous recovery/long-task reconciliation + R9.2.1 adaptive hypothesis reconciliation + R9.3 app integration framework + R9.3.1 screen health reconciliation + R9.3.2 history latency recovery reconciliation + R9.3.3 informational terminal reconciliation + R9.3.4 app integration device acceptance + R9.4 multi-app task orchestration + R9.4.1 screen ownership union reconciliation + R9.5 verified result transfer between app steps + R9.5.1 partial marker provenance reconciliation + R9.5.2 bounded marker observation + R9.5.3 verified action result transfer + R9.6 verified semantic observation fallback + R9.6.1 visual fallback acceptance truth + R9.7 structured screen reading + R9.7.1 conversation routing/terminal truth + R9.7.2 structured router conversation precedence + R9.7.3 action morphology/terminal truth + R9.8 generic verified result transfer + R9.8.1 master full acceptance/diagnostic engine + R9.9 reversible action journal/verified undo + R9.9.1 brightness verified undo device acceptance + R9.9.2 opt-in low-battery controlled proactivity + R10.0 unified screen intelligence + R10.1 local self-diagnostics/self-audit + R10.2 personal search expansion + R10.3 long autonomous tasks/recovery + R10.4 adaptive verified execution loop + R10.5 generalized live adaptive autonomy + R10.6 cross-lane adaptive continuity + R10.6.1 durable goal binding fix + R10.7 cross-lane durable recovery continuity + R10.7.1 isolated acceptance cleanup hardening + R10.8 general-purpose long autonomous objectives + R10.9 dynamic goal decomposition/planner contract + R10.10 adaptive planner production path + R10.11 production replan/durable recovery + R10.12 natural lifecycle recovery/background continuation + R10.13 full process-death recovery + R10.13.1 post-process readiness/reconciliation + R10.13.2 process-death core recovery proof correction + R10.14 perception process isolation/cross-process accessibility bridge + R10.14.1 cross-process visual evidence fix + R10.14.2 lifecycle profile/self-diagnostic truth + R10.14.3 history recovery reconciliation + R10.15 generalized cross-process autonomy hardening + R10.15.1 self-diagnostics routing reconciliation + R10.16 perception process recovery/safe bridge rebind + R10.16.1 restart telemetry reconciliation + R10.17 screen intelligence 2.0 + R10.17.1 acceptance routing reconciliation + R10.18 universal UI action engine + R10.18.1 acceptance target reconciliation + R10.18.2 live target authority reconciliation + R10.18.3 app info target reconciliation + R10.19 autonomous multi-app tasks 2.0 + R10.20 personal search 2.0 + R10.21 document & office engine 2.0 + R10.22 notifications & communication assistant + R10.22.1 notification acceptance visibility reconciliation + R10.21.1 pptx completion evidence reconciliation + R10.23 voice & background 2.0 + R10.24 field hardening + R10.24.1 field hardening reconciliation/device acceptance + R10.24.2 acceptance truth reconciliation + R10.25 cross-process accessibility truth reconciliation + R10.26 capability evidence metadata reconciliation + R10.26.1 capability evidence metadata detector reconciliation + R10.27.1 github repository write/commit-push + R10.27.1.1 github confirmation terminal truth + R10.27.1.2 github verified-commit completion truth + R10.27.2 apk build pipeline + R10.27.2.1 apk build prepare read-only truth + R10.27.3 verified development transaction/project workspace + R10.27.3.1 waiting-acceptance terminal truth + R10.27.4 video audio analysis + R10.27.5 verified internet speed + R10.27.6 controlled proactivity 2.0 + R10.28 projects core + R10.28.1 project data scope + R10.28.2 project commands/project-aware data scope + R10.28.5 development workspace 2.0 + R10.28.5.1 workspace reconciliation/confirmation fix"
