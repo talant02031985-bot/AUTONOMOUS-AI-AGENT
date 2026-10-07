@@ -45,10 +45,13 @@ class AyanaProjectDevelopmentCoordinator(
             current.optString("project_id") == projectId &&
             now < current.optLong("expires_at_ms", 0L)
         ) {
+            normalizeState(current)
+            save(current)
             return publicState(current)
         }
 
         val objective = command.trim().take(MAX_OBJECTIVE_CHARS)
+        val requiresSourceChange = requiresSourceChangeEvidence(objective)
         val session =
             JSONObject()
                 .put("version", VERSION)
@@ -62,6 +65,9 @@ class AyanaProjectDevelopmentCoordinator(
                 .put("build_attempts", 0)
                 .put("repair_cycles", 0)
                 .put("max_repair_cycles", MAX_REPAIR_CYCLES)
+                .put("requires_source_change", requiresSourceChange)
+                .put("source_commit_count", 0)
+                .put("green_build_count", 0)
                 .put("working_set", JSONObject())
                 .put("pending_transactions", JSONArray())
                 .put("last_compile_output", "")
@@ -123,11 +129,17 @@ class AyanaProjectDevelopmentCoordinator(
         val txId = result.optString("transaction_id").trim()
         if (txId.isBlank()) return
         val state = load()
+        normalizeState(state)
         val pending = state.optJSONArray("pending_transactions") ?: JSONArray()
-        if ((0 until pending.length()).none { pending.optString(it) == txId }) {
+        val alreadyObserved = (0 until pending.length()).any { pending.optString(it) == txId }
+        if (!alreadyObserved) {
             pending.put(txId)
+            state.put("source_commit_count", state.optInt("source_commit_count", 0) + 1)
         }
         state.put("pending_transactions", pending)
+        if (state.optBoolean("requires_source_change", false)) {
+            state.put("terminal_state", "IMPLEMENTED_PENDING_BUILD")
+        }
         save(state)
     }
 
@@ -136,6 +148,7 @@ class AyanaProjectDevelopmentCoordinator(
         if (!isActiveFor(projectId)) return publicState(load())
 
         val state = load()
+        normalizeState(state)
         state.put("build_attempts", state.optInt("build_attempts", 0) + 1)
         state.put("last_build_status", result.optString("build_status", result.optString("status")))
         state.put("last_build_conclusion", result.optString("build_conclusion"))
@@ -149,10 +162,30 @@ class AyanaProjectDevelopmentCoordinator(
                 result.optBoolean("artifact_verified", false)
 
         if (green) {
-            state.put("terminal_state", "GREEN")
+            state.put("green_build_count", state.optInt("green_build_count", 0) + 1)
             state.put("last_compile_output", "")
+
+            val requiresSourceChange = state.optBoolean("requires_source_change", false)
+            val sourceCommitCount = state.optInt("source_commit_count", 0)
+            if (requiresSourceChange && sourceCommitCount <= 0) {
+                // A GREEN baseline proves only that the pre-existing project compiles.
+                // It is NOT proof that an explicit implementation objective was performed.
+                state.put("terminal_state", "IMPLEMENTATION_REQUIRED")
+                save(state)
+                return publicState(state)
+                    .put("green", false)
+                    .put("baseline_green", true)
+                    .put("implementation_required", true)
+                    .put("development_goal_complete", false)
+            }
+
+            state.put("terminal_state", "GREEN")
             save(state)
-            return publicState(state).put("green", true)
+            return publicState(state)
+                .put("green", true)
+                .put("baseline_green", false)
+                .put("implementation_required", false)
+                .put("development_goal_complete", true)
         }
 
         val diagnostic = result.optString("compile_output").trim()
@@ -221,10 +254,17 @@ class AyanaProjectDevelopmentCoordinator(
             append("session_id=").append(state.optString("session_id")).append('\n')
             append("project_id=").append(state.optString("project_id")).append('\n')
             append("objective=").append(state.optString("objective")).append('\n')
+            append("coordinator_version=").append(VERSION).append('\n')
             append("build_attempts=").append(state.optInt("build_attempts", 0)).append('\n')
             append("repair_cycles=").append(state.optInt("repair_cycles", 0)).append('/')
                 .append(state.optInt("max_repair_cycles", MAX_REPAIR_CYCLES)).append('\n')
+            append("requires_source_change=").append(state.optBoolean("requires_source_change", false)).append('\n')
+            append("source_commit_count=").append(state.optInt("source_commit_count", 0)).append('\n')
+            append("green_build_count=").append(state.optInt("green_build_count", 0)).append('\n')
             append("terminal_state=").append(state.optString("terminal_state")).append('\n')
+            if (state.optString("terminal_state") == "IMPLEMENTATION_REQUIRED") {
+                append("COMPLETION GATE: baseline APK is GREEN, but this objective explicitly requires source implementation and no source transaction has been committed in this session. Continue inspecting the requested implementation surface, write the required source changes, then rebuild. Do not return final success.\n")
+            }
             val diagnostic = state.optString("last_compile_output")
             if (diagnostic.isNotBlank()) {
                 append("LAST VERIFIED BUILD DIAGNOSTIC:\n")
@@ -245,6 +285,9 @@ class AyanaProjectDevelopmentCoordinator(
             .put("build_attempts", state.optInt("build_attempts", 0))
             .put("repair_cycles", state.optInt("repair_cycles", 0))
             .put("max_repair_cycles", state.optInt("max_repair_cycles", MAX_REPAIR_CYCLES))
+            .put("requires_source_change", state.optBoolean("requires_source_change", false))
+            .put("source_commit_count", state.optInt("source_commit_count", 0))
+            .put("green_build_count", state.optInt("green_build_count", 0))
             .put("terminal_state", state.optString("terminal_state"))
             .put("pending_transaction_count", (state.optJSONArray("pending_transactions") ?: JSONArray()).length())
 
@@ -281,13 +324,48 @@ class AyanaProjectDevelopmentCoordinator(
         return develop && autonomous
     }
 
+
+    private fun normalizeState(state: JSONObject) {
+        if (!state.has("requires_source_change")) {
+            state.put(
+                "requires_source_change",
+                requiresSourceChangeEvidence(state.optString("objective"))
+            )
+        }
+        if (!state.has("source_commit_count")) {
+            state.put(
+                "source_commit_count",
+                (state.optJSONArray("pending_transactions") ?: JSONArray()).length()
+            )
+        }
+        if (!state.has("green_build_count")) {
+            state.put("green_build_count", 0)
+        }
+    }
+
+    private fun requiresSourceChangeEvidence(command: String): Boolean {
+        val n = command
+            .lowercase(Locale.ROOT)
+            .replace('ё', 'е')
+            .replace(Regex("\\s+"), " ")
+            .trim()
+
+        // Deliberately excludes a pure "доведи/собери до GREEN" request: an already
+        // corrected workspace may legitimately need only verification. Explicit
+        // implementation verbs, however, require at least one verified source commit
+        // in the current development session before GREEN can satisfy the objective.
+        return Regex(
+            "(?:^|\\s)(?:реализуй|реализовать|разработай|разработать|доделай|доделать|добавь|добавить|создай|создать|исправь|исправить)(?=\\s|$|[?.!,;:—-])"
+        ).containsMatchIn(n)
+    }
+
     private fun sha256(text: String): String {
         val digest = MessageDigest.getInstance("SHA-256").digest(text.toByteArray(Charsets.UTF_8))
         return digest.joinToString("") { "%02x".format(it) }
     }
 
     companion object {
-        const val VERSION = "1.0"
+        const val VERSION = "1.1"
         const val MAX_REPAIR_CYCLES = 5
         private const val PREFS_NAME = "ayana_project_development_r10_28_8"
         private const val KEY_STATE = "state"
