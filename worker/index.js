@@ -1,3 +1,5 @@
+// AYANA Worker v11.10.3 — R10.28.8.6 DEVELOPMENT SESSION MARKER COMPATIBILITY
+// Accepts trusted Project Development Session markers across coordinator minor versions (v1, v1.x / R10.28.8, R10.28.8.x), so a verified Workspace commit deterministically routes the next fresh turn to github_apk_build instead of transaction-control.
 // AYANA Worker v11.10.2 — R10.28.8.3 DEVELOPMENT COMPLETION EVIDENCE GATE
 // Explicit implementation objectives cannot terminate on a GREEN baseline build with zero verified source commits.
 // github_apk_build is withheld until the current development session has implementation evidence.
@@ -1573,7 +1575,7 @@ function isAutonomousProjectDevelopmentRequest(message = "") {
 function isTrustedAutonomousProjectDevelopmentContinuation(message = "", toolResults = []) {
   const raw = String(message || "").trim();
   const normalized = normalizeIntentText(raw);
-  const activeSessionMarker = raw.includes("AYANA PROJECT DEVELOPMENT SESSION v1 / R10.28.8")
+  const activeSessionMarker = /AYANA PROJECT DEVELOPMENT SESSION v1(?:\.\d+)? \/ R10\.28\.8(?:\.\d+)?/u.test(raw)
     && /session_id=pds-[a-z0-9-]+/u.test(raw)
     && /project_id=[a-f0-9-]{16,}/u.test(raw);
 
@@ -1594,7 +1596,7 @@ function hasProjectDevelopmentWorkspaceCommitFreshTurnObservation(message = "") 
   const raw = String(message || "");
   const normalized = normalizeIntentText(raw);
   if (!normalized.startsWith("продолжение многошаговой задачи ayana")) return false;
-  if (!raw.includes("AYANA PROJECT DEVELOPMENT SESSION v1 / R10.28.8")) return false;
+  if (!/AYANA PROJECT DEVELOPMENT SESSION v1(?:\.\d+)? \/ R10\.28\.8(?:\.\d+)?/u.test(raw)) return false;
 
   const toolIndex = raw.lastIndexOf("project_workspace_write_transaction");
   if (toolIndex < 0) return false;
@@ -1612,7 +1614,7 @@ function projectDevelopmentImplementationEvidencePending(message = "") {
     /(?:^|\s)(?:реализуй|реализовать|разработай|разработать|доделай|доделать|добавь|добавить|создай|создать|исправь|исправить)(?=\s|$|[?.!,;:—-])/u.test(normalized);
 
   const trustedRequiresSourceChange =
-    raw.includes("AYANA PROJECT DEVELOPMENT SESSION v1 / R10.28.8")
+    /AYANA PROJECT DEVELOPMENT SESSION v1(?:\.\d+)? \/ R10\.28\.8(?:\.\d+)?/u.test(raw)
       && /requires_source_change=true/u.test(raw);
 
   const commitMatch = raw.match(/source_commit_count=(\d+)/u);
