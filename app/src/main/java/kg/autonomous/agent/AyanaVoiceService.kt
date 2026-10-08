@@ -63,6 +63,12 @@ import kotlin.math.abs
 
 class AyanaVoiceService : Service() {
 
+// AYANA v12.68.6 / R10.28.8.7 COMMITTED WRITE CONTINUATION OWNERSHIP.
+// A verified Project Workspace source commit in an active development session is now
+// resumed through a dedicated Android-generated continuation envelope with the exact
+// committed tool result. Worker can therefore force the next tool to github_apk_build
+// without parsing bounded execution-trace prose or exposing transaction-control.
+//
 // AYANA v12.68.5 / R10.28.8.5 DEVELOPMENT OBSERVATION SEQUENCE.
 // Project Workspace and Project build steps are evaluated against persistent development
 // progress (observed source SHAs, source commits, build/repair state) instead of Android
@@ -60394,6 +60400,62 @@ adaptiveExecutionLoop
 
                                     break
                                 }
+                            }
+
+                            // R10.28.8.7: a verified Workspace source commit inside an
+                            // active autonomous development session has exactly one safe next
+                            // transition: Project build. Carry the exact committed result in a
+                            // fresh trusted envelope instead of the bounded generic execution
+                            // trace, whose truncation can hide development-session evidence and
+                            // let transaction-control text be misclassified as user intent.
+                            val projectDevelopmentCommitContinuation =
+                                toolName == "project_workspace_write_transaction" &&
+                                    result.optBoolean("success", false) &&
+                                    result.optBoolean("verified", false) &&
+                                    result.optString("status") == AyanaProjectWorkspaceExecutor.TX_COMMITTED &&
+                                    result.optBoolean("project_development_session", false) &&
+                                    projectDevelopmentCoordinator.isActiveFor(activeCommandProjectId)
+
+                            if (projectDevelopmentCommitContinuation) {
+                                val committedResultText = result.toString()
+
+                                previousResponseId = null
+                                agentPreviousResponseId = null
+
+                                toolResults =
+                                    JSONArray()
+                                        .put(
+                                            JSONObject()
+                                                .put("call_id", call.optString("call_id"))
+                                                .put("output", committedResultText)
+                                        )
+
+                                nextMessage =
+                                    """
+                                    AYANA_PROJECT_DEVELOPMENT_COMMIT_CONTINUATION_V1
+
+                                    Исходная команда пользователя:
+                                    $originalGoal
+
+                                    Workspace source transaction уже COMMITTED и локально SHA-проверена.
+                                    Точный результат commit передан отдельно в tool_results.
+                                    Не выполняй accept/cancel/rollback этой transaction.
+                                    Следующий допустимый шаг этой development session — Project APK build.
+
+                                    ${projectDevelopmentCoordinator.compactContext()}
+                                    """
+                                        .trimIndent()
+
+                                commandHistoryStore.addEvent(
+                                    activeCommandHistoryId,
+                                    state = "project_development_commit_continuation",
+                                    message = "Committed Workspace write передан в fresh build-only Agent Core turn",
+                                    details =
+                                        "transaction_id=${result.optString("transaction_id").take(120)}; " +
+                                            "response_id_bound=false; result_bytes=${committedResultText.toByteArray(Charsets.UTF_8).size}"
+                                )
+
+                                continue
                             }
 
                             // R10.28.6.22: Project Workspace read-only observations
