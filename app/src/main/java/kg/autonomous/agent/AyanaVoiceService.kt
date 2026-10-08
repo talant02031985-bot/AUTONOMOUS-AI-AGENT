@@ -69787,6 +69787,20 @@ private fun isSemanticActionResultVerified(
                                                 "message",
                                                 "Baseline APK GREEN подтверждён, но исходная development-цель требует реализации изменений, а в этой session ещё нет verified Workspace source commit. Продолжай читать фактические исходники, реализуй ТЗ, выполни Workspace write и затем пересобери APK."
                                             )
+                                    } else if (developmentState.optBoolean("acceptance_required", false)) {
+                                        // R10.28.9.1: GitHub Actions GREEN attests build only.
+                                        // Do not accept Workspace transactions or finish the goal
+                                        // until independent functional and APK-byte delivery checks exist.
+                                        JSONObject(buildResult.toString())
+                                            .put("success", true)
+                                            .put("verified", true)
+                                            .put("terminal_status", "RUNNING")
+                                            .put("status", "project_development_acceptance_required")
+                                            .put("project_development_session", true)
+                                            .put("development_goal_complete", false)
+                                            .put("build_green", true)
+                                            .put("acceptance_required", true)
+                                            .put("message", "Android APK build GREEN подтверждён, но требования ТЗ, функциональные тесты и реальные байты установочного APK ещё не подтверждены. Цель не завершена.")
                                     } else if (developmentState.optBoolean("green", false)) {
                                         val acceptedIds = mutableListOf<String>()
                                         val acceptEvidence = JSONArray()

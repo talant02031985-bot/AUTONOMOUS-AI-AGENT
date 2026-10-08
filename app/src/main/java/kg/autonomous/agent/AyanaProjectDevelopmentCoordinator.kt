@@ -7,7 +7,7 @@ import java.security.MessageDigest
 import java.util.Locale
 
 /**
- * AYANA Project Development Coordinator v1.6 — R10.28.8.12 DEVELOPMENT SESSION INTENT ALIGNMENT.
+ * AYANA Project Development Coordinator v1.7 — R10.28.9.1 EVIDENCE FIRST / BUILD TRUTH.
  *
  * Bounded authority for one explicitly requested autonomous Project development objective.
  * The user's explicit "develop/build to GREEN" command is the session authority. It never
@@ -45,9 +45,11 @@ class AyanaProjectDevelopmentCoordinator(
         if (
             current.optBoolean("active", false) &&
             current.optString("project_id") == projectId &&
-            now < current.optLong("expires_at_ms", 0L)
+            now < current.optLong("expires_at_ms", 0L) &&
+            now < current.optLong("started_at_ms", now) + MAX_SESSION_DURATION_MS
         ) {
             normalizeState(current)
+            renewLease(current)
             save(current)
             return publicState(current)
         }
@@ -66,6 +68,9 @@ class AyanaProjectDevelopmentCoordinator(
                 .put("expires_at_ms", now + SESSION_TTL_MS)
                 .put("build_attempts", 0)
                 .put("repair_cycles", 0)
+                .put("total_repair_cycles", 0)
+                .put("repair_problem_sha256", "")
+                .put("last_observed_build_run_id", 0L)
                 .put("max_repair_cycles", MAX_REPAIR_CYCLES)
                 .put("requires_source_change", requiresSourceChange)
                 .put("source_commit_count", 0)
@@ -77,6 +82,7 @@ class AyanaProjectDevelopmentCoordinator(
                 .put("last_build_status", "")
                 .put("last_build_conclusion", "")
                 .put("last_run_id", 0L)
+                .put("acceptance_verified", false)
                 .put("terminal_state", "ACTIVE")
         save(session)
         return publicState(session)
@@ -88,7 +94,11 @@ class AyanaProjectDevelopmentCoordinator(
         val state = load()
         if (!state.optBoolean("active", false)) return false
         if (state.optString("project_id") != expected) return false
-        if (System.currentTimeMillis() >= state.optLong("expires_at_ms", 0L)) {
+        val now = System.currentTimeMillis()
+        if (
+            now >= state.optLong("expires_at_ms", 0L) ||
+            now >= state.optLong("started_at_ms", now) + MAX_SESSION_DURATION_MS
+        ) {
             state.put("active", false).put("terminal_state", "EXPIRED")
             save(state)
             return false
@@ -144,6 +154,7 @@ class AyanaProjectDevelopmentCoordinator(
             // In particular, alternating Entity/DAO reads must not reset R10.4.
             state.put("stagnant_read_count", state.optInt("stagnant_read_count", 0) + 1)
         }
+        if (changed) renewLease(state)
         save(state)
     }
 
@@ -196,6 +207,7 @@ class AyanaProjectDevelopmentCoordinator(
             state.put("observation_sequence", state.optLong("observation_sequence", 0L) + 1L)
             state.put("last_observation_tool", cleanTool)
             state.put("last_observation_path", result.optString("path"))
+            renewLease(state)
         }
         save(state)
     }
@@ -204,7 +216,10 @@ class AyanaProjectDevelopmentCoordinator(
         path.isNotBlank() && path.length <= MAX_CONTEXT_PATH_CHARS &&
             !path.startsWith("/") && !path.contains("..") && !path.contains('\\') &&
             (path.endsWith(".kt") || path.endsWith(".kts") ||
-                path.endsWith("AndroidManifest.xml"))
+                path.endsWith(".xml") || path.endsWith(".toml") ||
+                path.endsWith(".properties") || path.endsWith(".gradle") ||
+                path.endsWith(".json") || path.endsWith(".pro") ||
+                path.endsWith(".yml") || path.endsWith(".yaml"))
 
     fun observeWorkspaceCommit(result: JSONObject) {
         if (!isActiveFor(result.optString("project_id"))) return
@@ -225,10 +240,15 @@ class AyanaProjectDevelopmentCoordinator(
             state.put("source_commit_count", state.optInt("source_commit_count", 0) + 1)
         }
         state.put("pending_transactions", pending)
+        // Every mutation invalidates all previously cached source SHAs/bodies.
+        // No post-build repair may use pre-COMMIT content as current evidence.
+        state.put("working_set", JSONObject())
+        state.put("observation_sequence", state.optLong("observation_sequence", 0L) + 1L)
         state.put("stagnant_read_count", 0)
         if (state.optBoolean("requires_source_change", false)) {
             state.put("terminal_state", "IMPLEMENTED_PENDING_BUILD")
         }
+        renewLease(state)
         save(state)
     }
 
@@ -238,16 +258,26 @@ class AyanaProjectDevelopmentCoordinator(
 
         val state = load()
         normalizeState(state)
+        val runId = result.optLong("run_id", 0L)
+        val status = result.optString("status")
+        // A repeated poll/result for a finished run is not a new failed build attempt.
+        if (runId > 0L && runId == state.optLong("last_observed_build_run_id", 0L)) {
+            return publicState(state)
+                .put("duplicate_build_observation", true)
+                .put("development_goal_complete", false)
+        }
+        if (runId > 0L) state.put("last_observed_build_run_id", runId)
         state.put("build_attempts", state.optInt("build_attempts", 0) + 1)
         state.put("stagnant_read_count", 0)
-        state.put("last_build_status", result.optString("build_status", result.optString("status")))
+        state.put("last_build_status", result.optString("build_status", status))
         state.put("last_build_conclusion", result.optString("build_conclusion"))
-        state.put("last_run_id", result.optLong("run_id", 0L))
+        state.put("last_run_id", runId)
+        renewLease(state)
 
         val green =
             result.optBoolean("success", false) &&
                 result.optBoolean("verified", false) &&
-                result.optString("status") == "verified_apk_build" &&
+                status == "verified_apk_build" &&
                 result.optString("build_conclusion") == "success" &&
                 result.optBoolean("artifact_verified", false)
 
@@ -258,8 +288,6 @@ class AyanaProjectDevelopmentCoordinator(
             val requiresSourceChange = state.optBoolean("requires_source_change", false)
             val sourceCommitCount = state.optInt("source_commit_count", 0)
             if (requiresSourceChange && sourceCommitCount <= 0) {
-                // A GREEN baseline proves only that the pre-existing project compiles.
-                // It is NOT proof that an explicit implementation objective was performed.
                 state.put("terminal_state", "IMPLEMENTATION_REQUIRED")
                 save(state)
                 return publicState(state)
@@ -269,21 +297,30 @@ class AyanaProjectDevelopmentCoordinator(
                     .put("development_goal_complete", false)
             }
 
-            state.put("terminal_state", "GREEN")
+            // An artifact metadata digest validates a CI archive only. It does not
+            // prove functional acceptance or bytes of an installable APK. The bridge
+            // and the current tool set do not provide those independent proofs yet.
+            state.put("terminal_state", "BUILD_GREEN_ACCEPTANCE_PENDING")
+            state.put("acceptance_verified", false)
             save(state)
             return publicState(state)
-                .put("green", true)
-                .put("baseline_green", false)
-                .put("implementation_required", false)
-                .put("development_goal_complete", true)
+                .put("green", false)
+                .put("build_green", true)
+                .put("acceptance_required", true)
+                .put("development_goal_complete", false)
         }
 
         val diagnostic = result.optString("compile_output").trim()
-        if (result.optString("status") == "project_apk_build_failed" && diagnostic.isNotBlank()) {
-            val cycles = state.optInt("repair_cycles", 0) + 1
+        if (status == "project_apk_build_failed" && diagnostic.isNotBlank()) {
+            val problemFingerprint = fingerprintProblem(diagnostic)
+            val sameProblem = problemFingerprint == state.optString("repair_problem_sha256")
+            val cycles = (if (sameProblem) state.optInt("repair_cycles", 0) else 0) + 1
+            val totalCycles = state.optInt("total_repair_cycles", 0) + 1
+            state.put("repair_problem_sha256", problemFingerprint)
             state.put("repair_cycles", cycles)
+            state.put("total_repair_cycles", totalCycles)
             state.put("last_compile_output", diagnostic.take(MAX_DIAGNOSTIC_CHARS))
-            if (cycles >= state.optInt("max_repair_cycles", MAX_REPAIR_CYCLES)) {
+            if (cycles >= MAX_REPAIR_CYCLES || totalCycles >= MAX_TOTAL_REPAIR_CYCLES) {
                 state.put("active", false)
                 state.put("terminal_state", "REPAIR_LIMIT_REACHED")
             } else {
@@ -291,7 +328,7 @@ class AyanaProjectDevelopmentCoordinator(
             }
         }
         save(state)
-        return publicState(state)
+        return publicState(state).put("development_goal_complete", false)
     }
 
     fun pendingTransactionIds(): List<String> {
@@ -317,8 +354,14 @@ class AyanaProjectDevelopmentCoordinator(
 
     fun finishGreen() {
         val state = load()
-        state.put("active", false)
-        state.put("terminal_state", "GREEN")
+        // No caller may finalize an implementation goal without independently
+        // attested functional acceptance and actual APK delivery evidence.
+        if (!state.optBoolean("acceptance_verified", false)) {
+            state.put("terminal_state", "BUILD_GREEN_ACCEPTANCE_PENDING")
+        } else {
+            state.put("active", false)
+            state.put("terminal_state", "ACCEPTED")
+        }
         save(state)
     }
 
@@ -365,13 +408,14 @@ class AyanaProjectDevelopmentCoordinator(
         val known = state.optJSONArray("known_source_paths") ?: JSONArray()
         val unread = (0 until known.length()).map { known.optString(it) }
             .filter { it.isNotBlank() && it !in readPaths }
-            .sortedWith(compareBy<String> { sourcePriority(it) }.thenBy { it })
+            .sortedWith(compareBy<String> { sourcePriority(it, state.optString("last_compile_output")) }.thenBy { it })
+        val reviewReady = sourceReviewReady(state)
         val stagnant = state.optInt("stagnant_read_count", 0)
         val diagnostic = state.optString("last_compile_output").trim()
         val pending = state.optJSONArray("pending_transactions") ?: JSONArray()
 
         return buildString {
-            append("AYANA PROJECT DEVELOPMENT SESSION v1.6 / R10.28.8.12\n")
+            append("AYANA PROJECT DEVELOPMENT SESSION v1.7 / R10.28.9.1\n")
             append("session_id=").append(state.optString("session_id")).append('\n')
             append("project_id=").append(state.optString("project_id")).append('\n')
             append("objective_sha256=").append(state.optString("objective_sha256")).append('\n')
@@ -379,6 +423,8 @@ class AyanaProjectDevelopmentCoordinator(
             append("build_attempts=").append(state.optInt("build_attempts", 0)).append('\n')
             append("repair_cycles=").append(state.optInt("repair_cycles", 0)).append('/')
                 .append(state.optInt("max_repair_cycles", MAX_REPAIR_CYCLES)).append('\n')
+            append("total_repair_cycles=").append(state.optInt("total_repair_cycles", 0)).append('\n')
+            append("repair_problem_sha256=").append(state.optString("repair_problem_sha256")).append('\n')
             append("requires_source_change=").append(state.optBoolean("requires_source_change", false)).append('\n')
             append("source_commit_count=").append(state.optInt("source_commit_count", 0)).append('\n')
             append("green_build_count=").append(state.optInt("green_build_count", 0)).append('\n')
@@ -389,9 +435,10 @@ class AyanaProjectDevelopmentCoordinator(
             append("unique_source_count=").append(keys.size).append('\n')
             append("cached_source_count=").append(cachedCount).append('\n')
             append("stagnant_read_count=").append(stagnant).append('\n')
+            append("source_review_ready=").append(reviewReady).append('\n')
             append("pending_transaction_count=").append(pending.length()).append('\n')
             if (stagnant >= STAGNATION_THRESHOLD) {
-                append("STAGNATION: verified identical SHA reads are NOT progress. Do not reread cached files. Choose a new verified path below, or create a coherent SHA-bound write transaction using source bodies below.\n")
+                append("STAGNATION: unchanged SHA reads are not progress. Read actual missing dependencies first. Never force a write when source_review_ready=false.\n")
             }
             if (state.optString("terminal_state") == "IMPLEMENTATION_REQUIRED") {
                 append("COMPLETION GATE: source commit required before GREEN completes this goal.\n")
@@ -409,8 +456,11 @@ class AyanaProjectDevelopmentCoordinator(
         }.take(MAX_COMPACT_CONTEXT_CHARS)
     }
 
-    private fun sourcePriority(path: String): Int {
+    private fun sourcePriority(path: String, diagnostic: String = ""): Int {
         val name = path.substringAfterLast('/').lowercase(Locale.ROOT)
+        if (diagnostic.contains(path, ignoreCase = true) ||
+            diagnostic.contains(path.substringAfterLast('/'), ignoreCase = true)
+        ) return -1
         return when {
             "database" in name -> 0
             "repository" in name -> 1
@@ -480,12 +530,15 @@ class AyanaProjectDevelopmentCoordinator(
             .put("active", state.optBoolean("active", false))
             .put("build_attempts", state.optInt("build_attempts", 0))
             .put("repair_cycles", state.optInt("repair_cycles", 0))
+            .put("total_repair_cycles", state.optInt("total_repair_cycles", 0))
+            .put("repair_problem_sha256", state.optString("repair_problem_sha256"))
             .put("max_repair_cycles", state.optInt("max_repair_cycles", MAX_REPAIR_CYCLES))
             .put("requires_source_change", state.optBoolean("requires_source_change", false))
             .put("source_commit_count", state.optInt("source_commit_count", 0))
             .put("green_build_count", state.optInt("green_build_count", 0))
             .put("observation_sequence", state.optLong("observation_sequence", 0L))
             .put("terminal_state", state.optString("terminal_state"))
+            .put("acceptance_verified", state.optBoolean("acceptance_verified", false))
             .put("pending_transaction_count", (state.optJSONArray("pending_transactions") ?: JSONArray()).length())
 
     private fun trimWorkingSet(working: JSONObject) {
@@ -544,6 +597,9 @@ class AyanaProjectDevelopmentCoordinator(
         if (!state.has("stagnant_read_count")) {
             state.put("stagnant_read_count", 0)
         }
+        if (!state.has("total_repair_cycles")) state.put("total_repair_cycles", state.optInt("repair_cycles", 0))
+        if (!state.has("repair_problem_sha256")) state.put("repair_problem_sha256", "")
+        if (!state.has("acceptance_verified")) state.put("acceptance_verified", false)
         if (!state.has("known_source_paths")) {
             state.put("known_source_paths", JSONArray())
         }
@@ -562,7 +618,73 @@ class AyanaProjectDevelopmentCoordinator(
         // in the current development session before GREEN can satisfy the objective.
         return Regex(
             "(?:^|\\s)(?:реализуй|реализовать|разработай|разработать|доделай|доделать|добавь|добавить|создай|создать|исправь|исправить)(?=\\s|$|[?.!,;:—-])"
+        ).containsMatchIn(n) || Regex(
+            "(?:^|\\s)продолжи\\s+(?:автономную\\s+)?(?:разработку|исправление|реализацию)(?=\\s|$|[?.!,;:—-])"
         ).containsMatchIn(n)
+    }
+
+    private fun renewLease(state: JSONObject) {
+        val now = System.currentTimeMillis()
+        val start = state.optLong("started_at_ms", now)
+        val absoluteLimit = start + MAX_SESSION_DURATION_MS
+        state.put("expires_at_ms", minOf(now + SESSION_TTL_MS, absoluteLimit))
+    }
+
+    private fun fingerprintProblem(diagnostic: String): String {
+        // Deliberately independent of GitHub run IDs, timestamps and noise.
+        val signatures = diagnostic.lineSequence()
+            .map { it.trim().replace(Regex("^\\d{4}-\\d{2}-\\d{2}.*?\\s"), "") }
+            .filter {
+                it.contains("error:", ignoreCase = true) ||
+                    it.startsWith("e:") ||
+                    it.contains(": error:", ignoreCase = true) ||
+                    it.contains("unresolved reference", ignoreCase = true) ||
+                    it.contains("Compilation error", ignoreCase = true)
+            }
+            .map { it.replace(Regex(":\\d+(?::\\d+)?"), ":LINE")
+                .replace(Regex("\\s+"), " ") }
+            .distinct().sorted().take(30).toList()
+        return sha256(if (signatures.isNotEmpty()) signatures.joinToString("\n") else diagnostic.take(3000))
+    }
+
+    private fun sourceReviewReady(state: JSONObject): Boolean {
+        if (state.optString("terminal_state") != "REPAIR_REQUIRED") return false
+        val diagnostic = state.optString("last_compile_output")
+        if (diagnostic.isBlank() || diagnostic.contains("truncated=true") ||
+            diagnostic.startsWith("BUILD_LOG_")
+        ) return false
+        val working = state.optJSONObject("working_set") ?: return false
+        val known = state.optJSONArray("known_source_paths") ?: return false
+        if (known.length() == 0) return false
+        val knownPaths = (0 until known.length()).map { known.optString(it) }
+            .filter(String::isNotBlank)
+        val referenced = knownPaths.filter { path ->
+            diagnostic.contains(path, ignoreCase = true) ||
+                diagnostic.contains(path.substringAfterLast('/'), ignoreCase = true) ||
+                (path.endsWith(".kt") && diagnostic.contains(
+                    path.substringAfterLast('/').removeSuffix(".kt") + ".java",
+                    ignoreCase = true
+                ))
+        }.toMutableSet()
+        if (referenced.isEmpty()) return false
+        // Unresolved symbols in a caller demand verified declaration evidence.
+        // This conservative relation does not assert that the files are correct;
+        // it only prevents writing when a likely provider has never been read.
+        if (diagnostic.contains("unresolved reference", ignoreCase = true)) {
+            if (referenced.any { it.contains("Repository.kt", ignoreCase = true) }) {
+                referenced.addAll(knownPaths.filter { it.endsWith("Dao.kt") })
+            }
+            if (referenced.any { it.contains("Navigation.kt", ignoreCase = true) ||
+                    it.contains("Screen.kt", ignoreCase = true) }) {
+                referenced.addAll(knownPaths.filter { it.endsWith("Repository.kt") })
+            }
+        }
+        return referenced.all { path ->
+            val entry = working.optJSONObject(path) ?: return@all false
+            val content = entry.optString("content")
+            val sha = entry.optString("sha256")
+            SHA256.matches(sha) && sha256(content) == sha
+        }
     }
 
     private fun sha256(text: String): String {
@@ -571,8 +693,10 @@ class AyanaProjectDevelopmentCoordinator(
     }
 
     companion object {
-        const val VERSION = "1.6"
+        const val VERSION = "1.7"
         const val MAX_REPAIR_CYCLES = 5
+        private const val MAX_TOTAL_REPAIR_CYCLES = 20
+        private const val MAX_SESSION_DURATION_MS = 24L * 60L * 60L * 1000L
         private const val PREFS_NAME = "ayana_project_development_r10_28_8"
         private const val KEY_STATE = "state"
         private const val SESSION_TTL_MS = 2L * 60L * 60L * 1000L
@@ -582,12 +706,12 @@ class AyanaProjectDevelopmentCoordinator(
         private const val MAX_KNOWN_SOURCE_PATHS = 250
         private const val MAX_UNREAD_PATHS = 20
         private const val STAGNATION_THRESHOLD = 1
-        private const val MAX_DIAGNOSTIC_CHARS = 18_000
-        private const val MAX_CONTEXT_DIAGNOSTIC_CHARS = 7_000
+        private const val MAX_DIAGNOSTIC_CHARS = 40_000
+        private const val MAX_CONTEXT_DIAGNOSTIC_CHARS = 14_000
         private const val MAX_CONTEXT_MANIFEST_FILES = 12
         private const val MAX_CONTEXT_MANIFEST_CHARS = 3_500
         private const val MAX_CONTEXT_PATH_CHARS = 320
-        private const val MAX_COMPACT_CONTEXT_CHARS = 39_000
+        private const val MAX_COMPACT_CONTEXT_CHARS = 49_000
         private const val MAX_OBJECTIVE_CHARS = 12_000
         private val SHA256 = Regex("^[0-9a-f]{64}$")
     }

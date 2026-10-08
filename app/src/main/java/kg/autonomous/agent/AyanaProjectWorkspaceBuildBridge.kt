@@ -22,7 +22,7 @@ import javax.crypto.SecretKey
 import javax.crypto.spec.GCMParameterSpec
 
 /**
- * AYANA Project Workspace Build Bridge v1.0 — R10.28.7.
+ * AYANA Project Workspace Build Bridge v1.1 — R10.28.9.1.
  *
  * Builds ONLY the project bound to the current command. The project snapshot is
  * pushed to a dedicated GitHub repository derived from the project name
@@ -1043,53 +1043,17 @@ class AyanaProjectWorkspaceBuildBridge(
         repository: String,
         runId: Long
     ): String {
+        // R10.28.9.1: preserve first compiler errors and unique error groups;
+        // never trim the first cause away with takeLast(60).
         return try {
-            val bytes =
-                githubBytesRequest(
-                    repository = repository,
-                    apiPath = "/actions/runs/$runId/logs",
-                    accessToken = accessToken
-                )
-
-            if (bytes.isEmpty()) {
-                return "GitHub Actions logs недоступны."
-            }
-
-            val lines = mutableListOf<String>()
-            ZipInputStream(ByteArrayInputStream(bytes)).use { zip ->
-                while (true) {
-                    val entry = zip.nextEntry ?: break
-                    if (!entry.isDirectory) {
-                        val text =
-                            zip.readBytes()
-                                .toString(StandardCharsets.UTF_8)
-                        text.lineSequence().forEach { line ->
-                            val normalized = line.trim()
-                            if (
-                                normalized.contains("FAILURE:", ignoreCase = true) ||
-                                normalized.contains("error:", ignoreCase = true) ||
-                                normalized.contains(" e: ", ignoreCase = true) ||
-                                normalized.startsWith("e:") ||
-                                normalized.contains("What went wrong", ignoreCase = true) ||
-                                normalized.contains("Compilation error", ignoreCase = true)
-                            ) {
-                                lines += normalized
-                            }
-                        }
-                    }
-                    zip.closeEntry()
-                }
-            }
-
-            if (lines.isEmpty()) {
-                "Build failed; error lines не выделены из GitHub Actions log."
-            } else {
-                lines.takeLast(MAX_DIAGNOSTIC_LINES)
-                    .joinToString("\n")
-                    .take(MAX_DIAGNOSTIC_CHARS)
-            }
+            val bytes = githubBytesRequest(
+                repository = repository,
+                apiPath = "/actions/runs/$runId/logs",
+                accessToken = accessToken
+            )
+            AyanaBuildDiagnosticExtractor.summarize(bytes)
         } catch (error: Exception) {
-            "Не удалось извлечь compile log: ${error.message.orEmpty().take(180)}"
+            "BUILD_LOG_UNAVAILABLE: ${error.javaClass.simpleName}"
         }
     }
 
@@ -1388,8 +1352,16 @@ class AyanaProjectWorkspaceBuildBridge(
             if (code !in 200..299) {
                 ByteArray(0)
             } else {
-                connection.inputStream.use {
-                    it.readBytes()
+                connection.inputStream.use { input ->
+                    val buffer = ByteArray(8192)
+                    val output = java.io.ByteArrayOutputStream()
+                    while (true) {
+                        val count = input.read(buffer)
+                        if (count < 0) break
+                        if (output.size() + count > MAX_LOG_ARCHIVE_BYTES) return ByteArray(0)
+                        output.write(buffer, 0, count)
+                    }
+                    output.toByteArray()
                 }
             }
         } catch (_: Exception) {
@@ -1552,7 +1524,7 @@ class AyanaProjectWorkspaceBuildBridge(
             .put("message", message)
 
     companion object {
-        const val VERSION = "1.0"
+        const val VERSION = "1.1"
         const val BRANCH = "main"
         const val PROJECT_ARTIFACT_NAME = "PROJECT-DEBUG-APK"
         const val SIDE_EFFECT_KIND = "project_workspace_apk_build"
@@ -1578,8 +1550,7 @@ class AyanaProjectWorkspaceBuildBridge(
         private const val BUILD_TIMEOUT_MS = 8L * 60L * 1000L
         private const val BUILD_POLL_MS = 3_000L
 
-        private const val MAX_DIAGNOSTIC_LINES = 60
-        private const val MAX_DIAGNOSTIC_CHARS = 12_000
+        private const val MAX_LOG_ARCHIVE_BYTES = 14 * 1024 * 1024
 
         private val SHA256_HEX =
             Regex("^[0-9a-f]{64}$")
