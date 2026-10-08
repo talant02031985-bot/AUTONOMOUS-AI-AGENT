@@ -1,3 +1,8 @@
+// AYANA Worker v11.10.9 — R10.28.8.12 VERIFIED INTENT ROUTING HARDENING
+// Workspace transaction control requires an explicit leading control directive.
+// A generic project repair mentioning Workspace transaction + "проверь" is NOT control.
+// Explicit diagnostic/no-build requests cannot trigger APK build preparation.
+// Autonomous VERIFIED GREEN objectives stay inside the bounded development lane.
 // AYANA Worker v11.10.8 — R10.28.8.11 BUILD-FAILURE DEVELOPMENT CONTINUITY FIX
 // Android's generic post-build continuation starts with "ПРОДОЛЖЕНИЕ МНОГОШАГОВОЙ ЗАДАЧИ AYANA".
 // Route a coordinator-attested development session BEFORE generic durable recovery;
@@ -1496,9 +1501,18 @@ function isProjectWorkspaceBuildRequest(message = "") {
   if (!n) return false;
 
   const explicitBuildDenial =
-    /(?:не\s+(?:выполняй|выполнять|запускай|запускать|делай|делать)|без)\s+(?:(?:github|project\s+workspace)\s+)?(?:build|сборк\p{L}*|apk\s+build|build\s+bridge)/u.test(n)
-    || /не\s+запускай\s+project\s+workspace\s+build\s+bridge/u.test(n);
+    // May include intervening modifiers such as "новую", "повторный", or
+    // other forbidden operations: "не выполняй COMMIT, cancel или новую сборку".
+    /(?:не\s+(?:выполняй|выполнять|запускай|запускать|делай|делать)|без)\b[^.!?\n]{0,130}?(?:сборк\p{L}*|\b(?:apk\s+)?build\b)/u.test(n)
+    || /не\s+запускай\s+project\s+workspace\s+build\s+bridge/u.test(n)
+    || /(?:это\s+)?только\s+диагностик/u.test(n);
   if (explicitBuildDenial) return false;
+
+  // Reading a past build log is not a request to dispatch a new build.
+  const readOnlyBuildLead = /^(?:проверь|посмотри|покажи|узнай|найди|прочитай)(?:\s|$)/u.test(n)
+    && /(?:статус|журнал|ошиб|результат|истори|compile_output|run\s*id|сборк)/u.test(n)
+    && !/(?:^|\s)(?:собери|собрать|запусти|запустить|пересобери)(?=\s|$|[?.!,;:—-])/u.test(n);
+  if (readOnlyBuildLead) return false;
 
   const buildSignal =
     /(?:^|\s)(?:собери|собрать|сборк\p{L}*|build|assemble)(?=\s|$|[?.!,;:—-])/u.test(n)
@@ -1584,7 +1598,7 @@ function isAutonomousProjectDevelopmentRequest(message = "") {
   const developmentSignal =
     /(?:продолжи|продолжить|разработай|разработать|доведи|доделай|реализуй|реализовать|создай|создать|исправь|исправить|собери|собрать).*(?:приложени|проект|android|apk|workspace|store accounting)/u.test(n);
   const autonomousGoalSignal =
-    /(?:до green|до успешн|до рабоч|до готов|сам[ао]? исправ|автоном|самостоятель|по тз|тех(?:ническ)?[а-я ]*задан|полностью разработ)/u.test(n);
+    /(?:до\s+(?:verified\s+)?green|verified[ _-]*green|до успешн|до рабоч|до готов|сам[ао]? исправ|автоном|самостоятель|по тз|тех(?:ническ)?[а-я ]*задан|полностью разработ)/u.test(n);
 
   return developmentSignal && autonomousGoalSignal;
 }
@@ -1730,24 +1744,38 @@ function getProjectWorkspaceTransactionControlAction(message = "") {
     .replace(/^(?:аяна|ayana)[\s,.:;!?—-]+/u, "");
   if (!n) return "";
 
-  const workspaceSignal =
-    /project[_ -]?workspace[_ -]?transaction[_ -]?control/u.test(n)
-    || /project[_ -]?workspace[_ -]?transaction/u.test(n)
-    || /workspace\s+transaction/u.test(n)
-    || /workspace[- ]?транзакц\p{L}*/u.test(n)
-    || /транзакц\p{L}*\s+workspace/u.test(n);
+  // R10.28.8.12: A long development objective may mention a previous Workspace
+  // transaction and unrelated verbs like "проверь все Entity". Those are NOT
+  // user authorization to control that transaction. Only the leading, explicit
+  // transaction-control directive may select this high-risk lane.
+  const lead = n.split(/\n|(?<=[.!?])\s+/u).map(part => part.trim()).find(Boolean) || "";
+  const workspaceTransactionSignal =
+    /project[_ -]?workspace[_ -]?transaction(?:[_ -]?control)?/u.test(lead)
+    || /workspace\s+transaction/u.test(lead)
+    || /workspace[- ]?транзакц\p{L}*/u.test(lead)
+    || /транзакц\p{L}*\s+workspace/u.test(lead);
+  if (!workspaceTransactionSignal) return "";
 
-  if (!workspaceSignal) return "";
+  const explicitAction = lead.match(/(?:^|[\s,;])action\s*=\s*(status|cancel|accept|rollback)(?:$|[\s,;.!?])/u);
+  const transactionLed = /^(?:project[_ -]?workspace[_ -]?transaction(?:[_ -]?control)?|workspace\s+transaction|workspace[- ]?транзакц\p{L}*|транзакц\p{L}*\s+workspace)(?:\s|$|[?.!,;:—-])/u.test(lead);
+  if (explicitAction && transactionLed) return explicitAction[1];
 
-  const explicit = n.match(/(?:^|[\s,;])action\s*=\s*(status|cancel|accept|rollback)(?:$|[\s,;.!?])/u);
-  if (explicit) return explicit[1];
+  // Require the leading command to address the transaction itself, not the
+  // surrounding project or source files; never read negated actions as orders.
+  const direct = lead.match(/^(?:пожалуйста[, ]+)?(?:проверь|проверить|покажи|показать|узнай|посмотри|посмотреть|отмени|отменить|прими|принять|подтверди|подтвердить|откати|откатить|status|cancel|accept|rollback)(?=\s|$|[?.!,;:—-])/u);
+  if (!direct) return "";
 
-  if (/(?:^|\s)(?:отмен\p{L}*|cancel)(?=\s|$|[?.!,;:—-])/u.test(n)) return "cancel";
-  if (/(?:^|\s)(?:прим\p{L}*|приним\p{L}*|accept)(?=\s|$|[?.!,;:—-])/u.test(n)) return "accept";
-  if (/(?:^|\s)(?:откат\p{L}*|rollback|верни\s+назад)(?=\s|$|[?.!,;:—-])/u.test(n)) return "rollback";
-  if (/(?:^|\s)(?:status|статус|состояни\p{L}*|проверь|проверить)(?=\s|$|[?.!,;:—-])/u.test(n)) return "status";
+  const verb = direct[0].trim().split(/\s+/u).at(-1);
+  // Reject "проверь исходники ... Workspace transaction" and similar mixed goals.
+  const afterVerb = lead.slice(direct[0].length).trim();
+  if (!/^(?:(?:статус|состояние|текущую|текущей|эту|этой|уже|подготовленную|записанную|прежнюю|предыдущую)\s+){0,4}(?:project[_ -]?workspace[_ -]?transaction(?:[_ -]?control)?|workspace\s+transaction|workspace[- ]?транзакц\p{L}*|транзакц\p{L}*\s+workspace)/u.test(afterVerb)) {
+    return "";
+  }
 
-  return "";
+  if (/^(?:отмени|отменить|cancel)$/u.test(verb)) return "cancel";
+  if (/^(?:прими|принять|подтверди|подтвердить|accept)$/u.test(verb)) return "accept";
+  if (/^(?:откати|откатить|rollback)$/u.test(verb)) return "rollback";
+  return "status";
 }
 
 function extractProjectWorkspaceTransactionId(message = "") {
@@ -4347,7 +4375,7 @@ export default {
         service: "AYANA AI",
         ai: "ready",
         agent_core: "v11.1-v12.15-completion-integrity",
-        worker: "v11.10.8-r10.28.8.11-build-failure-development-continuity",
+        worker: "v11.10.9-r10.28.8.12-verified-intent-routing",
         voice: "marin"
       });
     }
