@@ -7,7 +7,7 @@ import java.security.MessageDigest
 import java.util.Locale
 
 /**
- * AYANA Project Development Coordinator v1.3 — R10.28.8.5.
+ * AYANA Project Development Coordinator v1.4 — R10.28.8.9 DEVELOPMENT CONTEXT COMPACTION.
  *
  * Bounded authority for one explicitly requested autonomous Project development objective.
  * The user's explicit "develop/build to GREEN" command is the session authority. It never
@@ -21,7 +21,8 @@ import java.util.Locale
  * - count repair/build cycles and stop after MAX_REPAIR_CYCLES;
  * - remember workspace transactions created by the session so they can be accepted only after
  *   a verified GREEN APK artifact;
- * - provide a compact trusted context for Agent Core after every tool step.
+ * - provide a compact trusted context for Agent Core after every tool step without replaying
+ *   full source bodies that are already present in the current verified Workspace result.
  */
 class AyanaProjectDevelopmentCoordinator(
     context: Context,
@@ -101,7 +102,7 @@ class AyanaProjectDevelopmentCoordinator(
 
         val path = result.optString("path").trim()
         val sha = result.optString("sha256").trim().lowercase(Locale.ROOT)
-        val content = result.optString("content")
+        val contentChars = result.optString("content").length
         if (path.isBlank() || !SHA256.matches(sha) || result.optBoolean("truncated", false)) return
 
         val state = load()
@@ -111,7 +112,7 @@ class AyanaProjectDevelopmentCoordinator(
             JSONObject()
                 .put("path", path)
                 .put("sha256", sha)
-                .put("content", content.take(MAX_WORKING_FILE_CHARS))
+                .put("content_chars", contentChars)
                 .put("observed_at_ms", System.currentTimeMillis())
         )
         trimWorkingSet(working)
@@ -272,21 +273,33 @@ class AyanaProjectDevelopmentCoordinator(
         }
 
         val working = state.optJSONObject("working_set") ?: JSONObject()
-        val files = StringBuilder()
-        val keys = working.keys().asSequence().toList().sorted()
-        for (path in keys) {
+        val manifest = StringBuilder()
+        val keys =
+            working.keys().asSequence().toList()
+                .sortedByDescending { path ->
+                    working.optJSONObject(path)?.optLong("observed_at_ms", 0L) ?: 0L
+                }
+
+        for (path in keys.take(MAX_CONTEXT_MANIFEST_FILES)) {
             val item = working.optJSONObject(path) ?: continue
-            if (files.length >= MAX_CONTEXT_CHARS) break
-            files.append("\n--- FILE: ").append(path).append("\n")
-            files.append("SHA256: ").append(item.optString("sha256")).append("\n")
-            files.append(item.optString("content")).append("\n")
+            if (manifest.length >= MAX_CONTEXT_MANIFEST_CHARS) break
+            manifest.append("file=")
+                .append(path.take(MAX_CONTEXT_PATH_CHARS))
+                .append("|sha256=")
+                .append(item.optString("sha256").take(64))
+                .append("|chars=")
+                .append(item.optInt("content_chars", 0))
+                .append('\n')
         }
 
+        val diagnostic = state.optString("last_compile_output").trim()
+        val pending = state.optJSONArray("pending_transactions") ?: JSONArray()
+
         return buildString {
-            append("AYANA PROJECT DEVELOPMENT SESSION v1.3 / R10.28.8.5\n")
+            append("AYANA PROJECT DEVELOPMENT SESSION v1.4 / R10.28.8.9\n")
             append("session_id=").append(state.optString("session_id")).append('\n')
             append("project_id=").append(state.optString("project_id")).append('\n')
-            append("objective=").append(state.optString("objective")).append('\n')
+            append("objective_sha256=").append(state.optString("objective_sha256")).append('\n')
             append("coordinator_version=").append(VERSION).append('\n')
             append("build_attempts=").append(state.optInt("build_attempts", 0)).append('\n')
             append("repair_cycles=").append(state.optInt("repair_cycles", 0)).append('/')
@@ -295,17 +308,20 @@ class AyanaProjectDevelopmentCoordinator(
             append("source_commit_count=").append(state.optInt("source_commit_count", 0)).append('\n')
             append("green_build_count=").append(state.optInt("green_build_count", 0)).append('\n')
             append("terminal_state=").append(state.optString("terminal_state")).append('\n')
+            append("observation_sequence=").append(state.optLong("observation_sequence", 0L)).append('\n')
+            append("last_observation_tool=").append(state.optString("last_observation_tool")).append('\n')
+            append("last_observation_path=").append(state.optString("last_observation_path").take(MAX_CONTEXT_PATH_CHARS)).append('\n')
+            append("pending_transaction_count=").append(pending.length()).append('\n')
             if (state.optString("terminal_state") == "IMPLEMENTATION_REQUIRED") {
-                append("COMPLETION GATE: baseline APK is GREEN, but this objective explicitly requires source implementation and no source transaction has been committed in this session. Continue inspecting the requested implementation surface, write the required source changes, then rebuild. Do not return final success.\n")
+                append("COMPLETION GATE: explicit implementation still requires a verified source commit before GREEN can satisfy the objective.\n")
             }
-            val diagnostic = state.optString("last_compile_output")
             if (diagnostic.isNotBlank()) {
                 append("LAST VERIFIED BUILD DIAGNOSTIC:\n")
-                append(diagnostic).append('\n')
+                append(diagnostic.take(MAX_CONTEXT_DIAGNOSTIC_CHARS)).append('\n')
             }
-            append("PERSISTENT WORKING SET:")
-            append(files.toString().take(MAX_CONTEXT_CHARS))
-        }.take(MAX_CONTEXT_CHARS + MAX_DIAGNOSTIC_CHARS + 4000)
+            append("WORKING SET MANIFEST (source bodies intentionally omitted; the current verified read result carries exact content, and older files must be reread before mutation):\n")
+            append(manifest.toString().take(MAX_CONTEXT_MANIFEST_CHARS))
+        }.take(MAX_COMPACT_CONTEXT_CHARS)
     }
 
     /**
@@ -450,15 +466,18 @@ class AyanaProjectDevelopmentCoordinator(
     }
 
     companion object {
-        const val VERSION = "1.3"
+        const val VERSION = "1.4"
         const val MAX_REPAIR_CYCLES = 5
         private const val PREFS_NAME = "ayana_project_development_r10_28_8"
         private const val KEY_STATE = "state"
         private const val SESSION_TTL_MS = 2L * 60L * 60L * 1000L
         private const val MAX_WORKING_FILES = 12
-        private const val MAX_WORKING_FILE_CHARS = 48_000
         private const val MAX_DIAGNOSTIC_CHARS = 18_000
-        private const val MAX_CONTEXT_CHARS = 110_000
+        private const val MAX_CONTEXT_DIAGNOSTIC_CHARS = 7_000
+        private const val MAX_CONTEXT_MANIFEST_FILES = 12
+        private const val MAX_CONTEXT_MANIFEST_CHARS = 3_500
+        private const val MAX_CONTEXT_PATH_CHARS = 320
+        private const val MAX_COMPACT_CONTEXT_CHARS = 12_000
         private const val MAX_OBJECTIVE_CHARS = 12_000
         private val SHA256 = Regex("^[0-9a-f]{64}$")
     }
