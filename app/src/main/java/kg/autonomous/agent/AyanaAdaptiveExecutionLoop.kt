@@ -6,7 +6,7 @@ import java.security.MessageDigest
 import java.util.Locale
 
 /**
- * AYANA R10.5 Adaptive Execution Loop v1.1.
+ * AYANA R10.28.9.4 Adaptive Execution Loop v1.2.
  *
  * Purpose:
  * - give the existing stepwise Agent Core / local Android execution loop one explicit,
@@ -117,12 +117,19 @@ class AyanaAdaptiveExecutionLoop private constructor(
             )
         }
 
-        if (
-            hasVerifiedTransition(
-                signature = signature,
-                beforeStateFingerprint = cleanState
-            )
-        ) {
+        // R10.28.9.4: A completed workspace source read is idempotent. After a
+        // process/network interruption the model may request exactly one fresh
+        // revalidation of the same file against the same development state.
+        // All mutations and every other tool retain strict replay blocking;
+        // the second repeat of the same source read is still blocked.
+        val verifiedSameStateCount = countVerifiedTransitions(
+            signature = signature,
+            beforeStateFingerprint = cleanState
+        )
+        val boundedWorkspaceReadReplay =
+            !mayMutate && cleanTool == "project_workspace_read" &&
+                verifiedSameStateCount == 1
+        if (verifiedSameStateCount > 0 && !boundedWorkspaceReadReplay) {
             return decision(
                 allowed = false,
                 reason = "verified_transition_replay_blocked",
@@ -151,7 +158,11 @@ class AyanaAdaptiveExecutionLoop private constructor(
 
         return decision(
             allowed = true,
-            reason = "proposal_accepted",
+            reason = if (boundedWorkspaceReadReplay) {
+                "read_only_workspace_revalidation_accepted"
+            } else {
+                "proposal_accepted"
+            },
             signature = signature
         )
             .put("revision", revision)
@@ -527,21 +538,27 @@ class AyanaAdaptiveExecutionLoop private constructor(
             .put("unresolved_side_effect", unresolvedSideEffect)
             .put("execution_lane", executionLane)
 
-    private fun hasVerifiedTransition(
+    private fun countVerifiedTransitions(
         signature: String,
         beforeStateFingerprint: String
-    ): Boolean {
+    ): Int {
+        var count = 0
         for (index in 0 until verifiedSteps.length()) {
             val row = verifiedSteps.optJSONObject(index) ?: continue
             if (
                 row.optString("signature") == signature &&
                 row.optString("before_state") == beforeStateFingerprint
             ) {
-                return true
+                count++
             }
         }
-        return false
+        return count
     }
+
+    private fun hasVerifiedTransition(
+        signature: String,
+        beforeStateFingerprint: String
+    ): Boolean = countVerifiedTransitions(signature, beforeStateFingerprint) > 0
 
     private fun hasFailedTransition(
         signature: String,
@@ -562,7 +579,7 @@ class AyanaAdaptiveExecutionLoop private constructor(
     }
 
     companion object {
-        const val VERSION = "1.1"
+        const val VERSION = "1.2"
         const val MAX_REVISIONS = 3
 
         const val STATUS_ACTIVE = "ACTIVE"
@@ -638,7 +655,7 @@ class AyanaAdaptiveExecutionLoop private constructor(
             val version = snapshot.optString("version")
             if (
                 version.isNotBlank() &&
-                version !in setOf("1.0", VERSION)
+                version !in setOf("1.0", "1.1", VERSION)
             ) {
                 return create(
                     objective = fallbackObjective,

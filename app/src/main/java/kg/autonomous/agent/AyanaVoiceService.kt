@@ -4511,6 +4511,20 @@ mainHandler.postDelayed(
             STATE_THINKING
         )
 
+        // R10.28.9.4: Explicit control of an existing Durable Goal must win
+        // over generic autonomous-development session routing. This is an exact
+        // phrase check: "продолжи разработку ..." remains a new development
+        // instruction, while "продолжить" reopens the recoverable goal. Never
+        // create a fresh Agent Core objective for a resume-only command.
+        if (isDurableGoalResumePhrase(routingNormalized)) {
+            resumeDurableGoal(
+                silent = silent,
+                explicitConfirmation = false,
+                allowAutoResume = false
+            )
+            return
+        }
+
         // R10.28.8.2 AUTONOMOUS DEVELOPMENT ROUTING OWNERSHIP.
         // maybeStartExplicitSession() is a strict command classifier bound to the
         // frozen active Project. Once it owns this command, no generic deterministic
@@ -65098,6 +65112,15 @@ return try {
     ): Boolean =
         normalized in
             setOf(
+                "продолжить",
+                "продолжить задачу",
+                "продолжить текущую задачу",
+                "продолжить активную задачу",
+                "продолжить цель",
+                "продолжить текущую цель",
+                "продолжить активную цель",
+                "продолжаю активную цель",
+                "продолжаю активную задачу",
                 "продолжи задачу",
                 "продолжи текущую задачу",
                 "продолжи активную задачу",
@@ -67652,10 +67675,13 @@ connection
     )
 
     /**
-     * v12.15.1 transport policy. A deep read-only text request benefits more from one
-     * longer server window than from restarting the same generation after 18 seconds.
-     * Tool-result/verified-device-fact turns remain on the existing short bounded policy
-     * so device/action orchestration keeps its fail-closed latency and semantics.
+     * R10.28.9.3: A verified active Project development session needs a distinct
+     * response budget for Kotlin multi-file generation, including stateless
+     * continuations carrying verified Workspace tool results. A 18-second read
+     * timeout aborts the model before it can return an otherwise-valid full
+     * transaction. Only the frozen active Project development session receives
+     * the extended window; everyday, voice, device/action, and non-development
+     * tool-result requests retain their original bounded transport policy.
      */
     private fun resolveAgentCoreTransportPolicy(
         message: String?,
@@ -67667,6 +67693,20 @@ connection
         val hasToolResults =
             toolResults != null &&
                 toolResults.length() > 0
+
+        // The project ID was frozen for this execution turn. The coordinator
+        // verifies both project ownership and the durable session lease.
+        // This check must run even for a resumed Durable Goal: the source may
+        // be a short "Продолжаю активную цель" and toolResults may be nonempty.
+        if (
+            projectDevelopmentCoordinator.isActiveFor(activeCommandProjectId)
+        ) {
+            return AgentCoreTransportPolicy(
+                readTimeoutMs = AGENT_CORE_PROJECT_DEVELOPMENT_READ_TIMEOUT_MS,
+                retryCount = AGENT_CORE_PROJECT_DEVELOPMENT_RETRY_COUNT,
+                profile = "project_development"
+            )
+        }
 
         val normalized =
             message
@@ -67740,7 +67780,11 @@ connection
             commandHistoryStore.addEvent(
                 activeCommandHistoryId,
                 state = "agent_transport_policy",
-                message = "Для длинного read-only запроса выбран расширенный Agent Core budget",
+                message = if (transportPolicy.profile == "project_development") {
+                    "Для активной автономной разработки выбран расширенный Agent Core budget"
+                } else {
+                    "Для длинного read-only запроса выбран расширенный Agent Core budget"
+                },
                 details =
                     "profile=${transportPolicy.profile}; read_timeout_ms=${transportPolicy.readTimeoutMs}; retry_count=${transportPolicy.retryCount}"
             )
@@ -75836,7 +75880,7 @@ state
 
         // R10.27.4 VIDEO AUDIO ANALYSIS.
         private const val AYANA_VOICE_SERVICE_RELEASE =
-            "v12.68.5 / R10.28.8.5 DEVELOPMENT OBSERVATION SEQUENCE"
+            "v12.68.6 / R10.28.9.3 AUTONOMOUS DEVELOPMENT TRANSPORT RECOVERY"
 
         private const val AYANA_PERSONAL_SEARCH_ENGINE_RELEASE =
             "v2.0 / R10.20 PERSONAL SEARCH 2.0 + VERIFIED RESULT CONTRACT v2"
@@ -75964,6 +76008,10 @@ const val ACTION_START =
         private const val AGENT_CORE_CONNECT_TIMEOUT_MS = 15000
         private const val AGENT_CORE_READ_TIMEOUT_MS = 18000
         private const val AGENT_CORE_TIMEOUT_RETRY_COUNT = 1
+        // R10.28.9.3: bounded only to an active, project-bound development session;
+        // allows large verified file-result turns to finish before recovery kicks in.
+        private const val AGENT_CORE_PROJECT_DEVELOPMENT_READ_TIMEOUT_MS = 75000
+        private const val AGENT_CORE_PROJECT_DEVELOPMENT_RETRY_COUNT = 1
         private const val AGENT_CORE_LONG_READ_TIMEOUT_MS = 38000
         private const val AGENT_CORE_LONG_READ_TIMEOUT_RETRY_COUNT = 0
         private const val AGENT_CORE_RETRY_BACKOFF_MS = 350L
