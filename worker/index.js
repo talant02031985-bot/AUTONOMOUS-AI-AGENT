@@ -1,3 +1,7 @@
+// AYANA Worker v11.10.4 — R10.28.8.7 COMMITTED WRITE CONTINUATION OWNERSHIP
+// Recognizes only Android-generated commit continuation envelopes backed by the exact
+// verified project_workspace_transaction_committed tool result, then exposes and forces
+// github_apk_build as the sole next development action. Transaction-control is unavailable.
 // AYANA Worker v11.10.3 — R10.28.8.6 DEVELOPMENT SESSION MARKER COMPATIBILITY
 // Accepts trusted Project Development Session markers across coordinator minor versions (v1, v1.x / R10.28.8, R10.28.8.x), so a verified Workspace commit deterministically routes the next fresh turn to github_apk_build instead of transaction-control.
 // AYANA Worker v11.10.2 — R10.28.8.3 DEVELOPMENT COMPLETION EVIDENCE GATE
@@ -1581,6 +1585,10 @@ function isTrustedAutonomousProjectDevelopmentContinuation(message = "", toolRes
 
   if (!activeSessionMarker) return false;
 
+  if (raw.startsWith(AYANA_PROJECT_DEVELOPMENT_COMMIT_CONTINUATION_MARKER)) {
+    return isProjectDevelopmentCommitContinuation(raw, toolResults);
+  }
+
   if (normalized.startsWith("продолжение многошаговой задачи ayana")) {
     return true;
   }
@@ -2346,6 +2354,29 @@ function hasProjectWorkspaceVerifiedReadEvidence(toolResults) {
 
 const AYANA_WORKSPACE_STATELESS_CONTINUATION_MARKER =
   "AYANA_WORKSPACE_STATELESS_CONTINUATION_V1";
+
+const AYANA_PROJECT_DEVELOPMENT_COMMIT_CONTINUATION_MARKER =
+  "AYANA_PROJECT_DEVELOPMENT_COMMIT_CONTINUATION_V1";
+
+function isProjectDevelopmentCommitContinuation(message = "", toolResults = []) {
+  const rawMessage = String(message || "").trim();
+  if (!rawMessage.startsWith(AYANA_PROJECT_DEVELOPMENT_COMMIT_CONTINUATION_MARKER)) {
+    return false;
+  }
+
+  if (!Array.isArray(toolResults) || toolResults.length !== 1) {
+    return false;
+  }
+
+  const parsed = parseToolResultObject(toolResults[0]);
+  if (!parsed || parsed.success !== true || parsed.verified !== true) {
+    return false;
+  }
+
+  return String(parsed.status || "").trim() === "project_workspace_transaction_committed"
+    && parsed.project_development_session === true
+    && /^pws-[a-z0-9-]+$/u.test(String(parsed.transaction_id || "").trim());
+}
 
 function isProjectWorkspaceStatelessContinuation(message = "", toolResults = []) {
   const rawMessage = String(message || "").trim();
@@ -3236,7 +3267,10 @@ ${verifiedLocalEvidence}
     );
   const projectDevelopmentWorkspaceCommitFreshTurnMode =
     autonomousProjectDevelopmentMode
-    && hasProjectDevelopmentWorkspaceCommitFreshTurnObservation(message || "");
+    && (
+      isProjectDevelopmentCommitContinuation(message || "", toolResults)
+      || hasProjectDevelopmentWorkspaceCommitFreshTurnObservation(message || "")
+    );
   const projectWorkspaceBuildMode = !durableRecoveryMode
     && !autonomousProjectDevelopmentMode
     && !githubDevelopmentStatusCompletionMode
