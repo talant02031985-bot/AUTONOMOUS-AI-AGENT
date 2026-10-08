@@ -1,8 +1,8 @@
-// AYANA Worker v11.11.1 — R10.28.9.1 EVIDENCE-FIRST REPAIR ROUTING
+// AYANA Worker v11.11.2 — R10.28.9.2 DETERMINISTIC BUILD-REPAIR ROUTING
 // Never force an unchecked source mutation merely because source re-reads stagnated.
 // Diagnose and pin verified unread dependencies; require Coordinator source-review evidence
 // before deterministic write-only repair. Build dispatch and action authority unchanged.
-// AYANA Worker v11.11.0 — R10.28.8.13 SYSTEMIC REPAIR / COORDINATOR CONTRACT RECONCILIATION
+// Previous core: v11.11.0 R10.28.8.13; retained routing guards.
 // Aligns coordinator v1.5/v1.6+ session evidence, repairs the shadowed stagnation gate
 // in REPAIR_REQUIRED turns, and deterministically prevents identical source re-reads.
 // The next Project build remains gated on a fresh, verified Workspace source COMMIT.
@@ -1717,6 +1717,41 @@ function developmentRepairEvidence(message = "", toolResults = []) {
   if (cycle < 1 || maximum < 1 || cycle >= maximum) return null;
   const reviewReady = /(?:^|\n)source_review_ready=true(?=\r?\n|$)/u.test(header);
   return { cycle, maximum, reviewReady };
+}
+
+// R10.28.9.2: Only Android's frozen development-session ledger can authorize
+// deterministic repair-path selection. A user-supplied fake header has no
+// tool-result authority; trust the same verified stateless continuation gate.
+function developmentSessionEvidence(message = "", toolResults = []) {
+  if (!isTrustedAutonomousProjectDevelopmentContinuation(message, toolResults)) return null;
+  const header = String(message || "").split("PREVIOUS VERIFIED SOURCE BODIES (")[0];
+  const getNum = key => {
+    const m = header.match(new RegExp(`(?:^|\\n)${key}=(\\d+)(?=\\r?\\n|$)`, "u"));
+    return m ? Number(m[1]) : 0;
+  };
+  // The ledger lists only previously verified paths from the frozen Project tree.
+  const verifiedPath = key => Array.from(
+    header.matchAll(new RegExp(`(?:^|\\n)${key}=([^\\r\\n]{1,320})`, "gu")), m => m[1].trim()
+  ).filter(path => path.startsWith("app/") && !path.includes("..") && !path.includes("\\"));
+  const state = header.match(/(?:^|\n)terminal_state=([A-Z_]+)(?=\r?\n|$)/u)?.[1] || "";
+  return {
+    state,
+    buildAttempts: getNum("build_attempts"),
+    sourceCommitCount: getNum("source_commit_count"),
+    uniqueSources: getNum("unique_source_count"),
+    knownSourceCount: getNum("known_source_count"),
+    readCount: getNum("session_read_count"),
+    reviewReady: /(?:^|\n)source_review_ready=true(?=\r?\n|$)/u.test(header),
+    requiredPaths: verifiedPath("diagnostic_required_path"),
+    missingPaths: verifiedPath("diagnostic_missing_path"),
+    hasDiagnostic: /(?:^|\n)LAST VERIFIED BUILD DIAGNOSTIC:(?:\r?\n)/u.test(header)
+  };
+}
+
+function isHistoricalFailedBuildRepairIntent(message = "") {
+  const n = normalizeIntentText(message || "");
+  return /(?:последн|предыдущ|неудачн|ошибк|failed|failure|compile_output|run id|run_id)/u.test(n)
+    && /(?:сборк|build|kapt|компиляц|run id|run_id)/u.test(n);
 }
 
 function projectDevelopmentPinnedReadTool(path) {
@@ -3456,7 +3491,8 @@ AUTONOMOUS PROJECT DEVELOPMENT LOOP v1 — R10.28.8:
 - Android удерживает persistent working set между stateless turns. Используй его как фактический контекст, но перед повторным UPDATE уже изменённого файла обязательно перечитай этот файл для свежего exact SHA.
 - В development session project_workspace_write_transaction автоматически проходит локальный PREPARE + exact-id binding + commit под уже данной пользователем development authority. Никогда не добавляй confirmed=true сам.
 - github_apk_build внутри этой сессии автоматически делает локальный PREPARE + exact Project proof binding и запускает только dedicated Project repository. Никогда не добавляй confirmed=true сам.
-- После result status=project_development_repair_required НЕ завершай задачу. compile_output — подтверждённая причина failed build. Исправь только необходимые файлы и повтори build.
+- После status=project_development_repair_required НЕ завершай задачу. Android выбирает diagnostic_missing_path по фактическому build log; читай именно эти файлы, а после source_review_ready=true сразу формируй один coherent exact-SHA write. Не запускай обход всех файлов проекта.
+- Если предыдущая неудачная сборка названа пользователем, но у новой сессии ещё нет verified compile_output, один исходный baseline build допустим только для получения свежей проверенной диагностики. Это не достижение ТЗ.
 - Не выдумывай DAO/API/symbols. Если compile_output указывает unresolved reference/signature mismatch, сначала project_workspace_read фактического declaration/source dependency и только затем правь caller или declaration.
 - Максимум 5 repair/build циклов. Если Android сообщает REPAIR_LIMIT_REACHED или другой fail-closed terminal, остановись и верни точную оставшуюся ошибку.
 - Для команды с явной реализацией/изменением исходников GREEN baseline сам по себе НЕ завершает цель. До финала Android должен подтвердить source_commit_count>0 для текущей development session.
@@ -3757,8 +3793,16 @@ ${AYANA_VERIFIED_LOCAL_EVIDENCE_INSTRUCTIONS}` : ""}${responseIntegrityInstructi
     payload.tools = [githubDevelopmentTool];
     payload.tool_choice = { type: "function", name: "github_development_transaction" };
   } else if (autonomousProjectDevelopmentMode) {
+    const sessionEvidence = developmentSessionEvidence(message || "", toolResults);
+    const diagnosticBaselineNeeded = sessionEvidence
+      && sessionEvidence.state === "ACTIVE"
+      && !sessionEvidence.hasDiagnostic
+      && sessionEvidence.buildAttempts === 0
+      && sessionEvidence.sourceCommitCount === 0
+      && isHistoricalFailedBuildRepairIntent(message || "");
     const implementationEvidencePending = projectDevelopmentImplementationEvidencePending(message || "");
-    const allowDevelopmentBuild = !implementationEvidencePending || projectDevelopmentWorkspaceCommitFreshTurnMode;
+    const allowDevelopmentBuild = !implementationEvidencePending
+      || projectDevelopmentWorkspaceCommitFreshTurnMode || diagnosticBaselineNeeded;
     const latestDevelopmentWorkspaceStatus = latestProjectWorkspaceContinuationStatus(toolResults);
     const developmentTools = projectAutonomousDevelopmentTools({ allowBuild: allowDevelopmentBuild });
     const stagnation = developmentStagnationEvidence(message || "", toolResults);
@@ -3776,11 +3820,42 @@ ${AYANA_VERIFIED_LOCAL_EVIDENCE_INSTRUCTIONS}` : ""}${responseIntegrityInstructi
     } else if (projectDevelopmentWorkspaceCommitFreshTurnMode) {
       payload.tools = developmentTools.filter(tool => tool.name === "github_apk_build");
       payload.tool_choice = { type: "function", name: "github_apk_build" };
-    } else if (stagnation && repair && stagnation.reviewReady) {
-      // Verified complete diagnostic-related source evidence permits one coherent
-      // SHA-bound write PREPARE; unrelated unread files need not be scanned.
+    } else if (diagnosticBaselineNeeded) {
+      // A new development session cannot retrieve a historical failed run via
+      // the existing Project Build tool. Request one *real* baseline build to
+      // obtain verified diagnostic evidence, rather than scanning 48 source files.
+      // Coordinator's build_attempts prevents replaying this baseline transition.
+      payload.tools = developmentTools.filter(tool => tool.name === "github_apk_build");
+      payload.tool_choice = { type: "function", name: "github_apk_build" };
+    } else if (repair && sessionEvidence?.reviewReady) {
+      // First complete the verified error/dependency review, then immediately
+      // prepare one SHA-bound coherent repair. No stagnation threshold needed.
       payload.tools = developmentTools.filter(tool => tool.name === "project_workspace_write_transaction");
       payload.tool_choice = { type: "function", name: "project_workspace_write_transaction" };
+    } else if (repair && sessionEvidence?.missingPaths?.length > 0) {
+      const pinnedRead = projectDevelopmentPinnedReadTool(sessionEvidence.missingPaths[0]);
+      if (pinnedRead) {
+        payload.tools = [pinnedRead];
+        payload.tool_choice = { type: "function", name: "project_workspace_read" };
+      } else {
+        payload.tools = developmentTools.filter(tool => tool.name === "project_workspace_list");
+        payload.tool_choice = { type: "function", name: "project_workspace_list" };
+      }
+    } else if (repair && sessionEvidence && sessionEvidence.knownSourceCount === 0) {
+      // On the first failed build, Android may have no verified Project tree yet.
+      // Require one full recursive discovery, not 48 guessed file reads.
+      payload.tools = developmentTools.filter(tool => tool.name === "project_workspace_list");
+      payload.tool_choice = { type: "function", name: "project_workspace_list" };
+      payload.instructions += "\nRead the frozen Project tree recursively (path=\"\", recursive=true, limit=200) to establish real diagnostic file paths.";
+    } else if (repair && sessionEvidence &&
+        (sessionEvidence.requiredPaths.length === 0 ||
+         (!sessionEvidence.reviewReady && sessionEvidence.missingPaths.length === 0))) {
+      // Diagnostic cannot be mapped to complete SHA-verified source bodies.
+      // An uncontrolled read loop is NOT a valid recovery strategy. Fail closed
+      // with precise evidence gap; preserve the committed work and build run.
+      payload.tools = [];
+      payload.tool_choice = "none";
+      payload.instructions += "\nEVIDENCE_MISSING_STOP: Return a concise factual explanation of unavailable compiler-referenced source evidence and the last verified build error. Do NOT report BUILD GREEN or request rollback.";
     } else if (stagnation && stagnation.nextUnreadPath) {
       // A real, unread path from the verified Workspace list takes precedence
       // whenever diagnostic review is incomplete, including repeated reads.
@@ -3794,8 +3869,8 @@ ${AYANA_VERIFIED_LOCAL_EVIDENCE_INSTRUCTIONS}` : ""}${responseIntegrityInstructi
         payload.tool_choice = { type: "function", name: "project_workspace_list" };
       }
     } else if (stagnation && repair && !stagnation.reviewReady) {
-      // The Coordinator cannot prove that every compiler-referenced source has
-      // been reviewed. Read-only evidence expansion is safer than a blind write.
+      // A diagnostic may be unavailable / unparseable. Keep read-only access;
+      // never force a speculative source mutation to escape a repetition loop.
       payload.tools = developmentTools.filter(tool => [
         "project_workspace_list", "project_workspace_read"
       ].includes(tool.name));
@@ -4410,7 +4485,7 @@ export default {
         service: "AYANA AI",
         ai: "ready",
         agent_core: "v11.1-v12.15-completion-integrity",
-        worker: "v11.11.0-r10.28.8.13-systemic-repair-routing",
+        worker: "v11.11.2-r10.28.9.2-compiler-evidence-routing",
         voice: "marin"
       });
     }
