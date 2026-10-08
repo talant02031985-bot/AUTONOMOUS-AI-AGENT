@@ -7,7 +7,7 @@ import java.security.MessageDigest
 import java.util.Locale
 
 /**
- * AYANA Project Development Coordinator v1.4 — R10.28.8.9 DEVELOPMENT CONTEXT COMPACTION.
+ * AYANA Project Development Coordinator v1.6 — R10.28.8.12 DEVELOPMENT SESSION INTENT ALIGNMENT.
  *
  * Bounded authority for one explicitly requested autonomous Project development objective.
  * The user's explicit "develop/build to GREEN" command is the session authority. It never
@@ -371,7 +371,7 @@ class AyanaProjectDevelopmentCoordinator(
         val pending = state.optJSONArray("pending_transactions") ?: JSONArray()
 
         return buildString {
-            append("AYANA PROJECT DEVELOPMENT SESSION v1.5 / R10.28.8.10\n")
+            append("AYANA PROJECT DEVELOPMENT SESSION v1.6 / R10.28.8.12\n")
             append("session_id=").append(state.optString("session_id")).append('\n')
             append("project_id=").append(state.optString("project_id")).append('\n')
             append("objective_sha256=").append(state.optString("objective_sha256")).append('\n')
@@ -516,8 +516,8 @@ class AyanaProjectDevelopmentCoordinator(
     private fun isExplicitAutonomousDevelopmentCommand(command: String): Boolean {
         val n = command.lowercase(Locale.ROOT).replace('ё', 'е').replace(Regex("\\s+"), " ").trim()
         if (n.startsWith("ayana_development_session_continue")) return false
-        val develop = Regex("(?:разработай|разработать|доведи|доделай|реализуй|создай|собери|исправь).*(?:приложени|проект|apk|android|workspace|store accounting)").containsMatchIn(n)
-        val autonomous = Regex("(?:до green|до успешн|до рабоч|до готов|сам[ао]? исправ|автоном|самостоятель|по тз|тех(?:ническ)?[а-я ]*задан)").containsMatchIn(n)
+        val develop = Regex("(?:продолжи(?:\\s+(?:разработку|исправление))?|разработай|разработать|доведи|доделай|реализуй|создай|собери|исправь).*(?:приложени|проект|apk|android|workspace|store accounting)").containsMatchIn(n)
+        val autonomous = Regex("(?:до\\s+(?:verified\\s+)?green|verified[ _-]*green|до успешн|до рабоч|до готов|сам[ао]? исправ|автоном|самостоятель|по тз|тех(?:ническ)?[а-я ]*задан)").containsMatchIn(n)
         return develop && autonomous
     }
 
@@ -571,7 +571,7 @@ class AyanaProjectDevelopmentCoordinator(
     }
 
     companion object {
-        const val VERSION = "1.5"
+        const val VERSION = "1.6"
         const val MAX_REPAIR_CYCLES = 5
         private const val PREFS_NAME = "ayana_project_development_r10_28_8"
         private const val KEY_STATE = "state"
