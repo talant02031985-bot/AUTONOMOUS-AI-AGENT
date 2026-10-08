@@ -7,7 +7,7 @@ import java.security.MessageDigest
 import java.util.Locale
 
 /**
- * AYANA Project Development Coordinator v1.7 — R10.28.9.1 EVIDENCE FIRST / BUILD TRUTH.
+ * AYANA Project Development Coordinator v1.8 — R10.28.9.2 PINNED COMPILER DEPENDENCIES.
  *
  * Bounded authority for one explicitly requested autonomous Project development objective.
  * The user's explicit "develop/build to GREEN" command is the session authority. It never
@@ -76,6 +76,7 @@ class AyanaProjectDevelopmentCoordinator(
                 .put("source_commit_count", 0)
                 .put("green_build_count", 0)
                 .put("observation_sequence", 0L)
+                .put("session_read_count", 0)
                 .put("working_set", JSONObject())
                 .put("pending_transactions", JSONArray())
                 .put("last_compile_output", "")
@@ -119,6 +120,7 @@ class AyanaProjectDevelopmentCoordinator(
         val state = load()
         normalizeState(state)
         val working = state.optJSONObject("working_set") ?: JSONObject()
+        state.put("session_read_count", state.optInt("session_read_count", 0) + 1)
         val previous = working.optJSONObject(path)
         val changed = previous == null || previous.optString("sha256") != sha
         val cachedContent = if (
@@ -141,7 +143,7 @@ class AyanaProjectDevelopmentCoordinator(
             entry.put("content", previous.optString("content"))
         }
         working.put(path, entry)
-        trimWorkingSet(working)
+        trimWorkingSet(working, diagnosticRequiredPaths(state))
         state.put("working_set", working)
 
         if (changed) {
@@ -389,9 +391,14 @@ class AyanaProjectDevelopmentCoordinator(
 
         val cached = StringBuilder()
         var cachedCount = 0
-        // Prefer small complete bodies. An exact SHA + a truncated body is never
-        // sufficient evidence for a source rewrite.
-        for (path in keys.sortedBy { working.optJSONObject(it)?.optInt("content_chars", Int.MAX_VALUE) ?: Int.MAX_VALUE }) {
+        // Put *compiler-referenced* full bodies first. Previously smallest-first
+        // caching silently evicted AppNavigation/Repository, even when every
+        // compiler-referenced file had been read and review was marked ready.
+        val requiredForRepair = diagnosticRequiredPaths(state)
+        val orderedForContext = (requiredForRepair + keys.sortedBy {
+            working.optJSONObject(it)?.optInt("content_chars", Int.MAX_VALUE) ?: Int.MAX_VALUE
+        }).distinct()
+        for (path in orderedForContext) {
             val item = working.optJSONObject(path) ?: continue
             if (!item.has("content")) continue
             val body = item.optString("content")
@@ -410,12 +417,14 @@ class AyanaProjectDevelopmentCoordinator(
             .filter { it.isNotBlank() && it !in readPaths }
             .sortedWith(compareBy<String> { sourcePriority(it, state.optString("last_compile_output")) }.thenBy { it })
         val reviewReady = sourceReviewReady(state)
+        val requiredForDiagnostic = diagnosticRequiredPaths(state)
+        val missingForDiagnostic = missingDiagnosticPaths(state)
         val stagnant = state.optInt("stagnant_read_count", 0)
         val diagnostic = state.optString("last_compile_output").trim()
         val pending = state.optJSONArray("pending_transactions") ?: JSONArray()
 
         return buildString {
-            append("AYANA PROJECT DEVELOPMENT SESSION v1.7 / R10.28.9.1\n")
+            append("AYANA PROJECT DEVELOPMENT SESSION v1.8 / R10.28.9.2\n")
             append("session_id=").append(state.optString("session_id")).append('\n')
             append("project_id=").append(state.optString("project_id")).append('\n')
             append("objective_sha256=").append(state.optString("objective_sha256")).append('\n')
@@ -430,12 +439,16 @@ class AyanaProjectDevelopmentCoordinator(
             append("green_build_count=").append(state.optInt("green_build_count", 0)).append('\n')
             append("terminal_state=").append(state.optString("terminal_state")).append('\n')
             append("observation_sequence=").append(state.optLong("observation_sequence", 0L)).append('\n')
+            append("session_read_count=").append(state.optInt("session_read_count", 0)).append('\n')
             append("last_observation_tool=").append(state.optString("last_observation_tool")).append('\n')
             append("last_observation_path=").append(state.optString("last_observation_path").take(MAX_CONTEXT_PATH_CHARS)).append('\n')
             append("unique_source_count=").append(keys.size).append('\n')
+            append("known_source_count=").append(known.length()).append('\n')
             append("cached_source_count=").append(cachedCount).append('\n')
             append("stagnant_read_count=").append(stagnant).append('\n')
             append("source_review_ready=").append(reviewReady).append('\n')
+            requiredForDiagnostic.forEach { append("diagnostic_required_path=").append(it).append('\n') }
+            missingForDiagnostic.forEach { append("diagnostic_missing_path=").append(it).append('\n') }
             append("pending_transaction_count=").append(pending.length()).append('\n')
             if (stagnant >= STAGNATION_THRESHOLD) {
                 append("STAGNATION: unchanged SHA reads are not progress. Read actual missing dependencies first. Never force a write when source_review_ready=false.\n")
@@ -541,10 +554,15 @@ class AyanaProjectDevelopmentCoordinator(
             .put("acceptance_verified", state.optBoolean("acceptance_verified", false))
             .put("pending_transaction_count", (state.optJSONArray("pending_transactions") ?: JSONArray()).length())
 
-    private fun trimWorkingSet(working: JSONObject) {
+    // Compiler-referenced sources are not disposable LRU entries. Losing a caller
+    // or provider SHA during inspection makes source_review_ready impossible and
+    // causes repeated Workspace reads until the global 48-step limit.
+    private fun trimWorkingSet(working: JSONObject, pinnedPaths: List<String>) {
         val keys = working.keys().asSequence().toMutableList()
         if (keys.size <= MAX_WORKING_FILES) return
-        keys.sortBy { working.optJSONObject(it)?.optLong("observed_at_ms", 0L) ?: 0L }
+        val pins = pinnedPaths.take(MAX_PINNED_REPAIR_FILES).toSet()
+        keys.sortWith(compareBy<String> { it in pins }
+            .thenBy { working.optJSONObject(it)?.optLong("observed_at_ms", 0L) ?: 0L })
         keys.take(keys.size - MAX_WORKING_FILES).forEach { working.remove(it) }
     }
 
@@ -594,6 +612,7 @@ class AyanaProjectDevelopmentCoordinator(
         if (!state.has("observation_sequence")) {
             state.put("observation_sequence", 0L)
         }
+        if (!state.has("session_read_count")) state.put("session_read_count", 0)
         if (!state.has("stagnant_read_count")) {
             state.put("stagnant_read_count", 0)
         }
@@ -647,44 +666,61 @@ class AyanaProjectDevelopmentCoordinator(
         return sha256(if (signatures.isNotEmpty()) signatures.joinToString("\n") else diagnostic.take(3000))
     }
 
+    private fun diagnosticRequiredPaths(state: JSONObject): List<String> {
+        if (state.optString("terminal_state") != "REPAIR_REQUIRED") return emptyList()
+        val diagnostic = state.optString("last_compile_output")
+        if (diagnostic.isBlank() || diagnostic.startsWith("BUILD_LOG_")) return emptyList()
+        val known = state.optJSONArray("known_source_paths") ?: return emptyList()
+        val paths = (0 until known.length()).map { known.optString(it) }
+            .filter { isSafeSourcePath(it) && (it.endsWith(".kt") || it.endsWith(".java")) }
+        val primary = paths.filter { path ->
+            diagnostic.contains(path, ignoreCase = true) ||
+                diagnostic.contains(path.substringAfterLast('/'), ignoreCase = true) ||
+                (path.endsWith(".kt") && diagnostic.contains(
+                    path.substringAfterLast('/').removeSuffix(".kt") + ".java", ignoreCase = true
+                ))
+        }.toMutableSet()
+        if (primary.isEmpty()) return emptyList()
+        if (diagnostic.contains("unresolved reference", ignoreCase = true) ||
+            diagnostic.contains("Unresolved reference", ignoreCase = true)
+        ) {
+            if (primary.any { it.endsWith("Repository.kt") }) {
+                primary.addAll(paths.filter { it.endsWith("Dao.kt") })
+            }
+            if (primary.any { it.endsWith("Navigation.kt") || it.endsWith("Screen.kt") }) {
+                primary.addAll(paths.filter { it.endsWith("Repository.kt") })
+            }
+        }
+        return primary.sortedWith(compareBy<String> { sourcePriority(it, diagnostic) }.thenBy { it })
+            .take(MAX_PINNED_REPAIR_FILES)
+    }
+
+    private fun missingDiagnosticPaths(state: JSONObject): List<String> {
+        val working = state.optJSONObject("working_set") ?: JSONObject()
+        return diagnosticRequiredPaths(state).filter { path ->
+            val entry = working.optJSONObject(path)
+            val content = entry?.optString("content").orEmpty()
+            val sha = entry?.optString("sha256").orEmpty()
+            entry == null || !SHA256.matches(sha) || sha256(content) != sha
+        }
+    }
+
     private fun sourceReviewReady(state: JSONObject): Boolean {
         if (state.optString("terminal_state") != "REPAIR_REQUIRED") return false
         val diagnostic = state.optString("last_compile_output")
         if (diagnostic.isBlank() || diagnostic.contains("truncated=true") ||
             diagnostic.startsWith("BUILD_LOG_")
         ) return false
+        val required = diagnosticRequiredPaths(state)
+        if (required.isEmpty() || missingDiagnosticPaths(state).isNotEmpty()) return false
         val working = state.optJSONObject("working_set") ?: return false
-        val known = state.optJSONArray("known_source_paths") ?: return false
-        if (known.length() == 0) return false
-        val knownPaths = (0 until known.length()).map { known.optString(it) }
-            .filter(String::isNotBlank)
-        val referenced = knownPaths.filter { path ->
-            diagnostic.contains(path, ignoreCase = true) ||
-                diagnostic.contains(path.substringAfterLast('/'), ignoreCase = true) ||
-                (path.endsWith(".kt") && diagnostic.contains(
-                    path.substringAfterLast('/').removeSuffix(".kt") + ".java",
-                    ignoreCase = true
-                ))
-        }.toMutableSet()
-        if (referenced.isEmpty()) return false
-        // Unresolved symbols in a caller demand verified declaration evidence.
-        // This conservative relation does not assert that the files are correct;
-        // it only prevents writing when a likely provider has never been read.
-        if (diagnostic.contains("unresolved reference", ignoreCase = true)) {
-            if (referenced.any { it.contains("Repository.kt", ignoreCase = true) }) {
-                referenced.addAll(knownPaths.filter { it.endsWith("Dao.kt") })
-            }
-            if (referenced.any { it.contains("Navigation.kt", ignoreCase = true) ||
-                    it.contains("Screen.kt", ignoreCase = true) }) {
-                referenced.addAll(knownPaths.filter { it.endsWith("Repository.kt") })
-            }
+        // The model must actually receive complete verified bodies in the next
+        // stateless continuation; a manifest-only SHA is not enough to write safely.
+        val total = required.sumOf { path ->
+            val body = working.optJSONObject(path)?.optString("content").orEmpty()
+            body.length + path.length + 150
         }
-        return referenced.all { path ->
-            val entry = working.optJSONObject(path) ?: return@all false
-            val content = entry.optString("content")
-            val sha = entry.optString("sha256")
-            SHA256.matches(sha) && sha256(content) == sha
-        }
+        return total <= MAX_CONTEXT_SOURCE_CHARS
     }
 
     private fun sha256(text: String): String {
@@ -693,7 +729,7 @@ class AyanaProjectDevelopmentCoordinator(
     }
 
     companion object {
-        const val VERSION = "1.7"
+        const val VERSION = "1.8"
         const val MAX_REPAIR_CYCLES = 5
         private const val MAX_TOTAL_REPAIR_CYCLES = 20
         private const val MAX_SESSION_DURATION_MS = 24L * 60L * 60L * 1000L
@@ -701,6 +737,7 @@ class AyanaProjectDevelopmentCoordinator(
         private const val KEY_STATE = "state"
         private const val SESSION_TTL_MS = 2L * 60L * 60L * 1000L
         private const val MAX_WORKING_FILES = 12
+        private const val MAX_PINNED_REPAIR_FILES = 8
         private const val MAX_CACHED_SOURCE_CHARS = 24_000
         private const val MAX_CONTEXT_SOURCE_CHARS = 28_000
         private const val MAX_KNOWN_SOURCE_PATHS = 250
