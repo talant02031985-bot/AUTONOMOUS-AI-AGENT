@@ -1,3 +1,7 @@
+// AYANA Worker v11.11.0 — R10.28.8.13 SYSTEMIC REPAIR / COORDINATOR CONTRACT RECONCILIATION
+// Aligns coordinator v1.5/v1.6+ session evidence, repairs the shadowed stagnation gate
+// in REPAIR_REQUIRED turns, and deterministically prevents identical source re-reads.
+// The next Project build remains gated on a fresh, verified Workspace source COMMIT.
 // AYANA Worker v11.10.9 — R10.28.8.12 VERIFIED INTENT ROUTING HARDENING
 // Workspace transaction control requires an explicit leading control directive.
 // A generic project repair mentioning Workspace transaction + "проверь" is NOT control.
@@ -1677,7 +1681,7 @@ function projectAutonomousDevelopmentTools({ allowBuild = true } = {}) {
 function developmentStagnationEvidence(message = "", toolResults = []) {
   if (!isTrustedAutonomousProjectDevelopmentContinuation(message, toolResults)) return null;
   const raw = String(message || "");
-  if (!/AYANA PROJECT DEVELOPMENT SESSION v1\.5 \/ R10\.28\.8\.10/u.test(raw)) return null;
+  if (!/AYANA PROJECT DEVELOPMENT SESSION v1(?:\.\d+)? \/ R10\.28\.8(?:\.\d+)?/u.test(raw)) return null;
   // Never parse scheduler metadata from cached source: its content is untrusted.
   const header = raw.split("PREVIOUS VERIFIED SOURCE BODIES (")[0];
   const getNum = key => {
@@ -1698,7 +1702,7 @@ function developmentStagnationEvidence(message = "", toolResults = []) {
 function developmentRepairEvidence(message = "", toolResults = []) {
   if (!isTrustedAutonomousProjectDevelopmentContinuation(message, toolResults)) return null;
   const raw = String(message || "");
-  if (!/AYANA PROJECT DEVELOPMENT SESSION v1\.5 \/ R10\.28\.8\.10/u.test(raw)) return null;
+  if (!/AYANA PROJECT DEVELOPMENT SESSION v1(?:\.\d+)? \/ R10\.28\.8(?:\.\d+)?/u.test(raw)) return null;
   const header = raw.split("PREVIOUS VERIFIED SOURCE BODIES (")[0];
   if (!/(?:^|\n)terminal_state=REPAIR_REQUIRED(?=\r?\n|$)/u.test(header)) return null;
   const count = header.match(/(?:^|\n)repair_cycles=(\d+)\/(\d+)(?=\r?\n|$)/u);
@@ -3756,17 +3760,19 @@ ${AYANA_VERIFIED_LOCAL_EVIDENCE_INSTRUCTIONS}` : ""}${responseIntegrityInstructi
     if (projectDevelopmentWorkspaceCommitFreshTurnMode) {
       payload.tools = developmentTools.filter(tool => tool.name === "github_apk_build");
       payload.tool_choice = { type: "function", name: "github_apk_build" };
-    } else if (repair) {
-      // A failed build is not a new permission to cancel/accept/rollback the
-      // committed transaction. Repair code first. Only an exactly verified
-      // repair commit is permitted to reopen the build-only path above.
-      payload.tools = developmentTools.filter(tool => [
-        "project_workspace_read", "project_workspace_list", "project_workspace_write_transaction"
-      ].includes(tool.name));
-      payload.tool_choice = "auto";
-    } else if (stagnation && stagnation.nextUnreadPath && stagnation.cached < 6) {
-      // Verified list already exposed this exact real path. A repeated unchanged
-      // Entity/DAO read cannot consume another autonomous plan step.
+    } else if (stagnation && stagnation.cached >= 2 && (
+      stagnation.stagnant >= 2 || !stagnation.nextUnreadPath
+    )) {
+      // R10.28.8.13: REPAIR_REQUIRED must NOT shadow the replay/stagnation gate.
+      // Two unchanged re-reads after the build diagnostic are enough: source
+      // snapshots and exact SHAs are already in the trusted Coordinator context.
+      // Build and transaction-control remain unavailable until a fresh COMMIT.
+      payload.tools = developmentTools.filter(tool => tool.name === "project_workspace_write_transaction");
+      payload.tool_choice = { type: "function", name: "project_workspace_write_transaction" };
+    } else if (stagnation && stagnation.nextUnreadPath) {
+      // The verified Project list produced an unread actual source path. Pin the
+      // ONE safe read to it rather than accepting a repeated model-selected file.
+      // This also applies in REPAIR_REQUIRED; read-only evidence is not mutation.
       const pinnedRead = projectDevelopmentPinnedReadTool(stagnation.nextUnreadPath);
       if (pinnedRead) {
         payload.tools = [pinnedRead];
@@ -3775,12 +3781,18 @@ ${AYANA_VERIFIED_LOCAL_EVIDENCE_INSTRUCTIONS}` : ""}${responseIntegrityInstructi
         payload.tools = developmentTools.filter(tool => tool.name === "project_workspace_write_transaction");
         payload.tool_choice = { type: "function", name: "project_workspace_write_transaction" };
       }
-    } else if (stagnation && stagnation.cached >= 2) {
-      // The verified source snapshots are available in compactContext. Stop
-      // spending tool turns rereading identical SHAs: commit a coherent batch.
-      // Android still requires exact SHA guards and validates the PREPARE.
+    } else if (stagnation && stagnation.cached >= 1) {
+      // No verified unread path remains: stop the read loop and request a
+      // SHA-bound coherent repair from existing complete cached source bodies.
       payload.tools = developmentTools.filter(tool => tool.name === "project_workspace_write_transaction");
       payload.tool_choice = { type: "function", name: "project_workspace_write_transaction" };
+    } else if (repair) {
+      // A failed build permits read/list/write only. It does NOT authorize
+      // cancel/accept/rollback, nor an unmodified rebuild.
+      payload.tools = developmentTools.filter(tool => [
+        "project_workspace_read", "project_workspace_list", "project_workspace_write_transaction"
+      ].includes(tool.name));
+      payload.tool_choice = "auto";
     } else if (latestDevelopmentWorkspaceStatus === "project_workspace_ready") {
       // One verified status observation is enough. Deterministically advance to the
       // project tree instead of allowing the model to spend stateless turns asking
@@ -4375,7 +4387,7 @@ export default {
         service: "AYANA AI",
         ai: "ready",
         agent_core: "v11.1-v12.15-completion-integrity",
-        worker: "v11.10.9-r10.28.8.12-verified-intent-routing",
+        worker: "v11.11.0-r10.28.8.13-systemic-repair-routing",
         voice: "marin"
       });
     }
