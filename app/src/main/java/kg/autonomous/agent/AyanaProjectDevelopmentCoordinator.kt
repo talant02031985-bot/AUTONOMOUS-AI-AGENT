@@ -476,7 +476,7 @@ class AyanaProjectDevelopmentCoordinator(
         val pending = state.optJSONArray("pending_transactions") ?: JSONArray()
 
         return buildString {
-            append("AYANA PROJECT DEVELOPMENT SESSION v1.9 / R10.28.9.5\n")
+            append("AYANA PROJECT DEVELOPMENT SESSION v1.10 / R10.28.9.6\n")
             append("session_id=").append(state.optString("session_id")).append('\n')
             append("project_id=").append(state.optString("project_id")).append('\n')
             append("objective_sha256=").append(state.optString("objective_sha256")).append('\n')
@@ -533,7 +533,8 @@ class AyanaProjectDevelopmentCoordinator(
             "domain" in path.lowercase(Locale.ROOT) -> 2
             "mainactivity" in name -> 3
             "appnavigation" in name || "navigation" in name -> 4
-            "viewmodel" in name -> 5
+            "theme" in name || "colors" in name || name == "color.kt" -> 5
+            "viewmodel" in name -> 6
             "screen" in name -> 6
             "dao" in name -> 7
             "entit" in name -> 8
@@ -642,9 +643,17 @@ class AyanaProjectDevelopmentCoordinator(
     private fun isExplicitAutonomousDevelopmentCommand(command: String): Boolean {
         val n = command.lowercase(Locale.ROOT).replace('ё', 'е').replace(Regex("\\s+"), " ").trim()
         if (n.startsWith("ayana_development_session_continue")) return false
-        val develop = Regex("(?:продолжи(?:\\s+(?:разработку|исправление))?|разработай|разработать|доведи|доделай|реализуй|создай|собери|исправь).*(?:приложени|проект|apk|android|workspace|store accounting)").containsMatchIn(n)
-        val autonomous = Regex("(?:до\\s+(?:verified\\s+)?green|verified[ _-]*green|до успешн|до рабоч|до готов|сам[ао]? исправ|автоном|самостоятель|по тз|тех(?:ническ)?[а-я ]*задан)").containsMatchIn(n)
-        return develop && autonomous
+        val startNewDevelopment = Regex(
+            "^(?:начни|начать|запусти|выполни|выполнить|проведи)\\s+(?:(?:новую|новый)\\s+)?(?:(?:автономную|автономный)\\s+)?(?:(?:задачу|сессию|этап)\\s+)?(?:разработки|разработку|создания|реализации)(?=\\s|$|[?.!,;:—-])"
+        ).containsMatchIn(n)
+        val develop = Regex(
+            "(?:продолжи(?:\\s+(?:разработку|исправление))?|начни|начать|запусти|выполни|выполнить|разработай|разработать|доведи|доделай|реализуй|реализовать|создай|создать|собери|исправь).*(?:разработк|приложени|проект|apk|android|workspace|store accounting)"
+        ).containsMatchIn(n)
+        val autonomous = Regex(
+            "(?:до\\s+(?:verified\\s+)?green|verified[ _-]*green|до успешн|до рабоч|до готов|сам[ао]? исправ|автоном|самостоятель|по тз|тех(?:ническ)?[а-я ]*задан)"
+        ).containsMatchIn(n)
+        val scopedProject = Regex("(?:проект|приложени|android|apk|workspace|store accounting)").containsMatchIn(n)
+        return scopedProject && autonomous && (startNewDevelopment || develop)
     }
 
 
@@ -715,6 +724,8 @@ class AyanaProjectDevelopmentCoordinator(
         // corrected workspace may legitimately need only verification. Explicit
         // implementation verbs, however, require at least one verified source commit
         // in the current development session before GREEN can satisfy the objective.
+        if (Regex("^(?:начни|запусти|выполни)\\s+(?:(?:новую|новый)\\s+)?(?:(?:автономную|автономный)\\s+)?(?:(?:задачу|сессию|этап)\\s+)?(?:разработки|разработку|создания|реализации)(?=\\s|$|[?.!,;:—-])")
+                .containsMatchIn(n)) return true
         return Regex(
             "(?:^|\\s)(?:реализуй|реализовать|разработай|разработать|доделай|доделать|добавь|добавить|создай|создать|исправь|исправить)(?=\\s|$|[?.!,;:—-])"
         ).containsMatchIn(n) || Regex(
@@ -809,7 +820,7 @@ class AyanaProjectDevelopmentCoordinator(
     }
 
     companion object {
-        const val VERSION = "1.9"
+        const val VERSION = "1.10"
         const val MAX_REPAIR_CYCLES = 5
         private const val MAX_TOTAL_REPAIR_CYCLES = 20
         private const val MAX_SESSION_DURATION_MS = 24L * 60L * 60L * 1000L
