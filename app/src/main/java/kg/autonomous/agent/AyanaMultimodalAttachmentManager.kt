@@ -15,12 +15,13 @@ import org.json.JSONObject
 import java.io.File
 import java.io.FileOutputStream
 import java.nio.ByteBuffer
+import java.security.MessageDigest
 import java.util.Locale
 import java.util.UUID
 import kotlin.math.roundToInt
 
 /**
- * AYANA Multimodal Attachment Manager v1.3 — VIDEO AUDIO + MULTI-ATTACHMENT COMPATIBILITY.
+ * AYANA Multimodal Attachment Manager v1.4 — ORIGINAL IMAGE STAGING FOR PROJECT ASSETS.
  *
  * Security / reliability contract:
  * - never exposes arbitrary user filesystem paths to the service/Worker;
@@ -147,6 +148,8 @@ class AyanaMultimodalAttachmentManager(
             when (manifest.optString("kind")) {
                 KIND_IMAGE, KIND_DOCUMENT -> {
                     deleteOwnedPath(manifest.optString("path"))
+                    // R10.28.9.7: original source is private, bounded and short-lived.
+                    deleteOwnedPath(manifest.optString("original_path"))
                 }
                 KIND_VIDEO_VISUAL -> {
                     val frames = manifest.optJSONArray("frames") ?: JSONArray()
@@ -241,9 +244,26 @@ class AyanaMultimodalAttachmentManager(
             throw IllegalArgumentException("Изображение слишком большое. Максимум 30 МБ.")
         }
 
+        // The regular multimodal JPEG remains normalized, preserving previous
+        // image-analysis behavior. An optional, byte-exact original is staged
+        // separately for an explicitly requested Project asset import.
+        // Oversized originals are *not* imported but ordinary image analysis
+        // is still allowed, without regressing legacy >4 MiB uploads.
+        val original = newCacheFile("original_image", ".bin")
+        val originalBytes = try {
+            copyUriWithLimit(uri, original, MAX_PROJECT_IMAGE_BYTES)
+        } catch (_: Exception) {
+            original.delete()
+            0L
+        }
+        if (originalBytes <= 0L) original.delete()
+
         val bitmap = resolver.openInputStream(uri)?.use { input ->
             BitmapFactory.decodeStream(input)
-        } ?: throw IllegalArgumentException("Не удалось прочитать изображение.")
+        } ?: run {
+            original.delete()
+            throw IllegalArgumentException("Не удалось прочитать изображение.")
+        }
 
         val normalized = scaleBitmap(bitmap, MAX_IMAGE_DIMENSION)
         val target = newCacheFile("image", ".jpg")
@@ -261,6 +281,7 @@ class AyanaMultimodalAttachmentManager(
 
         if (target.length() <= 0L || target.length() > MAX_STAGED_FILE_BYTES) {
             target.delete()
+            original.delete()
             throw IllegalArgumentException("Изображение не удалось безопасно подготовить для анализа.")
         }
 
@@ -273,6 +294,13 @@ class AyanaMultimodalAttachmentManager(
             .put("source_size_bytes", metadata.sizeBytes)
             .put("size_bytes", target.length())
             .put("path", target.absolutePath)
+            .put("original_path", if (originalBytes > 0L) original.absolutePath else "")
+            .put("original_size_bytes", originalBytes)
+            .put("original_sha256", if (originalBytes > 0L) {
+                MessageDigest.getInstance("SHA-256")
+                    .digest(original.readBytes())
+                    .joinToString("") { "%02x".format(it) }
+            } else "")
 
         return PreparedAttachment(KIND_IMAGE, metadata.displayName, "image/jpeg", manifest)
     }
@@ -825,6 +853,8 @@ class AyanaMultimodalAttachmentManager(
         private const val CACHE_TTL_MS = 24L * 60L * 60L * 1000L
         private const val MAX_DISPLAY_NAME_CHARS = 160
         private const val MAX_SOURCE_IMAGE_BYTES = 30L * 1024L * 1024L
+        // Original media is persisted only upon an explicit Project import.
+        private const val MAX_PROJECT_IMAGE_BYTES = 4L * 1024L * 1024L
         private const val MAX_STAGED_FILE_BYTES = 8L * 1024L * 1024L
         private const val MAX_SOURCE_VIDEO_BYTES = 500L * 1024L * 1024L
         private const val MAX_VIDEO_DURATION_MS = 30L * 60L * 1000L

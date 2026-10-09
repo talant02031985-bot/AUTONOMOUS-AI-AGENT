@@ -65891,6 +65891,17 @@ return try {
         return false
     }
 
+    private fun isExplicitProjectImageImport(prompt: String): Boolean {
+        val normalized = prompt.lowercase(Locale.ROOT)
+        val mentionsImage = listOf("логотип", "фотограф", "изображен", "картин", "иконк", "фото")
+            .any { normalized.contains(it) }
+        val explicitlySave = listOf("сохрани", "сохранить", "добавь", "помести", "запиши")
+            .any { normalized.contains(it) }
+        val projectAsset = listOf("ресурс", "project workspace", "проект", "drawable")
+            .any { normalized.contains(it) }
+        return mentionsImage && explicitlySave && projectAsset
+    }
+
     private fun executeMultimodalCommand(
         prompt: String,
         manifestText: String
@@ -66026,6 +66037,91 @@ return try {
                 silent = true,
                 technical =
                     "multi_attachment_docx_translation_unsupported; fail_closed=true"
+            )
+            return
+        }
+
+        // R10.28.9.7: a user explicitly requesting that the selected image be
+        // saved into the CURRENT Project requires a real workspace side effect,
+        // not a multimodal model promise that cannot write Android resources.
+        // Keep ordinary Q&A/image analysis and unrelated app development unchanged.
+        if (isExplicitProjectImageImport(prompt)) {
+            activeCommandProjectId = projectStore.activeProjectId()
+            activeCommandHistoryId = commandHistoryStore.begin(
+                command = "$prompt [изображение для Project Workspace]",
+                source = "text"
+            )
+            recordActiveProjectHistoryBinding()
+            beginExecutionSession(
+                objective = prompt,
+                source = "text",
+                lane = "project_media_import",
+                executor = "verified_local_project_media_import"
+            )
+            val resourceName = if (prompt.lowercase(Locale.ROOT).contains("stella")) {
+                "stella_logo_original"
+            } else {
+                "project_image_" + java.util.UUID.randomUUID().toString()
+                    .replace("-", "").take(12)
+            }
+            val result = try {
+                if (manifest.optString("kind") != AyanaMultimodalAttachmentManager.KIND_IMAGE) {
+                    JSONObject().put("success", false).put("verified", true)
+                        .put("status", "project_media_requires_single_image")
+                        .put("message", "Для сохранения ресурса выберите одно изображение.")
+                } else if (!executionKernel.tryBeginIrreversibleDispatch(
+                    kind = "project_media_import",
+                    detail = "project_id=${activeCommandProjectId.orEmpty()}; resource=$resourceName"
+                )) {
+                    JSONObject().put("success", false).put("verified", true)
+                        .put("status", "project_media_dispatch_blocked")
+                        .put("message", "Сохранение изображения остановлено системой безопасности.")
+                } else {
+                    val imported = projectWorkspaceExecutor.importImageResource(
+                        manifest, resourceName
+                    )
+                    executionKernel.markIrreversibleDispatchAccepted(
+                        "Project media asset import: ${imported.optString("status")}"
+                    )
+                    executionKernel.markSideEffectReconciliationStarted("Image SHA-256 verification")
+                    executionKernel.markSideEffectReconciled(
+                        committed = imported.optBoolean("action_committed", false),
+                        detail = "Image import ${imported.optString("status")}; sha256=${imported.optString("sha256")}"
+                    )
+                    imported
+                }
+            } catch (error: Exception) {
+                JSONObject().put("success", false).put("verified", false)
+                    .put("status", "project_media_unhandled_exception")
+                    .put("message", error.message.orEmpty().take(160))
+            } finally {
+                try {
+                    AyanaMultimodalAttachmentManager(applicationContext)
+                        .cleanupPrepared(manifest)
+                } catch (_: Exception) { }
+            }
+            val verified = result.optBoolean("success", false) &&
+                result.optBoolean("verified", false)
+            commandHistoryStore.addEvent(
+                activeCommandHistoryId,
+                state = if (verified) "project_media_verified" else "project_media_error",
+                message = if (verified) "Файл оригинального изображения проверен в Project Workspace"
+                    else "Оригинал изображения не сохранён в Project Workspace",
+                details = result.toString().take(1700)
+            )
+            val response = if (verified) {
+                "Изображение сохранено и проверено в Project Workspace: " +
+                    result.optString("path") + ". SHA-256: " + result.optString("sha256") +
+                    ". Использование в интерфейсе и иконке выполню на отдельном этапе разработки."
+            } else {
+                "Изображение не сохранено: " +
+                    result.optString("message", result.optString("status", "ошибка"))
+            }
+            respondAndResume(
+                response,
+                silent = true,
+                success = verified,
+                technical = result.toString().take(1800)
             )
             return
         }
@@ -75921,7 +76017,7 @@ state
 
         // R10.27.4 VIDEO AUDIO ANALYSIS.
         private const val AYANA_VOICE_SERVICE_RELEASE =
-            "v12.68.6 / R10.28.9.3 AUTONOMOUS DEVELOPMENT TRANSPORT RECOVERY"
+            "v12.68.7 / R10.28.9.7 PROJECT MEDIA ASSET SUPPORT"
 
         private const val AYANA_PERSONAL_SEARCH_ENGINE_RELEASE =
             "v2.0 / R10.20 PERSONAL SEARCH 2.0 + VERIFIED RESULT CONTRACT v2"

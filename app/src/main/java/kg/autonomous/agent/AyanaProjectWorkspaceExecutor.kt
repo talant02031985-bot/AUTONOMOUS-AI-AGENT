@@ -11,7 +11,7 @@ import java.util.Locale
 import java.util.UUID
 
 /**
- * AYANA Project Workspace Executor v1.0.1 — DEVELOPMENT WORKSPACE 2.0 / local foundation.
+ * AYANA Project Workspace Executor v1.1.0 — VERIFIED PROJECT MEDIA ASSET IMPORT.
  *
  * Purpose:
  * - operate only inside the currently active AYANA Project filesRoot;
@@ -86,6 +86,7 @@ class AyanaProjectWorkspaceExecutor(
             .put("transaction_requires_confirmation", true)
             .put("rollback_supported", true)
             .put("binary_write_supported", false)
+            .put("image_asset_import_supported", true)
             .put("arbitrary_delete_supported", false)
             .put("github_mutation", false)
             .put("apk_build", false)
@@ -356,6 +357,169 @@ class AyanaProjectWorkspaceExecutor(
             )
         }
 
+
+    /**
+     * R10.28.9.7: import an explicitly user-selected Android image into the
+     * currently frozen Project Workspace. This is NOT a model-authored text
+     * transaction: the VoiceService may call it only from an explicit user
+     * media-save request, with the attachment's private intake manifest.
+     *
+     * Never overwrite a different image silently. Never trust the attachment
+     * display name as a filesystem path or accept an arbitrary source path.
+     * Only raw JPEG/PNG/WebP bytes with validated magic may be imported.
+     */
+    fun importImageResource(
+        manifest: JSONObject,
+        requestedBaseName: String
+    ): JSONObject {
+        val scope = currentScope()
+        if (!scope.optBoolean("success", false)) return scope
+
+        if (manifest.optString("kind") != "image") {
+            return failure("Для импорта выберите одно изображение.")
+                .put("status", "project_media_requires_single_image")
+        }
+
+        val originalPath = manifest.optString("original_path").trim()
+        if (originalPath.isBlank()) {
+            return failure("Исходное изображение недоступно или превышает 4 МБ. Выберите меньший файл.")
+                .put("status", "project_media_original_unavailable")
+        }
+
+        // The picker stages originals under a private, AYANA-owned cache root.
+        val cacheRoot = File(appContext.cacheDir, "ayana_multimodal").canonicalFile
+        val source = try { File(originalPath).canonicalFile } catch (_: Exception) { null }
+        if (source == null || !isInsideRoot(cacheRoot, source) ||
+            source == cacheRoot || !source.isFile ||
+            !source.name.startsWith("original_image_") ||
+            source.length() !in 1..MAX_MEDIA_IMAGE_BYTES) {
+            return failure("Не подтверждён безопасный исходный файл изображения.")
+                .put("status", "project_media_source_invalid")
+        }
+
+        val bytes = try { source.readBytes() } catch (_: Exception) { null }
+            ?: return failure("Не удалось прочитать оригинальное изображение.")
+                .put("status", "project_media_read_failed")
+        val extension = imageExtension(bytes)
+            ?: return failure("Формат изображения не подтверждён. Разрешены JPG, PNG и WebP.")
+                .put("status", "project_media_format_unsupported")
+        val expectedSourceSha = manifest.optString("original_sha256")
+        if (!SHA256_HEX.matches(expectedSourceSha) || sha256(bytes) != expectedSourceSha) {
+            return failure("SHA-256 исходного изображения не совпал с подготовленным вложением.")
+                .put("status", "project_media_source_sha_mismatch")
+        }
+        if (bytes.size.toLong() != source.length() ||
+            bytes.size.toLong() != manifest.optLong("original_size_bytes", -1L)) {
+            return failure("Исходное изображение изменилось после подготовки.")
+                .put("status", "project_media_source_size_mismatch")
+        }
+
+        // Android drawable resource names are deliberately much narrower than
+        // general workspace paths; preserve the source media extension.
+        val baseName = requestedBaseName.trim()
+        if (!RESOURCE_BASE_NAME.matches(baseName)) {
+            return failure("Недопустимое имя Android-ресурса.")
+                .put("status", "project_media_resource_name_invalid")
+        }
+        val path = "app/src/main/res/drawable-nodpi/$baseName.$extension"
+        if (isBlockedPath(path)) {
+            return failure("Путь ресурса заблокирован политикой workspace.")
+                .put("status", "project_media_protected_path")
+        }
+        val root = File(scope.optString("root_path"))
+        val resolved = resolveWorkspacePath(root, path, allowRoot = false)
+        if (!resolved.optBoolean("success", false)) return resolved
+        val target = File(resolved.optString("absolute_path"))
+        // Android AAPT2 treats identical resource stems with different extensions
+        // as a collision. Do not create a second stella_logo_original in the
+        // same drawable resource directory.
+        val conflicting = listOf("jpg", "jpeg", "png", "webp")
+            .asSequence()
+            .filter { it != extension }
+            .map { File(target.parentFile, "$baseName.$it") }
+            .any { it.exists() }
+        if (conflicting) {
+            return failure("Android-ресурс с таким именем уже есть в другом формате.")
+                .put("status", "project_media_resource_name_collision")
+                .put("path", path)
+        }
+        val expectedSha = sha256(bytes)
+        if (target.exists()) {
+            if (!target.isFile || target.length() > MAX_MEDIA_IMAGE_BYTES) {
+                return failure("Файл ресурса уже существует и не может быть безопасно заменён.")
+                    .put("status", "project_media_existing_target_blocked")
+            }
+            if (sha256File(target) != expectedSha) {
+                return failure("Другой ресурс с таким именем уже существует. Автозамена запрещена.")
+                    .put("status", "project_media_overwrite_requires_separate_action")
+                    .put("path", path)
+            }
+            return JSONObject()
+                .put("success", true).put("verified", true)
+                .put("terminal_status", "SUCCESS")
+                .put("status", "project_media_asset_already_present")
+                .put("project_id", scope.optString("project_id"))
+                .put("path", path).put("sha256", expectedSha)
+                .put("size_bytes", bytes.size)
+                .put("action_committed", false)
+                .put("reconciliation_complete", true)
+                .put("side_effect_state", "NONE")
+        }
+
+        val parent = target.parentFile
+            ?: return failure("Не удалось подготовить каталог изображения.")
+        if (!parent.isDirectory && !parent.mkdirs()) {
+            return failure("Не удалось создать каталог Android-ресурсов.")
+                .put("status", "project_media_directory_failed")
+        }
+        if (!isInsideRoot(root.canonicalFile, parent.canonicalFile)) {
+            return failure("Путь Android-ресурса вышел за границы проекта.")
+                .put("status", "project_media_scope_escape")
+        }
+
+        val temp = File(parent, ".$baseName.${UUID.randomUUID()}.tmp")
+        try {
+            if (!writeBytesSynced(temp, bytes) || sha256File(temp) != expectedSha) {
+                return failure("Не удалось записать и проверить временное изображение.")
+                    .put("status", "project_media_staging_failed")
+            }
+            if (target.exists() || !temp.renameTo(target)) {
+                return failure("Не удалось атомарно установить ресурс изображения.")
+                    .put("status", "project_media_atomic_commit_failed")
+            }
+            if (sha256File(target) != expectedSha) {
+                target.delete()
+                return failure("SHA-256 ресурса после записи не совпал.")
+                    .put("status", "project_media_post_commit_sha_failed")
+            }
+            return JSONObject()
+                .put("success", true).put("verified", true)
+                .put("terminal_status", "SUCCESS")
+                .put("status", "project_media_asset_imported_verified")
+                .put("project_id", scope.optString("project_id"))
+                .put("path", path).put("sha256", expectedSha)
+                .put("size_bytes", bytes.size)
+                .put("action_committed", true)
+                .put("reconciliation_complete", true)
+                .put("side_effect_state", "COMMITTED")
+        } catch (_: Exception) {
+            return failure("Ошибка при сохранении оригинального изображения в workspace.")
+                .put("status", "project_media_write_failed")
+        } finally {
+            if (temp.exists()) temp.delete()
+        }
+    }
+
+    private fun imageExtension(bytes: ByteArray): String? = when {
+        bytes.size >= 3 &&
+            bytes[0] == 0xff.toByte() && bytes[1] == 0xd8.toByte() &&
+            bytes[2] == 0xff.toByte() -> "jpg"
+        bytes.size >= 8 &&
+            bytes.take(8) == listOf(0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a).map { it.toByte() } -> "png"
+        bytes.size >= 12 && String(bytes, 0, 4, StandardCharsets.US_ASCII) == "RIFF" &&
+            String(bytes, 8, 4, StandardCharsets.US_ASCII) == "WEBP" -> "webp"
+        else -> null
+    }
     fun transactionStatus(
         transactionId: String
     ): JSONObject {
@@ -2021,7 +2185,7 @@ class AyanaProjectWorkspaceExecutor(
             .put("message", message)
 
     companion object {
-        const val VERSION = "1.0.1"
+        const val VERSION = "1.1.0"
         const val PLAN_SCHEMA = "ayana_project_workspace_tx_v1"
 
         const val MAX_FILES_PER_TRANSACTION = 32
@@ -2029,6 +2193,8 @@ class AyanaProjectWorkspaceExecutor(
         const val MAX_TRANSACTION_BYTES = 512 * 1024
         const val MAX_READ_BYTES = 128 * 1024
         const val DEFAULT_READ_BYTES = 64 * 1024
+        private const val MAX_MEDIA_IMAGE_BYTES = 4L * 1024L * 1024L
+        private val RESOURCE_BASE_NAME = Regex("^[a-z][a-z0-9_]{0,63}$")
         const val MAX_PATH_CHARS = 320
         const val MAX_NOTE_CHARS = 240
         const val MAX_PLAN_BYTES = 1024 * 1024

@@ -22,7 +22,7 @@ import javax.crypto.SecretKey
 import javax.crypto.spec.GCMParameterSpec
 
 /**
- * AYANA Project Workspace Build Bridge v1.1 — R10.28.9.1.
+ * AYANA Project Workspace Build Bridge v1.2 — R10.28.9.7 IMAGE GIT BLOBS.
  *
  * Builds ONLY the project bound to the current command. The project snapshot is
  * pushed to a dedicated GitHub repository derived from the project name
@@ -68,7 +68,8 @@ class AyanaProjectWorkspaceBuildBridge(
         val path: String,
         val content: String,
         val sha256: String,
-        val sizeBytes: Int
+        val sizeBytes: Int,
+        val encoding: String = "utf-8"
     )
 
     data class Snapshot(
@@ -538,19 +539,22 @@ class AyanaProjectWorkspaceBuildBridge(
                         .put("path", relative)
                 }
 
-            if (bytes.size > MAX_FILE_BYTES) {
-                return failure(
-                    "Файл $relative слишком большой для bounded project build."
-                )
+            val binaryImage = isAllowedBinaryImagePath(relative)
+            val maxBytes = if (binaryImage) MAX_IMAGE_BYTES else MAX_FILE_BYTES
+            if (bytes.size > maxBytes) {
+                return failure("Файл $relative слишком большой для bounded project build.")
                     .put("status", "project_build_file_too_large")
                     .put("path", relative)
                     .put("size_bytes", bytes.size)
             }
 
-            if (!isUtf8Text(bytes)) {
-                return failure(
-                    "Project build пока принимает только UTF-8 source/config files; бинарный файл: $relative."
-                )
+            if (binaryImage && !imageMagicMatchesExtension(relative, bytes)) {
+                return failure("Некорректный или неподдерживаемый ресурс изображения: $relative.")
+                    .put("status", "project_build_invalid_image_asset")
+                    .put("path", relative)
+            }
+            if (!binaryImage && !isUtf8Text(bytes)) {
+                return failure("Бинарные файлы разрешены только в Android drawable/mipmap (JPG/PNG/WebP).")
                     .put("status", "project_build_binary_source_unsupported")
                     .put("path", relative)
             }
@@ -562,13 +566,17 @@ class AyanaProjectWorkspaceBuildBridge(
                     .put("total_bytes", totalBytes)
             }
 
-            val content = String(bytes, StandardCharsets.UTF_8)
             files +=
                 SnapshotFile(
                     path = relative,
-                    content = content,
+                    content = if (binaryImage) {
+                        Base64.encodeToString(bytes, Base64.NO_WRAP)
+                    } else {
+                        String(bytes, StandardCharsets.UTF_8)
+                    },
                     sha256 = sha256(bytes),
-                    sizeBytes = bytes.size
+                    sizeBytes = bytes.size,
+                    encoding = if (binaryImage) "base64" else "utf-8"
                 )
         }
 
@@ -618,6 +626,7 @@ class AyanaProjectWorkspaceBuildBridge(
                 JSONObject()
                     .put("path", it.path)
                     .put("content", it.content)
+                    .put("encoding", it.encoding)
                     .put("sha256", it.sha256)
                     .put("size_bytes", it.sizeBytes)
             )
@@ -653,12 +662,25 @@ class AyanaProjectWorkspaceBuildBridge(
         val files = ArrayList<SnapshotFile>(array.length())
         for (index in 0 until array.length()) {
             val item = array.optJSONObject(index) ?: return null
+            val path = item.optString("path")
+            val encoding = item.optString("encoding", "utf-8")
+            if (encoding != "utf-8" && encoding != "base64") return null
+            if (encoding == "base64" && !isAllowedBinaryImagePath(path)) return null
+            val content = item.optString("content")
+            val bytes = try {
+                if (encoding == "base64") Base64.decode(content, Base64.NO_WRAP)
+                else content.toByteArray(StandardCharsets.UTF_8)
+            } catch (_: Exception) { return null }
+            if (bytes.size != item.optInt("size_bytes", -1) ||
+                sha256(bytes) != item.optString("sha256")) return null
+            if (encoding == "base64" && !imageMagicMatchesExtension(path, bytes)) return null
             files +=
                 SnapshotFile(
-                    path = item.optString("path"),
-                    content = item.optString("content"),
+                    path = path,
+                    content = content,
                     sha256 = item.optString("sha256"),
-                    sizeBytes = item.optInt("size_bytes", 0)
+                    sizeBytes = bytes.size,
+                    encoding = encoding
                 )
         }
 
@@ -682,13 +704,42 @@ class AyanaProjectWorkspaceBuildBridge(
 
         val treeEntries = JSONArray()
         for (file in snapshot.files) {
-            treeEntries.put(
-                JSONObject()
+            if (file.encoding == "base64") {
+                // Git trees' inline "content" is UTF-8-only. Binary assets must
+                // be created as base64 Git blobs before the exact tree is built.
+                val blob = githubJsonRequest(
+                    method = "POST",
+                    repository = repository,
+                    apiPath = "/git/blobs",
+                    accessToken = accessToken,
+                    body = JSONObject()
+                        .put("content", file.content)
+                        .put("encoding", "base64")
+                )
+                if (!blob.optBoolean("http_success", false)) {
+                    return githubFailure(
+                        status = "project_build_binary_blob_failed",
+                        response = blob,
+                        message = "Не удалось создать бинарный Git blob: ${file.path}."
+                    )
+                }
+                val blobSha = blob.optJSONObject("body")?.optString("sha").orEmpty()
+                if (!GIT_SHA_HEX.matches(blobSha)) {
+                    return failure("GitHub не подтвердил blob SHA для ${file.path}.")
+                        .put("status", "project_build_binary_blob_sha_invalid")
+                }
+                treeEntries.put(JSONObject()
                     .put("path", file.path)
                     .put("mode", "100644")
                     .put("type", "blob")
-                    .put("content", file.content)
-            )
+                    .put("sha", blobSha))
+            } else {
+                treeEntries.put(JSONObject()
+                    .put("path", file.path)
+                    .put("mode", "100644")
+                    .put("type", "blob")
+                    .put("content", file.content))
+            }
         }
 
         treeEntries.put(
@@ -1425,6 +1476,26 @@ class AyanaProjectWorkspaceBuildBridge(
         return true
     }
 
+    // Project media assets are bounded and restricted to Android image resources.
+    // This must never widen write access to arbitrary binary executables/secrets.
+    private fun isAllowedBinaryImagePath(path: String): Boolean =
+        ANDROID_IMAGE_RESOURCE_PATH.matches(path)
+
+    private fun imageMagicMatchesExtension(path: String, bytes: ByteArray): Boolean {
+        val ext = path.substringAfterLast('.', "")
+        return when (ext) {
+            "jpg", "jpeg" -> bytes.size >= 3 &&
+                bytes[0] == 0xff.toByte() && bytes[1] == 0xd8.toByte() &&
+                bytes[2] == 0xff.toByte()
+            "png" -> bytes.size >= 8 &&
+                bytes.take(8) == listOf(0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a).map { it.toByte() }
+            "webp" -> bytes.size >= 12 &&
+                String(bytes, 0, 4, StandardCharsets.US_ASCII) == "RIFF" &&
+                String(bytes, 8, 4, StandardCharsets.US_ASCII) == "WEBP"
+            else -> false
+        }
+    }
+
     private fun isUtf8Text(bytes: ByteArray): Boolean {
         if (bytes.any { it == 0.toByte() }) return false
         return try {
@@ -1524,7 +1595,7 @@ class AyanaProjectWorkspaceBuildBridge(
             .put("message", message)
 
     companion object {
-        const val VERSION = "1.1"
+        const val VERSION = "1.2"
         const val BRANCH = "main"
         const val PROJECT_ARTIFACT_NAME = "PROJECT-DEBUG-APK"
         const val SIDE_EFFECT_KIND = "project_workspace_apk_build"
@@ -1541,6 +1612,11 @@ class AyanaProjectWorkspaceBuildBridge(
 
         private const val MAX_FILES = 240
         private const val MAX_FILE_BYTES = 384 * 1024
+        private const val MAX_IMAGE_BYTES = 4 * 1024 * 1024
+        private val ANDROID_IMAGE_RESOURCE_PATH = Regex(
+            "^app/src/main/res/(?:drawable|mipmap)(?:-[a-z0-9-]+)?/[a-z][a-z0-9_]*\\.(?:png|jpg|jpeg|webp)$"
+        )
+        private val GIT_SHA_HEX = Regex("^[0-9a-f]{40}$")
         private const val MAX_TOTAL_BYTES = 6L * 1024L * 1024L
 
         private const val HTTP_CONNECT_TIMEOUT_MS = 15_000
