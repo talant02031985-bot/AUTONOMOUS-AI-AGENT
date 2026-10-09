@@ -1,5 +1,5 @@
 // AYANA Worker v11.11.5 — R10.28.9.6 NEW-TZ ROUTING & FINITE UI REVIEW
-// AYANA Worker v11.11.4 — R10.28.9.5 OBJECTIVE-BOUND BUILD MILESTONE
+// AYANA Worker v11.11.6 — R10.28.9.5 OBJECTIVE-BOUND BUILD MILESTONE
 // AYANA Worker v11.11.3 — R10.28.9.3 TRANSPORT CONTRACT ALIGNMENT
 // Existing Worker routing/side-effect guards unchanged. Android VoiceService selects a
 // 75s bounded transport window only inside a verified Project development session.
@@ -1759,6 +1759,7 @@ function developmentSessionEvidence(message = "", toolResults = []) {
     unreadPaths: verifiedPath("unread_verified_path"),
     sourceRequirementsMissing: (header.match(/(?:^|\n)source_requirements_missing=([^\r\n]*)(?=\r?\n|$)/u)?.[1] || "")
       .split(",").map(x => x.trim()).filter(Boolean),
+    lastObservationTool: header.match(/(?:^|\n)last_observation_tool=([^\r\n]*)(?=\r?\n|$)/u)?.[1] || "",
     hasDiagnostic: /(?:^|\n)LAST VERIFIED BUILD DIAGNOSTIC:(?:\r?\n)/u.test(header)
   };
 }
@@ -1796,7 +1797,13 @@ function developmentUiReviewEvidence(message = "", toolResults = [], sessionEvid
   const missingTheme = ![...paths].some(path => themePattern.test(path));
   const nextUnreadPath = (missingMain && main) || (missingNav && nav) || (missingTheme && theme) || "";
   const reviewed = !missingMain && !missingNav && !missingTheme;
-  return { nextUnreadPath, reviewed, missingMain, missingNav, missingTheme };
+  const verified = [...paths].sort();
+  // The model must update the actual missing objective target, not the easiest
+  // already-complete Theme file. Select exclusively from SHA-bound source bodies.
+  const navigationPath = verified.find(path => /(?:^|\/)AppNavigation\.kt$/u.test(path))
+    || verified.find(path => navigationPattern.test(path)) || "";
+  const themePath = verified.find(path => themePattern.test(path)) || "";
+  return { nextUnreadPath, reviewed, missingMain, missingNav, missingTheme, navigationPath, themePath };
 }
 
 function isHistoricalFailedBuildRepairIntent(message = "") {
@@ -1818,6 +1825,45 @@ function projectDevelopmentPinnedReadTool(path) {
           ...original.parameters.properties.path,
           enum: [path],
           description: "Use the EXACT verified unread path from Android's Project tree. Do not reread unchanged Entity/DAO files."
+        }
+      }
+    }
+  };
+}
+
+// R10.28.9.8: for a reviewed UI objective the write schema itself must be
+// pinned to the currently MISSING source requirement. A prose instruction
+// alone allowed 48 read -> unchanged Theme -> reread loops without navigation.
+// This schema narrowing never authorizes a write; Android still checks exact
+// expected_sha256, Project isolation, confirmation and transaction integrity.
+function projectDevelopmentPinnedUiWriteTool(path) {
+  const original = DEVICE_TOOLS.find(tool => tool.name === "project_workspace_write_transaction");
+  if (!original || !path || !/^app\/[A-Za-z0-9_./-]+\.kt$/u.test(path)
+      || path.includes("..") || path.includes("\\")) return null;
+  const filesSchema = original.parameters?.properties?.files;
+  const itemSchema = filesSchema?.items;
+  if (!itemSchema?.properties?.path) return null;
+  return {
+    ...original,
+    parameters: {
+      ...original.parameters,
+      properties: {
+        ...original.parameters.properties,
+        files: {
+          ...filesSchema,
+          minItems: 1,
+          maxItems: 1,
+          items: {
+            ...itemSchema,
+            properties: {
+              ...itemSchema.properties,
+              path: {
+                ...itemSchema.properties.path,
+                enum: [path],
+                description: "Change ONLY this existing, SHA-verified Project source file. Full replacement must differ from the baseline; unchanged file is not a development milestone."
+              }
+            }
+          }
         }
       }
     }
@@ -3865,8 +3911,16 @@ ${AYANA_VERIFIED_LOCAL_EVIDENCE_INSTRUCTIONS}` : ""}${responseIntegrityInstructi
       && /(?:^|\n)terminal_state=BUILD_GREEN_ACCEPTANCE_PENDING(?=\r?\n|$)/u.test(
         String(message || "").split("PREVIOUS VERIFIED SOURCE BODIES (")[0]
       );
+    // The Android coordinator rejects a SHA-identical transaction as verified
+    // development progress. Surface the stall instead of scheduling another
+    // circular write/read or dispatching GitHub after zero source mutation.
+    const noOpCommitStall = sessionEvidence?.lastObservationTool === "workspace_noop_transaction";
 
-    if (verifiedGreenMilestone) {
+    if (noOpCommitStall) {
+      payload.tools = [];
+      payload.tool_choice = "none";
+      payload.instructions += "\nDEVELOPMENT_NOOP_STOP: The last Workspace transaction did not change any SHA-verified source file. Do not build, reread the same inputs, or call another no-op write. Report that this development attempt is incomplete and give the current checkpoint. Do not claim GREEN.";
+    } else if (verifiedGreenMilestone) {
       payload.tools = [];
       payload.tool_choice = "none";
       payload.instructions += "\nGREEN_BUILD_VERIFIED: Return only the verified GitHub Actions run and BUILD GREEN milestone. Do not claim functional acceptance, visual acceptance or downloaded APK.";
@@ -3893,12 +3947,20 @@ ${AYANA_VERIFIED_LOCAL_EVIDENCE_INSTRUCTIONS}` : ""}${responseIntegrityInstructi
           ? { type: "function", name: "project_workspace_read" }
           : "none";
       } else if (uiReview?.reviewed) {
-        // All three real UI dependencies were read and SHA-bound. The only
-        // productive next step for this objective is a coherent Workspace write.
-        // Android still validates exact baselines and restricts file mutation.
-        payload.tools = developmentTools.filter(tool => tool.name === "project_workspace_write_transaction");
-        payload.tool_choice = { type: "function", name: "project_workspace_write_transaction" };
-        payload.instructions += "\nUI_REVIEW_VERIFIED: MainActivity, navigation and Theme have current SHA-bound bodies in the Android development context. Produce an exact-baseline coherent UI update; do not reread unchanged files, do not fabricate missing dependencies, and do not build until a verified source COMMIT.";
+        // R10.28.9.8: a verified read of MainActivity + navigation + Theme is
+        // insufficient if the model keeps updating Theme while the UI screen
+        // remains unchanged. Pin the transaction schema to the actually missing
+        // requirement and permit only ONE exact-baseline full-file replacement.
+        const missingTarget = wantsUI ? uiReview.navigationPath
+          : (wantsTheme ? uiReview.themePath : "");
+        const pinnedWrite = projectDevelopmentPinnedUiWriteTool(missingTarget);
+        payload.tools = pinnedWrite ? [pinnedWrite] : [];
+        payload.tool_choice = pinnedWrite
+          ? { type: "function", name: "project_workspace_write_transaction" }
+          : "none";
+        payload.instructions += pinnedWrite
+          ? `\nUI_TARGET_PINNED: Missing requirement=${wantsUI ? "UI_SCREEN_OR_NAVIGATION" : "THEME"}; exact file=${missingTarget}. Use only the SHA-verified full source for this file. Propose a materially changed full file which implements the user's objective. NEVER submit an unchanged file or edit Theme when navigation is missing. Existing Android Workspace performs exact baseline and policy checks.`
+          : "\nUI_TARGET_UNAVAILABLE: No eligible SHA-bound target for the outstanding UI requirement. Stop; do not write arbitrary files, claim progress, or build.";
       } else if (uiReview && (uiReview.missingMain || uiReview.missingNav || uiReview.missingTheme)) {
         // The verified project list did not include one mandatory file, or its
         // content couldn't be SHA-cached. No arbitrary source mutation is safe.
