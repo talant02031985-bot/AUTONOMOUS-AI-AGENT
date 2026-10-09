@@ -7,7 +7,7 @@ import java.security.MessageDigest
 import java.util.Locale
 
 /**
- * AYANA Project Development Coordinator v1.9 — R10.28.9.5 OBJECTIVE-BOUND BUILD MILESTONE.
+ * AYANA Project Development Coordinator v1.11 — R10.28.9.8 UI TARGET INTEGRITY + NO-OP BUDGET.
  *
  * Bounded authority for one explicitly requested autonomous Project development objective.
  * The user's explicit "develop/build to GREEN" command is the session authority. It never
@@ -265,39 +265,51 @@ class AyanaProjectDevelopmentCoordinator(
         normalizeState(state)
         val pending = state.optJSONArray("pending_transactions") ?: JSONArray()
         val alreadyObserved = (0 until pending.length()).any { pending.optString(it) == txId }
-        if (!alreadyObserved) {
-            pending.put(txId)
-            state.put("source_commit_count", state.optInt("source_commit_count", 0) + 1)
-            val observedPaths = state.optJSONArray("verified_source_paths") ?: JSONArray()
-            val paths = (0 until observedPaths.length())
-                .map { observedPaths.optString(it) }.toMutableSet()
-            val verification = result.optJSONArray("verification") ?: JSONArray()
-            val working = state.optJSONObject("working_set") ?: JSONObject()
-            for (i in 0 until verification.length()) {
-                val item = verification.optJSONObject(i) ?: continue
-                if (!item.optBoolean("verified", false)) continue
-                val path = item.optString("path")
-                val sha = item.optString("actual_sha256").lowercase(Locale.ROOT)
-                if (!isSafeSourcePath(path) || !SHA256.matches(sha) ||
-                    sha != item.optString("expected_sha256").lowercase(Locale.ROOT)) continue
-                // Unchanged SHA is never evidence that this objective changed a source.
-                if (working.optJSONObject(path)?.optString("sha256") == sha) continue
-                paths.add(path)
-            }
-            state.put("verified_source_paths", JSONArray().also { array ->
-                paths.sorted().take(MAX_KNOWN_SOURCE_PATHS).forEach(array::put)
-            })
+        if (alreadyObserved) return
+
+        pending.put(txId)
+        val observedPaths = state.optJSONArray("verified_source_paths") ?: JSONArray()
+        val paths = (0 until observedPaths.length())
+            .map { observedPaths.optString(it) }.toMutableSet()
+        val verification = result.optJSONArray("verification") ?: JSONArray()
+        val working = state.optJSONObject("working_set") ?: JSONObject()
+        val changedPaths = mutableSetOf<String>()
+        for (i in 0 until verification.length()) {
+            val item = verification.optJSONObject(i) ?: continue
+            if (!item.optBoolean("verified", false)) continue
+            val path = item.optString("path")
+            val sha = item.optString("actual_sha256").lowercase(Locale.ROOT)
+            if (!isSafeSourcePath(path) || !SHA256.matches(sha) ||
+                sha != item.optString("expected_sha256").lowercase(Locale.ROOT)) continue
+            // A matching verified source SHA is an idempotent NO-OP, not a
+            // milestone. Existing writes still require the Workspace SHA gate.
+            if (working.optJSONObject(path)?.optString("sha256") == sha) continue
+            changedPaths.add(path)
+            paths.add(path)
         }
         state.put("pending_transactions", pending)
-        // Every mutation invalidates all previously cached source SHAs/bodies.
-        // No post-build repair may use pre-COMMIT content as current evidence.
-        state.put("working_set", JSONObject())
-        state.put("observation_sequence", state.optLong("observation_sequence", 0L) + 1L)
-        state.put("stagnant_read_count", 0)
-        if (state.optBoolean("requires_source_change", false)) {
-            state.put("terminal_state", "IMPLEMENTED_PENDING_BUILD")
+        state.put("verified_source_paths", JSONArray().also { array ->
+            paths.sorted().take(MAX_KNOWN_SOURCE_PATHS).forEach(array::put)
+        })
+        if (changedPaths.isNotEmpty()) {
+            state.put("source_commit_count", state.optInt("source_commit_count", 0) + 1)
+            // Only changed paths lose cached SHA-bound bodies. The complete,
+            // unchanged verified MainActivity/navigation/Theme bodies remain
+            // available for the next stateless turn. This prevents the repeated
+            // read -> identical Theme write cycle seen in M4.
+            changedPaths.forEach { working.remove(it) }
+            state.put("working_set", working)
+            state.put("observation_sequence", state.optLong("observation_sequence", 0L) + 1L)
+            state.put("stagnant_read_count", 0)
+            if (state.optBoolean("requires_source_change", false)) {
+                state.put("terminal_state", "IMPLEMENTED_PENDING_BUILD")
+            }
+            renewLease(state)
+        } else {
+            // Preserve truthful stagnation and the already verified source set.
+            state.put("stagnant_read_count", state.optInt("stagnant_read_count", 0) + 1)
+            state.put("last_observation_tool", "workspace_noop_transaction")
         }
-        renewLease(state)
         save(state)
     }
 
@@ -697,8 +709,11 @@ class AyanaProjectDevelopmentCoordinator(
         val objective = normalizeObjectiveForFingerprint(state.optString("objective"))
         val verified = state.optJSONArray("verified_source_paths") ?: JSONArray()
         val paths = (0 until verified.length()).map { verified.optString(it).lowercase(Locale.ROOT) }
-        val isVisualRedesign = Regex("редизайн|ui/ux|визуальн|дизайн|redesign|переделай интерфейс")
-            .containsMatchIn(objective)
+        val isVisualRedesign = Regex(
+            "редизайн|ui/ux|визуальн|дизайн|redesign|переделай интерфейс|" +
+                "встрой.{0,100}логотип|размести.{0,100}логотип|" +
+                "адаптац.{0,100}интерфейс|galaxy z flip"
+        ).containsMatchIn(objective)
         if (!isVisualRedesign) return emptyList()
         val missing = mutableListOf<String>()
         if (paths.none { path ->
@@ -706,7 +721,9 @@ class AyanaProjectDevelopmentCoordinator(
                 (path.endsWith("navigation.kt") || path.endsWith("screen.kt") ||
                     path.endsWith("activity.kt") || path.contains("screen"))
         }) missing += "UI_SCREEN_OR_NAVIGATION"
-        if (Regex("тем[ауые]|палитр|цвет|light|светл|theme|color")
+        // Product variant colours ("цветов и размеров") do not mean that the
+        // Android UI colour scheme must be edited on every M4 iteration.
+        if (Regex("тем[ауые]|палитр|light|светл|theme|color scheme|цветов[а-я]* схема")
                 .containsMatchIn(objective) &&
             paths.none { path -> path.endsWith("theme.kt") || path.endsWith("color.kt") || path.endsWith("colors.kt") }
         ) missing += "THEME"
@@ -820,7 +837,7 @@ class AyanaProjectDevelopmentCoordinator(
     }
 
     companion object {
-        const val VERSION = "1.10"
+        const val VERSION = "1.11"
         const val MAX_REPAIR_CYCLES = 5
         private const val MAX_TOTAL_REPAIR_CYCLES = 20
         private const val MAX_SESSION_DURATION_MS = 24L * 60L * 60L * 1000L
