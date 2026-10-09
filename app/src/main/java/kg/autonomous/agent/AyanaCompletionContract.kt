@@ -3,7 +3,7 @@ package kg.autonomous.agent
 import java.util.Locale
 
 /**
- * AYANA Completion Contract v1.3 — FORMAT TRUTH.
+ * AYANA Completion Contract v1.4 — DEVELOPMENT OUTCOME SEPARATION.
  *
  * A model saying "готово" or merely mentioning a filename is not proof that a
  * requested artifact exists. v1.3 also prevents a real but wrong-type artifact
@@ -56,6 +56,14 @@ class AyanaCompletionContract {
 
     fun inspectRequest(request: String): ExpectedOutputs {
         val text = normalize(request)
+        // Development source files, UI graphics and brand images referenced inside
+        // a specification are INPUTS/INTERNAL project changes, not standalone
+        // user-downloadable artifacts. GitHub GREEN belongs to Development
+        // Coordinator and MUST NOT be judged by FILE/IMAGE/GRAPH heuristics.
+        // An independently requested external deliverable still uses this contract.
+        if (isProjectDevelopmentSpecification(text) &&
+            !hasExplicitExternalFileDeliveryRequest(text)
+        ) return ExpectedOutputs(emptySet())
         val expected = linkedSetOf<DeliverableKind>()
 
         if (
@@ -205,6 +213,19 @@ class AyanaCompletionContract {
 
         return ExpectedOutputs(expected)
     }
+
+    private fun isProjectDevelopmentSpecification(text: String): Boolean {
+        val target = Regex("android|apk|github actions|workspace|приложени|исходник|kotlin|jetpack compose")
+            .containsMatchIn(text)
+        val action = Regex("разработ|редизайн|реализ|собер|сборк|измен|исправ|ui/ux|проект")
+            .containsMatchIn(text)
+        return target && action
+    }
+
+    private fun hasExplicitExternalFileDeliveryRequest(text: String): Boolean =
+        Regex("(?:пришли|отправь|предоставь|выдай|приложи|скачать|скачивания)" +
+            ".{0,90}(?:отдельн.{0,24})?(?:pdf|docx|xlsx|презентац|отчет в файле|файл для скачивания)")
+            .containsMatchIn(text)
 
     /**
      * Backward-compatible entry point for callers that only have references.

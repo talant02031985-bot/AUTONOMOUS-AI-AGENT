@@ -56893,6 +56893,11 @@ val activeNetwork =
                 val originalGoal =
                     message
 
+                // A persisted, project-bound development goal must not be marked
+                // SUCCESS by an arbitrary model final after status/list/read.
+                val developmentSessionWasActive =
+                    projectDevelopmentCoordinator.isActiveFor(activeCommandProjectId)
+
                 // R10.28.5.1: currentDurableGoalId is command-local execution state.
                 // A fresh Agent Core turn must NEVER inherit an id left by a previous
                 // command/project. Recovery keeps the exact persisted id only when
@@ -60705,6 +60710,25 @@ adaptiveExecutionLoop
                                     1000
                                 )
                     )
+                }
+
+                // Development success must be based on the Coordinator's frozen
+                // objective and verified GitHub build, never on a model's prose.
+                if (finalSuccess && developmentSessionWasActive) {
+                    val developmentTerminal =
+                        projectDevelopmentCoordinator.sessionStatus(activeCommandProjectId)
+                    if (developmentTerminal.optString("terminal_state") == "BUILD_GREEN_VERIFIED") {
+                        answer = "GREEN BUILD подтверждён: GitHub Actions Run ID ${developmentTerminal.optLong("last_run_id", 0L)}. APK можно скачать из GitHub Actions. Реальная работа функций и выполнение полного ТЗ требуют отдельной проверки."
+                    } else {
+                        finalSuccess = false
+                        answer = "Автономная разработка ещё не подтверждена GREEN BUILD для текущего ТЗ. Состояние: ${developmentTerminal.optString("terminal_state")}; невыполненные изменения: ${developmentTerminal.optJSONArray("source_requirements_missing") ?: JSONArray()}. Исходники и предыдущие сборки сохранены."
+                        commandHistoryStore.addEvent(
+                            activeCommandHistoryId,
+                            state = "project_development_terminal_gate",
+                            message = "Model final не подтверждает завершение текущего ТЗ",
+                            details = developmentTerminal.toString().take(1400)
+                        )
+                    }
                 }
 
                 if (
@@ -69827,10 +69851,27 @@ private fun isSemanticActionResultVerified(
                                             .put("requires_source_change", developmentState.optBoolean("requires_source_change", true))
                                             .put("source_commit_count", developmentState.optInt("source_commit_count", 0))
                                             .put("green_build_count", developmentState.optInt("green_build_count", 0))
+                                            .put("source_requirements_missing", developmentState.optJSONArray("source_requirements_missing") ?: JSONArray())
                                             .put(
                                                 "message",
-                                                "Baseline APK GREEN подтверждён, но исходная development-цель требует реализации изменений, а в этой session ещё нет verified Workspace source commit. Продолжай читать фактические исходники, реализуй ТЗ, выполни Workspace write и затем пересобери APK."
+                                                "APK GREEN подтверждён, но обязательные изменения текущего ТЗ ещё не подтверждены: ${developmentState.optJSONArray("source_requirements_missing")}. Продолжай реализацию исходного задания, затем выполняй новый Workspace commit и сборку."
                                             )
+                                    } else if (developmentState.optBoolean("build_milestone_complete", false)) {
+                                        // Build is a valid user-requested terminal milestone.
+                                        // Functional testing and downloading the APK remain
+                                        // separate, unverified stages. Do not auto-accept or
+                                        // roll back saved Workspace transactions here.
+                                        JSONObject(buildResult.toString())
+                                            .put("success", true)
+                                            .put("verified", true)
+                                            .put("terminal_status", "SUCCESS")
+                                            .put("status", "project_development_build_green_verified")
+                                            .put("project_development_session", true)
+                                            .put("development_goal_complete", true)
+                                            .put("build_green", true)
+                                            .put("functional_acceptance_verified", false)
+                                            .put("user_ready", false)
+                                            .put("message", "GREEN BUILD подтверждён GitHub Actions. Этап сборки выполнен; соответствие всему ТЗ и установка APK должны проверяться отдельно. APK пользователь скачивает самостоятельно.")
                                     } else if (developmentState.optBoolean("acceptance_required", false)) {
                                         // R10.28.9.1: GitHub Actions GREEN attests build only.
                                         // Do not accept Workspace transactions or finish the goal

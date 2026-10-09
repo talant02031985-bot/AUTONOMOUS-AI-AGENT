@@ -7,7 +7,7 @@ import java.security.MessageDigest
 import java.util.Locale
 
 /**
- * AYANA Project Development Coordinator v1.8 — R10.28.9.2 PINNED COMPILER DEPENDENCIES.
+ * AYANA Project Development Coordinator v1.9 — R10.28.9.5 OBJECTIVE-BOUND BUILD MILESTONE.
  *
  * Bounded authority for one explicitly requested autonomous Project development objective.
  * The user's explicit "develop/build to GREEN" command is the session authority. It never
@@ -41,29 +41,48 @@ class AyanaProjectDevelopmentCoordinator(
         if (!isExplicitAutonomousDevelopmentCommand(command)) return null
 
         val now = System.currentTimeMillis()
+        val objective = command.trim().take(MAX_OBJECTIVE_CHARS)
+        val objectiveSha = sha256(normalizeObjectiveForFingerprint(objective))
         val current = load()
+        val previousObjectiveSha = current.optString("objective_sha256")
         if (
             current.optBoolean("active", false) &&
             current.optString("project_id") == projectId &&
+            previousObjectiveSha == objectiveSha &&
             now < current.optLong("expires_at_ms", 0L) &&
             now < current.optLong("started_at_ms", now) + MAX_SESSION_DURATION_MS
         ) {
             normalizeState(current)
             renewLease(current)
             save(current)
-            return publicState(current)
+            return publicState(current).put("objective_reused", true)
         }
 
-        val objective = command.trim().take(MAX_OBJECTIVE_CHARS)
+        // A changed user specification is a NEW development objective, not a
+        // continuation of the old GREEN/build/rollback ledger. Keep a bounded
+        // audit summary but never merge old commits or GREEN counters into it.
+        if (current.optString("session_id").isNotBlank()) {
+            prefs.edit().putString(
+                KEY_PREVIOUS_SESSION,
+                JSONObject()
+                    .put("session_id", current.optString("session_id"))
+                    .put("project_id", current.optString("project_id"))
+                    .put("objective_sha256", previousObjectiveSha)
+                    .put("terminal_state", current.optString("terminal_state"))
+                    .put("last_run_id", current.optLong("last_run_id", 0L))
+                    .put("pending_transaction_count", current.optJSONArray("pending_transactions")?.length() ?: 0)
+                    .toString()
+            ).commit()
+        }
         val requiresSourceChange = requiresSourceChangeEvidence(objective)
         val session =
             JSONObject()
                 .put("version", VERSION)
                 .put("active", true)
-                .put("session_id", "pds-${now.toString(36)}-${sha256(objective).take(12)}")
+                .put("session_id", "pds-${now.toString(36)}-${objectiveSha.take(12)}")
                 .put("project_id", projectId)
                 .put("objective", objective)
-                .put("objective_sha256", sha256(objective))
+                .put("objective_sha256", objectiveSha)
                 .put("started_at_ms", now)
                 .put("expires_at_ms", now + SESSION_TTL_MS)
                 .put("build_attempts", 0)
@@ -78,6 +97,7 @@ class AyanaProjectDevelopmentCoordinator(
                 .put("observation_sequence", 0L)
                 .put("session_read_count", 0)
                 .put("working_set", JSONObject())
+                .put("verified_source_paths", JSONArray())
                 .put("pending_transactions", JSONArray())
                 .put("last_compile_output", "")
                 .put("last_build_status", "")
@@ -87,6 +107,14 @@ class AyanaProjectDevelopmentCoordinator(
                 .put("terminal_state", "ACTIVE")
         save(session)
         return publicState(session)
+    }
+
+    /** Read-only status is valid even after the build milestone closes the session. */
+    fun sessionStatus(projectId: String?): JSONObject {
+        val state = load()
+        return if (projectId?.trim().orEmpty().isNotBlank() &&
+            state.optString("project_id") == projectId?.trim()
+        ) publicState(state) else JSONObject().put("active", false)
     }
 
     fun isActiveFor(projectId: String?): Boolean {
@@ -240,6 +268,25 @@ class AyanaProjectDevelopmentCoordinator(
         if (!alreadyObserved) {
             pending.put(txId)
             state.put("source_commit_count", state.optInt("source_commit_count", 0) + 1)
+            val observedPaths = state.optJSONArray("verified_source_paths") ?: JSONArray()
+            val paths = (0 until observedPaths.length())
+                .map { observedPaths.optString(it) }.toMutableSet()
+            val verification = result.optJSONArray("verification") ?: JSONArray()
+            val working = state.optJSONObject("working_set") ?: JSONObject()
+            for (i in 0 until verification.length()) {
+                val item = verification.optJSONObject(i) ?: continue
+                if (!item.optBoolean("verified", false)) continue
+                val path = item.optString("path")
+                val sha = item.optString("actual_sha256").lowercase(Locale.ROOT)
+                if (!isSafeSourcePath(path) || !SHA256.matches(sha) ||
+                    sha != item.optString("expected_sha256").lowercase(Locale.ROOT)) continue
+                // Unchanged SHA is never evidence that this objective changed a source.
+                if (working.optJSONObject(path)?.optString("sha256") == sha) continue
+                paths.add(path)
+            }
+            state.put("verified_source_paths", JSONArray().also { array ->
+                paths.sorted().take(MAX_KNOWN_SOURCE_PATHS).forEach(array::put)
+            })
         }
         state.put("pending_transactions", pending)
         // Every mutation invalidates all previously cached source SHAs/bodies.
@@ -289,27 +336,32 @@ class AyanaProjectDevelopmentCoordinator(
 
             val requiresSourceChange = state.optBoolean("requires_source_change", false)
             val sourceCommitCount = state.optInt("source_commit_count", 0)
-            if (requiresSourceChange && sourceCommitCount <= 0) {
+            val missingSourceRequirements = missingSourceRequirements(state)
+            if ((requiresSourceChange && sourceCommitCount <= 0) || missingSourceRequirements.isNotEmpty()) {
                 state.put("terminal_state", "IMPLEMENTATION_REQUIRED")
                 save(state)
                 return publicState(state)
                     .put("green", false)
+                    .put("build_green", true)
                     .put("baseline_green", true)
                     .put("implementation_required", true)
                     .put("development_goal_complete", false)
+                    .put("source_requirements_missing", JSONArray(missingSourceRequirements))
             }
 
-            // An artifact metadata digest validates a CI archive only. It does not
-            // prove functional acceptance or bytes of an installable APK. The bridge
-            // and the current tool set do not provide those independent proofs yet.
-            state.put("terminal_state", "BUILD_GREEN_ACCEPTANCE_PENDING")
+            // GREEN with verified source coverage is completion of the requested
+            // BUILD MILESTONE only. It is NOT functional acceptance or APK delivery.
+            state.put("terminal_state", "BUILD_GREEN_VERIFIED")
             state.put("acceptance_verified", false)
+            state.put("active", false)
             save(state)
             return publicState(state)
-                .put("green", false)
+                .put("green", true)
                 .put("build_green", true)
-                .put("acceptance_required", true)
-                .put("development_goal_complete", false)
+                .put("build_milestone_complete", true)
+                .put("functional_acceptance_verified", false)
+                .put("user_ready", false)
+                .put("development_goal_complete", true)
         }
 
         val diagnostic = result.optString("compile_output").trim()
@@ -424,7 +476,7 @@ class AyanaProjectDevelopmentCoordinator(
         val pending = state.optJSONArray("pending_transactions") ?: JSONArray()
 
         return buildString {
-            append("AYANA PROJECT DEVELOPMENT SESSION v1.8 / R10.28.9.2\n")
+            append("AYANA PROJECT DEVELOPMENT SESSION v1.9 / R10.28.9.5\n")
             append("session_id=").append(state.optString("session_id")).append('\n')
             append("project_id=").append(state.optString("project_id")).append('\n')
             append("objective_sha256=").append(state.optString("objective_sha256")).append('\n')
@@ -438,6 +490,7 @@ class AyanaProjectDevelopmentCoordinator(
             append("source_commit_count=").append(state.optInt("source_commit_count", 0)).append('\n')
             append("green_build_count=").append(state.optInt("green_build_count", 0)).append('\n')
             append("terminal_state=").append(state.optString("terminal_state")).append('\n')
+            append("source_requirements_missing=").append(missingSourceRequirements(state).joinToString(",")).append('\n')
             append("observation_sequence=").append(state.optLong("observation_sequence", 0L)).append('\n')
             append("session_read_count=").append(state.optInt("session_read_count", 0)).append('\n')
             append("last_observation_tool=").append(state.optString("last_observation_tool")).append('\n')
@@ -548,7 +601,9 @@ class AyanaProjectDevelopmentCoordinator(
             .put("max_repair_cycles", state.optInt("max_repair_cycles", MAX_REPAIR_CYCLES))
             .put("requires_source_change", state.optBoolean("requires_source_change", false))
             .put("source_commit_count", state.optInt("source_commit_count", 0))
+            .put("source_requirements_missing", JSONArray(missingSourceRequirements(state)))
             .put("green_build_count", state.optInt("green_build_count", 0))
+            .put("last_run_id", state.optLong("last_run_id", 0L))
             .put("observation_sequence", state.optLong("observation_sequence", 0L))
             .put("terminal_state", state.optString("terminal_state"))
             .put("acceptance_verified", state.optBoolean("acceptance_verified", false))
@@ -619,9 +674,34 @@ class AyanaProjectDevelopmentCoordinator(
         if (!state.has("total_repair_cycles")) state.put("total_repair_cycles", state.optInt("repair_cycles", 0))
         if (!state.has("repair_problem_sha256")) state.put("repair_problem_sha256", "")
         if (!state.has("acceptance_verified")) state.put("acceptance_verified", false)
+        if (!state.has("verified_source_paths")) state.put("verified_source_paths", JSONArray())
         if (!state.has("known_source_paths")) {
             state.put("known_source_paths", JSONArray())
         }
+    }
+
+    private fun normalizeObjectiveForFingerprint(command: String): String =
+        command.lowercase(Locale.ROOT).replace('ё', 'е')
+            .replace(Regex("\\s+"), " ").trim()
+
+    private fun missingSourceRequirements(state: JSONObject): List<String> {
+        val objective = normalizeObjectiveForFingerprint(state.optString("objective"))
+        val verified = state.optJSONArray("verified_source_paths") ?: JSONArray()
+        val paths = (0 until verified.length()).map { verified.optString(it).lowercase(Locale.ROOT) }
+        val isVisualRedesign = Regex("редизайн|ui/ux|визуальн|дизайн|redesign|переделай интерфейс")
+            .containsMatchIn(objective)
+        if (!isVisualRedesign) return emptyList()
+        val missing = mutableListOf<String>()
+        if (paths.none { path ->
+            path.contains("/ui/") &&
+                (path.endsWith("navigation.kt") || path.endsWith("screen.kt") ||
+                    path.endsWith("activity.kt") || path.contains("screen"))
+        }) missing += "UI_SCREEN_OR_NAVIGATION"
+        if (Regex("тем[ауые]|палитр|цвет|light|светл|theme|color")
+                .containsMatchIn(objective) &&
+            paths.none { path -> path.endsWith("theme.kt") || path.endsWith("color.kt") || path.endsWith("colors.kt") }
+        ) missing += "THEME"
+        return missing
     }
 
     private fun requiresSourceChangeEvidence(command: String): Boolean {
@@ -729,12 +809,13 @@ class AyanaProjectDevelopmentCoordinator(
     }
 
     companion object {
-        const val VERSION = "1.8"
+        const val VERSION = "1.9"
         const val MAX_REPAIR_CYCLES = 5
         private const val MAX_TOTAL_REPAIR_CYCLES = 20
         private const val MAX_SESSION_DURATION_MS = 24L * 60L * 60L * 1000L
         private const val PREFS_NAME = "ayana_project_development_r10_28_8"
         private const val KEY_STATE = "state"
+        private const val KEY_PREVIOUS_SESSION = "last_session_summary"
         private const val SESSION_TTL_MS = 2L * 60L * 60L * 1000L
         private const val MAX_WORKING_FILES = 12
         private const val MAX_PINNED_REPAIR_FILES = 8
