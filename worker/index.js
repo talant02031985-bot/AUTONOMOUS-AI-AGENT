@@ -1,3 +1,4 @@
+// AYANA Worker v11.11.5 — R10.28.9.6 NEW-TZ ROUTING & FINITE UI REVIEW
 // AYANA Worker v11.11.4 — R10.28.9.5 OBJECTIVE-BOUND BUILD MILESTONE
 // AYANA Worker v11.11.3 — R10.28.9.3 TRANSPORT CONTRACT ALIGNMENT
 // Existing Worker routing/side-effect guards unchanged. Android VoiceService selects a
@@ -1608,7 +1609,7 @@ function isAutonomousProjectDevelopmentRequest(message = "") {
   if (!n) return false;
 
   const developmentSignal =
-    /(?:продолжи|продолжить|разработай|разработать|доведи|доделай|реализуй|реализовать|создай|создать|исправь|исправить|собери|собрать).*(?:приложени|проект|android|apk|workspace|store accounting)/u.test(n);
+    /(?:начни|начать|запусти|выполни|выполнить|продолжи|продолжить|разработай|разработать|доведи|доделай|реализуй|реализовать|создай|создать|исправь|исправить|собери|собрать).*(?:разработк|приложени|проект|android|apk|workspace|store accounting)/u.test(n);
   const autonomousGoalSignal =
     /(?:до\s+(?:verified\s+)?green|verified[ _-]*green|до успешн|до рабоч|до готов|сам[ао]? исправ|автоном|самостоятель|по тз|тех(?:ническ)?[а-я ]*задан|полностью разработ)/u.test(n);
 
@@ -1760,6 +1761,42 @@ function developmentSessionEvidence(message = "", toolResults = []) {
       .split(",").map(x => x.trim()).filter(Boolean),
     hasDiagnostic: /(?:^|\n)LAST VERIFIED BUILD DIAGNOSTIC:(?:\r?\n)/u.test(header)
   };
+}
+
+// R10.28.9.6: UI REDESIGN requires a finite, evidence-bound source review.
+// For a trusted Android session, pin unread UI inputs by the VERIFIED project list.
+// After MainActivity/navigation/theme are SHA-cached, allow the model to create
+// a coherent write transaction; never let it reopen AppNavigation a third time.
+// This function does NOT authorize writes or trust path strings from project code.
+function developmentUiReviewEvidence(message = "", toolResults = [], sessionEvidence = null) {
+  if (!sessionEvidence || !isTrustedAutonomousProjectDevelopmentContinuation(message, toolResults)) return null;
+  const missing = sessionEvidence.sourceRequirementsMissing || [];
+  if (!missing.includes("UI_SCREEN_OR_NAVIGATION") && !missing.includes("THEME")) return null;
+  const header = String(message || "").split("PREVIOUS VERIFIED SOURCE BODIES (")[0];
+  const manifest = Array.from(header.matchAll(/(?:^|\n)file=([^|\r\n]{1,320})\|sha256=([a-f0-9]{64})\|chars=(\d+)\|body_cached=(true|false)/gu), m => ({
+    path: m[1], sha: m[2], cached: m[4] === "true"
+  })).filter(entry => entry.path.startsWith("app/") && !entry.path.includes("..") && !entry.path.includes("\\"));
+  // A manifest flag alone is insufficient: the complete SHA-bound source must
+  // actually be present in this stateless continuation before a write is forced.
+  const paths = new Set(manifest.filter(entry => entry.cached &&
+    String(message || "").includes(`<<<VERIFIED_SOURCE path=${entry.path} sha256=${entry.sha}>>>`)
+  ).map(entry => entry.path));
+  const unread = sessionEvidence.unreadPaths.filter(path => path.startsWith("app/") && !path.includes(".."));
+  const mainPattern = /(?:^|\/)MainActivity\.kt$/u;
+  const navigationPattern = /(?:^|\/)(?:AppNavigation|[^/]*Screen|[^/]*Navigation)\.kt$/u;
+  const themePattern = /(?:^|\/)(?:Theme|Color|Colors)\.kt$/u;
+  const select = pattern => unread.find(path => pattern.test(path)) || "";
+  const main = select(mainPattern);
+  const nav = select(navigationPattern);
+  const theme = select(themePattern);
+  // A new explicit UI redesign needs MainActivity to ensure Theme is applied,
+  // a navigation/screen to really redesign and the Theme to keep colors coherent.
+  const missingMain = ![...paths].some(path => mainPattern.test(path));
+  const missingNav = ![...paths].some(path => navigationPattern.test(path));
+  const missingTheme = ![...paths].some(path => themePattern.test(path));
+  const nextUnreadPath = (missingMain && main) || (missingNav && nav) || (missingTheme && theme) || "";
+  const reviewed = !missingMain && !missingNav && !missingTheme;
+  return { nextUnreadPath, reviewed, missingMain, missingNav, missingTheme };
 }
 
 function isHistoricalFailedBuildRepairIntent(message = "") {
@@ -3821,6 +3858,7 @@ ${AYANA_VERIFIED_LOCAL_EVIDENCE_INSTRUCTIONS}` : ""}${responseIntegrityInstructi
     const developmentTools = projectAutonomousDevelopmentTools({ allowBuild: allowDevelopmentBuild });
     const stagnation = developmentStagnationEvidence(message || "", toolResults);
     const repair = developmentRepairEvidence(message || "", toolResults);
+    const uiReview = developmentUiReviewEvidence(message || "", toolResults, sessionEvidence);
     const verifiedGreenMilestone = isTrustedAutonomousProjectDevelopmentContinuation(message || "", toolResults)
       && /project_development_build_green_verified/u.test(String(message || ""));
     const acceptancePending = isTrustedAutonomousProjectDevelopmentContinuation(message || "", toolResults)
@@ -3843,28 +3881,42 @@ ${AYANA_VERIFIED_LOCAL_EVIDENCE_INSTRUCTIONS}` : ""}${responseIntegrityInstructi
       // then its exact SHA-bound update. Never invent an unlisted project path.
       const wantsUI = sessionEvidence.sourceRequirementsMissing.includes("UI_SCREEN_OR_NAVIGATION");
       const wantsTheme = sessionEvidence.sourceRequirementsMissing.includes("THEME");
-      const candidate = sessionEvidence.unreadPaths.find(path =>
-        (wantsUI && /\/ui\/.*(?:navigation|screen|activity)\.kt$/iu.test(path)) ||
-        (wantsTheme && /\/ui\/.*(?:theme|colors?)\.kt$/iu.test(path))
-      );
-      if (latestDevelopmentWorkspaceStatus === "project_workspace_ready") {
-        // Fresh project discovery must precede any source write.
+      if (latestDevelopmentWorkspaceStatus === "project_workspace_ready" || sessionEvidence.knownSourceCount === 0) {
         payload.tools = developmentTools.filter(tool => tool.name === "project_workspace_list");
         payload.tool_choice = { type: "function", name: "project_workspace_list" };
-      } else if (candidate) {
-        const pinned = projectDevelopmentPinnedReadTool(candidate);
-        payload.tools = pinned ? [pinned] : developmentTools.filter(tool => tool.name === "project_workspace_list");
+      } else if (uiReview?.nextUnreadPath) {
+        // Never hand the model a general read/list schema when a verified UI
+        // dependency is still unread. Exact-path pinning makes cycles impossible.
+        const pinned = projectDevelopmentPinnedReadTool(uiReview.nextUnreadPath);
+        payload.tools = pinned ? [pinned] : [];
         payload.tool_choice = pinned
           ? { type: "function", name: "project_workspace_read" }
-          : { type: "function", name: "project_workspace_list" };
-      } else if (sessionEvidence.knownSourceCount === 0) {
-        payload.tools = developmentTools.filter(tool => tool.name === "project_workspace_list");
-        payload.tool_choice = { type: "function", name: "project_workspace_list" };
+          : "none";
+      } else if (uiReview?.reviewed) {
+        // All three real UI dependencies were read and SHA-bound. The only
+        // productive next step for this objective is a coherent Workspace write.
+        // Android still validates exact baselines and restricts file mutation.
+        payload.tools = developmentTools.filter(tool => tool.name === "project_workspace_write_transaction");
+        payload.tool_choice = { type: "function", name: "project_workspace_write_transaction" };
+        payload.instructions += "\nUI_REVIEW_VERIFIED: MainActivity, navigation and Theme have current SHA-bound bodies in the Android development context. Produce an exact-baseline coherent UI update; do not reread unchanged files, do not fabricate missing dependencies, and do not build until a verified source COMMIT.";
+      } else if (uiReview && (uiReview.missingMain || uiReview.missingNav || uiReview.missingTheme)) {
+        // The verified project list did not include one mandatory file, or its
+        // content couldn't be SHA-cached. No arbitrary source mutation is safe.
+        // Stop with specific evidence rather than looping the same source read.
+        payload.tools = [];
+        payload.tool_choice = "none";
+        payload.instructions += "\nUI_SOURCE_EVIDENCE_MISSING: A required actual MainActivity/navigation/Theme source was not present in the verified project working set. Explain which type is missing. Do not repeat the same read, fabricate paths or claim GREEN.";
       } else {
-        payload.tools = developmentTools.filter(tool => [
-          "project_workspace_read", "project_workspace_list", "project_workspace_write_transaction"
-        ].includes(tool.name));
-        payload.tool_choice = "required";
+        // Conservative compatibility for other project objectives: only
+        // previously verified unread paths can be selected. A generic read of
+        // an already seen file is never an acceptable loop escape.
+        const candidate = sessionEvidence.unreadPaths.find(path =>
+          (wantsUI && /\/ui\/.*(?:navigation|screen|activity)\.kt$/iu.test(path)) ||
+          (wantsTheme && /\/ui\/.*(?:theme|colors?)\.kt$/iu.test(path))
+        );
+        const pinned = candidate && projectDevelopmentPinnedReadTool(candidate);
+        payload.tools = pinned ? [pinned] : [];
+        payload.tool_choice = pinned ? { type: "function", name: "project_workspace_read" } : "none";
       }
     } else if (projectDevelopmentWorkspaceCommitFreshTurnMode) {
       payload.tools = developmentTools.filter(tool => tool.name === "github_apk_build");
@@ -4549,7 +4601,7 @@ export default {
         service: "AYANA AI",
         ai: "ready",
         agent_core: "v11.1-v12.15-completion-integrity",
-        worker: "v11.11.4-r10.28.9.5-objective-bound-build-milestone",
+        worker: "v11.11.5-r10.28.9.6-verified-ui-review",
         voice: "marin"
       });
     }
